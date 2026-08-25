@@ -24,12 +24,23 @@ loadDotenv({ path: join(ROOT, '.env'), quiet: true });
  * Read an env var, accepting the legacy ONELOOP_ spelling for any ONESHOT_
  * name so an existing One Loop .env keeps working. ONESHOT_ wins.
  */
+/**
+ * An unreplaced placeholder from .env.example.
+ *
+ * Treated as unset, not as a value. Otherwise `SLACK_BOT_TOKEN=xoxb-REPLACE_ME`
+ * satisfies every "is it configured" check and the failure only surfaces later
+ * as an opaque `invalid_auth` from the API.
+ */
+export function isPlaceholder(v: string): boolean {
+  return /REPLACE_ME|<[a-z-]+>|CHANGE_?ME|your-.*-here/i.test(v);
+}
+
 export function envOr(name: string, fallback = ''): string {
   const primary = process.env[name];
-  if (typeof primary === 'string' && primary !== '') return primary;
+  if (typeof primary === 'string' && primary !== '' && !isPlaceholder(primary)) return primary;
   if (name.startsWith('ONESHOT_')) {
     const legacy = process.env[`ONELOOP_${name.slice('ONESHOT_'.length)}`];
-    if (typeof legacy === 'string' && legacy !== '') return legacy;
+    if (typeof legacy === 'string' && legacy !== '' && !isPlaceholder(legacy)) return legacy;
   }
   return fallback;
 }
