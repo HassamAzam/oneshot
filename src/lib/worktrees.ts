@@ -26,7 +26,13 @@ import { db } from './db.js';
 import { log } from './log.js';
 
 function git(args: string[], cwd = WORK_REPO): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 120_000 }).trim();
+  return execFileSync('git', args, {
+    cwd, encoding: 'utf8', timeout: 120_000,
+    // stderr is piped, not inherited: `rev-parse --verify` on a branch that
+    // does not exist yet is an expected probe, and letting its `fatal:` reach
+    // the console makes a normal worktree creation look like a failure.
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
 }
 
 export interface Lease {

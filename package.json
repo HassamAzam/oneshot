@@ -15,13 +15,17 @@
     "hooks:install": "bash scripts/install-hooks.sh",
     "hooks:uninstall": "bash scripts/uninstall-hooks.sh",
     "hooks:verify": "bash scripts/verify-hooks.sh",
-    "check": "tsc --noEmit && for f in hooks/*.cjs scripts/*.cjs; do node --check \"$f\" || exit 1; done && echo 'check clean'"
+    "verify": "npm run deps:verify && npm run hooks:verify && npm run doctor",
+    "check": "tsc --noEmit && for f in hooks/*.cjs scripts/*.cjs; do node --check \"$f\" || exit 1; done && echo 'check clean'",
+    "deps:verify": "tsx scripts/verify-deps.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.77",
     "better-sqlite3": "^12.11.1",
     "dotenv": "^16.6.1",
-    "tsx": "^4.23.11"
+    "tsx": "^4.23.11",
+    "@zereight/mcp-gitlab": "^1.0.66",
+    "playwright": "^1.61.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

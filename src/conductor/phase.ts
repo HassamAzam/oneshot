@@ -11,7 +11,8 @@
  * next phase expects a field.
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   BASE_ENV, DRY_RUN, ROOT, artifactDir, envOr, modelFor, runDir,
   type PhaseConfig,
@@ -102,9 +103,23 @@ function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
   return { disallowedTools: [...new Set(disallowed)] };
 }
 
+/**
+ * The GitLab MCP server, resolved to a LOCAL binary.
+ *
+ * Not `npx -y`: npx re-resolves against the npm registry on every spawn, and
+ * this machine's npm traffic is blocked while the FortiClient VPN is up — the
+ * same VPN that GitLab itself requires. The result was the worst possible
+ * failure shape: the server never started, the session got no tools, and it
+ * burned its entire wall-clock timeout at ZERO turns with no error.
+ *
+ * @zereight/mcp-gitlab is a real dependency now, so the binary is in
+ * node_modules and starts offline in milliseconds.
+ */
 function mcpServers(): Record<string, unknown> {
-  const cmd = envOr('GITLAB_MCP_CMD', 'npx');
-  const args = envOr('GITLAB_MCP_ARGS', '-y @zereight/mcp-gitlab').split(' ').filter(Boolean);
+  const local = join(ROOT, 'node_modules', '.bin', 'mcp-gitlab');
+  const cmd = envOr('GITLAB_MCP_CMD', existsSync(local) ? local : 'npx');
+  const defaultArgs = cmd === 'npx' ? '-y @zereight/mcp-gitlab' : '';
+  const args = envOr('GITLAB_MCP_ARGS', defaultArgs).split(' ').filter(Boolean);
   const token = envOr('GITLAB_TOKEN');
   if (!token) return {};
   return {
@@ -221,7 +236,12 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     }
   } catch (err) {
     const m = (err as Error).message ?? String(err);
-    out.error = ac.signal.aborted ? `timed out after ${cfg.timeoutMin}m` : m;
+    out.error = ac.signal.aborted
+      ? (out.turns === 0
+        ? `timed out after ${cfg.timeoutMin}m at ZERO turns — the session never started. `
+          + 'Almost always a wedged MCP server spawn: run `npm run deps:verify`.'
+        : `timed out after ${cfg.timeoutMin}m`)
+      : m;
     limitSignals.push(m);
   } finally {
     clearTimeout(killer);
