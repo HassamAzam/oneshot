@@ -190,12 +190,23 @@ export function otelStatus(): { on: boolean; why: string; remote: boolean } {
       why: `${c.endpoint} is remote and allowRemote is false — set it to opt in, or self-host`,
     };
   }
-  const leaks: string[] = [];
-  if (c.logUserPrompts) leaks.push('prompts');
-  if (c.logAssistantResponses) leaks.push('responses');
-
   let why = c.endpoint;
-  if (remote) why += ' (REMOTE — span metadata leaves this machine)';
-  if (leaks.length) why += ` — WARNING: ${leaks.join(' + ')} TEXT is being exported`;
+  if (remote) why += ' (remote)';
+  if (c.logAssistantResponses) why += ' +responses';
+  if (c.logUserPrompts) why += ' +PROMPTS';
   return { on: true, remote, why };
+}
+
+/**
+ * Whether prompt text is being exported.
+ *
+ * Split out from responses because the two are not comparable. Responses are
+ * output-only and never replayed, so they are cheap and useful. Prompts carry
+ * the whole conversation plus every file read, on every turn — expensive, and
+ * the flag that makes the span store a second copy of every ticket and diff.
+ * `doctor` fails on this one and merely notes the other.
+ */
+export function promptTextExported(): boolean {
+  const c = otelConfig();
+  return c.enabled && c.logUserPrompts && !!authHeader();
 }

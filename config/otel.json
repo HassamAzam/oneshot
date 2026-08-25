@@ -25,9 +25,13 @@
   "_comment_toolDetails": "OTEL_LOG_TOOL_DETAILS=1 puts tool names, subagent names and subagent_type on spans. This is what makes 'which agents were called / ran' answerable, so it is on. It logs tool METADATA, not prompt text.",
   "logToolDetails": true,
 
-  "_comment_privacy": "PRIVACY — both OFF on purpose. OTEL_LOG_USER_PROMPTS puts full prompt text (for Oneshot: ticket bodies, MR diffs, whatever the phase read out of the repo) into span payloads; OTEL_LOG_ASSISTANT_RESPONSES does the same for everything the model wrote. Turning either on makes the span store a second, unredacted copy of every conversation, rendered in a browser. The per-phase JSONL under state/runs/<iid>/ is ALREADY the system of record for conversation content and Langfuse links to it. Flip one only for a short, deliberate debugging session, then flip it back.",
+  "_comment_text": "The two text flags are NOT symmetric in cost, and the asymmetry is the whole reason responses are on and prompts are not.",
+
+  "_comment_prompts": "OFF. The prompt is re-sent on EVERY turn and carries the entire conversation so far plus every file the phase has read — so logging it is roughly quadratic in turn count. A 60-turn implement phase whose prompt grows to ~100k tokens logs several million tokens cumulatively: ~12 MB for that one phase, ~30-60 MB per ticket. It is also the flag that turns the span store into an unredacted second copy of every ticket body and diff. Leave it off; state/runs/<iid>/*.jsonl already holds the full prompt locally for free.",
   "logUserPrompts": false,
-  "logAssistantResponses": false,
+
+  "_comment_responses": "ON. Only what the model WROTE — output tokens, which are roughly a tenth of input and, crucially, are never replayed turn over turn. ~20-80 KB per phase, ~0.5-1.5 MB per ticket: about 30x cheaper than prompts, and it is the half you actually want when asking 'what did this agent decide and why'.",
+  "logAssistantResponses": true,
 
   "_comment_flush": "Phase sessions are SHORT (a Haiku recall can be under 30s) and each is a separate CLI process, so the OTel default 60s interval would let a whole phase exit before its first export. Lowered so a finished phase is visible almost immediately. Set any to 0 to omit the variable and take the SDK default.",
   "spanScheduleDelayMs": 2000,

@@ -13,7 +13,7 @@ import {
   projectConfig, slackConfig,
 } from '../src/lib/config.js';
 import { ping, listBranches } from '../src/lib/gitlab.js';
-import { otelStatus } from '../src/lib/otel.js';
+import { otelStatus, promptTextExported } from '../src/lib/otel.js';
 
 let fails = 0;
 let warns = 0;
@@ -170,19 +170,20 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------ telemetry
   section('Session tracking (Langfuse)');
   const otel = otelStatus();
-  if (otel.on) {
-    if (otel.remote) {
-      warn('telemetry ON, endpoint is REMOTE', otel.why);
-      warn('span metadata leaves this machine', 'tool names, file paths, command arguments');
-    } else {
-      pass('telemetry ON', otel.why);
-    }
-    if (otel.why.includes('TEXT is being exported')) {
-      fail('prompt/response TEXT export is enabled',
-        'ticket bodies and diffs are going into the span store — turn it off in config/otel.json');
-    }
-  } else {
+  if (!otel.on) {
     warn('telemetry OFF', otel.why);
+  } else {
+    if (otel.remote) warn('telemetry ON, endpoint is remote', otel.why);
+    else pass('telemetry ON', otel.why);
+
+    if (otel.why.includes('+responses')) {
+      pass('assistant responses saved', '~0.5-1.5 MB/ticket — output only, never replayed');
+    }
+    if (promptTextExported()) {
+      fail('prompt TEXT export is enabled',
+        'prompts replay the whole conversation every turn: ~30-60 MB/ticket, and a full ' +
+        'unredacted copy of every ticket body and diff. Set logUserPrompts:false.');
+    }
   }
 
   // ---------------------------------------------------------------- slack
