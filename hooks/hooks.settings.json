@@ -1,0 +1,67 @@
+{
+  "//": "Oneshot guardrail hook block, merged into ~/.claude/settings.json by scripts/install-hooks.cjs. Never hand-edit settings.json for these — the installer tags the block with oneshotManaged so it can be removed cleanly. Every command is shell-gated on ONESHOT_PHASE so Hassam's own interactive sessions pay one exit and are otherwise untouched; each script ALSO self-gates via C.bailIfNotOneshot() as defense in depth. Matchers containing (|) are regexes anchored ^...$ so mcp__gitlab__update_issue cannot substring-match mcp__gitlab__update_issue_note. __ONESHOT_HOME__ and __NODE__ are substituted at install time.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ONESHOT_PHASE\" ] || exit 0; exec \"__NODE__\" __ONESHOT_HOME__/hooks/pause-check.cjs",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "^(Write|Edit|NotebookEdit)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ONESHOT_PHASE\" ] || exit 0; exec \"__NODE__\" __ONESHOT_HOME__/hooks/write-scope.cjs",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ONESHOT_PHASE\" ] || exit 0; exec \"__NODE__\" __ONESHOT_HOME__/hooks/git-guard.cjs",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ONESHOT_PHASE\" ] || exit 0; exec \"__NODE__\" __ONESHOT_HOME__/hooks/log-event.cjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ONESHOT_PHASE\" ] || exit 0; exec \"__NODE__\" __ONESHOT_HOME__/hooks/log-event.cjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ONESHOT_PHASE\" ] || exit 0; exec \"__NODE__\" __ONESHOT_HOME__/hooks/budget-gate.cjs",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

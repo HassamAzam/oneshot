@@ -1,0 +1,42 @@
+{
+  "_comment": "Session tracking via native Claude Code OpenTelemetry -> Langfuse. Nothing here instruments anything: the Agent SDK spawns the Claude Code CLI, and the CLI emits OTLP itself. Oneshot's only job is to put the right variables in the session environment — which it CANNOT do from your shell, because src/lib/config.ts buildBaseEnv() REPLACES the subprocess env (that is the control keeping ANTHROPIC_API_KEY out). So the settings live here, in tracked config, not in .env.",
+
+  "_comment_why_langfuse": "Langfuse is MIT-licensed and self-hostable for free, unlike LangSmith (closed source, self-host is Enterprise-only). It is chosen over a generic tracing backend for its Sessions concept, which maps onto Oneshot exactly: session = one ticket run, trace = one phase, span = one tool call or subagent, generation = one model request with tokens.",
+
+  "enabled": true,
+
+  "_comment_endpoint": "Langfuse ingests OTLP over HTTP at /api/public/otel (v3.22.0+). Default is a local self-hosted instance. Traces POST to <endpoint>/v1/traces. Env override: ONESHOT_OTEL_ENDPOINT.",
+  "endpoint": "http://localhost:3000/api/public/otel",
+  "protocol": "http/protobuf",
+  "serviceName": "oneshot",
+
+  "_comment_auth": "Langfuse authenticates OTLP with HTTP Basic: base64(publicKey:secretKey) from a project's API keys page. Built at runtime from LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY in .env — never written here, because this file is tracked.",
+
+  "_comment_exporters": "Traces are what build the phase/agent tree. Metrics and logs are cheap and land on the same endpoint, but Langfuse only consumes traces — set them to 'none' unless you are also pointing at a general OTLP collector.",
+  "exporters": {
+    "traces": "otlp",
+    "metrics": "none",
+    "logs": "none"
+  },
+
+  "_comment_toolDetails": "OTEL_LOG_TOOL_DETAILS=1 puts tool names, subagent names and subagent_type on spans. This is what makes 'which agents were called / ran' answerable, so it is on. It logs tool METADATA, not prompt text.",
+  "logToolDetails": true,
+
+  "_comment_privacy": "PRIVACY — both OFF on purpose. OTEL_LOG_USER_PROMPTS puts full prompt text (for Oneshot: ticket bodies, MR diffs, whatever the phase read out of the repo) into span payloads; OTEL_LOG_ASSISTANT_RESPONSES does the same for everything the model wrote. Turning either on makes the span store a second, unredacted copy of every conversation, rendered in a browser. The per-phase JSONL under state/runs/<iid>/ is ALREADY the system of record for conversation content and Langfuse links to it. Flip one only for a short, deliberate debugging session, then flip it back.",
+  "logUserPrompts": false,
+  "logAssistantResponses": false,
+
+  "_comment_flush": "Phase sessions are SHORT (a Haiku recall can be under 30s) and each is a separate CLI process, so the OTel default 60s interval would let a whole phase exit before its first export. Lowered so a finished phase is visible almost immediately. Set any to 0 to omit the variable and take the SDK default.",
+  "spanScheduleDelayMs": 2000,
+  "exporterTimeoutMs": 10000,
+  "metricExportIntervalMs": 0,
+  "logsExportIntervalMs": 0,
+
+  "_comment_sessionAttribute": "Langfuse groups traces into a session by the 'langfuse.session.id' attribute. Oneshot stamps it with the run id, so every phase of one ticket lands in one session view. UNVERIFIED against a live Langfuse: whether resource-level attributes propagate to spans for session grouping, or whether Langfuse requires it span-level, needs one real run to confirm — see docs/OBSERVABILITY.md.",
+  "sessionAttribute": "langfuse.session.id",
+
+  "_comment_resourceAttributes": "Extra static key=value pairs merged into OTEL_RESOURCE_ATTRIBUTES on every span, on top of the per-spawn identity (oneshot.run_id, oneshot.ticket, oneshot.phase, oneshot.lap, oneshot.tier, langfuse.session.id) that src/lib/otel.ts adds. Values are percent-encoded before joining, so a comma or equals sign in one cannot break the variable.",
+  "resourceAttributes": {
+    "deployment.environment": "hassam-mac"
+  }
+}

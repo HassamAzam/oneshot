@@ -1,0 +1,120 @@
+{
+  "_comment": "Per-phase execution policy. 'kind' is the important field: 'code' phases are plain TypeScript in the conductor and never spawn a model — that is WHY no hook is needed to stop a model merging or deploying (docs/HOOKS.md §1). 'session' phases get one fresh Agent SDK query() that is never resumed.",
+
+  "_comment_cwd": "'worktree' = the leased git worktree for this ticket. 'conductor' = the Oneshot repo root, used by phases that must not see repo files at all.",
+
+  "_comment_writes": "Filesystem scopes handed to hooks/write-scope.js via ONESHOT_WRITE_SCOPES. Anything outside is denied. 'run' expands to state/runs/<iid>/, 'artifacts' to state/runs/<iid>/artifacts/, 'memory' to state/memory/.",
+
+  "phases": [
+    {
+      "name": "recall", "n": 0, "kind": "session", "tier": "light",
+      "cwd": "conductor", "maxTurns": 20, "timeoutMin": 6,
+      "writes": ["run"], "onFail": "skip",
+      "skills": ["ticket-recall", "phase-handoff-contract"],
+      "artifact": "recall.json"
+    },
+    {
+      "name": "research", "n": 1, "kind": "session", "tier": "heavy",
+      "cwd": "worktree", "maxTurns": 60, "timeoutMin": 25,
+      "writes": ["run"], "onFail": "abort",
+      "skills": ["ticket-research", "graphify-knowledge-graph", "phase-handoff-contract"],
+      "artifact": "research.json"
+    },
+    {
+      "name": "plan", "n": 2, "kind": "session", "tier": "heavy",
+      "cwd": "worktree", "maxTurns": 50, "timeoutMin": 20,
+      "writes": ["run"], "onFail": "abort",
+      "skills": ["planning-methodology", "util-reuse-methodology", "phase-handoff-contract"],
+      "artifact": "plan.json"
+    },
+    {
+      "name": "testcases", "n": 3, "kind": "session", "tier": "heavy",
+      "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
+      "writes": ["run"], "onFail": "abort",
+      "skills": ["testcase-brainstorm", "phase-handoff-contract"],
+      "artifact": "testcases.json",
+      "_why": "Opus, and its own phase: verify and qa must execute the SAME list or a green local run and a green demo run cover different ground and cannot be compared."
+    },
+    {
+      "name": "implement", "n": 4, "kind": "session", "tier": "heavy",
+      "cwd": "worktree", "maxTurns": 220, "timeoutMin": 90,
+      "writes": ["worktree", "run"], "onFail": "retry", "maxRetries": 2,
+      "coding": true,
+      "skills": ["django-backend-standards", "django-migration-standards", "react-frontend-standards", "django-query-optimisation", "python-linting", "script-writing-standards", "phase-handoff-contract"],
+      "agents": ["backend-agent", "frontend-agent"],
+      "artifact": "implement.json"
+    },
+    {
+      "name": "review", "n": 5, "kind": "session", "tier": "heavy",
+      "cwd": "worktree", "maxTurns": 70, "timeoutMin": 30,
+      "writes": ["run"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 3,
+      "skills": ["erp-code-review", "dead-code-sweep", "phase-handoff-contract"],
+      "agents": ["backend-reviewer-agent", "frontend-reviewer-agent", "util-reuse-agent"],
+      "artifact": "findings.json"
+    },
+    {
+      "name": "verify", "n": 6, "kind": "session", "tier": "standard",
+      "cwd": "worktree", "maxTurns": 90, "timeoutMin": 60,
+      "writes": ["worktree", "run", "artifacts"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 2,
+      "coding": true, "needsPort": true,
+      "skills": ["local-browser-verify", "phase-handoff-contract"],
+      "artifact": "verify.json"
+    },
+    {
+      "name": "ui-evidence", "n": 7, "kind": "session", "tier": "standard",
+      "cwd": "worktree", "maxTurns": 60, "timeoutMin": 30,
+      "writes": ["run", "artifacts"], "onFail": "warn", "needsPort": true,
+      "skills": ["ui-evidence-pack", "phase-handoff-contract"],
+      "artifact": "ui-evidence.json"
+    },
+    {
+      "name": "mr", "n": 8, "kind": "session", "tier": "standard",
+      "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
+      "writes": ["run"], "onFail": "abort",
+      "skills": ["mr-metadata", "mr-change-logger", "phase-handoff-contract"],
+      "artifact": "mr.json"
+    },
+    {
+      "name": "merge", "n": 9, "kind": "code",
+      "timeoutMin": 10, "onFail": "blocked",
+      "_why": "Code, not a session. No model holds a merge tool, so v1's label-guard approval check has nothing to guard."
+    },
+    {
+      "name": "deploy", "n": 10, "kind": "code",
+      "timeoutMin": 50, "onFail": "blocked",
+      "_why": "Code. Runs scripts/deploy-wsai.sh, which sleeps 90s internally — a model's Bash would have been denied by sleep-cap."
+    },
+    {
+      "name": "qa", "n": 11, "kind": "session", "tier": "heavy",
+      "cwd": "conductor", "maxTurns": 90, "timeoutMin": 45,
+      "writes": ["run", "artifacts"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 2,
+      "skills": ["demo-server-qa", "phase-handoff-contract"],
+      "artifact": "qa.json"
+    },
+    {
+      "name": "demo", "n": 12, "kind": "session", "tier": "standard",
+      "cwd": "conductor", "maxTurns": 60, "timeoutMin": 30,
+      "writes": ["run", "artifacts"], "onFail": "warn",
+      "skills": ["create-demo", "phase-handoff-contract"],
+      "artifact": "demo.json"
+    },
+    {
+      "name": "document", "n": 13, "kind": "session", "tier": "light",
+      "cwd": "conductor", "maxTurns": 40, "timeoutMin": 15,
+      "writes": ["run"], "onFail": "warn",
+      "skills": ["mr-documentation", "ui-evidence-pack", "phase-handoff-contract"],
+      "artifact": "document.json"
+    },
+    {
+      "name": "memorize", "n": 14, "kind": "session", "tier": "light",
+      "cwd": "conductor", "maxTurns": 25, "timeoutMin": 10,
+      "writes": ["run", "memory"], "onFail": "warn",
+      "skills": ["ticket-memory-write", "phase-handoff-contract"],
+      "artifact": "memorize.json"
+    },
+    {
+      "name": "close", "n": 15, "kind": "code",
+      "timeoutMin": 5, "onFail": "warn"
+    }
+  ]
+}

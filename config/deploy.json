@@ -1,0 +1,30 @@
+{
+  "_comment": "Phase 10. Adapted from Hassam's ~/Documents/'WSAI deployment script.sh'. Oneshot runs its OWN vendored copy (scripts/deploy-wsai.sh) so his manual script stays untouched; the vendored copy adds --yes, because the original blocks on `read -r -p 'press Enter to continue'` at line 78 when the branch is already up to date, and under `set -euo pipefail` feeding it /dev/null makes read return 1 and abort the script.",
+
+  "script": "scripts/deploy-wsai.sh",
+  "args": ["--yes"],
+
+  "_comment_host": "hooks/deploy-guard.js allowlist. A deploy command naming any other host is denied, fail-closed. 172.30.1.64 is VPN-gated, so the reachability breaker must probe it as well as GitLab.",
+  "server": "ibrahim@172.30.1.64",
+  "allowedHosts": ["172.30.1.64", "ws-ai-demo.arbisoft.com"],
+  "vpnGated": true,
+
+  "_comment_refs": "The ONLY refs phase 10 may deploy. The script deploys the TIP OF A BRANCH, not a SHA — see config/project.json concurrency for why that forces one run at a time.",
+  "allowedRefs": ["dev", "<ticket-branch>"],
+  "defaultRef": "dev",
+
+  "_comment_verify": "The script exits non-zero when the site does not return 200, so the exit code is the primary signal. healthUrl re-checks independently after the script returns: curl BY IP without the Host header returns 400 (ALLOWED_HOSTS), so the Host header is mandatory.",
+  "healthUrl": "https://127.0.0.1/",
+  "healthHostHeader": "ws-ai-demo.arbisoft.com",
+  "expectStatus": 200,
+
+  "_comment_deps": "The script's --npm / --pip flags. Oneshot decides these from ITS OWN diff rather than letting the script probe the server: if the run touched package.json -> --npm, requirements/ -> --pip.",
+  "depFlags": {
+    "package.json": "--npm",
+    "requirements/": "--pip"
+  },
+
+  "_comment_timeout": "Cold builds on that box take ~25 min and the script's own deadline is 45 min, plus a 90s service-stability sleep. 50 min gives it room without letting a wedged build hold the queue forever.",
+  "timeoutMin": 50,
+  "demoUrl": "https://ws-ai-demo.arbisoft.com"
+}

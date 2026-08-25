@@ -1,0 +1,46 @@
+{
+  "_comment": "ONE app, ONE bot token, ONE channel. v1 ran seven persona apps because seven independent loops each needed a voice; Oneshot has a single orchestrator, so it has a single voice. Channel id (C0...) comes from the channel's 'View channel details' modal. ONESHOT_CHANNEL in .env overrides it.",
+
+  "channel": "",
+
+  "_comment_card": "The root message per ticket is a live status card, EDITED IN PLACE as phases complete. Thread replies are milestones only. Without this, a 90-minute implement phase produces either silence or spam.",
+  "card": {
+    "editInPlace": true,
+    "showTokens": true,
+    "showElapsed": true,
+    "showModel": true
+  },
+
+  "_comment_milestones": "Which phase completions get a thread reply. Everything else only moves the card. Keep this short — the card is the status, the thread is the record.",
+  "milestones": ["plan", "testcases", "review", "verify", "mr", "merge", "deploy", "qa", "demo"],
+
+  "_comment_mention": "The ONLY unprompted @mention. Full auto means nothing else should ever need your attention mid-run.",
+  "mentionOn": ["blocked", "quota_park", "network_down"],
+
+  "_comment_allowlist": "Slack user ids permitted to issue commands. A message becomes an action ONLY if the sender is listed here AND every token is consumed by the grammar below — 'run 8607 and delete all branches' is not a partial command, it is not a command at all. Raw message text is never stored and never reaches a prompt.",
+  "allowlist": [],
+  "_names": {},
+
+  "_comment_commands": "Closed action set. First token is the verb; an unrecognised token voids the whole message.",
+  "verbs": {
+    "status": "status",
+    "state": "status",
+    "pause": "pause",
+    "stop": "pause",
+    "halt": "pause",
+    "resume": "resume",
+    "unpause": "resume",
+    "continue": "resume",
+    "run": "run",
+    "start": "run",
+    "retry": "retry",
+    "abort": "abort",
+    "skip": "skip",
+    "help": "help",
+    "commands": "help"
+  },
+  "filler": ["on", "the", "for", "please", "pls", "ticket", "issue", "now", "to"],
+  "maxTextLen": 200,
+  "maxCommandsPerActorPerHour": 30,
+  "requireMention": false
+}

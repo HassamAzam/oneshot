@@ -1,0 +1,56 @@
+# Self-hosted Langfuse — session tracking for Oneshot.
+#
+#   docker compose -f docker-compose.langfuse.yml up -d
+#   open http://localhost:3000        # create an account, then a project
+#   # copy the project's public/secret keys into .env as
+#   #   LANGFUSE_PUBLIC_KEY=pk-lf-...
+#   #   LANGFUSE_SECRET_KEY=sk-lf-...
+#   npm run doctor                    # confirms telemetry is on
+#
+# Langfuse is MIT-licensed and free to self-host with no event caps. Claude Code
+# emits OTLP natively, so Oneshot writes no instrumentation — src/lib/otel.ts
+# only puts the right variables in each phase's environment.
+#
+# Everything binds to 127.0.0.1 on purpose. Spans carry tool names, file paths
+# and command arguments; nothing about this should be reachable off the machine.
+
+name: oneshot-langfuse
+
+services:
+  langfuse:
+    image: langfuse/langfuse:3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@postgres:5432/langfuse
+      NEXTAUTH_URL: http://localhost:3000
+      # Local-only dev secrets. Regenerate for anything reachable off this box:
+      #   openssl rand -base64 32          -> NEXTAUTH_SECRET, SALT
+      #   openssl rand -hex 32             -> ENCRYPTION_KEY
+      NEXTAUTH_SECRET: oneshot-local-dev-secret-change-me
+      SALT: oneshot-local-dev-salt-change-me
+      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  langfuse-pg:

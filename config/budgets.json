@@ -1,0 +1,45 @@
+{
+  "_comment": "QUOTA budget. UNITS ARE WEIGHTED TOKENS, NOT DOLLARS. This machine runs on a Claude Max subscription, so there is no metered bill to cap — the real constraint is the rolling 5-hour and 7-day usage windows, and those windows are SHARED with Hassam's own interactive Claude Code sessions. The job of this file is 'leave Hassam enough of his own window', not 'spend less money'. Enforced twice: hooks/budget-gate.js at SessionStart, and the conductor before it claims a ticket.",
+
+  "_units": "Raw token counts are not comparable — an output token costs ~5x an input token and a cache read ~0.1x — so every count is multiplied by the weights below before comparison. Weights are Sonnet list-price ratios, which makes 1 weighted token ~= 1 input token of burn regardless of origin.",
+  "weights": { "input": 1, "output": 5, "cache_creation": 1.25, "cache_read": 0.1 },
+
+  "_ceilings": "SELF-IMPOSED, not the plan limit. Anthropic publishes no token numbers for Max 20x. Deliberately conservative: one Oneshot ticket runs SIX Opus phases (research, plan, testcases, implement, review, qa), which is materially heavier per ticket than v1's per-loop sessions. Tune after a week against /usage.",
+  "window_hours": 5,
+  "window_tokens": 25000000,
+  "day_tokens": 75000000,
+  "warn_pct": 80,
+
+  "_reserve": "Headroom held back for Hassam. Compared against ACCOUNT-WIDE window utilisation read from the status-line signal file when it is being harvested (see README). At 70, Oneshot stops claiming new tickets once 70% of a window is gone. Without the signal file the token ceilings above apply alone — which is why they are conservative. A reading older than signal_max_age_min is treated as unknown and ignored.",
+  "reserve": {
+    "pause_at_five_hour_pct": 70,
+    "pause_at_seven_day_pct": 70,
+    "signal_max_age_min": 90
+  },
+
+  "_ticket": "Per-RUN ceiling. A single ticket that blows this is escalated as BLOCKED rather than allowed to eat the whole window — the classic runaway is `implement` cycling against `review` findings it cannot satisfy.",
+  "ticket_tokens": 6000000,
+
+  "_phases": "Per-phase ceilings, checked at SessionStart. A phase refused here fails its onFail policy (cycle/warn/abort) exactly as if it had errored, so a runaway implement cannot starve qa.",
+  "phases": {
+    "recall": 150000,
+    "research": 900000,
+    "plan": 600000,
+    "testcases": 400000,
+    "implement": 2000000,
+    "review": 700000,
+    "verify": 700000,
+    "ui-evidence": 350000,
+    "mr": 250000,
+    "qa": 700000,
+    "demo": 350000,
+    "document": 150000,
+    "memorize": 100000
+  },
+
+  "_pause": "How long Oneshot stays parked after a subscription limit is hit when the reset time cannot be parsed from the error text. Session/Opus limits reset inside a 5h window so an hour then re-checking is cheap; a weekly limit resets at a fixed per-account time we cannot know, so re-check every 6h rather than sleeping for a week.",
+  "pause_defaults": { "session_minutes": 60, "weekly_minutes": 360 },
+
+  "_usd_note": "ESTIMATE ONLY — NOT A REAL CHARGE. On a subscription, total_cost_usd is computed locally from token counts at API list rates and, per Anthropic, is not relevant for billing. Nothing here is billed. This gates NOTHING.",
+  "usd_cap_estimate": 60
+}

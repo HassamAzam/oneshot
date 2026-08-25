@@ -1,0 +1,15 @@
+{
+  "_comment": "Tier -> model id. Phases reference a TIER, never a model id, so re-tiering the whole pipeline is one edit here. Ids verified against the Claude 5 family (Opus 5, Sonnet 5, Haiku 4.5).",
+
+  "tiers": {
+    "heavy": "claude-opus-5",
+    "standard": "claude-sonnet-5",
+    "light": "claude-haiku-4-5-20251001"
+  },
+
+  "_comment_narrator": "The Slack voice. Runs once per milestone on a JSON artifact — never on raw phase output, so a phase that read a secret cannot narrate it into the channel.",
+  "narrator": "light",
+
+  "_comment_overrides": "phase name -> tier, wins over config/phases.json. For one-off experiments; keep it empty in normal operation so phases.json stays the single source of truth.",
+  "overrides": {}
+}

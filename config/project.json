@@ -1,0 +1,47 @@
+{
+  "_comment": "The GitLab project Oneshot works in, and the two labels that are its entire external state. Verified against gitlab.arbisoft.com on 2026-08-25: project id 1491, 16 labels, dev/stage/master protected with can_push=false.",
+
+  "gitlab": {
+    "host": "gitlab.arbisoft.com",
+    "apiUrl": "https://gitlab.arbisoft.com/api/v4",
+    "project": "arbisoft/workstreamai",
+    "projectId": 1491
+  },
+
+  "_comment_context": "Read-only. Oneshot reads this repo for prior art, conventions and skills; it NEVER writes to it, and hooks/write-scope.js denies every write under contextRepo for every phase. See docs/HOOKS.md 4.1.",
+  "contextRepo": {
+    "path": "~/Documents/erp",
+    "gitlabProject": "arbisoft/erp",
+    "skillsRoot": "~/Documents/erp/.claude"
+  },
+
+  "_comment_labels": "ONE label in, one label out. There is no intermediate state machine — progress lives in the Slack card and the run journal, not on the board. All three ids below already exist on project 1491; Oneshot never creates, renames or deletes a label.",
+  "labels": {
+    "entry": "Loop",
+    "entryId": 1308,
+    "exit": "Ready For Deployment",
+    "exitId": 1303,
+    "blocked": "Needs Human",
+    "blockedId": 1310
+  },
+
+  "_comment_markers": "Persistent labels Oneshot must copy through untouched on any label write. A label swap is one update_issue call carrying the full array, so anything not listed here and not the entry/exit label would be silently dropped.",
+  "preserveLabels": ["AI", "Agentic", "Minor", "Major", "No QA", "Design"],
+
+  "_comment_branches": "base is what ticket branches are cut from and what their MRs target. NOTE: the project's GitLab default branch is 'main', NOT 'dev' — do not infer the base from the default branch. 'main' is protected but currently reports can_push=true for our token, which is why it is in protectedBranches: the guard must refuse it even though the server would allow it.",
+  "branches": {
+    "base": "dev",
+    "protected": ["dev", "stage", "master", "main"],
+    "prefix": "oneshot",
+    "pattern": "oneshot/ticket-<iid>-<slug>"
+  },
+
+  "_comment_promotion": "After a ticket MR merges into base, Oneshot promotes base -> stage. stage -> master is never automated: production release stays a human act.",
+  "promotions": [
+    { "from": "dev", "to": "stage", "auto": true },
+    { "from": "stage", "to": "master", "auto": false }
+  ],
+
+  "_comment_concurrency": "MUST STAY 1. The deploy script deploys the TIP OF A BRANCH, not a SHA, so two runs merging into dev between phase 9 and phase 10 put both changes on the demo server and phase 11's QA verdict is no longer attributable to either ticket. This is a correctness constraint, not a throughput knob.",
+  "concurrency": 1
+}
