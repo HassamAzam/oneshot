@@ -49,12 +49,13 @@ function preflight(): boolean {
   if (auth.clean) {
     log.ok(`auth       ${auth.credential}`);
   } else {
-    for (const p of auth.problems) log.warn(`auth       ${p}`);
+    for (const p of auth.problems) log.error(`auth       ${p}`);
     if (envOr('ONESHOT_REQUIRE_SUBSCRIPTION') === '1') {
       log.error('ONESHOT_REQUIRE_SUBSCRIPTION=1 and auth is not clean — refusing to start');
       fatal = true;
     }
   }
+  for (const n of auth.notes) log.warn(`auth       ${n}`);
 
   if (!envOr('GITLAB_TOKEN')) {
     log.error('GITLAB_TOKEN is not set. cp .env.example .env and fill it in.');

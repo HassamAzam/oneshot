@@ -17,8 +17,8 @@
     "signal_max_age_min": 90
   },
 
-  "_ticket": "Per-RUN ceiling. A single ticket that blows this is escalated as BLOCKED rather than allowed to eat the whole window — the classic runaway is `implement` cycling against `review` findings it cannot satisfy.",
-  "ticket_tokens": 6000000,
+  "_ticket": "Per-RUN ceiling. A single ticket that blows this is escalated as BLOCKED rather than allowed to eat the whole window — the classic runaway is `implement` cycling against `review` findings it cannot satisfy. Set ABOVE the sum of the per-phase caps below (7.35M) on purpose: if it sat under that sum, a ticket where every phase legitimately used its full budget would be killed on a clean single pass, and the cap would be measuring the wrong thing. At 8M it only bites once cycling has added laps, which is the runaway it exists to catch.",
+  "ticket_tokens": 8000000,
 
   "_phases": "Per-phase ceilings, checked at SessionStart. A phase refused here fails its onFail policy (cycle/warn/abort) exactly as if it had errored, so a runaway implement cannot starve qa.",
   "phases": {

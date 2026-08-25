@@ -44,6 +44,7 @@ async function main(): Promise<void> {
   } else {
     for (const p of auth.problems) fail('auth', p);
   }
+  for (const n of auth.notes) warn('auth', n);
   const claude = spawnSync('which', ['claude'], { encoding: 'utf8' });
   if (claude.status === 0) pass('claude CLI on PATH', claude.stdout.trim());
   else warn('claude CLI not on PATH', 'the Agent SDK spawns it — sessions will fail');

@@ -264,6 +264,24 @@ const AUTH_VARS_NEVER_FORWARDED = [
 ] as const;
 
 /**
+ * The subset whose mere presence is a billing risk.
+ *
+ * ANTHROPIC_BASE_URL is deliberately NOT here. Claude Code sets it to the
+ * canonical endpoint for its own process, so treating any value as a problem
+ * fires on a completely healthy machine. It only matters when it points
+ * somewhere other than Anthropic — that is a proxy, and worth saying so.
+ */
+const CREDENTIAL_VARS = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+] as const;
+
+const CANONICAL_API_HOSTS = ['api.anthropic.com'];
+
+/**
  * Identity variables the OAuth keychain lookup needs. Not secrets — without
  * them the macOS keychain cannot resolve the login and a subscription session
  * fails to authenticate at all.
@@ -324,7 +342,10 @@ export const BASE_ENV: Record<string, string> = buildBaseEnv();
 export interface AuthReport {
   clean: boolean;
   credential: string;
+  /** Would bill to an API key. Fails `doctor`. */
   problems: string[];
+  /** Worth knowing, not a billing risk. Warns only. */
+  notes: string[];
 }
 
 /**
@@ -336,12 +357,29 @@ export interface AuthReport {
  */
 export function auditAuth(): AuthReport {
   const problems: string[] = [];
-  for (const v of AUTH_VARS_NEVER_FORWARDED) {
-    if (typeof process.env[v] === 'string') {
+  const notes: string[] = [];
+
+  for (const v of CREDENTIAL_VARS) {
+    if (typeof process.env[v] === 'string' && process.env[v] !== '') {
       problems.push(
-        `${v} is set in this shell. It is stripped from session env, but its ` +
-        'presence means an interactive session on this machine may be billing to an API key.',
+        `${v} is set in this shell. It is stripped from session env, so Oneshot is ` +
+        'unaffected, but an interactive session on this machine may be billing to an API key.',
       );
+    }
+  }
+
+  const baseUrl = process.env.ANTHROPIC_BASE_URL;
+  if (baseUrl) {
+    try {
+      const host = new URL(baseUrl).hostname;
+      if (!CANONICAL_API_HOSTS.includes(host)) {
+        notes.push(
+          `ANTHROPIC_BASE_URL points at ${host}, not Anthropic. Sessions are routed ` +
+          'through a proxy. It is stripped from session env, so Oneshot goes direct.',
+        );
+      }
+    } catch {
+      notes.push(`ANTHROPIC_BASE_URL is set but unparseable: ${baseUrl}`);
     }
   }
 
@@ -362,5 +400,5 @@ export function auditAuth(): AuthReport {
     ? 'CLAUDE_CODE_OAUTH_TOKEN (subscription)'
     : 'keychain OAuth from `claude login` (subscription)';
 
-  return { clean: problems.length === 0, credential, problems };
+  return { clean: problems.length === 0, credential, problems, notes };
 }

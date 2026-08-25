@@ -24,7 +24,11 @@ export ONESHOT_TICKET="0"
 export ONESHOT_BRANCH="oneshot/ticket-0-verify"
 export ONESHOT_WORKTREE="/tmp/oneshot-verify-wt"
 export ONESHOT_WRITE_SCOPES="/tmp/oneshot-verify-wt:$ROOT/state/runs/0"
-export CONTEXT_REPO="${CONTEXT_REPO:-$HOME/Documents/erp}"
+# Expand a leading ~ ourselves. .env carries `CONTEXT_REPO=~/Documents/erp`, and a
+# tilde arriving through the environment is a literal character, not $HOME — which
+# silently turned the symlink-escape test into a SKIP when doctor ran this suite.
+CONTEXT_REPO="${CONTEXT_REPO:-$HOME/Documents/erp}"
+export CONTEXT_REPO="${CONTEXT_REPO/#\~/$HOME}"
 
 mkdir -p "$ONESHOT_WORKTREE"
 
@@ -109,7 +113,10 @@ if command -v ln >/dev/null 2>&1; then
         expect_deny "symlinked .claude/skills (realpath escape)" \
             write-scope.cjs "$(write_payload "$ONESHOT_WORKTREE/.claude/skills/erp-code-review/SKILL.md")"
     else
-        echo "  SKIP  symlink test — $CONTEXT_REPO/.claude not present"
+        # A silent skip here is worse than a failure: this is the test for the
+        # one escape that lets a phase rewrite its own governing skills.
+        red "  FAIL  symlink test could not run — $CONTEXT_REPO/.claude not present"
+        FAIL=$((FAIL+1))
     fi
 fi
 
