@@ -23,11 +23,26 @@ import { windowUsage, dayUsage, quotaParked } from './lib/quota.js';
 import { budgetConfig } from './lib/config.js';
 import { describe, scan } from './conductor/watcher.js';
 import { runTicket } from './conductor/runner.js';
-import { projectUrl } from './lib/gitlab.js';
+import { getIssue, projectUrl } from './lib/gitlab.js';
 import { log } from './lib/log.js';
 
 const TICK_MS = 60_000;
 const watchOnly = process.argv.includes('--watch-only');
+
+/**
+ * `--ticket <iid>` — run exactly one ticket, then exit.
+ *
+ * The watcher claims the oldest-updated candidate, which is right for steady
+ * state and wrong for a first run: a board with stale labels from an earlier
+ * system would have it start on whichever ticket happens to sort first.
+ */
+const ticketArg = (() => {
+  const i = process.argv.indexOf('--ticket');
+  if (i === -1) return null;
+  const n = Number(process.argv[i + 1]);
+  return Number.isInteger(n) && n > 0 ? n : null;
+})();
+const once = process.argv.includes('--once') || ticketArg !== null;
 
 function banner(): void {
   const cfg = projectConfig();
@@ -100,6 +115,17 @@ async function tick(): Promise<void> {
     return;
   }
 
+  if (ticketArg !== null) {
+    const res = await getIssue(ticketArg);
+    if (!res.ok || !res.data) {
+      log.error(`cannot read #${ticketArg}`, { kind: res.kind, status: res.status });
+      return;
+    }
+    log.phase(`targeting #${ticketArg}  ${res.data.title.slice(0, 60)}`);
+    await runTicket(res.data);
+    return;
+  }
+
   const result = await scan();
   const inFlight = activeRuns();
 
@@ -151,7 +177,9 @@ async function main(): Promise<void> {
   log.info(`quota      ${Math.round(windowUsage() / 1e6)}M / ${Math.round(b.window_tokens / 1e6)}M this window · ` +
     `${Math.round(dayUsage() / 1e6)}M / ${Math.round(b.day_tokens / 1e6)}M today (weighted)`);
 
-  log.banner(`Watching every ${TICK_MS / 1000}s. Ctrl-C to stop.`);
+  log.banner(once
+    ? (ticketArg !== null ? `Single run: ticket #${ticketArg}.` : 'Single pass, then exit.')
+    : `Watching every ${TICK_MS / 1000}s. Ctrl-C to stop.`);
   logEvent('conductor_start', { root: ROOT, watchOnly });
 
   let stopping = false;
@@ -172,7 +200,7 @@ async function main(): Promise<void> {
       log.error('tick failed', { error: (err as Error).message });
       logEvent('tick_error', { error: (err as Error).message });
     }
-    if (stopping) break;
+    if (stopping || once) break;
     // Back off while the network breaker is open rather than hammering it.
     const delay = netState() === 'ok' ? TICK_MS : Math.max(TICK_MS, 30_000);
     await new Promise((r) => setTimeout(r, delay));
