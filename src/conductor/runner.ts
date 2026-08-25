@@ -20,7 +20,7 @@ import { branchFor, newRunId, worktreeName } from '../lib/ids.js';
 import { leaseWorktree, reapWorktree } from '../lib/worktrees.js';
 import { addIssueNote, getIssue, issueNotes, issueUrl, swapLabel, type Issue } from '../lib/gitlab.js';
 import { checkQuota } from '../lib/quota.js';
-import { createRun, logEvent, updateRun } from '../lib/db.js';
+import { createRun, isClaimed, logEvent, updateRun } from '../lib/db.js';
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
 import { log } from '../lib/log.js';
 import { runPhase } from './phase.js';
@@ -109,7 +109,17 @@ export async function runTicket(issue: Issue): Promise<RunOutcome> {
   const cfg = projectConfig();
   const iid = issue.iid;
 
-  let j = readJournal(iid);
+  // Claim here, not in the watcher. --ticket dispatches straight to runTicket,
+  // so a guard living only in the scan path is a guard that is not there on the
+  // path most likely to be used for a manual re-run.
+  const existing = readJournal(iid);
+  const ours = existing?.status === 'running';
+  if (!ours && isClaimed(iid)) {
+    log.warn(`#${iid} is already claimed by an in-flight run — refusing`);
+    return { runId: '', iid, status: 'aborted', reason: 'already claimed' };
+  }
+
+  let j = existing;
   const resuming = j !== null && j.status === 'running';
   const runId = resuming && j ? j.runId : newRunId();
 
@@ -142,7 +152,8 @@ export async function runTicket(issue: Issue): Promise<RunOutcome> {
     if (ts) { j.slackTs = ts; writeJournal(j); updateRun(runId, { slack_ts: ts }); }
   }
 
-  if (!DRY_RUN) {
+  // Once per run, not once per resumption.
+  if (!DRY_RUN && !resuming) {
     await addIssueNote(iid, `Oneshot claimed this ticket — run \`${runId}\`.`);
   }
 

@@ -25,6 +25,7 @@ import { describe, scan } from './conductor/watcher.js';
 import { runTicket } from './conductor/runner.js';
 import { getIssue, projectUrl } from './lib/gitlab.js';
 import { log } from './lib/log.js';
+import { acquire, release } from './lib/singleton.js';
 
 const TICK_MS = 60_000;
 const watchOnly = process.argv.includes('--watch-only');
@@ -170,6 +171,18 @@ async function main(): Promise<void> {
   mkdirSync(RUNS, { recursive: true });
   mkdirSync(MEMORY, { recursive: true });
 
+  const lock = acquire();
+  if (!lock.ok) {
+    log.error('another conductor is already running — refusing to start', {
+      pid: lock.heldBy?.pid,
+      since: new Date(lock.heldBy?.startedAt ?? 0).toLocaleTimeString(),
+      argv: lock.heldBy?.argv,
+    });
+    log.error('stop it first:  pkill -f "src/index.ts"');
+    process.exit(1);
+  }
+  process.on('exit', release);
+
   banner();
   if (!preflight()) process.exit(1);
 
@@ -188,6 +201,7 @@ async function main(): Promise<void> {
     stopping = true;
     log.warn(`${sig} — finishing this tick then exiting`);
     logEvent('conductor_stop', { signal: sig });
+    release();
     setTimeout(() => process.exit(0), 250);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
