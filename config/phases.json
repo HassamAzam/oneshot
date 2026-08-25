@@ -31,7 +31,7 @@
       "name": "testcases", "n": 3, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
       "writes": ["run"], "onFail": "abort",
-      "skills": ["testcase-brainstorm", "phase-handoff-contract"],
+      "skills": ["test-case-writing", "phase-handoff-contract"],
       "artifact": "testcases.json",
       "_why": "Opus, and its own phase: verify and qa must execute the SAME list or a green local run and a green demo run cover different ground and cannot be compared."
     },
