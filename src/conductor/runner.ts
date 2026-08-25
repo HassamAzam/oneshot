@@ -34,6 +34,27 @@ export interface RunOutcome {
   reason?: string;
 }
 
+export interface CodePhaseCtx {
+  iid: number;
+  runId: string;
+  journal: RunJournal;
+  prior: Record<string, Record<string, unknown> | null>;
+}
+
+/**
+ * Deterministic phases — merge, deploy, close. TypeScript, never a model.
+ *
+ * Registered here rather than assumed: an unregistered name stops the run. The
+ * alternative (treat 'code' as "nothing to do") would let a run skip the merge
+ * and the deploy and still finish labelled Ready For Deployment.
+ *
+ * M4/M5 populate this map.
+ */
+export const CODE_PHASES: Record<
+  string,
+  ((ctx: CodePhaseCtx) => Promise<{ ok: boolean; error?: string }>) | undefined
+> = {};
+
 function cardLines(j: RunJournal, current: string | null): PhaseLine[] {
   return phases()
     .filter((p) => isImplemented(p.name) || p.kind === 'code')
@@ -134,10 +155,27 @@ export async function runTicket(issue: Issue): Promise<RunOutcome> {
   const prior: Record<string, Record<string, unknown> | null> = {};
 
   for (const phase of phases()) {
-    if (!isImplemented(phase.name)) {
-      if (phase.kind === 'code') continue;
+    // A phase with no implementation STOPS the run — including 'code' phases.
+    // Skipping them would let a run reach the end without merging or deploying
+    // and still be labelled Ready For Deployment, which is the worst possible
+    // failure mode: silent success on work that never happened.
+    if (!isImplemented(phase.name) && !CODE_PHASES[phase.name]) {
       log.warn(`phase '${phase.name}' is not implemented yet — stopping here`);
-      return finish(j, 'blocked', `phase '${phase.name}' not implemented (M1 covers recall→testcases)`);
+      return finish(j, 'blocked',
+        `not built yet: phase '${phase.name}'. Implemented so far: ` +
+        `${phases().filter((p) => isImplemented(p.name) || CODE_PHASES[p.name]).map((p) => p.name).join(' → ')}`);
+    }
+
+    if (CODE_PHASES[phase.name]) {
+      const done = await CODE_PHASES[phase.name]!({ iid, runId, journal: j, prior });
+      recordPhase(iid, {
+        phase: phase.name, lap: 0, status: done.ok ? 'ok' : 'failed',
+        startedAt: Date.now(), endedAt: Date.now(), error: done.error,
+      });
+      j = readJournal(iid) ?? j;
+      if (!done.ok) return finish(j, 'blocked', `${phase.name}: ${done.error}`);
+      await updateCard(j.slackTs ?? '', cardState(j, null));
+      continue;
     }
 
     if (phaseSucceeded(iid, phase.name)) {
