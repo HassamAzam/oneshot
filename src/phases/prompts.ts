@@ -90,9 +90,13 @@ The memory lives at \`state/memory/\`: \`index.jsonl\` has one line per complete
 overlap first (in a monorepo that is the strongest signal for "similar ticket"), then module,
 label and title-token overlap. Read the top 3 cards at most.
 
-Produce a prior-art brief short enough to sit inside three later prompts: what was done, what
-broke, what to reuse. If there is no memory yet or nothing overlaps, return an empty list and
-an empty brief — that is a correct answer, not a failure.`,
+FIRST, check whether \`state/memory/index.jsonl\` exists at all. If it does not, or it is
+empty, STOP IMMEDIATELY and return an empty list and an empty brief. Do not search the
+filesystem for alternatives, do not look for other memory formats, do not explore. On a
+system with no completed runs yet this is the expected answer and it costs one tool call.
+
+Otherwise produce a prior-art brief short enough to sit inside three later prompts: what was
+done, what broke, what to reuse. An empty brief is a correct answer, not a failure.`,
 
   research: (ctx) => `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 
@@ -145,6 +149,85 @@ the hostile-QA one, and record any pass that legitimately produced nothing in \`
 A skipped pass and a clean pass must not look the same.
 
 Do not run anything. You are authoring the list, not executing it.`,
+
+  implement: (ctx) => {
+    const r = (ctx.prior.research ?? {}) as {
+      acceptanceCriteria?: string[]; codePath?: Array<{ file: string; line: number; role: string }>;
+      blastRadius?: string[];
+    };
+    const cases = ((ctx.prior.testcases as {
+      cases?: Array<{ id: string; scenario: string; expected: string; blast: string }>;
+    } | null)?.cases ?? []);
+    const findings = ((ctx.prior.review as {
+      findings?: Array<{ id: string; severity: string; file: string; line: number; what: string; fix: string }>;
+    } | null)?.findings ?? []);
+
+    // A review lap and a retry lap are different jobs and must not read the
+    // same: one has a defect list to close, the other has an unknown amount of
+    // its own half-finished work already committed on the branch.
+    const lapBlock = findings.length
+      ? `## Review findings to fix (lap ${ctx.lap})
+The previous lap was reviewed and sent back. Fix every blocker and major. Address minors and
+suggestions unless doing so contradicts the plan — say which you left and why in \`summary\`.
+Return the ids you actually closed in \`addressedFindings\`; an id you list but did not fix is
+worse than one you admit you skipped, because the next review trusts this field.
+
+${findings.map((f) => `- ${f.id} [${f.severity}] ${f.file}:${f.line}\n    ${f.what}\n    fix: ${f.fix}`).join('\n')}
+`
+      : ctx.lap > 0
+        ? `## This is lap ${ctx.lap}
+A previous attempt at this phase did not finish. Its commits may already be on the branch.
+Run \`git log --oneline origin/${projectConfig().branches.base}..HEAD\` and read the diff
+BEFORE writing anything, and continue from there rather than redoing work that landed.
+`
+        : '';
+
+    return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
+${lapBlock}
+## Plan (phase 2) — this is your specification
+${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
+
+## From research (phase 1)
+Acceptance criteria:
+${(r.acceptanceCriteria ?? []).map((a) => `  - ${a}`).join('\n') || '  (none recorded)'}
+
+Code path:
+${(r.codePath ?? []).map((c) => `  - ${c.file}:${c.line} — ${c.role}`).join('\n') || '  (none recorded)'}
+
+Blast radius: ${(r.blastRadius ?? []).join(', ') || '(none recorded)'}
+
+## What phase 6 and phase 11 will execute against your code
+${cases.map((c) => `  - ${c.id} [${c.blast}] ${c.scenario}\n      expects: ${c.expected}`).join('\n') || '  (no cases)'}
+
+Write the code.
+
+- You are on branch \`${ctx.branch ?? '(unleased)'}\`, already checked out in your worktree.
+  Work through the plan's steps in order and commit as you complete each coherent one — small
+  commits are what let \`review\` and \`git bisect\` say anything useful. Never amend or rebase a
+  commit from an earlier lap.
+- Follow the plan. If executing a step proves it wrong — the research missed something, the
+  helper it names does not do what it claims — do the right thing instead and say so in
+  \`summary\`. Do not silently implement a different design, and do not implement a design you
+  know to be wrong because the plan said so.
+- Reuse what the plan named under \`reuse\` before writing anything new.
+- Every acceptance criterion above must be met by the code you leave behind. The case list is
+  the oracle three later phases run; code that cannot pass a case there will come straight back
+  to you as a finding.
+- Lint is a gate, not a formality: run the project's linters over the files you touched and set
+  \`lintClean\` from what they actually printed. The pre-commit hook is broken on this machine,
+  so \`--no-verify\` is permitted and the linters are the only thing standing in for it. Never
+  report clean without having run them.
+- If the plan sets \`migrations\`, generate them with the migration skill and list the files in
+  \`migrationsAdded\`. A model change with no migration is a broken deploy, not a small omission.
+- \`commits\` and \`filesChanged\` are read by later phases and by the MR description. Take them
+  from \`git log\` and \`git diff --name-only\`, never from memory.
+
+Delegate implementation work to the \`backend-agent\` and \`frontend-agent\` subagents for changes
+in their layer; they carry the standards this repo is reviewed against.
+
+Do not push, open an MR, merge or deploy — later phases own those and you have no tools for
+them. Do not edit anything outside your worktree.`;
+  },
 };
 
 export function promptFor(cfg: PhaseConfig, ctx: PromptCtx): string {

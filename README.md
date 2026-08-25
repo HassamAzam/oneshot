@@ -88,13 +88,12 @@ the breaker, or a quota park. That posts an @mention and applies `Needs Human`.
 ```sh
 git clone https://github.com/HassamAzam/oneshot.git && cd oneshot
 npm install
-cp .env.example .env && chmod 600 .env     # fill in GITLAB_TOKEN, SLACK_BOT_TOKEN, channel
-npm run hooks:install                      # merge guardrails into ~/.claude/settings.json
-npm run doctor                             # refuse to start on a misconfiguration
-npm start
+npm start                                  # no .env? an interactive wizard runs first
 ```
 
-`npm run doctor` is the gate. It checks auth, config coherence, paths, GitLab reachability and
+`npm start` with no `.env` hands off to a setup wizard that reuses the GitLab token already in
+`~/.claude.json`, detects your repo clones, and warns before configuring a remote telemetry
+endpoint. Then `npm run verify` (deps → hooks → doctor) is the gate. It checks auth, config coherence, paths, GitLab reachability and
 branch protection, that the hooks are installed and their test suite passes, and that the deploy
 target is configured. It exits non-zero on anything that would only surface as a confusing
 failure three phases into a real ticket.
@@ -136,9 +135,15 @@ Installed hooks (`npm run hooks:verify` — 32 offline assertions, no network, n
 - **`budget-gate`** — refuses a phase whose per-phase, per-ticket, per-window or per-day weighted
   token ceiling is already spent.
 
-Every hook is shell-gated on `ONESHOT_PHASE`, so your own interactive Claude Code sessions pay
-one process exit and are otherwise untouched. `npm run hooks:uninstall` removes exactly what was
-installed and nothing else.
+**Guards are passed to the SDK in-process, not installed into `~/.claude/settings.json`.** They
+travel with the repo, so a fresh clone is protected with no install step, and your own
+interactive sessions are untouched *by construction* rather than by env-gating. The callbacks
+shell out to the same `hooks/*.cjs` files the test suite exercises — one implementation, no
+drift between a guard and its copy.
+
+The original design loaded them via `settingSources: ['user']`. That dragged in the operator's
+entire personal config, including a `npx`-based `statusLine` that hung every phase before its
+first turn. Global install remains available (`npm run hooks:install`) but is no longer needed.
 
 Design rationale for each, and the seven not yet built, is in [docs/HOOKS.md](docs/HOOKS.md).
 
@@ -206,16 +211,48 @@ problem, and letting it trip the breaker would make a wrong `GITLAB_TOKEN` look 
 
 ## Status
 
-Built through **M0**. `npm start` boots, audits auth, validates config, probes GitLab, and scans
-for `Loop`-labelled tickets on a 60s timer. Phase dispatch lands in M1.
+Built and **proven live** through **M1**. A `Loop`-labelled ticket runs
+recall → research → plan → testcases against real GitLab, producing schema-valid artifacts
+that hand forward. First end-to-end run on ticket #5 (Invoices):
+
+| phase | result | turns | weighted tokens |
+|---|---|---|---|
+| `recall` | skipped (no memory yet) | 20 | 79k |
+| `research` | ok — 21 cited code-path steps, 5 AC, 8 stated unknowns | 40 | 461k |
+| `plan` | ok — 6 steps, 10 reuse items, 8 risks | 22 | 298k |
+| `testcases` | ok — 19 cases, 9 high-blast, all 8 passes run | 16 | 176k |
+
+~1.0M weighted tokens for a researched, planned, test-cased ticket.
 
 | M | Ships | Status |
 |---|---|---|
 | M0 | skeleton, config, hooks + test suite, quota, breaker, watcher, doctor | **done** |
-| M1 | phase runner, result schema, run journal, teardown, phases 0–3, OTel/Langfuse | next |
-| M2 | worktrees + skill symlinks, phases 4–5, review cycle | |
-| M3 | phases 6–7, dev server on a leased port, Playwright, screenshots | |
+| M1 | phase runner, schema-enforced handoffs, run journal, teardown, phases 0–3, Slack card, Langfuse | **done, verified live** |
+| M2 | phases 4–5 — implement, review, the review cycle | next |
+| M3 | phases 6–7 — dev server on a leased port, Playwright, screenshots | |
 | M4 | phases 8–9, 13 — MR, merge, promote, documentation, uploads | |
 | M5 | phases 10–12 — deploy, demo-server QA, demo recording | |
 | M6 | phases 0 + 14 — memory index and recall | |
 | M7 | dashboard, replay, hardening hooks | |
+
+A blank Status is work not yet started. `runner.ts` stops with an explicit
+`BLOCKED: not built yet: phase '<name>'` rather than skipping ahead — including for the
+deterministic `merge`/`deploy`/`close` phases, so a run can never reach
+`Ready For Deployment` without having actually merged and deployed.
+
+## What six live failures taught this design
+
+Every one was found by running it, not by reading it. Only the first was predicted.
+
+| Failure | Cause | Fix |
+|---|---|---|
+| Phase hung 6 min at **zero turns** | `npx -y @zereight/mcp-gitlab` re-resolves against the npm registry per spawn; npm is blocked behind the same VPN GitLab needs | MCP server is a real dependency |
+| Still hung after that fix | `settingSources:['user']` loads the operator's `statusLine: npx ccusage@latest`, which hangs the same way | guards passed in-process; `'user'` dropped |
+| `spawn node ENOENT` | resume trusted a `worktree` path that had been deleted — a missing `cwd` reports as ENOENT and reads like a broken PATH | validate and re-lease |
+| Two conductors claimed one ticket | a killed `npm` wrapper orphans its `tsx` child; and `isClaimed()` lived only in the watcher, so `--ticket` bypassed it | PID-file singleton + claim inside `runTicket` |
+| Duplicate claim notes | the note was re-posted on every resumption | once per run |
+| Unimplemented `code` phases skipped silently | `kind: 'code'` was treated as nothing-to-do | explicit `CODE_PHASES` registry |
+
+The recurring lesson: **nothing in this pipeline may shell out to `npx` at run time**, and
+`npm run deps:verify` now spawns every out-of-process dependency for real — because checking
+that a dependency is *configured* is not the same as checking that it *runs*.

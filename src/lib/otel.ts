@@ -114,14 +114,29 @@ export function otelBaseEnv(): Record<string, string> {
     // REQUIRED for spans. Without it you get metrics and logs only, and the
     // phase -> tool -> subagent tree never appears — which is the whole point.
     CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: '1',
-    OTEL_TRACES_EXPORTER: c.exporters.traces,
-    OTEL_METRICS_EXPORTER: c.exporters.metrics,
-    OTEL_LOGS_EXPORTER: c.exporters.logs,
     OTEL_EXPORTER_OTLP_PROTOCOL: c.protocol,
     OTEL_EXPORTER_OTLP_ENDPOINT: c.endpoint,
     OTEL_EXPORTER_OTLP_HEADERS: `Authorization=${auth}`,
     OTEL_SERVICE_NAME: c.serviceName,
   };
+
+  // 'none' is config vocabulary, NOT a value the CLI accepts. Its exporter
+  // setup splits each OTEL_*_EXPORTER on ',', drops empties, and THROWS on any
+  // surviving token that is not console/otlp/prometheus — so 'none' kills the
+  // session at startup, before turn one. Worse, the metrics branch reports it
+  // as "Unknown exporter type set in OTEL_EXPORTER_OTLP_METRICS_PROTOCOL or
+  // OTEL_EXPORTER_OTLP_PROTOCOL", naming two variables that are correct and
+  // not the one at fault. Off is expressed by omitting the variable.
+  const exporter = (v: string): string | null => {
+    const s = (v ?? '').trim().toLowerCase();
+    return s === '' || s === 'none' || s === 'off' ? null : s;
+  };
+  const traces = exporter(c.exporters.traces);
+  const metrics = exporter(c.exporters.metrics);
+  const logs = exporter(c.exporters.logs);
+  if (traces) env.OTEL_TRACES_EXPORTER = traces;
+  if (metrics) env.OTEL_METRICS_EXPORTER = metrics;
+  if (logs) env.OTEL_LOGS_EXPORTER = logs;
 
   if (c.logToolDetails) env.OTEL_LOG_TOOL_DETAILS = '1';
   if (c.logUserPrompts) env.OTEL_LOG_USER_PROMPTS = '1';
