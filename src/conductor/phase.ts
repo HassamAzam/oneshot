@@ -25,6 +25,7 @@ import { transcriptPath, writeArtifact } from '../lib/artifacts.js';
 import { logEvent } from '../lib/db.js';
 import { log } from '../lib/log.js';
 import { schemaFor } from './schemas.js';
+import { hooksFor } from './hooks.js';
 
 export interface PhaseInput {
   iid: number;
@@ -179,9 +180,14 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
         systemPrompt: cfg.coding
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: input.systemPrompt }
           : input.systemPrompt,
-        // 'user' loads the guardrail hooks; 'project' loads CLAUDE.md and the
-        // symlinked .claude/skills inside the worktree.
-        settingSources: ['user', 'project'],
+        // 'project' ONLY — it loads CLAUDE.md and the symlinked .claude/skills
+        // in the worktree, which is all a phase needs. 'user' is deliberately
+        // absent: it drags in the operator's whole personal config, and on this
+        // machine that includes a `npx ccusage` statusLine that hangs behind the
+        // VPN and wedged every phase before its first turn. Guards come from the
+        // `hooks` option below instead, so they travel with the repo.
+        settingSources: ['project'],
+        hooks: hooksFor(env) as never,
         mcpServers: mcpServers() as never,
         ...toolPolicy(cfg),
         permissionMode: 'bypassPermissions',
@@ -191,6 +197,9 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
         ...(schema ? { outputFormat: { type: 'json_schema' as const, schema } } : {}),
         env,
         abortController: ac,
+        stderr: (d: string) => {
+          try { appendFileSync(tee, `${JSON.stringify({ type: 'cli-stderr', text: d })}\n`); } catch { /* best effort */ }
+        },
       },
     });
 

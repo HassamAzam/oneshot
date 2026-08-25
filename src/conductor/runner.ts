@@ -148,7 +148,14 @@ export async function runTicket(issue: Issue): Promise<RunOutcome> {
 
   // Worktree is leased lazily: phases 0-3 do not need one, and leasing early
   // would hold a port through 40 minutes of research for nothing.
-  let worktree: string | undefined = j.worktree;
+  // Validate, do not trust. A journal survives a crash, a manual cleanup, or a
+  // `git worktree prune`, so a resumed run can carry a path that no longer
+  // exists — and passing a missing cwd to the SDK surfaces as the maximally
+  // confusing `spawn node ENOENT`, which looks like a broken PATH.
+  let worktree: string | undefined = j.worktree && existsSync(j.worktree) ? j.worktree : undefined;
+  if (j.worktree && !worktree) {
+    log.warn('recorded worktree is gone — re-leasing', { was: j.worktree });
+  }
   let port: number | undefined = j.port;
   const branch = j.branch ?? branchFor(cfg.branches.prefix, iid, issue.title);
 
