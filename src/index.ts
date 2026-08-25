@@ -6,12 +6,13 @@
  * That is what makes "clear the context between tickets" free rather than a
  * feature — there is no conductor context to clear.
  *
- * M0 scope: boot, audit auth, verify config and reachability, and scan for
- * tickets on a timer. It does not yet dispatch phases; --watch-only is the
- * permanent form of that behaviour.
+ * On a tick it probes the network, honours the pause/quota switches, scans for
+ * tickets carrying the entry label, and dispatches one. --watch-only reports
+ * what it would claim without claiming it.
  */
 import { existsSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   CONTEXT_REPO, DRY_RUN, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT, WORK_REPO,
   auditAuth, envOr, phases, projectConfig, slackConfig,
@@ -21,6 +22,7 @@ import { probe, netState } from './lib/reachability.js';
 import { windowUsage, dayUsage, quotaParked } from './lib/quota.js';
 import { budgetConfig } from './lib/config.js';
 import { describe, scan } from './conductor/watcher.js';
+import { runTicket } from './conductor/runner.js';
 import { projectUrl } from './lib/gitlab.js';
 import { log } from './lib/log.js';
 
@@ -110,19 +112,35 @@ async function tick(): Promise<void> {
     log.info(`tick  ${summary}`);
   }
 
-  for (const c of result.candidates) {
-    log.phase(`claimable  #${c.iid}  ${c.title.slice(0, 70)}`);
-  }
   for (const s of result.skipped) {
     log.info(`skip       #${s.iid}  ${s.why}`);
   }
 
-  if (watchOnly && result.candidates.length) {
-    log.warn('--watch-only: not dispatching. Phase dispatch lands in M1.');
+  if (!result.candidates.length) return;
+
+  if (watchOnly) {
+    for (const c of result.candidates) log.phase(`claimable  #${c.iid}  ${c.title.slice(0, 70)}`);
+    log.warn('--watch-only: not dispatching');
+    return;
+  }
+
+  // Concurrency is 1 by design, not for throughput: the deploy script deploys a
+  // branch TIP, so two runs merging into the base between merge and deploy put
+  // both changes on the demo server and QA's verdict stops being attributable.
+  const slots = projectConfig().concurrency - inFlight.length;
+  for (const c of result.candidates.slice(0, Math.max(0, slots))) {
+    await runTicket(c);
   }
 }
 
 async function main(): Promise<void> {
+  if (!existsSync(join(ROOT, '.env'))) {
+    log.banner('No .env found — starting first-run setup.');
+    const { execFileSync } = await import('node:child_process');
+    execFileSync(process.execPath, [join(ROOT, 'node_modules/tsx/dist/cli.mjs'), join(ROOT, 'scripts/setup.ts')], { stdio: 'inherit' });
+    log.info('Setup complete — re-run: npm start');
+    process.exit(0);
+  }
   mkdirSync(RUNS, { recursive: true });
   mkdirSync(MEMORY, { recursive: true });
 

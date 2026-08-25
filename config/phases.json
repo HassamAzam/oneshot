@@ -10,28 +10,28 @@
       "name": "recall", "n": 0, "kind": "session", "tier": "light",
       "cwd": "conductor", "maxTurns": 20, "timeoutMin": 6,
       "writes": ["run"], "onFail": "skip",
-      "skills": ["ticket-recall", "phase-handoff-contract"],
+      "skills": ["ticket-recall"],
       "artifact": "recall.json"
     },
     {
       "name": "research", "n": 1, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 60, "timeoutMin": 25,
       "writes": ["run"], "onFail": "abort",
-      "skills": ["ticket-research", "graphify-knowledge-graph", "phase-handoff-contract"],
+      "skills": ["ticket-research", "graphify-knowledge-graph"],
       "artifact": "research.json"
     },
     {
       "name": "plan", "n": 2, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 50, "timeoutMin": 20,
       "writes": ["run"], "onFail": "abort",
-      "skills": ["planning-methodology", "util-reuse-methodology", "phase-handoff-contract"],
+      "skills": ["planning-methodology", "util-reuse-methodology"],
       "artifact": "plan.json"
     },
     {
       "name": "testcases", "n": 3, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
       "writes": ["run"], "onFail": "abort",
-      "skills": ["test-case-writing", "phase-handoff-contract"],
+      "skills": ["test-case-writing"],
       "artifact": "testcases.json",
       "_why": "Opus, and its own phase: verify and qa must execute the SAME list or a green local run and a green demo run cover different ground and cannot be compared."
     },
@@ -40,7 +40,7 @@
       "cwd": "worktree", "maxTurns": 220, "timeoutMin": 90,
       "writes": ["worktree", "run"], "onFail": "retry", "maxRetries": 2,
       "coding": true,
-      "skills": ["django-backend-standards", "django-migration-standards", "react-frontend-standards", "django-query-optimisation", "python-linting", "script-writing-standards", "phase-handoff-contract"],
+      "skills": ["django-backend-standards", "django-migration-standards", "react-frontend-standards", "django-query-optimisation", "python-linting", "script-writing-standards"],
       "agents": ["backend-agent", "frontend-agent"],
       "artifact": "implement.json"
     },
@@ -48,7 +48,7 @@
       "name": "review", "n": 5, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 70, "timeoutMin": 30,
       "writes": ["run"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 3,
-      "skills": ["erp-code-review", "dead-code-sweep", "phase-handoff-contract"],
+      "skills": ["erp-code-review", "dead-code-sweep"],
       "agents": ["backend-reviewer-agent", "frontend-reviewer-agent", "util-reuse-agent"],
       "artifact": "findings.json"
     },
@@ -57,21 +57,21 @@
       "cwd": "worktree", "maxTurns": 90, "timeoutMin": 60,
       "writes": ["worktree", "run", "artifacts"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 2,
       "coding": true, "needsPort": true,
-      "skills": ["local-browser-verify", "phase-handoff-contract"],
+      "skills": ["local-browser-verify"],
       "artifact": "verify.json"
     },
     {
       "name": "ui-evidence", "n": 7, "kind": "session", "tier": "standard",
       "cwd": "worktree", "maxTurns": 60, "timeoutMin": 30,
       "writes": ["run", "artifacts"], "onFail": "warn", "needsPort": true,
-      "skills": ["ui-evidence-pack", "phase-handoff-contract"],
+      "skills": ["ui-evidence-pack"],
       "artifact": "ui-evidence.json"
     },
     {
       "name": "mr", "n": 8, "kind": "session", "tier": "standard",
       "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
       "writes": ["run"], "onFail": "abort",
-      "skills": ["mr-metadata", "mr-change-logger", "phase-handoff-contract"],
+      "skills": ["mr-metadata", "mr-change-logger"],
       "artifact": "mr.json"
     },
     {
@@ -88,28 +88,28 @@
       "name": "qa", "n": 11, "kind": "session", "tier": "heavy",
       "cwd": "conductor", "maxTurns": 90, "timeoutMin": 45,
       "writes": ["run", "artifacts"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 2,
-      "skills": ["demo-server-qa", "phase-handoff-contract"],
+      "skills": ["demo-server-qa"],
       "artifact": "qa.json"
     },
     {
       "name": "demo", "n": 12, "kind": "session", "tier": "standard",
       "cwd": "conductor", "maxTurns": 60, "timeoutMin": 30,
       "writes": ["run", "artifacts"], "onFail": "warn",
-      "skills": ["create-demo", "phase-handoff-contract"],
+      "skills": ["create-demo"],
       "artifact": "demo.json"
     },
     {
       "name": "document", "n": 13, "kind": "session", "tier": "light",
       "cwd": "conductor", "maxTurns": 40, "timeoutMin": 15,
       "writes": ["run"], "onFail": "warn",
-      "skills": ["mr-documentation", "ui-evidence-pack", "phase-handoff-contract"],
+      "skills": ["mr-documentation", "ui-evidence-pack"],
       "artifact": "document.json"
     },
     {
       "name": "memorize", "n": 14, "kind": "session", "tier": "light",
       "cwd": "conductor", "maxTurns": 25, "timeoutMin": 10,
       "writes": ["run", "memory"], "onFail": "warn",
-      "skills": ["ticket-memory-write", "phase-handoff-contract"],
+      "skills": ["ticket-memory-write"],
       "artifact": "memorize.json"
     },
     {

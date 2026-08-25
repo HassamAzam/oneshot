@@ -11,10 +11,11 @@
     "start": "tsx src/index.ts",
     "watch": "tsx src/index.ts --watch-only",
     "doctor": "tsx scripts/doctor.ts",
+    "setup": "tsx scripts/setup.ts",
     "hooks:install": "bash scripts/install-hooks.sh",
     "hooks:uninstall": "bash scripts/uninstall-hooks.sh",
     "hooks:verify": "bash scripts/verify-hooks.sh",
-    "check": "tsc --noEmit && for f in hooks/*.js; do node --check \"$f\" || exit 1; done && echo 'check clean'"
+    "check": "tsc --noEmit && for f in hooks/*.cjs scripts/*.cjs; do node --check \"$f\" || exit 1; done && echo 'check clean'"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.77",
