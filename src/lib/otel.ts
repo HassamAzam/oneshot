@@ -20,6 +20,7 @@ import { ROOT, envOr, envFlag } from './config.js';
 export interface OtelConfig {
   enabled: boolean;
   endpoint: string;
+  allowRemote: boolean;
   protocol: string;
   serviceName: string;
   exporters: { traces: string; metrics: string; logs: string };
@@ -41,14 +42,34 @@ export function otelConfig(): OtelConfig {
     const raw = JSON.parse(
       readFileSync(join(ROOT, 'config', 'otel.json'), 'utf8'),
     ) as OtelConfig;
-    raw.endpoint = envOr('ONESHOT_OTEL_ENDPOINT', raw.endpoint);
+    // LANGFUSE_BASE_URL is what the Langfuse UI hands you, so accept it directly
+    // rather than making the operator hand-append the OTLP path.
+    const fromBase = envOr('LANGFUSE_BASE_URL')
+      ? `${envOr('LANGFUSE_BASE_URL').replace(/\/+$/, '')}/api/public/otel`
+      : '';
+    raw.endpoint = envOr('ONESHOT_OTEL_ENDPOINT', fromBase || raw.endpoint);
+
     // ONESHOT_OTEL=0 kills telemetry for one run without editing tracked config.
     const override = envOr('ONESHOT_OTEL');
     if (override === '0' || override.toLowerCase() === 'false') raw.enabled = false;
     if (override === '1' || override.toLowerCase() === 'true') raw.enabled = true;
+
+    if (envFlag('ONESHOT_OTEL_ALLOW_REMOTE')) raw.allowRemote = true;
     _cfg = raw;
   }
   return _cfg;
+}
+
+const LOOPBACK = /^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)$/i;
+
+/** True when the endpoint sends span metadata off this machine. */
+export function isRemoteEndpoint(endpoint: string): boolean {
+  try {
+    return !LOOPBACK.test(new URL(endpoint).hostname);
+  } catch {
+    // An unparseable endpoint is treated as remote: fail toward not shipping.
+    return true;
+  }
 }
 
 /**
@@ -74,6 +95,16 @@ export function otelBaseEnv(): Record<string, string> {
     // later that no run was ever recorded.
     process.stderr.write(
       '[otel] LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY unset — telemetry disabled.\n',
+    );
+    return {};
+  }
+
+  if (isRemoteEndpoint(c.endpoint) && !c.allowRemote) {
+    process.stderr.write(
+      `[otel] ${c.endpoint} is not loopback and allowRemote is false — telemetry disabled.\n` +
+      '[otel] Spans carry tool names, file paths and command arguments from a private\n' +
+      '[otel] repo. Either self-host (docker compose -f docker-compose.langfuse.yml up -d)\n' +
+      '[otel] or set allowRemote: true in config/otel.json to send that metadata off-machine.\n',
     );
     return {};
   }
@@ -144,13 +175,27 @@ export function otelSpawnEnv(id: SpawnIdentity): Record<string, string> {
 }
 
 /** Reported by `npm run doctor`. */
-export function otelStatus(): { on: boolean; why: string } {
+export function otelStatus(): { on: boolean; why: string; remote: boolean } {
   const c = otelConfig();
-  if (!c.enabled) return { on: false, why: 'disabled in config/otel.json (or ONESHOT_OTEL=0)' };
-  if (!authHeader()) return { on: false, why: 'LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY unset' };
+  const remote = isRemoteEndpoint(c.endpoint);
+  if (!c.enabled) {
+    return { on: false, remote, why: 'disabled in config/otel.json (or ONESHOT_OTEL=0)' };
+  }
+  if (!authHeader()) {
+    return { on: false, remote, why: 'LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY unset' };
+  }
+  if (remote && !c.allowRemote) {
+    return {
+      on: false, remote,
+      why: `${c.endpoint} is remote and allowRemote is false — set it to opt in, or self-host`,
+    };
+  }
   const leaks: string[] = [];
   if (c.logUserPrompts) leaks.push('prompts');
   if (c.logAssistantResponses) leaks.push('responses');
-  const suffix = leaks.length ? ` — WARNING: ${leaks.join(' + ')} text is being exported` : '';
-  return { on: true, why: `${c.endpoint}${suffix}` };
+
+  let why = c.endpoint;
+  if (remote) why += ' (REMOTE — span metadata leaves this machine)';
+  if (leaks.length) why += ` — WARNING: ${leaks.join(' + ')} TEXT is being exported`;
+  return { on: true, remote, why };
 }

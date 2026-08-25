@@ -5,10 +5,13 @@
 
   "enabled": true,
 
-  "_comment_endpoint": "Langfuse ingests OTLP over HTTP at /api/public/otel (v3.22.0+). Default is a local self-hosted instance. Traces POST to <endpoint>/v1/traces. Env override: ONESHOT_OTEL_ENDPOINT.",
+  "_comment_endpoint": "Langfuse ingests OTLP over HTTP at /api/public/otel (v3.22.0+). Traces POST to <endpoint>/v1/traces. Resolution order: ONESHOT_OTEL_ENDPOINT, then LANGFUSE_BASE_URL + /api/public/otel, then this value. Default is a local self-hosted instance (docker-compose.langfuse.yml).",
   "endpoint": "http://localhost:3000/api/public/otel",
   "protocol": "http/protobuf",
   "serviceName": "oneshot",
+
+  "_comment_allowRemote": "DATA EGRESS GATE. Spans carry tool names, file paths and command arguments — for Oneshot that means ERP module paths, migration filenames, branch names: structural metadata about a private corporate codebase. Prompt/response TEXT is separately gated below and stays off. false = telemetry silently disables itself rather than shipping spans to a non-loopback host. Set true ONLY as a deliberate decision to send that metadata to a third party (e.g. Langfuse Cloud). Self-hosting via docker-compose.langfuse.yml keeps everything on this machine and needs no opt-in.",
+  "allowRemote": false,
 
   "_comment_auth": "Langfuse authenticates OTLP with HTTP Basic: base64(publicKey:secretKey) from a project's API keys page. Built at runtime from LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY in .env — never written here, because this file is tracked.",
 

@@ -13,6 +13,7 @@ import {
   projectConfig, slackConfig,
 } from '../src/lib/config.js';
 import { ping, listBranches } from '../src/lib/gitlab.js';
+import { otelStatus } from '../src/lib/otel.js';
 
 let fails = 0;
 let warns = 0;
@@ -165,6 +166,24 @@ async function main(): Promise<void> {
   else warn('deploy script missing', `${d.script} — phase 10 will report BLOCKED`);
   pass('demo target', d.demoUrl);
   if (d.vpnGated) warn('demo host is VPN-gated', `${d.server} — phase 10 probes it before deploying`);
+
+  // ------------------------------------------------------------ telemetry
+  section('Session tracking (Langfuse)');
+  const otel = otelStatus();
+  if (otel.on) {
+    if (otel.remote) {
+      warn('telemetry ON, endpoint is REMOTE', otel.why);
+      warn('span metadata leaves this machine', 'tool names, file paths, command arguments');
+    } else {
+      pass('telemetry ON', otel.why);
+    }
+    if (otel.why.includes('TEXT is being exported')) {
+      fail('prompt/response TEXT export is enabled',
+        'ticket bodies and diffs are going into the span store — turn it off in config/otel.json');
+    }
+  } else {
+    warn('telemetry OFF', otel.why);
+  }
 
   // ---------------------------------------------------------------- slack
   section('Slack');
