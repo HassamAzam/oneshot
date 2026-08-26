@@ -137,7 +137,23 @@ ${JSON.stringify(ctx.prior.research ?? {}, null, 2)}
 ## Plan (phase 2)
 ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 
+## What implement (phase 3) actually built
+${JSON.stringify(ctx.prior.implement ?? {}, null, 2)}
+
 Write the test cases for this ticket.
+
+The code is already written and sitting on \`${ctx.branch ?? 'the ticket branch'}\` in your
+worktree. Read \`git diff origin/${projectConfig().branches.base}\` before you start: it gives
+you the real component names, routes, ids and error strings, so your steps can be concrete
+instead of approximate, and it shows you what the change actually touched.
+
+That advantage cuts both ways, and this is the one thing to get right in this phase: the
+ORACLE for every case comes from the acceptance criteria and the ticket, never from the diff.
+A case whose \`expected\` was read off the implementation passes by construction and tests
+nothing. Where the code and the criteria disagree, write the case the criteria demand and let
+it fail — that failure is the most valuable line you can produce here, because \`review\`,
+\`verify\` and \`qa\` all come after you and a case that never fails cannot catch anything.
+Cover the criteria the diff does NOT appear to satisfy, not just the paths it does.
 
 This ONE list is executed three times: locally in a browser by the \`verify\` phase, for
 screenshots by \`ui-evidence\`, and against the deployed demo server by \`qa\`. If you write a
@@ -148,7 +164,8 @@ so cases written here drop into it unchanged. Run every brainstorm pass it names
 the hostile-QA one, and record any pass that legitimately produced nothing in \`passesEmpty\`.
 A skipped pass and a clean pass must not look the same.
 
-Do not run anything. You are authoring the list, not executing it.`,
+Read whatever you need to. Do not run the app and do not change a line of code — you are
+authoring the list, not executing it and not fixing what it finds.`,
 
   implement: (ctx) => {
     const r = (ctx.prior.research ?? {}) as {
@@ -182,6 +199,17 @@ BEFORE writing anything, and continue from there rather than redoing work that l
 `
         : '';
 
+    // Empty on lap 0 — testcases runs AFTER this phase. On a review or verify
+    // cycle lap it exists, and then it is the sharpest statement of what the
+    // code has to do, so it is worth carrying back in.
+    const caseBlock = cases.length
+      ? `## Test cases already written against this ticket (phase 4)
+\`verify\` and \`qa\` both execute this list. Code that cannot pass a case here returns to you
+as a finding.
+${cases.map((c) => `  - ${c.id} [${c.blast}] ${c.scenario}\n      expects: ${c.expected}`).join('\n')}
+`
+      : '';
+
     return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 ${lapBlock}
 ## Plan (phase 2) — this is your specification
@@ -196,9 +224,7 @@ ${(r.codePath ?? []).map((c) => `  - ${c.file}:${c.line} — ${c.role}`).join('\
 
 Blast radius: ${(r.blastRadius ?? []).join(', ') || '(none recorded)'}
 
-## What phase 6 and phase 11 will execute against your code
-${cases.map((c) => `  - ${c.id} [${c.blast}] ${c.scenario}\n      expects: ${c.expected}`).join('\n') || '  (no cases)'}
-
+${caseBlock}
 Write the code.
 
 - You are on branch \`${ctx.branch ?? '(unleased)'}\`, already checked out in your worktree.
@@ -210,9 +236,9 @@ Write the code.
   \`summary\`. Do not silently implement a different design, and do not implement a design you
   know to be wrong because the plan said so.
 - Reuse what the plan named under \`reuse\` before writing anything new.
-- Every acceptance criterion above must be met by the code you leave behind. The case list is
-  the oracle three later phases run; code that cannot pass a case there will come straight back
-  to you as a finding.
+- Every acceptance criterion above must be met by the code you leave behind. The next phase
+  writes the test cases that \`verify\` and \`qa\` will execute, and it writes them from those
+  same criteria — so a criterion you quietly dropped becomes a failing case, not a saved step.
 - Lint is a gate, not a formality: run the project's linters over the files you touched and set
   \`lintClean\` from what they actually printed. The pre-commit hook is broken on this machine,
   so \`--no-verify\` is permitted and the linters are the only thing standing in for it. Never

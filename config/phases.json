@@ -28,21 +28,21 @@
       "artifact": "plan.json"
     },
     {
-      "name": "testcases", "n": 3, "kind": "session", "tier": "heavy",
-      "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
-      "writes": ["run"], "onFail": "abort",
-      "skills": ["test-case-writing"],
-      "artifact": "testcases.json",
-      "_why": "Opus, and its own phase: verify and qa must execute the SAME list or a green local run and a green demo run cover different ground and cannot be compared."
-    },
-    {
-      "name": "implement", "n": 4, "kind": "session", "tier": "heavy",
+      "name": "implement", "n": 3, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 220, "timeoutMin": 90,
       "writes": ["worktree", "run"], "onFail": "retry", "maxRetries": 2,
       "coding": true,
       "skills": ["django-backend-standards", "django-migration-standards", "react-frontend-standards", "django-query-optimisation", "python-linting", "script-writing-standards"],
       "agents": ["backend-agent", "frontend-agent"],
       "artifact": "implement.json"
+    },
+    {
+      "name": "testcases", "n": 4, "kind": "session", "tier": "heavy",
+      "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
+      "writes": ["run"], "onFail": "abort",
+      "skills": ["test-case-writing"],
+      "artifact": "testcases.json",
+      "_why": "Opus, and its own phase: verify and qa must execute the SAME list or a green local run and a green demo run cover different ground and cannot be compared. It runs AFTER implement so the cases can name the real symbols and routes the change actually produced — the cost of that is a list authored with the implementation in view, so the prompt makes the acceptance criteria, not the diff, the source of truth."
     },
     {
       "name": "review", "n": 5, "kind": "session", "tier": "heavy",

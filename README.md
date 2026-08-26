@@ -56,16 +56,16 @@ Three things fall out of that:
    0  recall        Haiku    prior art from past runs
    1  research      Opus 5   trace the code path, state blast radius
    2  plan          Opus 5   phased plan
-   3  testcases     Opus 5   ONE shared case list  ──┐
-   4  implement     Opus 5   commits on oneshot/ticket-<iid>-<slug>
-   5  review        Opus 5   findings ──► back to 4 (max 3 laps)
+   3  implement     Opus 5   commits on oneshot/ticket-<iid>-<slug>
+   4  testcases     Opus 5   ONE shared case list, written against real code  ──┐
+   5  review        Opus 5   findings ──► back to 3 (max 3 laps)
    6  verify        Sonnet 5 dev server + Playwright  ◄──┤ same list
    7  ui-evidence   Sonnet 5 screenshots              ◄──┤
    8  mr            Sonnet 5 MR + description
    9  merge         code     merge into dev, promote dev → stage
   10  deploy        code     scripts/deploy-wsai.sh → ws-ai-demo
   11  qa            Opus 5   run the case list on the deployed build ◄──┘
-                             fail ──► back to 4 (max 2 laps)
+                             fail ──► back to 3 (max 2 laps)
   12  demo          Sonnet 5 recorded walkthrough
   13  document      Haiku    ticket note + MR note + uploads
   14  memorize      Haiku    memory card for future recall
@@ -75,9 +75,17 @@ Three things fall out of that:
 `merge`, `deploy` and `close` are **code, not sessions**. No model holds a merge tool, which is
 why One Loop's approval-label guard has nothing left to guard.
 
-**Phase 3 exists so `verify` and `qa` execute the same list.** Without it each invents its own
+**Phase 4 exists so `verify` and `qa` execute the same list.** Without it each invents its own
 scenarios, and a green local run and a green demo run cover different ground — you cannot
 compare them, so the QA pass means less than it looks.
+
+**It runs after `implement`, not before.** Writing the cases against real code buys concrete
+steps — actual component names, routes, ids and error strings — instead of the approximations
+you get from a plan. The cost is a list authored with the diff in view, which is how a case
+list quietly ratifies a bug rather than catching it, so the prompt makes the acceptance
+criteria the oracle and the diff merely the vocabulary: where the two disagree, the case is
+written to the criteria and is expected to fail. `implement` therefore works from the plan
+alone; on a `review` or `verify` cycle lap the cases exist and are handed back to it.
 
 **Full auto.** There are no human gates. The only thing that stops a run is `BLOCKED` — a deploy
 that exits non-zero, a cycle cap exhausted, an unresolvable MR conflict, GitLab unreachable past
@@ -211,9 +219,9 @@ problem, and letting it trip the breaker would make a wrong `GITLAB_TOKEN` look 
 
 ## Status
 
-Built and **proven live** through **M1**. A `Loop`-labelled ticket runs
-recall → research → plan → testcases against real GitLab, producing schema-valid artifacts
-that hand forward. First end-to-end run on ticket #5 (Invoices):
+Built and **proven live** through **M1**. A `Loop`-labelled ticket runs against real GitLab,
+producing schema-valid artifacts that hand forward. First end-to-end run on ticket #5
+(Invoices), on the then-current order of recall → research → plan → testcases:
 
 | phase | result | turns | weighted tokens |
 |---|---|---|---|
@@ -227,11 +235,11 @@ that hand forward. First end-to-end run on ticket #5 (Invoices):
 | M | Ships | Status |
 |---|---|---|
 | M0 | skeleton, config, hooks + test suite, quota, breaker, watcher, doctor | **done** |
-| M1 | phase runner, schema-enforced handoffs, run journal, teardown, phases 0–3, Slack card, Langfuse | **done, verified live** |
-| M2 | phases 4–5 — implement, review, the review cycle | next |
-| M3 | phases 6–7 — dev server on a leased port, Playwright, screenshots | |
-| M4 | phases 8–9, 13 — MR, merge, promote, documentation, uploads | |
-| M5 | phases 10–12 — deploy, demo-server QA, demo recording | |
+| M1 | phase runner, schema-enforced handoffs, run journal, teardown, `recall`/`research`/`plan`/`testcases`, Slack card, Langfuse | **done, verified live** |
+| M2 | `implement` — built, unproven; `review` and the review cycle | in progress |
+| M3 | `verify`, `ui-evidence` — dev server on a leased port, Playwright, screenshots | |
+| M4 | `mr`, `merge`, `document` — MR, merge, promote, documentation, uploads | |
+| M5 | `deploy`, `qa`, `demo` — deploy, demo-server QA, demo recording | |
 | M6 | phases 0 + 14 — memory index and recall | |
 | M7 | dashboard, replay, hardening hooks | |
 

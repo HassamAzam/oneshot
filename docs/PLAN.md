@@ -68,15 +68,15 @@ a shared transcript.
 | 0 | `recall` | Haiku 4.5 | conductor | `prior-art.md` | skip (non-fatal) |
 | 1 | `research` | **Opus 5** | worktree | `research.json` + `.md` | abort run |
 | 2 | `plan` | **Opus 5** | worktree | `plan.json` + `.md` | abort run |
-| 3 | `testcases` | **Opus 5** | worktree | `testcases.json` | abort run |
-| 4 | `implement` | **Opus 5** | worktree | commits on ticket branch | retry ×2 |
-| 5 | `review` | **Opus 5** | worktree | `findings.json` | → 4 (max 3 laps) |
-| 6 | `verify` | Sonnet 5 | worktree + leased port | `test-report.json` | → 4 (max 2 laps) |
+| 3 | `implement` | **Opus 5** | worktree | commits on ticket branch | retry ×2 |
+| 4 | `testcases` | **Opus 5** | worktree | `testcases.json` | abort run |
+| 5 | `review` | **Opus 5** | worktree | `findings.json` | → 3 (max 3 laps) |
+| 6 | `verify` | Sonnet 5 | worktree + leased port | `test-report.json` | → 3 (max 2 laps) |
 | 7 | `ui-evidence` | **Sonnet 5** | worktree + port | `shots/*.png` | warn only |
 | 8 | `mr` | Sonnet 5 | worktree | MR + description | abort run |
 | 9 | `merge` | *code* | — | merged, `dev` promoted | escalate BLOCKED |
 | 10 | `deploy` | *code* | — | demo server on new SHA | escalate BLOCKED |
-| 11 | `qa` | **Opus 5** | conductor | `qa-report.json` | → 4 (max 2 laps) |
+| 11 | `qa` | **Opus 5** | conductor | `qa-report.json` | → 3 (max 2 laps) |
 | 12 | `demo` | Sonnet 5 | conductor | `demo.mp4` | warn only |
 | 13 | `document` | **Haiku 4.5** | conductor | ticket note + MR note + uploads | warn only |
 | 14 | `memorize` | **Haiku 4.5** | conductor | `memory/tickets/<iid>.md` | warn only |
@@ -89,15 +89,34 @@ a shared transcript.
 - **Sonnet 5** — verify, ui-evidence, mr, demo. Structured execution against a spec.
 - **Haiku 4.5** — recall, document, memorize, and all Slack narration. Mechanical.
 
-### Phase 3 `testcases` is new, and it fixes a real gap
+### Phase 4 `testcases` is new, and it fixes a real gap
 
 Without it, `verify` (local) and `qa` (demo server) each invent their own scenarios — so the
 thing you tested locally and the thing you signed off on the demo server are **not the same
-list**. Phase 3 brainstorms one case list from the plan + acceptance criteria, and phases 6, 7
-and 11 all execute against it. One list, three executions, comparable results.
+list**. Phase 4 brainstorms one case list, and phases 6, 7 and 11 all execute against it. One
+list, three executions, comparable results.
 
 It runs on Opus because case brainstorming is divergent work — the value is in the edge case
 nobody thought of, which is exactly what a weaker model drops.
+
+### Why `testcases` runs after `implement` rather than before
+
+The cases are written with the finished diff on disk. That buys precision: real component
+names, routes, ids and error strings, so a step reads `click invoicesTestIds.completeButton`
+rather than "click the compute button", and the same list is executable by a browser agent in
+`verify` and by `qa` against the demo server without either re-deriving it.
+
+The hazard is the obvious one — a list authored while looking at the implementation tends to
+describe the implementation, and a case that passes by construction tests nothing. The
+ordering is only safe because the oracle is pinned somewhere the implementer did not control:
+every `expected` comes from the acceptance criteria in `research.json` and the ticket, and the
+diff supplies vocabulary, not truth. Where they disagree the case is written to the criteria
+and is **expected to fail** — `review`, `verify` and `qa` all run after this phase, so a
+failing case is caught rather than shipped.
+
+The cost of the swap is that `implement` no longer has the case list as its acceptance oracle
+on lap 0; it works from the plan and the criteria. On a `review` or `verify` cycle lap the
+list exists and is handed back to it.
 
 ### Cycles are bounded and carry findings forward
 
@@ -237,7 +256,7 @@ one-loop-v2/
 `create-demo` · `erp-code-review` · `dead-code-sweep` · `graphify-knowledge-graph` ·
 `test-erp-ticket` (+ its 5 phase skills)
 
-Plus your agents, reused as SDK subagents in phase 3/4: `backend-agent`, `frontend-agent`,
+Plus your agents, reused as SDK subagents in `implement` and `review`: `backend-agent`, `frontend-agent`,
 `qa-agent`, `backend-reviewer-agent`, `frontend-reviewer-agent`, `util-reuse-agent`.
 
 ### New skills I will author (written into the ERP repo, so your interactive sessions get them too)
