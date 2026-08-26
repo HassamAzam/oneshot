@@ -143,21 +143,22 @@ async function main(): Promise<void> {
   }
 
   // ---------------------------------------------------------------- hooks
-  section('Hooks');
-  const settings = join(process.env.HOME ?? '', '.claude', 'settings.json');
-  if (!existsSync(settings)) {
-    fail('~/.claude/settings.json missing', 'run: npm run hooks:install');
-  } else {
-    const raw = spawnSync('cat', [settings], { encoding: 'utf8' }).stdout;
-    if (raw.includes('oneshotManaged')) pass('guardrail hooks installed');
-    else fail('guardrail hooks NOT installed', 'run: npm run hooks:install');
-  }
+  section('Guardrails');
+  // Guards are passed to the SDK in-process (src/conductor/hooks.ts), so there
+  // is nothing to install and nothing in settings.json to check. What matters
+  // is that the .cjs files exist and still enforce what they claim to.
+  const guards = ['pause-check', 'write-scope', 'git-guard', 'budget-gate', 'log-event', '_common'];
+  const missing = guards.filter((g) => !existsSync(join(process.cwd(), 'hooks', `${g}.cjs`)));
+  missing.length
+    ? fail('guard scripts missing', missing.join(', '))
+    : pass(`${guards.length} guard scripts present`, 'loaded in-process, no install step');
+
   const verify = spawnSync('bash', ['scripts/verify-hooks.sh'], { encoding: 'utf8' });
   if (verify.status === 0) {
     const last = verify.stdout.trim().split('\n').pop() ?? '';
-    pass('hook test suite', last.replace(/\x1b\[[0-9;]*m/g, ''));
+    pass('guard test suite', last.replace(/\x1b\[[0-9;]*m/g, ''));
   } else {
-    fail('hook test suite failed', 'run: npm run hooks:verify');
+    fail('guard test suite failed', 'run: npm run hooks:verify');
   }
 
   // --------------------------------------------------------------- deploy

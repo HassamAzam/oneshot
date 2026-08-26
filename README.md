@@ -94,8 +94,8 @@ npm start                                  # no .env? an interactive wizard runs
 `npm start` with no `.env` hands off to a setup wizard that reuses the GitLab token already in
 `~/.claude.json`, detects your repo clones, and warns before configuring a remote telemetry
 endpoint. Then `npm run verify` (deps → hooks → doctor) is the gate. It checks auth, config coherence, paths, GitLab reachability and
-branch protection, that the hooks are installed and their test suite passes, and that the deploy
-target is configured. It exits non-zero on anything that would only surface as a confusing
+branch protection, that every guard script is present and its test suite passes, and that the
+deploy target is configured. It exits non-zero on anything that would only surface as a confusing
 failure three phases into a real ticket.
 
 - **Auth:** the Agent SDK uses the same credential as Claude Code — if `claude login` works here,
@@ -117,7 +117,7 @@ Structure first, hooks only for what structure cannot reach:
 | Schema | the output shape is checkable | no |
 | Skill / prompt | judgment, taste, method | yes — it's advice |
 
-Installed hooks (`npm run hooks:verify` — 32 offline assertions, no network, no session):
+The guards (`npm run hooks:verify` — 32 offline assertions, no network, no session):
 
 - **`pause-check`** — the brake. Denies side-effectful tools while paused; denies all GitLab
   calls while the VPN breaker is open. Reads stay allowed, so an interrupted phase can still
@@ -143,7 +143,7 @@ drift between a guard and its copy.
 
 The original design loaded them via `settingSources: ['user']`. That dragged in the operator's
 entire personal config, including a `npx`-based `statusLine` that hung every phase before its
-first turn. Global install remains available (`npm run hooks:install`) but is no longer needed.
+first turn. There is no global install path any more — it would double-run every guard.
 
 Design rationale for each, and the seven not yet built, is in [docs/HOOKS.md](docs/HOOKS.md).
 

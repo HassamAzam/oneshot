@@ -12,11 +12,9 @@
     "watch": "tsx src/index.ts --watch-only",
     "doctor": "tsx scripts/doctor.ts",
     "setup": "tsx scripts/setup.ts",
-    "hooks:install": "bash scripts/install-hooks.sh",
-    "hooks:uninstall": "bash scripts/uninstall-hooks.sh",
     "hooks:verify": "bash scripts/verify-hooks.sh",
     "verify": "npm run deps:verify && npm run hooks:verify && npm run doctor",
-    "check": "tsc --noEmit && for f in hooks/*.cjs scripts/*.cjs; do node --check \"$f\" || exit 1; done && echo 'check clean'",
+    "check": "tsc --noEmit && for f in hooks/*.cjs; do node --check \"$f\" || exit 1; done && echo 'check clean'",
     "deps:verify": "tsx scripts/verify-deps.ts"
   },
   "dependencies": {
