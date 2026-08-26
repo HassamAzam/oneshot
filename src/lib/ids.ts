@@ -41,10 +41,16 @@ export interface PhaseIdentity {
  *
  * ONESHOT_PHASE is the gate every hook checks first — its absence is what
  * makes the hooks a no-op in ordinary interactive sessions on this machine.
+ *
+ * ONESHOT_BRANCH is what git-guard compares a `git push` ref against. The rule
+ * is written to allow exactly the run's leased branch, so leaving the variable
+ * unset does not fail closed — it removes the comparison and every non-
+ * protected ref passes. It belongs here, next to the identity the hooks
+ * already read, rather than anywhere a caller could forget it.
  */
 export function phaseEnv(
   id: PhaseIdentity,
-  paths: { worktree?: string; writeScopes: string[]; port?: number },
+  paths: { worktree?: string; writeScopes: string[]; port?: number; branch?: string },
 ): Record<string, string> {
   const env: Record<string, string> = {
     ONESHOT_PHASE: id.phase,
@@ -55,5 +61,6 @@ export function phaseEnv(
   };
   if (paths.worktree) env.ONESHOT_WORKTREE = paths.worktree;
   if (paths.port) env.ONESHOT_PORT = String(paths.port);
+  if (paths.branch) env.ONESHOT_BRANCH = paths.branch;
   return env;
 }

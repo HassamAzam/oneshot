@@ -51,12 +51,22 @@ artifacts between phases).
 | `pause-check` | *(all)* | Denies side-effectful tools while `state/PAUSE`, `PAUSE-QUOTA`, `PAUSE-NETWORK` or `PAUSE-DEPLOY` exists. Denies all `mcp__gitlab__*` while the VPN breaker is open. **With zero human gates this is your only brake on a live run.** | **P0** |
 | `write-scope` | `Write\|Edit\|NotebookEdit` | Per-phase write allowlist. Absolute deny for every phase: the v2 runtime's own `hooks/ config/ src/ scripts/`, `~/.claude/`, **and `$ERP_REPO`**. Must `realpath()` before comparing — see §4.1. | **P0** |
 | `git-guard` | `Bash` | No `push --force`, no push to `dev\|stage\|master`, no push to any ref except the run's leased branch, no `branch -D` of a protected ref, no `remote set-url`, no `gh`/`glab` as an escape hatch, and **no git command whose resolved cwd is outside the leased worktree**. | **P0** |
-| `deploy-guard` | `Bash` matching the deploy script | Ref is the leased branch or `dev`; SHA equals the SHA this run pushed (read from the run journal, not the prompt); target host is in `config/deploy.json`'s allowlist; no other run holds the deploy lock. **Fails closed.** | **P1 (must land with phase 10)** |
+| `deploy-guard` | `Bash` | **Built.** Outside the `deploy` phase, `ssh`/`scp`/`rsync`/`sftp` are denied outright — no other phase has business on another machine. Inside `deploy`: the vendored `scripts/deploy-wsai.sh` is permitted, remote verbs are permitted only when the parsed `user@host` is in `config/deploy.json`'s `allowedHosts`, an unparseable remote target is denied, and `git push`/`gh`/`glab` are denied regardless (belt over `git-guard`'s braces). Purely local commands pass through, so reading a build log is never blocked. **Fails closed** — see below. | **shipped with phase 10** |
 | `browser-scope` | Playwright / browser tools | Navigation allowlist: `localhost:<leased-port>`, the demo URL, `gitlab.arbisoft.com`. Everything else denied. | **P1 (M3)** |
-| `sleep-cap` | `Bash` | Caps `sleep N`. Phases 6 and 10 legitimately wait (webpack ~30 min; deploy health) — they must use `scripts/wait-for.sh <url> --timeout`, which polls and reports, instead of sleeping through their own wall clock. | **P1 (M3)** |
+| `sleep-cap` | `Bash` | Caps `sleep N`. Phases 6 and 10 legitimately wait (webpack ~30 min; deploy health) — they must poll and report instead of sleeping through their own wall clock. Phase 10 becoming a session does not change this: its one long unconditional wait is the 90s stability sleep *inside* `scripts/deploy-wsai.sh`, which `deploy-guard` allowlists as a whole invocation, so the agent never issues it directly. | **P1 (M3)** |
 | `secret-guard` | `Read\|Bash` | Denies reads of `.env`, `local_settings.py`, `~/.claude.json`, `~/.ssh/**`, `*.pem`, and any Bash that echoes `*TOKEN*\|*KEY*\|*SECRET*\|*PASSWORD*`. | P2 |
 | `dryrun-guard` | *(all)* | `DRY_RUN=1` → all writes denied. How you test the pipeline against a real ticket without touching it. | P2 |
 | `log-event` | *(all)* | Event tail / dashboard. | **P0** |
+
+**Fail-open is the default; `deploy-guard` is the exception, and the exception is wired in
+`src/conductor/hooks.ts`.** Every `.cjs` guard already fails open on its own internal errors, and
+the runner mirrored that: a spawn failure, a 15s timeout or non-JSON stdout resolved to `{}`,
+which the SDK reads as allow. That is right for guards whose subject matter the pipeline can
+survive being wrong about, and it keeps a broken guard from wedging a 90-minute phase. It is
+wrong for the one guard standing between a confused agent and a live demo server, so `hooks.ts`
+keeps a `FAIL_CLOSED` set — currently `deploy-guard.cjs` alone — and turns any failure of a
+script in it into a `PreToolUse` **deny** payload instead. A deploy guard that cannot run is a
+deploy that does not happen.
 
 ### PostToolUse
 
@@ -111,11 +121,19 @@ Hence the cwd check in `git-guard` — not just "which branch" but "which repo".
 
 ### 4.2 `deploy-guard` is the load-bearing hook of the whole design
 
-You chose full auto **and** self-deploy. That combination has no human in the path, so the only
-thing standing between a confused phase and the demo server is this hook. It must read the SHA
-from the **run journal**, never from the prompt or the model's own message — otherwise a
-prompt-injected ticket body can name a ref and the guard validates the attacker's input against
-itself.
+You chose full auto **and** self-deploy, and phase 10 has since become a session rather than
+code — a diagnostician that can read the remote build log and retry. That combination has no
+human in the path, so the only thing standing between a confused phase and the demo server is
+this hook.
+
+As shipped it guards the **surface**: which hosts may be reached, with which verbs, from which
+phase. It deliberately does not adjudicate the SHA. The prohibition that motivated that — never
+validate a ref against the prompt or the model's own message, because a prompt-injected ticket
+body can name one and the guard then checks the attacker's input against itself — is honoured
+by moving the SHA check out of the hook entirely: the **conductor** compares the deployed SHA
+against `journal.mergedSha` after the phase returns and overrules the agent's verdict on a
+mismatch. A hook is a per-call gate with no view of the run; the check that matters is a
+post-condition on the run, and that is where it now lives.
 
 This is also why I still want the guard duplicated **inside your deploy script**: my hook can't
 be bypassed by a prompt, but it can be bypassed by a bug in my runner. Yours can't.
@@ -149,7 +167,9 @@ them in M1, alongside the first three phases — not in the hardening milestone.
 
 **M3** — `browser-scope`, `sleep-cap`, `reap-check`.
 
-**M5** — `deploy-guard`. Ships in the same commit as phase 10, never after.
+**M5** — `deploy-guard`. **Shipped**, in the same commit as phase 10, as required. Note what
+changed underneath it: phase 10 stopped being code and became a session, so this guard went from
+a second opinion on a deterministic script to the primary structural control on the phase.
 
 **M7** — `secret-guard`, `dryrun-guard`, `precompact-guard`, `subagent-capture`,
 `archive-transcript`.

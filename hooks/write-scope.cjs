@@ -19,6 +19,13 @@
  *      govern it, permanently, for every future run and every interactive
  *      session. C.isInside() realpath-resolves before comparing. See
  *      docs/HOOKS.md 4.1.
+ *
+ * A phase that arrives with NO scopes is refused rather than waved through.
+ * Empty means the conductor's scope expansion produced nothing — a
+ * configuration slip — and the one thing a configuration slip must not do is
+ * silently upgrade a phase to unrestricted writes. Sessions without
+ * ONESHOT_PHASE never get here at all: the gate above exits first, so an
+ * ordinary interactive session on this machine is untouched.
  */
 const path = require('node:path');
 const C = require(path.join(__dirname, '_common.cjs'));
@@ -84,7 +91,16 @@ try {
     }
 
     const scopes = allowedScopes();
-    if (scopes.length && !scopes.some((s) => C.isInside(target, s))) {
+    if (!scopes.length) {
+      C.event('denied_write_no_scopes', { target });
+      C.deny(
+        `Denied: the '${C.phase()}' phase was handed no write scopes at all, so every path is ` +
+        'outside them. This is a configuration fault, not something you can work around — ' +
+        'report it in `blocked` and stop.',
+      );
+    }
+
+    if (!scopes.some((s) => C.isInside(target, s))) {
       C.event('denied_write_scope', { target, scopes });
       C.deny(
         `Denied: the '${C.phase()}' phase may only write under:\n` +

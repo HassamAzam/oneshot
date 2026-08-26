@@ -7,10 +7,12 @@
  *    already-working repo: heavy read-mostly things symlinked, settings copied
  *    (so a worktree editing its settings does not edit the seed repo's).
  *
- * 2. SKILLS. `.claude/` is symlinked to the context repo so phases get the
- *    real, current skills with no vendoring and no sync step. Note what this
- *    implies: writes through that symlink land in the context repo, which is
- *    exactly why hooks/write-scope.cjs realpath-resolves before comparing.
+ * 2. SKILLS. `.claude/` is composed by ensureClaudeDir() so phases get the
+ *    context repo's real, current skills with no vendoring and no sync step,
+ *    plus the pipeline skills that live in the Oneshot repo. Note what the
+ *    symlinks inside it imply: writes through one land in the context repo,
+ *    which is exactly why hooks/write-scope.cjs realpath-resolves before
+ *    comparing.
  *
  * 3. EXCLUDE. Those symlinks are untracked files in a real checkout, so they
  *    are written to .git/info/exclude — otherwise every `git status` a phase
@@ -19,8 +21,9 @@
 import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { ensureClaudeDir } from './claudedir.js';
 import {
-  CONTEXT_REPO, SKILLS_ROOT, WORK_REPO, WT_ROOT, envOr, expandPath, portPool, projectConfig,
+  CONTEXT_REPO, WORK_REPO, WT_ROOT, envOr, expandPath, portPool, projectConfig,
 } from './config.js';
 import { db } from './db.js';
 import { log } from './log.js';
@@ -38,18 +41,34 @@ function git(args: string[], cwd = WORK_REPO): string {
 export interface Lease {
   worktree: string;
   branch: string;
-  port: number;
+  /** Present only when the caller asked for one — see leaseWorktree's options. */
+  port?: number;
   baseSha: string;
 }
 
 /**
+ * Lease a port for this run.
+ *
  * Ports are the real concurrency limit for phases that run a dev server.
  * Leased through SQLite rather than by probing, because a port that is free
  * *right now* can be taken by the next phase two seconds later.
+ *
+ * The DELETE first is not housekeeping, it is the pool's only repair path. A
+ * lease is released in teardown, so a conductor that dies mid-run — or a run
+ * that ended blocked before teardown released anything — leaves a row owning a
+ * port forever, and the pool is three entries wide. Three such rows and every
+ * later run fails at its first server-holding phase with "all leased" while
+ * nothing at all is listening. Ownership is decided by the runs table, which
+ * boot-time reconciliation has already truthed: a lease whose run is no longer
+ * claimed or running cannot be in use by anyone.
  */
-function leasePort(runId: string): number {
+export function leasePortFor(runId: string): number {
   db.exec(`CREATE TABLE IF NOT EXISTS port_leases (
     port INTEGER PRIMARY KEY, run_id TEXT NOT NULL, leased_at INTEGER NOT NULL)`);
+  const reaped = db.prepare(`DELETE FROM port_leases WHERE run_id NOT IN
+    (SELECT run_id FROM runs WHERE status IN ('claimed','running'))`).run();
+  if (reaped.changes) log.info(`reclaimed ${reaped.changes} port lease(s) from finished runs`);
+
   const taken = new Set(
     (db.prepare('SELECT port FROM port_leases').all() as Array<{ port: number }>).map((r) => r.port),
   );
@@ -98,14 +117,7 @@ function seed(worktree: string): void {
     excluded.push(rel);
   }
 
-  // Skills, agents and rules from the context repo — live, not vendored.
-  if (existsSync(SKILLS_ROOT)) {
-    const dotClaude = join(worktree, '.claude');
-    if (!existsSync(dotClaude)) {
-      symlinkSync(SKILLS_ROOT, dotClaude);
-      excluded.push('.claude');
-    }
-  }
+  excluded.push(...ensureClaudeDir(worktree));
 
   addExcludes(worktree, excluded);
 }
@@ -133,21 +145,51 @@ function addExcludes(worktree: string, paths: string[]): void {
 }
 
 /**
+ * Where this branch left the base — the diff base every later phase reads
+ * against.
+ *
+ * merge-base rather than the tip of origin/<base>, and computed WITHOUT a
+ * fetch. A run lives for hours and the base branch moves under it; taking the
+ * tip means the review, the evidence pack and the MR each describe a different
+ * diff from the one implement wrote, and a resumed run's diff silently grows to
+ * include whatever landed on dev while it was down. The merge-base is fixed by
+ * the branch's own history, so it answers the same thing at every phase and on
+ * every resumption.
+ */
+function forkPoint(worktree: string, base: string): string {
+  try {
+    return git(['merge-base', 'HEAD', `origin/${base}`], worktree);
+  } catch (err) {
+    log.warn(`no merge-base with origin/${base} — diffing against HEAD`, {
+      error: (err as Error).message,
+    });
+    return git(['rev-parse', 'HEAD'], worktree);
+  }
+}
+
+/**
  * Create (or re-attach to) the worktree for a ticket.
  *
  * Idempotent: a run resumed after a crash finds its existing worktree and
- * branch and continues in them rather than starting over.
+ * branch and continues in them rather than starting over. The fetch happens
+ * only on creation — re-attaching must not move origin/<base> under a run that
+ * is already mid-flight.
+ *
+ * A port is leased only when `withPort` is set. Leasing one with the worktree
+ * held a scarce, pool-limited resource from the first worktree phase through
+ * every phase that has no use for it; the runner asks for one when it first
+ * reaches a phase that actually serves the app.
  */
-export function leaseWorktree(runId: string, branch: string, name: string): Lease {
+export function leaseWorktree(
+  runId: string, branch: string, name: string, opts: { withPort?: boolean } = {},
+): Lease {
   const cfg = projectConfig();
   const base = cfg.branches.base;
   mkdirSync(WT_ROOT, { recursive: true });
   const worktree = join(WT_ROOT, name);
 
-  git(['fetch', 'origin', base]);
-  const baseSha = git(['rev-parse', `origin/${base}`]);
-
   if (!existsSync(worktree)) {
+    git(['fetch', 'origin', base]);
     const branchExists = (() => {
       try { git(['rev-parse', '--verify', `refs/heads/${branch}`]); return true; } catch { return false; }
     })();
@@ -165,7 +207,9 @@ export function leaseWorktree(runId: string, branch: string, name: string): Leas
   git(['config', 'user.name', author], worktree);
   if (email) git(['config', 'user.email', email], worktree);
 
-  return { worktree, branch, port: leasePort(runId), baseSha };
+  const lease: Lease = { worktree, branch, baseSha: forkPoint(worktree, base) };
+  if (opts.withPort) lease.port = leasePortFor(runId);
+  return lease;
 }
 
 /** Remove the worktree. The BRANCH is deliberately left alone — it is pushed work. */

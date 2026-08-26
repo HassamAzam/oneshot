@@ -132,6 +132,28 @@ export function activeRuns(): RunRow[] {
   ).all() as RunRow[];
 }
 
+/**
+ * Bury the rows a dead conductor left behind. Returns how many were reaped.
+ *
+ * The PID-file singleton is what makes this safe: this process holds the lock,
+ * so it is the only conductor, so every row still reading claimed/running at
+ * boot belongs to one that died. Left alone such a row wedges dispatch
+ * permanently — activeRuns() counts it against concurrency and isClaimed()
+ * hides its ticket from the watcher, so each crash narrows the queue by one
+ * until nothing is claimable at all and the console reports, truthfully and
+ * uselessly, "no tickets carry the entry label".
+ *
+ * 'aborted' rather than 'blocked': the journal on disk is untouched, so the
+ * next scan re-claims the ticket and the run resumes from the last phase that
+ * actually succeeded.
+ */
+export function reconcileStaleRuns(): number {
+  const info = db.prepare(
+    "UPDATE runs SET status = 'aborted', ended_at = ? WHERE status IN ('claimed','running')",
+  ).run(now());
+  return info.changes;
+}
+
 /** True if this ticket already has an in-flight run — the whole claim protocol. */
 export function isClaimed(iid: number): boolean {
   const row = db.prepare(

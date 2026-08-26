@@ -42,6 +42,6 @@
     { "from": "stage", "to": "master", "auto": false }
   ],
 
-  "_comment_concurrency": "MUST STAY 1. The deploy script deploys the TIP OF A BRANCH, not a SHA, so two runs merging into dev between phase 9 and phase 10 put both changes on the demo server and phase 11's QA verdict is no longer attributable to either ticket. This is a correctness constraint, not a throughput knob.",
-  "concurrency": 1
+  "_comment_concurrency": "In-flight TICKET cap. The old MUST-STAY-1 constraint is now carried by the promotion mutex (src/lib/promotion.ts): the deploy script ships the TIP of dev, so exactly one run may occupy the merge→deploy→qa window at a time — that is where attribution lives, and the mutex enforces it while every other phase pipelines freely. Residual cap reasons: worktrees symlink ONE shared node_modules/venv (a second webpack build during another run's verify contends on the babel cache), and the port pool (PORT_POOL, default 3) bounds server-holding phases. Raise toward the pool size once shared-cache contention is observed to be tolerable.",
+  "concurrency": 2
 }

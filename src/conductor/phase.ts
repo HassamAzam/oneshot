@@ -14,7 +14,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { appendFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  BASE_ENV, DRY_RUN, ROOT, artifactDir, envOr, modelFor, runDir,
+  BASE_ENV, DRY_RUN, ROOT, artifactDir, deployConfig, envOr, modelFor, runDir,
   type PhaseConfig,
 } from '../lib/config.js';
 import { MEMORY } from '../lib/config.js';
@@ -36,6 +36,18 @@ export interface PhaseInput {
   systemPrompt: string;
   worktree?: string;
   port?: number;
+  /**
+   * The run's leased branch. Reaches the session as ONESHOT_BRANCH, which is
+   * what arms git-guard's "push to this ref and nothing else" rule — the rule
+   * is inert while the variable is unset.
+   */
+  branch?: string;
+  /**
+   * External cancellation. Phases in a parallel group share one signal, so a
+   * group that has already lost control flow can stop paying for the siblings
+   * still running beside it.
+   */
+  signal?: AbortSignal;
 }
 
 export interface PhaseOutput {
@@ -69,6 +81,18 @@ function writeScopes(cfg: PhaseConfig, iid: number, worktree?: string): string[]
  * Structure before hooks: a phase that must not mutate GitLab simply does not
  * receive the mutation tools, so no guard has to intercept a call that cannot
  * be made. DRY_RUN removes every write tool from every phase.
+ *
+ * "Read-only" means the phase declares NO write scopes — not that it lacks a
+ * worktree. Phases whose only output is a file under the run, artifacts or
+ * memory directory (ui-evidence, memorize, deploy, demo, qa) still need Write,
+ * and keying the test to the worktree scope left them one way out: a Bash
+ * heredoc, the single write path write-scope.cjs cannot see. The declared
+ * scopes decide WHERE a phase may write; this decides WHETHER it may at all.
+ *
+ * The GitLab denial list is wide deliberately. A phase kept away from
+ * create_merge_request but handed create_issue_note can still publish to a
+ * customer's ticket, and push_files / create_or_update_file / create_branch
+ * commit through the API — around both write-scope.cjs and git-guard.cjs.
  */
 function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
   const disallowed: string[] = [
@@ -80,7 +104,7 @@ function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
     'mcp__gitlab__update_default_branch',
   ];
 
-  const readOnly = !(cfg.writes ?? []).includes('worktree');
+  const readOnly = (cfg.writes ?? []).length === 0;
   if (readOnly) disallowed.push('Write', 'Edit', 'NotebookEdit');
 
   const mayTouchGitlab = cfg.name === 'mr' || cfg.name === 'document';
@@ -90,6 +114,13 @@ function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
       'mcp__gitlab__update_merge_request',
       'mcp__gitlab__update_issue',
       'mcp__gitlab__create_issue',
+      'mcp__gitlab__create_issue_note',
+      'mcp__gitlab__create_merge_request_note',
+      'mcp__gitlab__create_merge_request_discussion_note',
+      'mcp__gitlab__upload_markdown',
+      'mcp__gitlab__push_files',
+      'mcp__gitlab__create_or_update_file',
+      'mcp__gitlab__create_branch',
     );
   }
 
@@ -154,11 +185,45 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     ...BASE_ENV,
     ...otelBaseEnv(),
     ...otelSpawnEnv(identity),
-    ...phaseEnv(identity, { worktree: input.worktree, writeScopes: scopes, port: input.port }),
+    ...phaseEnv(identity, {
+      worktree: input.worktree, writeScopes: scopes, port: input.port, branch: input.branch,
+    }),
+    // The guards read the flag from the environment rather than trusting the
+    // tool policy alone: DRY_RUN takes the write tools away, but Bash remains,
+    // and `git push` is a mutation the tool list cannot describe.
+    ...(DRY_RUN ? { ONESHOT_DRY_RUN: '1' } : {}),
+    // Playwright lives in THIS repo's node_modules. Worktree phases resolve
+    // node modules through a symlink into the seed repo, which does not carry
+    // it, and conductor phases run at ROOT where a bare `node -e` still needs
+    // the path. NODE_PATH is Node's documented fallback for exactly this.
+    NODE_PATH: join(ROOT, 'node_modules'),
   };
 
+  // scripts/deploy-wsai.sh refuses any ref outside this list BEFORE touching
+  // the box (exit 3, RESULT=refused_ref) — a script-side guard independent of
+  // hooks/deploy-guard.cjs, per docs/HOOKS.md §4.2. The '<ticket-branch>'
+  // placeholder in config/deploy.json is expanded against THIS run's leased
+  // branch, never against anything the session says.
+  if (cfg.name === 'deploy') {
+    env.ONESHOT_ALLOWED_REFS = deployConfig().allowedRefs
+      .map((r) => (r === '<ticket-branch>' ? input.branch ?? '' : r))
+      .filter(Boolean)
+      .join(',');
+  }
+
+  // Two ways a phase ends early, and they are not the same failure. The timer
+  // is this phase overrunning its own budget; the caller's signal is the
+  // conductor withdrawing the phase for reasons that have nothing to do with
+  // what the session was doing. Reporting the second as a timeout would send
+  // whoever reads the journal after the wrong thing entirely.
   const ac = new AbortController();
-  const killer = setTimeout(() => ac.abort(), cfg.timeoutMin * 60_000);
+  let timedOut = false;
+  const killer = setTimeout(() => { timedOut = true; ac.abort(); }, cfg.timeoutMin * 60_000);
+  const cancel = (): void => ac.abort();
+  if (input.signal) {
+    if (input.signal.aborted) ac.abort();
+    else input.signal.addEventListener('abort', cancel, { once: true });
+  }
 
   const out: PhaseOutput = {
     ok: false, data: null, blocked: null, summary: '',
@@ -166,6 +231,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   };
   // Bounded: only frames that could name a subscription limit.
   const limitSignals: string[] = [];
+  let settled = false;
 
   try {
     const schema = schemaFor(cfg.name);
@@ -209,6 +275,23 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       } catch { /* the tee is best-effort; never fail a phase over logging */ }
 
       if (msg.type === 'result') {
+        // The FIRST result frame settles the phase, and only the first.
+        //
+        // The SDK can emit several. Observed live: a 'success' frame carrying
+        // the real turn count and usage, followed by an
+        // 'error_during_execution' frame carrying zero turns and no usage.
+        // Read as the outcome, the trailing frame turned a passing phase into
+        // a failed one, overwrote the recorded spend with zero, and pushed its
+        // own error text into limitSignals — where one rate-limit-shaped
+        // string parks the entire conductor via parkForQuota on an account
+        // that was never limited. Later frames stay in the tee and in the log,
+        // and touch nothing that decides anything.
+        if (settled) {
+          log.warn(`${cfg.name}: extra result frame ignored`, { subtype: msg.subtype });
+          continue;
+        }
+        settled = true;
+
         out.turns = msg.num_turns;
         out.sessionId = msg.session_id;
 
@@ -245,15 +328,23 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     }
   } catch (err) {
     const m = (err as Error).message ?? String(err);
-    out.error = ac.signal.aborted
-      ? (out.turns === 0
+    if (timedOut) {
+      out.error = out.turns === 0
         ? `timed out after ${cfg.timeoutMin}m at ZERO turns — the session never started. `
           + 'Almost always a wedged MCP server spawn: run `npm run deps:verify`.'
-        : `timed out after ${cfg.timeoutMin}m`)
-      : m;
-    limitSignals.push(m);
+        : `timed out after ${cfg.timeoutMin}m`;
+      limitSignals.push(m);
+    } else if (ac.signal.aborted) {
+      // A cancellation the conductor asked for reports nothing about the
+      // account, so its text is kept away from the usage-limit detector.
+      out.error = 'cancelled by the conductor';
+    } else {
+      out.error = m;
+      limitSignals.push(m);
+    }
   } finally {
     clearTimeout(killer);
+    input.signal?.removeEventListener('abort', cancel);
   }
 
   const signalText = limitSignals.join('\n');

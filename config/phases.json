@@ -39,7 +39,7 @@
     {
       "name": "testcases", "n": 4, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
-      "writes": ["run"], "onFail": "abort",
+      "writes": ["run"], "onFail": "abort", "group": "check",
       "skills": ["test-case-writing"],
       "artifact": "testcases.json",
       "_why": "Opus, and its own phase: verify and qa must execute the SAME list or a green local run and a green demo run cover different ground and cannot be compared. It runs AFTER implement so the cases can name the real symbols and routes the change actually produced — the cost of that is a list authored with the implementation in view, so the prompt makes the acceptance criteria, not the diff, the source of truth."
@@ -47,7 +47,8 @@
     {
       "name": "review", "n": 5, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 70, "timeoutMin": 30,
-      "writes": ["run"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 3,
+      "writes": ["run"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 3, "group": "check",
+      "_why_group": "testcases and review both consume only implement's output and neither reads the other's artifact, so they run concurrently. The one interaction — a review cycle lap re-entering implement — leaves testcases pinned (the case list is written once), so the group simply degrades to review alone on later laps.",
       "skills": ["erp-code-review", "dead-code-sweep"],
       "agents": ["backend-reviewer-agent", "frontend-reviewer-agent", "util-reuse-agent"],
       "artifact": "findings.json"
@@ -63,14 +64,15 @@
     {
       "name": "ui-evidence", "n": 7, "kind": "session", "tier": "standard",
       "cwd": "worktree", "maxTurns": 60, "timeoutMin": 30,
-      "writes": ["run", "artifacts"], "onFail": "warn", "needsPort": true,
+      "writes": ["run", "artifacts"], "onFail": "warn", "needsPort": true, "group": "package",
       "skills": ["ui-evidence-pack"],
       "artifact": "ui-evidence.json"
     },
     {
       "name": "mr", "n": 8, "kind": "session", "tier": "standard",
       "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
-      "writes": ["run"], "onFail": "abort",
+      "writes": ["run"], "onFail": "abort", "group": "package",
+      "_why_group": "ui-evidence drives the browser on the leased port while mr pushes the branch and writes the MR — disjoint tools, disjoint writes, both read-only on the diff. Running them together hides the screenshot pass inside the MR pass's wall clock.",
       "skills": ["mr-metadata", "mr-change-logger"],
       "artifact": "mr.json"
     },
@@ -80,9 +82,12 @@
       "_why": "Code, not a session. No model holds a merge tool, so v1's label-guard approval check has nothing to guard."
     },
     {
-      "name": "deploy", "n": 10, "kind": "code",
-      "timeoutMin": 50, "onFail": "blocked",
-      "_why": "Code. Runs scripts/deploy-wsai.sh, which sleeps 90s internally — a model's Bash would have been denied by sleep-cap."
+      "name": "deploy", "n": 10, "kind": "session", "tier": "standard",
+      "cwd": "conductor", "maxTurns": 80, "timeoutMin": 75,
+      "writes": ["run", "artifacts"], "onFail": "abort",
+      "skills": [],
+      "artifact": "deploy.json",
+      "_why": "A SESSION, deliberately — the one deterministic step this pipeline had, made adaptive on purpose. The script is still the only sanctioned path to the box (scripts/deploy-wsai.sh via scripts/deploy-watch.sh, detached, polled in slices because the Bash tool caps near 10 minutes), but a deploy that fails now gets a diagnostician: read the remote build log, check supervisor state, decide --npm/--pip from the actual diff, retry within the attempt cap. Safety moved from 'no model holds the tool' to hooks/deploy-guard.cjs — allowlisted hosts, allowlisted remote verbs, fail-CLOSED — plus a deterministic conductor check after the phase: the deployed SHA must contain this run's merge SHA and the site must answer 200, or the phase result is overruled. Retries live inside the session (schema `attempts`); onFail abort because a deploy the agent itself gave up on needs a human, not a redo."
     },
     {
       "name": "qa", "n": 11, "kind": "session", "tier": "heavy",
@@ -94,23 +99,24 @@
     {
       "name": "demo", "n": 12, "kind": "session", "tier": "standard",
       "cwd": "conductor", "maxTurns": 60, "timeoutMin": 30,
-      "writes": ["run", "artifacts"], "onFail": "warn",
+      "writes": ["run", "artifacts"], "onFail": "warn", "group": "wrap",
       "skills": ["create-demo"],
       "artifact": "demo.json"
     },
     {
-      "name": "document", "n": 13, "kind": "session", "tier": "light",
+      "name": "memorize", "n": 13, "kind": "session", "tier": "light",
+      "cwd": "conductor", "maxTurns": 25, "timeoutMin": 10,
+      "writes": ["run", "memory"], "onFail": "warn", "group": "wrap",
+      "_why_order": "Before document, not after — the ticket note wants to link the memory card, and the card needs nothing from the note. demo and memorize share nothing at all, so they run as a group.",
+      "skills": ["ticket-memory-write"],
+      "artifact": "memorize.json"
+    },
+    {
+      "name": "document", "n": 14, "kind": "session", "tier": "light",
       "cwd": "conductor", "maxTurns": 40, "timeoutMin": 15,
       "writes": ["run"], "onFail": "warn",
       "skills": ["mr-documentation", "ui-evidence-pack"],
       "artifact": "document.json"
-    },
-    {
-      "name": "memorize", "n": 14, "kind": "session", "tier": "light",
-      "cwd": "conductor", "maxTurns": 25, "timeoutMin": 10,
-      "writes": ["run", "memory"], "onFail": "warn",
-      "skills": ["ticket-memory-write"],
-      "artifact": "memorize.json"
     },
     {
       "name": "close", "n": 15, "kind": "code",

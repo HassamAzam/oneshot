@@ -16,26 +16,56 @@ import { log } from './log.js';
 
 const API = 'https://slack.com/api';
 
+/**
+ * Every call here sits AWAITED on the critical path of a run — the card is
+ * updated at every phase boundary — so an unresponsive slack.com would stall
+ * the pipeline on a channel nobody is reading. Status reporting must never be
+ * able to cost more than the work it reports on.
+ */
+const CALL_TIMEOUT_MS = 15_000;
+
+/** Warn once per outage, not once per phase boundary. */
+let unreachable = false;
+
 function token(): string { return envOr('SLACK_BOT_TOKEN'); }
 function channel(): string { return slackConfig().channel; }
 export function slackEnabled(): boolean { return Boolean(token() && channel()); }
 
 async function call(method: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API}/${method}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token()}`,
-      'Content-Type': 'application/json; charset=utf-8',
-    },
-    body: JSON.stringify(body),
-  });
-  const json = (await res.json()) as Record<string, unknown>;
-  if (!json.ok) {
-    // Report the error CODE only. Slack echoes request fields on some errors,
-    // and this line goes to a log file.
-    log.warn(`slack ${method} failed`, { error: json.error });
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), CALL_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${API}/${method}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token()}`,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify(body),
+      signal: ctl.signal,
+    });
+    const json = (await res.json()) as Record<string, unknown>;
+    unreachable = false;
+    if (!json.ok) {
+      // Report the error CODE only. Slack echoes request fields on some errors,
+      // and this line goes to a log file.
+      log.warn(`slack ${method} failed`, { error: json.error });
+    }
+    return json;
+  } catch (err) {
+    // Degrade to exactly the no-token shape: callers already handle a Slack
+    // that is not configured, so a Slack that is not answering is the same
+    // situation and the run carries on with the console as its only channel.
+    if (!unreachable) {
+      unreachable = true;
+      log.warn('slack is unreachable — status stays on this console', {
+        error: (err as Error).message,
+      });
+    }
+    return { ok: false, error: 'unreachable' };
+  } finally {
+    clearTimeout(timer);
   }
-  return json;
 }
 
 export interface PhaseLine {
@@ -118,10 +148,13 @@ export async function thread(ts: string | null, text: string): Promise<void> {
 export async function alert(text: string): Promise<void> {
   if (!slackEnabled()) { log.error(`[slack-alert] ${text}`); return; }
   const owner = envOr('ONESHOT_OWNER_SLACK_ID');
-  await call('chat.postMessage', {
+  const res = await call('chat.postMessage', {
     channel: channel(),
     text: `${owner ? `<@${owner}> ` : ''}${text}`,
   });
+  // The one message that must not be lost to a network blip. If it did not
+  // land, put it where the operator will at least find it afterwards.
+  if (res.ok !== true) log.error(`[slack-alert] ${text}`);
 }
 
 export async function verifyAuth(): Promise<{ ok: boolean; team?: string; user?: string }> {

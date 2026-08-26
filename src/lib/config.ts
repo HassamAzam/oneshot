@@ -100,6 +100,14 @@ export interface PhaseConfig {
   skills?: string[];
   agents?: string[];
   artifact?: string;
+  /**
+   * Concurrency marker. A maximal run of CONSECUTIVE phases sharing a group
+   * value is dispatched together, so a group is only ever as wide as the
+   * phases.json ordering allows — which is what keeps the config readable as a
+   * sequence and stops a stray group name from parallelising two phases that
+   * happen to be far apart.
+   */
+  group?: string;
 }
 
 export interface BudgetConfig {
@@ -362,9 +370,12 @@ export interface AuthReport {
 /**
  * Report which credential a session will actually use.
  *
- * Reports variable NAMES only, never values. `apiKeyHelper` matters because
- * sessions load user settings (settingSources includes 'user'), so a helper
- * configured there WOULD run and its output outranks subscription OAuth.
+ * Reports variable NAMES only, never values. `apiKeyHelper` is a NOTE rather
+ * than a problem: phase sessions load `settingSources: ['project']` only
+ * (src/conductor/phase.ts), so a helper configured at user level never runs for
+ * one. It is still worth saying, because it does run for the operator's own
+ * interactive sessions on the same machine — the thing this audit is really
+ * about is nobody discovering a metered bill by accident.
  */
 export function auditAuth(): AuthReport {
   const problems: string[] = [];
@@ -399,9 +410,10 @@ export function auditAuth(): AuthReport {
     try {
       const s = JSON.parse(readFileSync(settingsPath, 'utf8')) as { apiKeyHelper?: unknown };
       if (s.apiKeyHelper) {
-        problems.push(
-          'apiKeyHelper is configured in ~/.claude/settings.json. Sessions load user ' +
-          'settings, so it WILL run and its key outranks subscription OAuth.',
+        notes.push(
+          'apiKeyHelper is configured in ~/.claude/settings.json. Phase sessions load ' +
+          'project settings only, so it does NOT run for them — but it does run for ' +
+          'interactive sessions here, and its key outranks subscription OAuth.',
         );
       }
     } catch { /* unreadable settings is not an auth problem */ }

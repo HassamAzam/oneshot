@@ -21,8 +21,18 @@
  * than reimplementing the policy in TypeScript. One implementation, one test
  * suite (scripts/verify-hooks.sh), no chance of the two drifting apart — which
  * for a security guard is the failure that matters.
+ *
+ * One asymmetry is deliberate and load-bearing. Every guard here used to fail
+ * OPEN on every failure path — timeout, spawn error, non-JSON — because a
+ * broken guard must never wedge a phase. That is right for all of them except
+ * deploy-guard, whose own header and docs/HOOKS.md 4.2 both promise it fails
+ * CLOSED. The promise was not true: a deploy-guard that was missing, crashed or
+ * slow resolved `{}` here and the deploy proceeded unguarded, which is exactly
+ * the "bypassed by a bug in my runner" failure that made a script-side guard a
+ * requirement in the first place. FAIL_CLOSED makes the promise real.
  */
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, envOr } from '../lib/config.js';
 import { log } from '../lib/log.js';
@@ -32,12 +42,36 @@ type HookOutput = Record<string, unknown>;
 const NODE = envOr('ONESHOT_NODE', process.execPath);
 const HOOK_TIMEOUT_MS = 15_000;
 
+/** Guards that must DENY rather than allow when they cannot run. */
+const FAIL_CLOSED = new Set(['deploy-guard.cjs']);
+
+/** The .cjs deny shape, mirrored exactly so a model reads one contract. */
+function denyPayload(reason: string): HookOutput {
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: reason,
+    },
+  };
+}
+
+function guardFailure(script: string, why: string): HookOutput {
+  log.warn(`guard ${script} did not run`, { why });
+  if (!FAIL_CLOSED.has(script)) return {};
+  return denyPayload(
+    `Denied: the ${script} guard could not run (${why}), and it fails closed. Nothing reaches ` +
+    'the demo server unguarded. Report this in `blocked` — an operator has to fix the guard, ' +
+    'and no retry of yours will change the answer.',
+  );
+}
+
 /**
  * Run one .cjs guard with the hook payload on stdin.
  *
- * FAIL-OPEN on internal error, matching the .cjs contract: a broken guard must
- * never wedge a phase. It is logged loudly instead — a guard that is silently
- * not running is worse than one that is loudly broken.
+ * Fail-open by default, matching the .cjs contract; fail-closed for the scripts
+ * in FAIL_CLOSED. Either way the failure is logged loudly — a guard that is
+ * silently not running is worse than one that is loudly broken.
  */
 function runGuard(script: string, input: unknown, env: Record<string, string>): Promise<HookOutput> {
   return new Promise((resolve) => {
@@ -45,27 +79,39 @@ function runGuard(script: string, input: unknown, env: Record<string, string>): 
     let settled = false;
     const done = (out: HookOutput) => { if (!settled) { settled = true; resolve(out); } };
 
+    // A missing guard file surfaces as a spawn error, which used to be
+    // indistinguishable from a guard that ran and allowed.
+    if (!existsSync(join(ROOT, 'hooks', script))) {
+      return done(guardFailure(script, 'the script is missing'));
+    }
+
     const child = spawn(NODE, [join(ROOT, 'hooks', script)], {
       env: { ...process.env, ...env },
       stdio: ['pipe', 'pipe', 'ignore'],
     });
 
-    const killer = setTimeout(() => { child.kill('SIGKILL'); done({}); }, HOOK_TIMEOUT_MS);
+    const killer = setTimeout(() => {
+      child.kill('SIGKILL');
+      done(guardFailure(script, 'it timed out'));
+    }, HOOK_TIMEOUT_MS);
 
     child.stdout.on('data', (d) => { stdout += String(d); });
     child.on('error', (err) => {
       clearTimeout(killer);
-      log.warn(`guard ${script} failed to spawn`, { error: err.message });
-      done({});
+      done(guardFailure(script, `it failed to spawn: ${err.message}`));
     });
-    child.on('close', () => {
+    child.on('close', (code) => {
       clearTimeout(killer);
-      if (!stdout.trim()) return done({});          // empty stdout = allow
+      if (!stdout.trim()) {
+        // The .cjs contract is exit-0-always, so a non-zero exit means the
+        // process died before it reached its own allow().
+        if (code !== 0) return done(guardFailure(script, `it exited ${code}`));
+        return done({});                            // empty stdout = allow
+      }
       try {
         done(JSON.parse(stdout) as HookOutput);
       } catch {
-        log.warn(`guard ${script} emitted non-JSON — ignoring`);
-        done({});
+        done(guardFailure(script, 'it emitted non-JSON'));
       }
     });
 
@@ -73,6 +119,7 @@ function runGuard(script: string, input: unknown, env: Record<string, string>): 
       child.stdin.write(JSON.stringify(input));
       child.stdin.end();
     } catch { /* the close handler still resolves */ }
+    return undefined;
   });
 }
 
@@ -96,6 +143,8 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
       { hooks: [guard('pause-check.cjs')], timeout: 15 },
       { matcher: WRITE_TOOLS, hooks: [guard('write-scope.cjs')], timeout: 15 },
       { matcher: BASH, hooks: [guard('git-guard.cjs')], timeout: 20 },
+      { matcher: BASH, hooks: [guard('deploy-guard.cjs')], timeout: 20 },
+      // log-event stays last so a denied call is still recorded.
       { hooks: [guard('log-event.cjs')], timeout: 10 },
     ],
     PostToolUse: [

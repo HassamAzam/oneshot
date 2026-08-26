@@ -12,10 +12,20 @@
  *   state/runs/<iid>/artifacts/       screenshots, mp4, reports
  *   state/runs/<iid>/transcripts/     per-phase JSONL — the content record
  *   state/runs/<iid>/scratch/         reaped on teardown
+ *
+ * A ticket has ONE run directory, keyed by iid rather than by run id, because
+ * that is what makes resumption a lookup instead of a search. A ticket that
+ * comes back for a second run therefore has its finished directory moved aside
+ * (`archiveRun`) rather than merged into — two runs' phase records in one
+ * journal would make every lap counter and every resume check lie.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import { artifactDir, runDir } from './config.js';
+import { STATE, artifactDir, runDir } from './config.js';
+
+const RUNS_ARCHIVE = join(STATE, 'runs-archive');
 
 export interface PhaseRecord {
   phase: string;
@@ -45,6 +55,14 @@ export interface RunJournal {
   mergedSha?: string;
   deployedSha?: string;
   blockedWhy?: string;
+  /**
+   * When the run was blocked. A block is a request for a human, so a resume
+   * that ignores it just burns the same budget on the same failure — the
+   * conductor honours a cooldown against this stamp before it re-claims.
+   */
+  blockedAt?: number;
+  /** The closing note on the ticket, so a re-run of `close` edits instead of repeating. */
+  closeNoteId?: number;
   slackTs?: string;
   phases: PhaseRecord[];
 }
@@ -96,11 +114,52 @@ export function lapsOf(iid: number, phase: string): number {
   return j.phases.filter((p) => p.phase === phase).length;
 }
 
+/**
+ * How many laps of a phase actually FAILED.
+ *
+ * Distinct from lapsOf: retry and cycle budgets are spent by failures, and a
+ * phase that ran three times because an earlier phase cycled back to it has not
+ * spent any of its own. Counting all laps would strand a run that was doing
+ * exactly what it was told to.
+ */
+export function failedLapsOf(iid: number, phase: string): number {
+  const j = readJournal(iid);
+  if (!j) return 0;
+  return j.phases.filter((p) => p.phase === phase && p.status === 'failed').length;
+}
+
 /** True if the phase completed successfully at any lap — the resume check. */
 export function phaseSucceeded(iid: number, phase: string): boolean {
   const j = readJournal(iid);
   if (!j) return false;
   return j.phases.some((p) => p.phase === phase && (p.status === 'ok' || p.status === 'warned'));
+}
+
+/**
+ * Move a finished run's directory to state/runs-archive/<iid>-<runId>.
+ *
+ * Called when a ticket carrying a COMPLETED journal is claimed again — a
+ * re-labelled ticket is a new run, not a continuation of the one that already
+ * shipped. Nothing is deleted: the previous run's journal, artifacts and
+ * transcripts are the record of what was delivered last time, and the recall
+ * phase is not the only thing that may want to read them.
+ */
+export function archiveRun(iid: number, runId: string): string | null {
+  const from = runDir(iid);
+  if (!existsSync(from)) return null;
+  mkdirSync(RUNS_ARCHIVE, { recursive: true });
+
+  let to = join(RUNS_ARCHIVE, `${iid}-${runId}`);
+  if (existsSync(to)) to = `${to}-${Date.now().toString(36)}`;
+
+  try {
+    renameSync(from, to);
+  } catch {
+    // Rename fails across filesystems, which state/ on an external volume is.
+    cpSync(from, to, { recursive: true });
+    rmSync(from, { recursive: true, force: true });
+  }
+  return to;
 }
 
 // ------------------------------------------------------------------ artifacts

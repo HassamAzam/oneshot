@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "One orchestrator, one label, one ticket at a time: a deterministic conductor that drives a GitLab ticket from label to Ready For Deployment through fresh per-phase Claude sessions.",
+  "description": "One orchestrator, one label: a deterministic conductor that drives GitLab tickets from label to Ready For Deployment through fresh per-phase Claude sessions — pipelined, with one ticket at a time in the merge→deploy→qa window.",
   "engines": {
     "node": ">=20"
   },

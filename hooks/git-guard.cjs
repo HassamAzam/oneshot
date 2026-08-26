@@ -19,6 +19,11 @@
  *   - no git command whose working directory is outside the leased worktree.
  *     ~/Documents/erp is a live repo with a real remote on this machine; a
  *     `git commit -am` with the wrong cwd would land there
+ *   - no push at all under DRY_RUN. The dry-run banner promises that every
+ *     write is refused, and the SDK's own tool policy cannot make that true on
+ *     the Bash surface: a push is just a command there
+ *   - no mutating git from a conductor-cwd phase. Those phases hold no leased
+ *     worktree, so whatever repo they are standing in is not theirs to change
  *
  * `--no-verify` is deliberately ALLOWED: the husky pre-commit hook in these
  * repos is broken locally and aborts every commit. Lint is enforced as a phase
@@ -59,6 +64,15 @@ function isProtected(ref, cfg) {
 
 function checkPush(t, cfg) {
   const rest = t.slice(t.indexOf('push') + 1);
+
+  if (process.env.ONESHOT_DRY_RUN === '1') {
+    C.event('denied_push_dryrun', { cmd: t.join(' ') });
+    C.deny(
+      'Denied: this is a DRY RUN. Nothing leaves this machine — no push, no MR, no deploy. ' +
+      'Do the work locally and report what you would have pushed; the run is being exercised ' +
+      'end to end precisely because nothing it does is meant to land.',
+    );
+  }
 
   if (rest.some((a) => a === '-f' || a === '--force' || a.startsWith('--force-with-lease'))) {
     C.event('denied_force_push', { cmd: t.join(' ') });
@@ -110,6 +124,35 @@ function checkBranchDelete(t, cfg) {
     C.event('denied_branch_delete', { target });
     C.deny(`Denied: '${target}' is a protected branch and cannot be deleted.`);
   }
+}
+
+const CONDUCTOR_WRITES = new Set([
+  'push', 'commit', 'merge', 'rebase', 'reset', 'cherry-pick', 'am', 'revert', 'stash', 'apply',
+]);
+
+/**
+ * A phase whose cwd is the conductor holds no leased worktree, so there is no
+ * repository it has any claim on — the Oneshot root, the context repo and
+ * every other checkout on this laptop are all somebody else's. Reads stay
+ * open: recall, deploy and qa all legitimately inspect history. Writes have
+ * nowhere legitimate to land, which makes this cheap to refuse and expensive
+ * to allow.
+ */
+function checkConductorPhase(t) {
+  if (!C.phase() || leasedWorktree()) return;
+  const sub = t.find((a, i) => i > 0 && !a.startsWith('-') && t[i - 1] !== '-C');
+  const mutating = CONDUCTOR_WRITES.has(sub)
+    || (sub === 'tag' && t.some((a) => a === '-a' || a === '-d' || a === '-f'))
+    || (sub === 'branch' && t.some((a) => a === '-D' || a === '-d' || a === '-m' || a === '--delete'))
+    || (sub === 'checkout' && t.some((a) => a === '-B' || a === '-b'))
+    || (sub === 'switch' && t.some((a) => a === '-c' || a === '-C'));
+  if (!mutating) return;
+  C.event('denied_conductor_git_write', { sub, cmd: t.join(' ') });
+  C.deny(
+    `Denied: \`git ${sub}\` from the '${C.phase()}' phase, which runs in the conductor and has ` +
+    'no leased branch or worktree. Whatever repository you are standing in belongs to someone ' +
+    'else. Reads — log, diff, show, rev-parse, status, fetch — are fine; changes are not.',
+  );
 }
 
 function checkCwd(cmd) {
@@ -166,6 +209,7 @@ try {
       if (t[0] !== 'git') continue;
       const sub = t.find((a, i) => i > 0 && !a.startsWith('-') && t[i - 1] !== '-C');
 
+      checkConductorPhase(t);
       if (sub === 'push') checkPush(t, cfg);
       if (sub === 'branch') checkBranchDelete(t, cfg);
 

@@ -195,19 +195,49 @@ function parseResetMs(text: string): number | null {
   return target.getTime();
 }
 
+/**
+ * True while the machine's own quota park is in force.
+ *
+ * The park is self-clearing, and that self-clearing is entirely carried by
+ * `until` inside the file. So a file that cannot be parsed — truncated by a
+ * crash mid-write, hand-edited, or half-synced — has no expiry, and treating it
+ * as a park meant the conductor stood down FOREVER while logging one ordinary
+ * "parked after a subscription usage limit" line a minute. That is the worst
+ * shape a failure can take here: indistinguishable from working correctly.
+ *
+ * A corrupt park is therefore removed and refused. Nothing is lost by doing so:
+ * the weighted-token ceilings in checkQuota() are independent of this file and
+ * still bound the spend, and a real limit re-parks on the next phase that hits
+ * one. state/PAUSE — the human kill switch — is a different file and is never
+ * touched here.
+ */
 export function quotaParked(): boolean {
   if (!existsSync(PAUSE_QUOTA)) return false;
   try {
     const p = JSON.parse(readFileSync(PAUSE_QUOTA, 'utf8')) as { until?: number };
-    if (typeof p.until === 'number' && Date.now() >= p.until) {
+    if (typeof p.until !== 'number' || !Number.isFinite(p.until)) {
+      throw new Error('no usable "until" field');
+    }
+    if (Date.now() >= p.until) {
       rmSync(PAUSE_QUOTA, { force: true });
       logEvent('quota_park_cleared');
       log.ok('Quota park expired — resuming');
       return false;
     }
     return true;
-  } catch {
-    return true;
+  } catch (err) {
+    log.error(`${PAUSE_QUOTA} is unreadable and has no expiry — removing it and resuming`, {
+      error: (err as Error).message,
+    });
+    logEvent('quota_park_corrupt', { error: (err as Error).message });
+    try {
+      rmSync(PAUSE_QUOTA, { force: true });
+    } catch (rmErr) {
+      log.error('could not remove the corrupt park file — delete it by hand', {
+        error: (rmErr as Error).message,
+      });
+    }
+    return false;
   }
 }
 

@@ -6,3 +6,4 @@ logs/
 !.env.example
 *.log
 .DS_Store
+/.claude/

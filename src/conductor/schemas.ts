@@ -209,6 +209,47 @@ export const MR_SCHEMA = phaseSchema({
   targetBranch: str('Branch the MR targets'),
 }, ['mrIid', 'mrUrl', 'title', 'targetBranch']);
 
+/**
+ * Deploy is the one phase whose own account of itself is never the source of
+ * truth: the conductor re-derives the SHA and the health status from the box
+ * afterwards. These fields exist so a disagreement between the two is loud
+ * rather than silently overwritten — and so an in-session retry leaves a trace,
+ * since the runner records one row per phase and would otherwise show a deploy
+ * that took three builds as a clean single pass.
+ */
+export const DEPLOY_SCHEMA = phaseSchema({
+  deployedSha: str(
+    'The 40-hex SHA the demo box HEAD is on now. Read it from a command you ran — the script ' +
+    'output or a fresh rev-parse — never from recollection. The conductor re-derives this ' +
+    'independently and blocks the run if the two disagree.',
+  ),
+  healthOk: {
+    type: 'boolean',
+    description:
+      'The site returned the expected status through the Host header on your final check. ' +
+      'A bare-IP request returns 400 from ALLOWED_HOSTS and looks exactly like a broken app.',
+  },
+  attempts: {
+    type: 'number',
+    minimum: 1,
+    maximum: 3,
+    description:
+      'How many times you launched the deploy script, INCLUDING the ones that failed. Three is ' +
+      'the cap and the guard enforces it.',
+  },
+  flagsUsed: strArr("Dependency flags passed on the successful attempt: '--npm', '--pip', or neither."),
+  flagsRationale: str(
+    'Why those flags and not others, in one sentence, naming the files in THIS run\'s diff that ' +
+    'justified them (package.json -> --npm, requirements/ -> --pip). If you passed none and the ' +
+    'script reported a dependency change, say why that was right.',
+  ),
+  serviceState: str(
+    'What supervisorctl showed at the end: which demo_erp units are running, and whether they ' +
+    'held the same PIDs across the stability window. A crash-loop reads as RUNNING if you only ' +
+    'look once.',
+  ),
+}, ['deployedSha', 'healthOk', 'attempts', 'flagsUsed', 'flagsRationale', 'serviceState']);
+
 export const QA_SCHEMA = phaseSchema({
   deployedSha: str('SHA actually live on the demo server when you tested.'),
   results: CASE_RESULT,
@@ -241,6 +282,7 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   verify: VERIFY_SCHEMA,
   'ui-evidence': UI_EVIDENCE_SCHEMA,
   mr: MR_SCHEMA,
+  deploy: DEPLOY_SCHEMA,
   qa: QA_SCHEMA,
   demo: DEMO_SCHEMA,
   document: DOCUMENT_SCHEMA,

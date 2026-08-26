@@ -24,7 +24,7 @@
     "requirements/": "--pip"
   },
 
-  "_comment_timeout": "Cold builds on that box take ~25 min and the script's own deadline is 45 min, plus a 90s service-stability sleep. 50 min gives it room without letting a wedged build hold the queue forever.",
+  "_comment_timeout": "Informational since deploy became a session phase — the enforced wall clock is timeoutMin in config/phases.json (75, sized for two build attempts). Kept because scripts/deploy-watch.sh and the doctor read this file for the script's own internal deadline: cold builds take ~25 min, the script allows 45, plus a 90s stability sleep.",
   "timeoutMin": 50,
   "demoUrl": "https://ws-ai-demo.arbisoft.com"
 }

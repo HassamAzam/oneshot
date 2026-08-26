@@ -57,6 +57,20 @@ emit() { printf 'ONESHOT_%s=%s\n' "$1" "$2"; }
 
 remote() { ssh -n -o BatchMode=yes -o ConnectTimeout=20 "$SERVER" "$@"; }
 
+# Refuse a ref this caller has no business deploying, before anything touches
+# the server. Deliberately independent of the Oneshot hook layer: that hook
+# cannot be bypassed by a prompt, but it can be bypassed by a bug in the
+# conductor that spawns it. This check cannot. Unset means a human is driving,
+# and a human's manual run behaves exactly as it always has.
+if [ -n "${ONESHOT_ALLOWED_REFS:-}" ]; then
+    case ",${ONESHOT_ALLOWED_REFS}," in
+        *",${BRANCH},"*) ;;
+        *)  echo "Refusing to deploy '$BRANCH': not in ONESHOT_ALLOWED_REFS (${ONESHOT_ALLOWED_REFS})." >&2
+            emit RESULT refused_ref
+            exit 3 ;;
+    esac
+fi
+
 # ---------------------------------------------------------------------------
 # 1. Connectivity
 # ---------------------------------------------------------------------------

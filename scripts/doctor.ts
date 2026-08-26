@@ -55,11 +55,17 @@ async function main(): Promise<void> {
   pass('project.json', `${cfg.gitlab.project} (id ${cfg.gitlab.projectId})`);
   pass('labels', `"${cfg.labels.entry}" -> "${cfg.labels.exit}", blocked "${cfg.labels.blocked}"`);
 
-  if (cfg.concurrency !== 1) {
-    fail('concurrency must be 1',
-      'the deploy script deploys a branch TIP, so parallel runs make QA verdicts unattributable');
+  // The branch-TIP deploy still means only ONE run may hold the merge→deploy→qa
+  // window, but that is now enforced by the in-process promotion mutex rather
+  // than by pinning the whole pipeline to a single ticket. A sane upper bound
+  // is the port pool — every server-holding phase needs its own port.
+  if (cfg.concurrency < 1 || cfg.concurrency > portPool().length) {
+    fail('concurrency out of range',
+      `must be 1..${portPool().length} (the port pool); the promotion mutex, not this number, ` +
+      'keeps QA verdicts attributable');
   } else {
-    pass('concurrency', '1 — QA verdicts stay attributable');
+    pass('concurrency', `${cfg.concurrency} — merge→qa serialized by the promotion mutex, ` +
+      `capped at the ${portPool().length}-port pool`);
   }
 
   const ph = phases();
@@ -147,7 +153,7 @@ async function main(): Promise<void> {
   // Guards are passed to the SDK in-process (src/conductor/hooks.ts), so there
   // is nothing to install and nothing in settings.json to check. What matters
   // is that the .cjs files exist and still enforce what they claim to.
-  const guards = ['pause-check', 'write-scope', 'git-guard', 'budget-gate', 'log-event', '_common'];
+  const guards = ['pause-check', 'write-scope', 'git-guard', 'deploy-guard', 'budget-gate', 'log-event', '_common'];
   const missing = guards.filter((g) => !existsSync(join(process.cwd(), 'hooks', `${g}.cjs`)));
   missing.length
     ? fail('guard scripts missing', missing.join(', '))

@@ -1,12 +1,12 @@
 # Oneshot
 
-One orchestrator. One label. One ticket at a time.
+One orchestrator. One label. Zero human gates.
 
 Oneshot takes a GitLab issue in [`arbisoft/workstreamai`](https://gitlab.arbisoft.com/arbisoft/workstreamai)
 carrying the label **`Loop`** and drives it — unattended — to **`Ready For Deployment`**:
-recall prior art, research, plan, brainstorm test cases, implement, review, verify in a real
+recall prior art, research, plan, implement, brainstorm test cases, review, verify in a real
 browser, open and merge the MR, deploy to the demo server, QA the deployed build, record a demo,
-document the ticket and the MR, and write a memory card so the next similar ticket starts warm.
+write a memory card so the next similar ticket starts warm, and document the ticket and the MR.
 
 It is the successor to [`one-loop`](https://github.com/HassamAzam/one-loop), and it is a
 different shape on purpose.
@@ -53,27 +53,40 @@ Three things fall out of that:
 
 ```
  issue labelled `Loop`
-   0  recall        Haiku    prior art from past runs
-   1  research      Opus 5   trace the code path, state blast radius
-   2  plan          Opus 5   phased plan
-   3  implement     Opus 5   commits on oneshot/ticket-<iid>-<slug>
-   4  testcases     Opus 5   ONE shared case list, written against real code  ──┐
-   5  review        Opus 5   findings ──► back to 3 (max 3 laps)
-   6  verify        Sonnet 5 dev server + Playwright  ◄──┤ same list
-   7  ui-evidence   Sonnet 5 screenshots              ◄──┤
-   8  mr            Sonnet 5 MR + description
-   9  merge         code     merge into dev, promote dev → stage
-  10  deploy        code     scripts/deploy-wsai.sh → ws-ai-demo
-  11  qa            Opus 5   run the case list on the deployed build ◄──┘
-                             fail ──► back to 3 (max 2 laps)
-  12  demo          Sonnet 5 recorded walkthrough
-  13  document      Haiku    ticket note + MR note + uploads
-  14  memorize      Haiku    memory card for future recall
-  15  close         code     label → Ready For Deployment, teardown
+   0  recall          Haiku     prior art from past runs
+   1  research        Opus 5    trace the code path, state blast radius
+   2  plan            Opus 5    phased plan
+   3  implement       Opus 5    commits on oneshot/ticket-<iid>-<slug>
+   4  testcases    ∥  Opus 5    ONE shared case list, written against real code
+   5  review       ∥  Opus 5    findings ──► back to 3 (max 3 laps)
+   6  verify          Sonnet 5  dev server + Playwright, runs THE list
+                                fail ──► back to 3 (max 2 laps)
+   7  ui-evidence  ∥  Sonnet 5  screenshots
+   8  mr           ∥  Sonnet 5  MR + description
+   9  merge           code      merge into dev, promote dev → stage
+  10  deploy          Sonnet 5  guarded agent: runs the deploy script,
+                                diagnoses failures, bounded retries
+  11  qa              Opus 5    THE list again, on the deployed build
+                                fail ──► back to 3 (max 2 laps), and the lap
+                                re-runs 8 → 9 → 10 so the fix actually reships
+  12  demo         ∥  Sonnet 5  recorded walkthrough
+  13  memorize     ∥  Haiku     memory card for future recall
+  14  document        Haiku     ticket note (links the card) + MR note + uploads
+  15  close           code      label → Ready For Deployment, teardown
+
+  ∥  runs concurrently with the phase above it
 ```
 
-`merge`, `deploy` and `close` are **code, not sessions**. No model holds a merge tool, which is
-why One Loop's approval-label guard has nothing left to guard.
+`merge` and `close` are **code, not sessions**. No model holds a merge tool, which is why One
+Loop's approval-label guard has nothing left to guard.
+
+`deploy` used to be code too, and stopped being. The script is still the only sanctioned path to
+the box, but a failed deploy needs a diagnostician — read the remote build log, check supervisor
+state, pick `--npm`/`--pip` from the actual diff, retry within a cap — and none of that is
+expressible as a return code. Safety moved from "no model holds the tool" to
+`hooks/deploy-guard.cjs` (allowlisted hosts, allowlisted remote verbs, **fails closed**) plus a
+deterministic conductor check afterwards: the deployed SHA must contain this run's merge SHA and
+the site must answer 200, or the agent's verdict is overruled.
 
 **Phase 4 exists so `verify` and `qa` execute the same list.** Without it each invents its own
 scenarios, and a green local run and a green demo run cover different ground — you cannot
@@ -85,11 +98,47 @@ you get from a plan. The cost is a list authored with the diff in view, which is
 list quietly ratifies a bug rather than catching it, so the prompt makes the acceptance
 criteria the oracle and the diff merely the vocabulary: where the two disagree, the case is
 written to the criteria and is expected to fail. `implement` therefore works from the plan
-alone; on a `review` or `verify` cycle lap the cases exist and are handed back to it.
+alone; on a cycle lap the cases already exist and are handed back to it. They are never
+re-authored — one list, three executions, or the runs cannot be compared.
+
+**A `qa` failure is not the same shape as a `review` failure.** It happens after the merge and
+the deploy, so a lap back to `implement` is worth nothing unless `mr → merge → deploy` run again
+on the way forward. They do: a cycle marks every phase in the window as owing a re-run, which is
+also why a lap costs so much more from phase 11 than from phase 5.
 
 **Full auto.** There are no human gates. The only thing that stops a run is `BLOCKED` — a deploy
-that exits non-zero, a cycle cap exhausted, an unresolvable MR conflict, GitLab unreachable past
-the breaker, or a quota park. That posts an @mention and applies `Needs Human`.
+the agent itself gave up on, a cycle cap exhausted, an unresolvable MR conflict, GitLab
+unreachable past the breaker, or a quota park. That posts an @mention and applies `Needs Human`.
+
+## Mobilizing agents
+
+Sixteen phases deep, and most of them spend their time waiting — on a webpack build, on a
+GitLab poll, on a browser. Four kinds of concurrency shorten the wall clock, and none of them
+weakens an invariant.
+
+**Parallel phase groups.** A `group` in `config/phases.json` marks consecutive phases that read
+the same inputs and write disjoint artifacts. The runner starts them together and then processes
+their outcomes *in phase order*, so the first failure still owns control flow and a group is
+never a way for a later phase to overrule an earlier one. Three today: `testcases ∥ review`
+(both consume only `implement`, neither reads the other), `ui-evidence ∥ mr` (a browser pass and
+a git push — disjoint tools, disjoint writes), `demo ∥ memorize` (nothing in common at all).
+
+**Parallel subagents inside a phase.** `review` dispatches `backend-reviewer-agent`,
+`frontend-reviewer-agent` and `util-reuse-agent` in a single message, so a full-stack diff gets
+three specialists at once instead of three specialists in a row.
+
+**Pipelined tickets.** `concurrency` is 2, and the tick loop keeps scanning while runs are in
+flight. What used to force this to 1 was real: the deploy script ships the TIP of `dev`, so two
+runs merging inside the `merge → deploy → qa` window put both changes on the demo box and QA's
+verdict stops being attributable to either. That is now stated precisely rather than
+approximated by a global serialisation — `src/lib/promotion.ts` is an in-process FIFO mutex held
+from `merge` until `qa` passes or the run ends. Only the window where attribution lives is
+serialized; everything else pipelines.
+
+**The port pool is the real ceiling.** `verify` and `ui-evidence` run a dev server, and
+`PORT_POOL` (3 by default) bounds how many can at once. A run leases its port when it first
+reaches a phase that needs one — not when it leases its worktree, because holding 8001 through
+forty minutes of `research` buys nothing and starves the pool.
 
 ## Quick start
 
@@ -125,7 +174,7 @@ Structure first, hooks only for what structure cannot reach:
 | Schema | the output shape is checkable | no |
 | Skill / prompt | judgment, taste, method | yes — it's advice |
 
-The guards (`npm run hooks:verify` — 32 offline assertions, no network, no session):
+The guards (`npm run hooks:verify` — offline assertions, no network, no session):
 
 - **`pause-check`** — the brake. Denies side-effectful tools while paused; denies all GitLab
   calls while the VPN breaker is open. Reads stay allowed, so an interrupted phase can still
@@ -142,6 +191,20 @@ The guards (`npm run hooks:verify` — 32 offline assertions, no network, no ses
   `--no-verify` is deliberately allowed — the husky pre-commit hook is broken locally.
 - **`budget-gate`** — refuses a phase whose per-phase, per-ticket, per-window or per-day weighted
   token ceiling is already spent.
+- **`deploy-guard`** — the only remote-execution guard, and the reason phase 10 can be an agent.
+  Outside `deploy`, `ssh`/`scp`/`rsync`/`sftp` are denied outright — no other phase has any
+  business on another machine. Inside `deploy` it permits the vendored `scripts/deploy-wsai.sh`
+  and permits remote verbs only when the parsed `user@host` is in `config/deploy.json`'s
+  `allowedHosts`; an unparseable target is denied, and `git push`/`gh`/`glab` are denied in this
+  phase regardless. Local commands pass through untouched, so reading a log is never blocked.
+
+**`deploy-guard` fails closed; the other four fail open, and that asymmetry is deliberate.** A
+guard that crashes must not wedge a 90-minute phase, so a spawn error, a timeout or non-JSON
+output from `pause-check`, `write-scope`, `git-guard` or `budget-gate` is logged loudly and
+treated as allow — they are policy on operations the pipeline is otherwise structured to
+survive. `deploy-guard` is not: it is the last thing between a confused phase and a live demo
+server, with no human in the path, so `src/conductor/hooks.ts` keeps a `FAIL_CLOSED` set and
+turns any failure of that script into a deny.
 
 **Guards are passed to the SDK in-process, not installed into `~/.claude/settings.json`.** They
 travel with the repo, so a fresh clone is protected with no install step, and your own
@@ -153,7 +216,7 @@ The original design loaded them via `settingSources: ['user']`. That dragged in 
 entire personal config, including a `npx`-based `statusLine` that hung every phase before its
 first turn. There is no global install path any more — it would double-run every guard.
 
-Design rationale for each, and the seven not yet built, is in [docs/HOOKS.md](docs/HOOKS.md).
+Design rationale for each, and the ones not yet built, is in [docs/HOOKS.md](docs/HOOKS.md).
 
 ## Running on a Max subscription
 
@@ -207,21 +270,25 @@ problem, and letting it trip the breaker would make a wrong `GITLAB_TOKEN` look 
 
 | Path | What it is |
 |---|---|
-| `src/index.ts` | the conductor — boot, preflight, watch loop |
-| `src/conductor/` | watcher, queue, phase runner, schema validation, teardown |
+| `src/index.ts` | the conductor — boot, preflight, watch loop, dispatch, drain |
+| `src/conductor/` | watcher, queue, phase runner, the `merge`/`close` code phases, schemas, hook wiring, teardown |
 | `src/phases/` | one module per phase: prompt, schema, tool policy |
-| `src/lib/` | config + session env, SQLite, GitLab, worktrees, quota, reachability, memory |
-| `config/` | project + labels, per-phase model/tools/skills, budgets, deploy, Slack |
-| `hooks/` | guardrails merged into `~/.claude/settings.json` |
-| `scripts/` | hook install/verify, `doctor`, the vendored deploy script |
+| `src/lib/` | config + session env, SQLite, GitLab, worktrees, promotion mutex, quota, reachability, memory |
+| `config/` | project + labels, per-phase model/tools/skills/groups, budgets, deploy, Slack |
+| `hooks/` | guardrails — passed to the SDK in-process, never installed globally |
+| `scripts/` | hook verify, `doctor`, dependency probe, the vendored deploy script |
 | `docs/` | [PLAN.md](docs/PLAN.md) · [HOOKS.md](docs/HOOKS.md) |
 | `state/` | gitignored — runs, artifacts, memory, SQLite |
 
 ## Status
 
-Built and **proven live** through **M1**. A `Loop`-labelled ticket runs against real GitLab,
-producing schema-valid artifacts that hand forward. First end-to-end run on ticket #5
-(Invoices), on the then-current order of recall → research → plan → testcases:
+All sixteen phases are **built**. Everything past M1 is code-complete and **unproven live** —
+that distinction is the whole point of this section, and this repo has already learned six times
+over that reading code is not running it.
+
+**Proven live** through **M1**. A `Loop`-labelled ticket runs against real GitLab, producing
+schema-valid artifacts that hand forward. First end-to-end run on ticket #5 (Invoices), on the
+then-current order of recall → research → plan → testcases:
 
 | phase | result | turns | weighted tokens |
 |---|---|---|---|
@@ -236,16 +303,15 @@ producing schema-valid artifacts that hand forward. First end-to-end run on tick
 |---|---|---|
 | M0 | skeleton, config, hooks + test suite, quota, breaker, watcher, doctor | **done** |
 | M1 | phase runner, schema-enforced handoffs, run journal, teardown, `recall`/`research`/`plan`/`testcases`, Slack card, Langfuse | **done, verified live** |
-| M2 | `implement` — built, unproven; `review` and the review cycle | in progress |
-| M3 | `verify`, `ui-evidence` — dev server on a leased port, Playwright, screenshots | |
-| M4 | `mr`, `merge`, `document` — MR, merge, promote, documentation, uploads | |
-| M5 | `deploy`, `qa`, `demo` — deploy, demo-server QA, demo recording | |
-| M6 | phases 0 + 14 — memory index and recall | |
-| M7 | dashboard, replay, hardening hooks | |
+| M2 | `implement`, `review` and the review cycle | built, unproven |
+| M3 | `verify`, `ui-evidence` — dev server on a leased port, Playwright, screenshots | built, unproven |
+| M4 | `mr`, `merge`, `document` — MR, merge, promote, documentation, uploads | built, unproven |
+| M5 | `deploy`, `qa`, `demo` — guarded deploy agent, demo-server QA, demo recording | built, unproven |
+| M6 | phases 0 + 13 — memory card, index and recall | built, unproven |
+| M7 | dashboard, replay, hardening hooks | partial — `deploy-guard` shipped with M5; dashboard and replay not started |
 
-A blank Status is work not yet started. `runner.ts` stops with an explicit
-`BLOCKED: not built yet: phase '<name>'` rather than skipping ahead — including for the
-deterministic `merge`/`deploy`/`close` phases, so a run can never reach
+`runner.ts` stops with an explicit `BLOCKED: not built yet: phase '<name>'` rather than skipping
+ahead — including for the `merge`/`close` code phases, so a run can never reach
 `Ready For Deployment` without having actually merged and deployed.
 
 ## What six live failures taught this design
