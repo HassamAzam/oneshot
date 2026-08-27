@@ -202,6 +202,44 @@ touching passwords and record the case as blocked. A rejected login with the man
 credentials above is a REGRESSION to report, not an environment fault to fix.`;
 }
 
+/**
+ * Credentials for the DEMO SERVER, which are not the local ones.
+ *
+ * Learned by running out of road: the demo box carries its own anonymised
+ * snapshot, so the account `verify` uses locally does not exist there at all.
+ * The qa phase had no demo credential of its own, fell back to the local one,
+ * and correctly refused to go further — it would not guess a password, because
+ * guessing is credential-stuffing and bypassing the form invalidates the very
+ * thing it is there to test. That refusal is the behaviour to keep; what was
+ * missing was somewhere legitimate for the credential to come from.
+ */
+function demoLoginBlock(): string {
+  const raw = envOr('ONESHOT_DEMO_LOGIN');
+  const [email, ...rest] = raw.split(':');
+  const password = rest.join(':');
+  if (!email || !password) {
+    return `## Demo credentials — NOT PROVISIONED
+
+\`ONESHOT_DEMO_LOGIN\` is unset, and the demo server's database is a different
+snapshot from the local one, so local credentials will not work there.
+
+If you cannot log in: set \`blocked\`, say plainly that no demo credential is
+provisioned, and name what the cases need (which permissions the account must
+hold). Do NOT guess a password, do NOT try a list of likely ones, and do NOT
+bypass the login form — the first two are credential-stuffing and the third
+invalidates the result you were asked to produce.`;
+  }
+  return `## Demo credentials
+Log in to the demo server with EXACTLY these, and nothing else:
+
+    email:    ${email}
+    password: ${password}
+
+They are provisioned outside your session against the demo database. Never
+guess, never try variations, never bypass the login form. If these are rejected,
+that is a provisioning problem worth \`blocked\` — say so and stop.`;
+}
+
 function criteria(ctx: PromptCtx): string {
   const ac = artifact<{ acceptanceCriteria: string[] }>(ctx, 'research').acceptanceCriteria ?? [];
   return ac.map((a) => `  - ${a}`).join('\n') || '  (none recorded)';
@@ -1015,6 +1053,8 @@ ${lapBlock}
 ## Acceptance criteria (phase 1)
 ${criteria(ctx)}
 
+${demoLoginBlock()}
+
 ## What is supposed to be live
 
 demo server:            ${d.demoUrl}
@@ -1091,6 +1131,8 @@ module: ${r.module || '(unrecorded)'}
 Produce the artefact someone who was not involved can watch or read to see this ticket working,
 on the deployed build ${qa.deployedSha || '(SHA unrecorded)'} at ${d.demoUrl}.
 QA verdict on that build: ${qa.verdict || '(none)'}.
+
+${demoLoginBlock()}
 
 ## Your script is already written
 The high-blast cases that PASSED in qa, in order. Do not invent a narrative, and do not
