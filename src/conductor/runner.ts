@@ -53,6 +53,7 @@ import { checkQuota } from '../lib/quota.js';
 import { createRun, getRun, isClaimed, logEvent, phaseEnd, phaseStart, updateRun } from '../lib/db.js';
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
 import { log } from '../lib/log.js';
+import { exportRun } from '../lib/langfuse.js';
 import { publishPending } from '../lib/publish.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { closePhase, mergePhase } from './codephases.js';
@@ -401,7 +402,13 @@ export async function runTicket(
 
     for (const k of members) {
       const p = list[k]!;
-      const quota = checkQuota(runId, p.name);
+      // The lap goes to checkQuota because the per-phase budget bounds ONE
+      // attempt, and this is the only place that knows which attempt is about
+      // to run. Without it a phase on its third lap is measured against a
+      // one-lap allowance its two failures have already spent, and the run is
+      // blocked for budget when what it actually needs is the retry the phase
+      // config promises it.
+      const quota = checkQuota(runId, p.name, lapsOf(iid, p.name));
       if (!quota.allowed) return finish(j, 'blocked', `quota: ${quota.reason}`);
       const leaseError = ensureLeases(p);
       if (leaseError) return finish(j, 'blocked', leaseError);
@@ -950,6 +957,11 @@ export async function runTicket(
     } else {
       log.warn(`■ #${journal.iid} stopped — ${reason ?? 'aborted'}`);
     }
+
+    // The run's own trace, written by the conductor rather than by the
+    // sessions. Last, and never awaited for anything that matters: a Langfuse
+    // that is down must not change how a run ends.
+    await exportRun(journal);
 
     // Teardown. Scratch goes; the journal, artifacts and transcripts stay —
     // those are the run's value. The WORKTREE stays on anything that is not a

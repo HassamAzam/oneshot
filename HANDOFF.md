@@ -1,0 +1,191 @@
+# Handoff — running Oneshot
+
+Everything needed to take a GitLab ticket from the `Loop` label to
+`Ready For Deployment` without anyone watching. Ticket #5 went the whole way on
+2026-08-27; that run needed about a dozen human interventions, and this document
+exists because each one of them is now either automated or written down.
+
+Read the **Run it** section. The rest is for when something stops.
+
+---
+
+## Run it
+
+```sh
+cd ~/Documents/oneshot
+npm run preflight        # exit 0 = READY. Fix anything it FAILs before starting.
+npm start                # watch mode: claims any ticket labelled `Loop`, every 60s
+```
+
+Then label a ticket `Loop` in `arbisoft/workstreamai` and leave it alone.
+
+For one specific ticket instead of watching:
+
+```sh
+npm start -- --ticket 6
+```
+
+Long runs outlive a terminal better detached:
+
+```sh
+nohup npx tsx src/index.ts --ticket 6 >> state/logs-ticket6.log 2>&1 &
+tail -f state/logs-ticket6.log
+```
+
+A full ticket takes **3–5 hours** and roughly **5M weighted tokens**. Most of
+that is `implement`, `verify` and `qa`.
+
+---
+
+## Before the first run of the day
+
+`npm run preflight` answers all of this, but the two things it cannot fix
+itself:
+
+**The VPN must be up.** GitLab and the demo box are both behind FortiClient. A
+dropped tunnel is the single most common cause of a stalled run, and preflight
+FAILs on it with that wording.
+
+**`GITLAB_TOKEN` should be a project access token, not yours.** Preflight WARNs
+while it is a personal token, because every note, MR, merge and label change is
+attributed to whoever owns it — which makes "did I do this or did the pipeline"
+unanswerable later. Create one at *Settings → Access Tokens* on
+`arbisoft/workstreamai` with role **Maintainer** (the merge phase needs to merge
+into a protected `dev`) and scopes `api` + `write_repository`, then:
+
+```sh
+read -rs -p "paste token: " T && sed -i '' "s|^GITLAB_TOKEN=.*|GITLAB_TOKEN=$T|" .env && unset T
+```
+
+---
+
+## When a run stops
+
+Every stop posts a note on the ticket saying why, applies `Needs Human`, and
+names the run id (`r-<base36 time>-<hex>`, which is also the worktree directory,
+the SQLite row and the Langfuse session). Read the note first — the phase that
+stopped has almost always already diagnosed it precisely.
+
+Then, once you have fixed the cause:
+
+```sh
+npm run unblock -- 6                    # see what it would do, then do it
+npm run unblock -- 6 --dry-run          # inspect only
+npm run unblock -- 6 --phase qa         # retry one phase
+```
+
+That performs the whole manual sequence that used to be done by hand: prunes the
+failed phase records while keeping every succeeded one, clears the blocked
+status, deletes the half-written artifacts of the phases being retried (a stale
+artifact is worse than none — the next lap reads it as fact), releases that run's
+phase budget, swaps `Needs Human` off and `Loop` back on, and clears stale locks
+and port leases. Then `npm start` again and it resumes exactly where it stopped.
+
+**Never hand-edit `state/runs/<iid>/run.json`.** That is what `unblock` is for,
+and it knows which artifacts have to go with which records.
+
+A blocked run is refused for **60 minutes** before it can be re-claimed, so the
+watcher cannot loop on the same failure while you are still reading the note.
+
+---
+
+## The failures you should expect, and what they mean
+
+These all happened on ticket #5. Each is now either fixed in code or has a known
+response.
+
+| What you see | What it is | What to do |
+|---|---|---|
+| `BLOCKED — qa: no demo credential` / `cannot log in` | The demo box runs a **different anonymised snapshot** from the local seed, so local accounts do not exist there | `ONESHOT_DEMO_LOGIN` in `.env`. Preflight verifies it every time |
+| `qa` blocked on a permission, e.g. buttons never render | The demo account lacks a group the feature is gated behind | Provision `ONESHOT_DEMO_ADMIN_URL` + `ONESHOT_DEMO_ADMIN` and `qa` arranges its own preconditions through the admin panel, recording every change in `dataChanges` |
+| `phase '<name>' ceiling reached` immediately | Was a real bug: per-phase ceilings counted every lap, so failed attempts permanently ate the budget | Fixed — ceilings are **per attempt** now. If you still see it, the phase genuinely spent its budget in one go; do not raise the number, read the transcript |
+| `timed out after Nm while still working` | The phase was alive and simply ran out of clock | Its partial results are salvaged into a verdict automatically. If it recurs for the same phase, raise that phase's `maxTurns` in `config/phases.json` |
+| `timed out ... without a single message` | Genuinely different: the session never started | `npm run deps:verify` — this is the wedged-MCP-spawn shape |
+| `another conductor is already running` | A previous process still holds the lock, or died holding it | `npm run preflight` clears it when the process is gone |
+| `login rejected` locally with a correct password | This venv computes **corrupted password hashes** when `psycopg2` loads before `ssl`/`hashlib` | Never write passwords from an ad-hoc shell. `ONESHOT_TEST_LOGIN` is managed outside the session for exactly this reason |
+| Run stops at `deploy` | The demo box is VPN-gated and the phase will not retry through an outage | Reconnect, `npm run unblock -- <iid>`, restart |
+
+---
+
+## What it produces
+
+**On the ticket:** the plan as markdown and the test cases as CSV, posted as
+soon as those phases finish rather than at the end; QA follow-ups; a closing
+summary. **On the MR:** verification results, the UI evidence pack, QA results
+and the demo — 45 embedded screenshots on ticket #5.
+
+**On disk**, and this is the real record:
+
+```
+state/runs/<iid>/run.json                     the journal: every phase, lap, status, spend
+state/runs/<iid>/transcripts/<phase>.jsonl    every message of every phase
+state/runs/<iid>/artifacts/                   screenshots, demo, reports
+state/memory/                                 cards, so the next similar ticket starts warm
+```
+
+**In Langfuse:** one trace per run, one span per phase, with models and real
+token counts.
+
+```sh
+npm run langfuse -- 6      # re-export one run (idempotent)
+npm run langfuse           # backfill everything on disk
+```
+
+Worth knowing: the CLI's own OpenTelemetry **does not work through the Agent
+SDK** — measured, not assumed. A session spawned by `query()` exports nothing
+while the identical environment spawned as `claude -p` exports every time, and
+it is not a flush race. So the conductor writes the trace itself from the
+journal. You lose per-tool-call spans; you keep the run, the phases, the
+timings, the models and the spend.
+
+---
+
+## Safety, and what it will not do
+
+- `merge` and `close` are **code, not models** — no session holds a merge tool.
+- `deploy` is a session, but caged: `hooks/deploy-guard.cjs` fails **closed** and
+  allows only allowlisted hosts and remote verbs. Afterwards the conductor
+  re-derives the deployed SHA itself and **overrules** the phase unless it
+  contains this run's merge SHA and the site answers 200.
+- `git-guard` forbids force-push, pushes to protected branches, and pushes to
+  any ref but this run's leased branch.
+- A `verify` that passes **no** cases hard-stops the run rather than riding a
+  clean-looking card toward a merge.
+- `qa` returns `fail` for any high-blast failure, for a reproducible failure in
+  behaviour the change touched, and whenever it cannot tell. Only narrow,
+  low-blast, describable defects — and anything in behaviour the ticket never
+  touched — become `followUps` posted to the ticket instead of blocking.
+- `state/PAUSE` freezes everything, including sessions already mid-phase.
+  Nothing automatic ever removes it.
+- `DRY_RUN=1 npm start` runs every phase and refuses every write.
+
+**Do not `git add -A` in this repo while a run is in flight.** Phases write
+scratch at the conductor root — a Bash redirect escapes `write-scope`, which
+only guards the `Write`/`Edit` tools — and a session-state file was once
+committed to a public repo this way. The patterns are gitignored now; stage
+deliberately anyway.
+
+---
+
+## Concurrency
+
+`config/project.json` sets `concurrency: 2`. Tickets pipeline freely, but the
+`merge → deploy → qa` window is held by **one run at a time** via
+`src/lib/promotion.ts` — the deploy ships a branch *tip*, so two runs merging
+into `dev` inside that window would make neither QA verdict attributable. The
+upper bound is the port pool (`PORT_POOL`, 3 by default).
+
+---
+
+## If you change something
+
+```sh
+npm run check          # tsc + syntax-check every guard
+npm run hooks:verify   # 89 offline guard assertions, no network
+npm run doctor         # auth, config, paths, GitLab, deploy target
+npm run preflight      # everything above plus live credentials and stale state
+```
+
+`tsx` compiles at process start, so a running conductor keeps executing the code
+it launched with. Edits apply on the **next** launch — which is what makes it
+safe to fix something while a run is in flight.

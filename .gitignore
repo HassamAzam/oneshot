@@ -14,3 +14,6 @@ logs/
 /*-auth.json
 /*-recon.cjs
 /otel-*.mts
+
+# document phase stages attachments here before upload_markdown (it rejects absolute paths)
+/evidence_upload/

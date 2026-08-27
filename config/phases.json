@@ -114,8 +114,8 @@
     },
     {
       "name": "document", "n": 14, "kind": "session", "tier": "light",
-      "cwd": "conductor", "maxTurns": 40, "timeoutMin": 15,
-      "writes": ["run"], "onFail": "warn",
+      "cwd": "conductor", "maxTurns": 70, "timeoutMin": 25,
+      "_why_turns": "Measured live: this phase composes two long-form notes (the ticket and the MR) and uploads the evidence attachments behind them, on the light tier, which spends turns where a heavier model would spend tokens. 40 never fit the job — it died at max_turns with the notes half-written, and because onFail is warn that loss is silent: the run finishes green having published nothing.",
       "skills": ["mr-documentation", "ui-evidence-pack"],
       "artifact": "document.json"
     },

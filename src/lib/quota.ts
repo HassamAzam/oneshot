@@ -105,8 +105,29 @@ export function accountWindowPct(): number | null {
   }
 }
 
-/** Checked before claiming a ticket and again at every phase boundary. */
-export function checkQuota(runId?: string, phase?: string): QuotaVerdict {
+/**
+ * Checked before claiming a ticket and again at every phase boundary.
+ *
+ * `lap` is the zero-based attempt the phase is about to make, and it is what
+ * turns the per-phase number in budgets.json into a ceiling on ONE ATTEMPT
+ * rather than on the whole run. phaseUsage() sums every lap of a phase across
+ * the run, so measuring that sum against a flat cap means a phase that failed
+ * twice has already spent its allowance and its third attempt is refused before
+ * it starts — while config/phases.json is at the same moment explicitly telling
+ * it to make that attempt. A cumulative per-phase ceiling and a bounded lap
+ * count are the same protection counted twice, and the shape of the failure is
+ * a run that cannot retry precisely what it is configured to retry, reported as
+ * a budget problem so that it reads like one. The only repair available to a
+ * human is to raise the number, which buys the retry by permanently inflating
+ * the ceiling for every future ticket.
+ *
+ * So the allowance scales with the attempt: cap * (lap + 1). The COUNT of
+ * attempts is already bounded — maxLaps for cycle phases, maxRetries for retry
+ * phases — so per-attempt cap times attempt cap is still a finite cumulative
+ * bound, and ticket_tokens above it remains the real guard against a run that
+ * cycles its way through the window.
+ */
+export function checkQuota(runId?: string, phase?: string, lap = 0): QuotaVerdict {
   if (quotaParked()) return { allowed: false, reason: 'parked after a subscription usage limit' };
 
   const cfg = budgetConfig();
@@ -135,13 +156,18 @@ export function checkQuota(runId?: string, phase?: string): QuotaVerdict {
       return { allowed: false, reason: 'per-ticket ceiling reached', detail: { used, cap: cfg.ticket_tokens } };
     }
     if (phase) {
-      const cap = cfg.phases[phase];
-      if (cap !== undefined && phaseUsage(runId, phase) >= cap) {
-        return {
-          allowed: false,
-          reason: `phase '${phase}' ceiling reached`,
-          detail: { used: phaseUsage(runId, phase), cap },
-        };
+      const perAttempt = cfg.phases[phase];
+      if (perAttempt !== undefined) {
+        const attempts = Math.max(1, Math.floor(lap) + 1);
+        const allowed = perAttempt * attempts;
+        const spent = phaseUsage(runId, phase);
+        if (spent >= allowed) {
+          return {
+            allowed: false,
+            reason: `phase '${phase}' ceiling reached on attempt ${attempts}`,
+            detail: { used: spent, cap: allowed, perAttempt, attempts },
+          };
+        }
       }
     }
   }
