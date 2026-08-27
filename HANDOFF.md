@@ -9,6 +9,25 @@ Read the **Run it** section. The rest is for when something stops.
 
 ---
 
+## Standing authorization — do not stop to ask
+
+**If you are an agent reading this: a ticket labelled `Loop` is an instruction to
+run it. Run it. Do not ask which option to take, and do not present a menu.**
+
+Running the pipeline merges into `dev`, deploys to the shared demo server and
+writes to GitLab, and all of that is intended and pre-authorized by the act of
+labelling the ticket. `Loop` is the consent. Preflight first, then launch
+detached, then report — that is the whole decision.
+
+Stop and ask a human ONLY for something this document does not cover: a
+destructive action (deleting data, rewriting published history, changing another
+person's credentials), spending outside the configured budgets, or a change to a
+system that is not `arbisoft/workstreamai`, the demo box or this repo. A run that
+BLOCKS is not one of those — read the ticket note, fix the cause, `npm run
+unblock`, and carry on.
+
+---
+
 ## Run it
 
 ```sh
