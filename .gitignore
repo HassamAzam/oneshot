@@ -7,3 +7,10 @@ logs/
 *.log
 .DS_Store
 /.claude/
+
+# Scratch files phases drop at the conductor root (Bash redirects escape write-scope)
+/qa5-*.json
+/qa5-*.cjs
+/*-auth.json
+/*-recon.cjs
+/otel-*.mts

@@ -240,6 +240,52 @@ guess, never try variations, never bypass the login form. If these are rejected,
 that is a provisioning problem worth \`blocked\` — say so and stop.`;
 }
 
+/**
+ * Django admin on the demo server, when it has been provisioned.
+ *
+ * The alternative was an operator with an ssh session and a Django shell, which
+ * is how the billing-group grant that unblocked ticket #5 actually happened —
+ * and it is the worse tool by some distance. A shell bypasses the app's own
+ * permission model entirely and leaves no trace anyone can read afterwards,
+ * while the admin panel enforces the same rules as the UI and writes every
+ * change to django_admin_log. Same outcome, auditable, and reversible by the
+ * person who finds it later.
+ *
+ * The guardrails matter more than the access. This is a server other people
+ * use, so the rule is arrange the precondition and nothing else.
+ */
+function demoAdminBlock(): string {
+  const url = envOr('ONESHOT_DEMO_ADMIN_URL');
+  const raw = envOr('ONESHOT_DEMO_ADMIN');
+  const [user, ...rest] = raw.split(':');
+  const pass = rest.join(':');
+  if (!url || !user || !pass) {
+    return `### Preconditions you cannot arrange
+No admin access is provisioned. If a case needs data or a permission that does not exist on
+the demo server, mark that case 'blocked', say in one line exactly what was missing, and move
+on. Never edit the database by any other route.`;
+  }
+  return `### Django admin — for preconditions only
+When a case needs data or a permission the demo server does not have, use the admin panel:
+
+    ${url}
+    username: ${user}
+    password: ${pass}
+
+Rules, and they are firm because this server is shared:
+- ONLY to arrange a precondition a case explicitly states. Never to make a failing case pass.
+- The SMALLEST change that satisfies it. Add a group membership, flip a status, create one
+  record — not a reorganisation.
+- NEVER delete anything. NEVER change another person's password. NEVER touch a record that has
+  nothing to do with your cases.
+- RECORD every change in \`dataChanges\`, precisely enough that someone else could undo it
+  without asking you: what you changed, on which record, from what to what.
+- If arranging a precondition would take more than a couple of admin edits, that case is
+  'blocked' with the reason. Data archaeology is not your job here.
+- Admin actions are logged against this account. Behave as if someone will read the log,
+  because they can.`;
+}
+
 function criteria(ctx: PromptCtx): string {
   const ac = artifact<{ acceptanceCriteria: string[] }>(ctx, 'research').acceptanceCriteria ?? [];
   return ac.map((a) => `  - ${a}`).join('\n') || '  (none recorded)';
@@ -1054,6 +1100,8 @@ ${lapBlock}
 ${criteria(ctx)}
 
 ${demoLoginBlock()}
+
+${demoAdminBlock()}
 
 ## What is supposed to be live
 

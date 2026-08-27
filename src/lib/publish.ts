@@ -260,9 +260,17 @@ const SPECS: Spec[] = [
     build: (data, ctx) => {
       const results = (data.results as CaseResult[]) ?? [];
       const verdict = String(data.verdict ?? 'unknown');
+      // Surfaced rather than filed: a change made to a SHARED server to get a
+      // case running is exactly the thing a reviewer needs to see, and the
+      // thing whoever hits it next week needs in order to undo it.
+      const changes = (data.dataChanges as string[]) ?? [];
       return {
         body: `**QA on the demo server** — verdict **${verdict}** (${tally(results)}).\n\n` +
           `Deployed SHA \`${String(data.deployedSha ?? '?').slice(0, 12)}\`\n\n${resultTable(results)}\n\n` +
+          (changes.length
+            ? `**Demo-server data changed to arrange preconditions** — undo these when the ` +
+              `ticket is done:\n${changes.map((c) => `- ${c}`).join('\n')}\n\n`
+            : '') +
           `_Run ${ctx.runId} · the same case list, executed against the deployed build._`,
         attachments: screenshotsFrom(ctx.iid, results, 10),
       };

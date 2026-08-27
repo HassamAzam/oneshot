@@ -254,7 +254,13 @@ export const QA_SCHEMA = phaseSchema({
   deployedSha: str('SHA actually live on the demo server when you tested.'),
   results: CASE_RESULT,
   verdict: { type: 'string', enum: ['pass', 'fail'] },
-}, ['deployedSha', 'results', 'verdict']);
+  dataChanges: strArr(
+    'EVERY change you made to the demo server to arrange a precondition, one per entry, each ' +
+    'specific enough to undo without you: what you changed, on which record, from what to what. ' +
+    'Empty array if you changed nothing. This is a shared server other people use, so an ' +
+    'unrecorded change is indistinguishable from someone else breaking their own environment.',
+  ),
+}, ['deployedSha', 'results', 'verdict', 'dataChanges']);
 
 export const DEMO_SCHEMA = phaseSchema({
   files: strArr('Demo artefacts produced, under artifacts/.'),
