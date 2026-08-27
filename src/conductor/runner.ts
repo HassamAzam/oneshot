@@ -480,9 +480,13 @@ export async function runTicket(
       // mark everything it never reached as skipped, and let the pipeline
       // continue — qa executes this same list against the deployed build
       // anyway, which is what makes a partial local pass acceptable.
-      if (r.cfg.name === 'verify' && !r.out.ok && !r.out.blocked) {
+      // Both list-executing phases, because both run the same twenty cases and
+      // both can run out of turns doing it. qa is the more expensive one to
+      // lose: its cycle goes all the way back to implement and drags the MR,
+      // the merge and the deploy along with it.
+      if ((r.cfg.name === 'verify' || r.cfg.name === 'qa') && !r.out.ok && !r.out.blocked) {
         const partial = readArtifact<{ results?: Array<Record<string, unknown>> }>(
-          iid, 'verify-partial.json',
+          iid, `${r.cfg.name}-partial.json`,
         );
         const recorded = partial?.results ?? [];
         const recordedPasses = recorded.filter((x) => String(x.result) === 'pass').length;
@@ -495,18 +499,23 @@ export async function runTicket(
               id: c.id, result: 'skipped',
               evidence: 'session died at its turn cap before this case ran', screenshot: '',
             }));
-          r.out.data = {
-            summary: `Salvaged from verify-partial.json: ${recorded.length} case(s) recorded ` +
-              `before the session died (${r.out.error ?? 'no error text'}); ${skipped.length} never ran.`,
-            blocked: null,
-            serverStarted: true,
-            port: port ?? 0,
-            results: [...recorded, ...skipped],
-            regressions: [],
-          };
+          const results = [...recorded, ...skipped];
+          const summary = `Salvaged from ${r.cfg.name}-partial.json: ${recorded.length} case(s) `
+            + `recorded before the session died (${r.out.error ?? 'no error text'}); `
+            + `${skipped.length} never ran.`;
+          // A salvaged qa verdict is only ever 'fail' — a pass is an assertion
+          // that the whole list ran, and by construction this one did not.
+          r.out.data = r.cfg.name === 'qa'
+            ? {
+              summary, blocked: null, results, verdict: 'fail',
+              deployedSha: String(readArtifact<{ deployedSha?: string }>(iid, 'deploy.json')?.deployedSha ?? ''),
+            }
+            : {
+              summary, blocked: null, serverStarted: true, port: port ?? 0, results, regressions: [],
+            };
           r.out.ok = true;
-          writeArtifact(iid, 'verify.json', r.out.data);
-          log.warn(`verify salvaged from partial results — ${recorded.length} recorded, ${skipped.length} skipped`);
+          writeArtifact(iid, r.cfg.artifact ?? `${r.cfg.name}.json`, r.out.data);
+          log.warn(`${r.cfg.name} salvaged from partial results — ${recorded.length} recorded, ${skipped.length} skipped`);
         }
       }
     }

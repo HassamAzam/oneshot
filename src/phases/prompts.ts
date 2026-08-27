@@ -1098,6 +1098,26 @@ and do not bypass. There is no local server and no leased port in this phase.
 Report one result per case, using the case's own id, with evidence that reads ACTUAL vs
 EXPECTED. Screenshot every fail.
 
+## Turn economy — a protocol, not advice
+
+\`verify\` ran this same list and died at its turn cap three times before it learned this. You
+are running it against a remote server, so every round trip costs more than it did there.
+
+- BATCH. ONE Playwright script that logs in once, reuses the authenticated context, runs MANY
+  cases in sequence and prints \`CASE <id> PASS|FAIL <one-line evidence>\` per case. A handful of
+  script invocations for the whole list — never a write-run-read round trip per case.
+- Blast order: high first, then medium, then low. If something has to give, it is a low-blast
+  case, marked 'skipped' with the reason.
+- LAND THE PLANE. At roughly 70% of your turn budget, stop starting new cases, mark the rest
+  'skipped', and emit the structured result. Finishing early with an honest accounting is a
+  success; dying at the cap is the one true failure, because it produces no verdict at all.
+- WRITE AS YOU GO. After every case settles, rewrite
+  \`${runDir(ctx.ticket.iid)}/qa-partial.json\` as \`{"results": [<CaseResult so far>]}\` — the
+  same shape as your final \`results\`. If this session dies anyway, that file is what survives
+  it.
+- This is a READ-ONLY pass against someone else's server. Do not fix, redeploy, restart a
+  service, or edit data beyond what a case's precondition legitimately needs.
+
 ${artifactsBlock(ctx)}
 
 ${ORACLE}
