@@ -147,6 +147,62 @@ export async function addIssueNote(
   );
 }
 
+export interface Upload {
+  url: string;
+  markdown: string;
+  full_path?: string;
+}
+
+/**
+ * Attach a file to the project and get back the markdown that renders it.
+ *
+ * Multipart, so it cannot go through call() — and deliberately so: the JSON
+ * helper sets its own Content-Type, while a multipart body needs fetch to
+ * generate the boundary, which it only does when the header is ABSENT.
+ *
+ * The returned `markdown` is project-scoped: it renders in a note on this
+ * project's issues or merge requests and nowhere else, which is exactly the
+ * scope Oneshot posts into.
+ */
+export async function uploadFile(
+  filename: string, content: Buffer | string, mime = 'application/octet-stream',
+): Promise<GitlabResult<Upload>> {
+  if (DRY_RUN) {
+    log.warn('[dry-run] would upload', { filename, bytes: content.length });
+    return {
+      ok: true, kind: 'ok', status: 200,
+      data: { url: '', markdown: `_(dry-run: ${filename} not uploaded)_` },
+    };
+  }
+  const bytes = typeof content === 'string' ? Buffer.from(content, 'utf8') : content;
+  const form = new FormData();
+  form.append('file', new Blob([new Uint8Array(bytes)], { type: mime }), filename);
+
+  const controller = new AbortController();
+  const killer = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const res = await fetch(`${base()}/projects/${projectId()}/uploads`, {
+      method: 'POST',
+      headers: { 'PRIVATE-TOKEN': writeToken() },
+      body: form,
+      signal: controller.signal,
+    });
+    const kind = classify(res.status);
+    if (kind !== 'ok') {
+      const text = await res.text().catch(() => '');
+      return { ok: false, kind, status: res.status, data: null, error: text.slice(0, 300) };
+    }
+    return { ok: true, kind: 'ok', status: res.status, data: (await res.json()) as Upload };
+  } catch (err) {
+    return {
+      ok: false, kind: 'network', status: 0, data: null,
+      error: (err as Error).message.slice(0, 300),
+    };
+  } finally {
+    clearTimeout(killer);
+  }
+}
+
 /**
  * Swap the ticket's Oneshot label, preserving every other label.
  *

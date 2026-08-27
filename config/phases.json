@@ -55,7 +55,8 @@
     },
     {
       "name": "verify", "n": 6, "kind": "session", "tier": "standard",
-      "cwd": "worktree", "maxTurns": 90, "timeoutMin": 60,
+      "cwd": "worktree", "maxTurns": 200, "timeoutMin": 90,
+      "_why_turns": "Measured live: driving webpack + the real login form + a ~19-case list through Bash-run Playwright exhausted 90 turns before the list finished. The turn cap must fit the whole list — a verify that dies at max_turns produces no artifact, and the cycle it triggers re-pays implement and review for what was only a budget problem.",
       "writes": ["worktree", "run", "artifacts"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 2,
       "coding": true, "needsPort": true,
       "skills": ["local-browser-verify"],
@@ -63,7 +64,7 @@
     },
     {
       "name": "ui-evidence", "n": 7, "kind": "session", "tier": "standard",
-      "cwd": "worktree", "maxTurns": 60, "timeoutMin": 30,
+      "cwd": "worktree", "maxTurns": 80, "timeoutMin": 40,
       "writes": ["run", "artifacts"], "onFail": "warn", "needsPort": true, "group": "package",
       "skills": ["ui-evidence-pack"],
       "artifact": "ui-evidence.json"
@@ -91,7 +92,7 @@
     },
     {
       "name": "qa", "n": 11, "kind": "session", "tier": "heavy",
-      "cwd": "conductor", "maxTurns": 90, "timeoutMin": 45,
+      "cwd": "conductor", "maxTurns": 140, "timeoutMin": 60,
       "writes": ["run", "artifacts"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 2,
       "skills": ["demo-server-qa"],
       "artifact": "qa.json"

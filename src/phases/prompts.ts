@@ -20,7 +20,7 @@
  *    attributed to this ticket.
  */
 import {
-  artifactDir, deployConfig, phaseByName, projectConfig, type PhaseConfig,
+  artifactDir, deployConfig, envOr, phaseByName, projectConfig, runDir, type PhaseConfig,
 } from '../lib/config.js';
 import type { RunJournal } from '../lib/artifacts.js';
 import {
@@ -172,6 +172,36 @@ function caseList(list: TestCase[], opts: { steps: boolean }): string {
 }
 
 /** Acceptance criteria: the only oracle an executing phase is allowed to use. */
+/**
+ * Managed test credentials for the local app, from ONESHOT_TEST_LOGIN
+ * (email:password in .env). Managed OUTSIDE the session on purpose: the
+ * import-order trap above means a session that writes a password can poison its
+ * own login and then burn its budget concluding the app is broken. The
+ * operator pins the hash with a preloaded shell; the session only USES it.
+ */
+function testLoginBlock(): string {
+  const raw = envOr('ONESHOT_TEST_LOGIN');
+  const [email, ...rest] = raw.split(':');
+  const password = rest.join(':');
+  if (!email || !password) {
+    return `Passwords: set them yourself ONLY with a shell that opens \`import ssl, hashlib\`,
+and after ANY password write immediately prove it with a curl to the login endpoint. If that
+check fails once, STOP touching passwords and report — iterating here is the trap.`;
+  }
+  return `Log in with EXACTLY these managed credentials — they are pinned outside your session
+and verified against the running server before you started:
+
+    email:    ${email}
+    password: ${password}
+
+NEVER reset, change, or re-pin this password — a corrupted-shell write is precisely how the
+trap above poisons login. If a case genuinely needs a DIFFERENT user (another role), you may
+set that one user's password ONLY with a shell that opens \`import ssl, hashlib\`, and you must
+immediately prove the write with a curl to the login endpoint; if that proof fails once, stop
+touching passwords and record the case as blocked. A rejected login with the managed
+credentials above is a REGRESSION to report, not an environment fault to fix.`;
+}
+
 function criteria(ctx: PromptCtx): string {
   const ac = artifact<{ acceptanceCriteria: string[] }>(ctx, 'research').acceptanceCriteria ?? [];
   return ac.map((a) => `  - ${a}`).join('\n') || '  (none recorded)';
@@ -576,11 +606,41 @@ into a shared symlinked \`node_modules\` corrupts every other worktree on this m
 copied from a checkout that runs elsewhere, and the frontend will otherwise call an API that is
 not yours. That file is in \`.git/info/exclude\`, so editing it cannot reach a commit.
 
-The FIRST webpack compile is slow — minutes, not seconds — and silence is not failure. POLL the
-port until it answers, with a bounded overall wait; never a blind \`sleep\` long enough to cover
-the worst case, because that spends the wall clock whether or not the server came up early.
-A detached start needs stdin held open: \`tail -f /dev/null | npm start\`. Your whole budget is
-${mins} minutes, so start the server FIRST and read the diff while it compiles.
+The app is TWO processes — the webpack dev server (frontend assets) and Django (HTML + API on
+your leased port) — and the expensive one is webpack: its FIRST compile takes minutes, and
+silence during it is not failure. So before building anything, CHECK what is already alive: a
+previous lap's servers can outlive their session, and a warm webpack is minutes of your budget
+handed back. \`lsof\` the listener's cwd and require it to be THIS worktree — a server from any
+other worktree path is stale evidence and must be killed, never reused. Django restarts in
+seconds, so a missing backend is cheap; a missing webpack is the thing worth checking for
+first. Start whatever is missing DETACHED with \`setsid\` so it survives this session — the
+next phase reuses it instead of re-paying the compile. POLL until ready with a bounded wait;
+never a blind worst-case \`sleep\`. Your whole budget is ${mins} minutes; start servers FIRST
+and do your reading while webpack compiles.
+
+Previous laps may also have left your own artifacts in the worktree — a Playwright suite, login
+helpers. REUSE them; re-authoring a script that already exists is pure turn burn.
+
+## Known environment trap — SOLVED, do not re-diagnose it
+
+This machine's seeded venv has an import-order conflict: a Python process that touches
+\`psycopg2\` before \`ssl\`/\`hashlib\` initialize computes CORRUPTED password hashes. The
+poisonous consequence is indirect: a password WRITTEN by a corrupted shell verifies inside
+that same shell and is rejected by the healthy server — which looks exactly like broken login
+with correct credentials, and has eaten two whole sessions chasing it. The cure is
+invocation-only — \`import ssl, hashlib\` FIRST in every python you start. Django is started
+EXACTLY like this, from the worktree:
+
+\`\`\`
+source venv/bin/activate && nohup python -c "
+import ssl, hashlib
+import sys
+sys.argv = ['manage.py', 'runserver', '0.0.0.0:<your port>', '--noreload']
+exec(compile(open('manage.py').read(), 'manage.py', 'exec'))
+" > .verify-scratch/django.log 2>&1 < /dev/null & disown
+\`\`\`
+
+${testLoginBlock()}
 
 ${migrations.length ? `Run migrations before the first request — this change added ${migrations.join(', ')}.` : 'No migrations were added this run, so the seeded database is already the right shape.'}
 
@@ -603,6 +663,34 @@ the reason in \`evidence\` — never a silent omission, and never a 'pass'.
 
 \`evidence\` for a fail is ACTUAL vs EXPECTED, in that order, in one line. "Did not work" is not
 evidence and the next \`implement\` lap cannot act on it.
+
+## Turn economy — this is what killed the last session, so it is a protocol, not advice
+
+A session that dies at its turn cap produces NO artifact, and no artifact costs the pipeline a
+full implement+review lap for what was only your own budgeting. A partial result with honest
+'skipped' rows costs nothing. So:
+
+- BATCH. Write ONE Playwright script that logs in once, reuses the authenticated context, runs
+  MANY cases in sequence, prints one \`CASE <id> PASS|FAIL <one-line evidence>\` line per case,
+  and screenshots as it goes. The whole list should take a handful of script invocations —
+  never one write-run-read round trip per case.
+- Blast order. Execute high-blast cases first, then medium, then low. If anything must be
+  dropped, it is a low-blast case — 'skipped', with the reason.
+- Data setup is bounded. Arrange preconditions with at most a few Django-shell calls TOTAL,
+  batched — one script that inspects and fixes up every case's data at once. A case whose data
+  cannot be arranged inside that budget is 'blocked' with one line saying what was missing.
+  Data archaeology is where whole sessions quietly go to die.
+- Do not re-derive the change. \`implement\`'s file list above is authoritative; the diff is
+  context you already have, not something to reconstruct commit by commit.
+- LAND THE PLANE. Keep a rough count of your own tool calls; at ~70% of your turn budget, stop
+  launching new cases, mark the rest 'skipped', and emit the structured result. Ending early
+  with a complete accounting is a success; ending at max_turns is the one true failure.
+- WRITE AS YOU GO — this is the backstop for everything above. After EVERY case settles,
+  rewrite \`${runDir(ctx.ticket.iid)}/verify-partial.json\` as \`{"results": [<CaseResult so far>]}\`
+  (same shape as your final \`results\` field). If this session dies at its cap anyway, the
+  conductor salvages that file into a partial verdict instead of burning an implement lap; a
+  session that kept it current has therefore already succeeded, whatever happens to its last
+  turn.
 
 ${ORACLE}
 

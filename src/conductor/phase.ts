@@ -159,7 +159,19 @@ function mcpServers(): Record<string, unknown> {
       type: 'stdio',
       command: cmd,
       args,
+      // BASE_ENV first, and it is load-bearing rather than tidy. This block
+      // REPLACES the subprocess environment, and `node_modules/.bin/mcp-gitlab`
+      // is a shim whose shebang is `#!/usr/bin/env node` — so with only the
+      // GitLab variables here there is no PATH, `env` cannot find node, and the
+      // server dies instantly with exit 127. The SDK still reports the server
+      // as `connected`, and the session simply gets no mcp__gitlab__* tools at
+      // all: the `mr` phase pushes its branch, finds nothing to create an MR
+      // with, and blocks. Same family as the npx failure this file already
+      // documents — a dependency that is configured is not a dependency that
+      // runs. `npm run deps:verify` spawns it with a real environment, which is
+      // why it passed while every phase went without.
       env: {
+        ...BASE_ENV,
         GITLAB_PERSONAL_ACCESS_TOKEN: token,
         GITLAB_API_URL: envOr('ONESHOT_GITLAB_API', 'https://gitlab.arbisoft.com/api/v4'),
         USE_PIPELINE: 'true',
@@ -231,6 +243,8 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   };
   // Bounded: only frames that could name a subscription limit.
   const limitSignals: string[] = [];
+  /** Stream messages seen — the only honest way to tell a wedged spawn from a slow phase. */
+  let sawActivity = 0;
   let settled = false;
 
   try {
@@ -270,6 +284,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     });
 
     for await (const msg of q) {
+      sawActivity += 1;
       try {
         appendFileSync(tee, `${JSON.stringify(msg)}\n`);
       } catch { /* the tee is best-effort; never fail a phase over logging */ }
@@ -329,10 +344,18 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   } catch (err) {
     const m = (err as Error).message ?? String(err);
     if (timedOut) {
-      out.error = out.turns === 0
-        ? `timed out after ${cfg.timeoutMin}m at ZERO turns — the session never started. `
-          + 'Almost always a wedged MCP server spawn: run `npm run deps:verify`.'
-        : `timed out after ${cfg.timeoutMin}m`;
+      // `turns` is only populated by a result frame, so a session killed
+      // mid-work reports zero of them however long it actually worked. Read
+      // the stream instead: nothing at all means the spawn wedged, whereas
+      // assistant traffic means a session that was working and simply never
+      // finished. Conflating the two sends whoever reads this at a healthy MCP
+      // server while the real answer is a budget that was too small.
+      out.error = !sawActivity
+        ? `timed out after ${cfg.timeoutMin}m without a single message — the session never `
+          + 'started. Almost always a wedged MCP server spawn: run `npm run deps:verify`.'
+        : `timed out after ${cfg.timeoutMin}m while still working (${sawActivity} stream `
+          + 'messages, no final result). The phase needs a larger budget or less to do; any '
+          + 'partial artifact it wrote on the way is the only salvageable evidence.';
       limitSignals.push(m);
     } else if (ac.signal.aborted) {
       // A cancellation the conductor asked for reports nothing about the

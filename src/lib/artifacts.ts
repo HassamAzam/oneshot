@@ -63,6 +63,8 @@ export interface RunJournal {
   blockedAt?: number;
   /** The closing note on the ticket, so a re-run of `close` edits instead of repeating. */
   closeNoteId?: number;
+  /** Publication keys already posted to GitLab — see lib/publish.ts. */
+  published?: string[];
   slackTs?: string;
   phases: PhaseRecord[];
 }

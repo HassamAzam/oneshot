@@ -36,9 +36,8 @@
     "pattern": "oneshot/ticket-<iid>-<slug>"
   },
 
-  "_comment_promotion": "After a ticket MR merges into base, Oneshot promotes base -> stage. stage -> master is never automated: production release stays a human act.",
+  "_comment_promotion": "dev is FINAL. A ticket MR merges into base and the run is done — nothing is promoted onward. dev -> stage is deliberately absent rather than auto:false, because auto:false reads as 'a human owns this hop' (which is what it means for stage -> master) and that is not the reason here: the hop is switched off while the pipeline earns trust. With no entry whose `from` is the base branch, runPromotions() records no promotion and merge reports 'no automatic promotion applies to this base'. Restore by putting { from: dev, to: stage, auto: true } back — nothing else has to change, and note that config/deploy.json already ships dev (defaultRef), so the deploy never depended on this hop. stage -> master stays listed and stays manual: production release is a human act.",
   "promotions": [
-    { "from": "dev", "to": "stage", "auto": true },
     { "from": "stage", "to": "master", "auto": false }
   ],
 

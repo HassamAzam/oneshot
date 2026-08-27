@@ -63,7 +63,7 @@ Three things fall out of that:
                                 fail ──► back to 3 (max 2 laps)
    7  ui-evidence  ∥  Sonnet 5  screenshots
    8  mr           ∥  Sonnet 5  MR + description
-   9  merge           code      merge into dev, promote dev → stage
+   9  merge           code      merge into dev — dev is final, nothing promotes on
   10  deploy          Sonnet 5  guarded agent: runs the deploy script,
                                 diagnoses failures, bounded retries
   11  qa              Opus 5    THE list again, on the deployed build

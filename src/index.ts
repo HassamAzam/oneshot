@@ -351,6 +351,26 @@ async function main(): Promise<void> {
   process.exit(0);
 }
 
+// A phase session the conductor deliberately aborts can still throw from the
+// SDK's transport AFTER runPhase has returned — an async write against a dead
+// process rejecting with AbortError. Observed live: the rejection surfaced
+// while the NEXT phase group was already dispatching and took the whole
+// conductor down mid-run. The conductor never dies for a session's corpse: log
+// it, keep conducting. A genuinely fatal programming error still surfaces —
+// loudly, repeatedly — in the log it would have crashed into anyway.
+process.on('unhandledRejection', (reason) => {
+  log.error('unhandled rejection (conductor continues)', {
+    error: reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason),
+  });
+  logEvent('unhandled_rejection', {
+    error: reason instanceof Error ? reason.message : String(reason),
+  });
+});
+process.on('uncaughtException', (err) => {
+  log.error('uncaught exception (conductor continues)', { error: `${err.name}: ${err.message}` });
+  logEvent('uncaught_exception', { error: err.message });
+});
+
 main().catch((err) => {
   log.error('fatal', { error: (err as Error).message });
   process.exit(1);

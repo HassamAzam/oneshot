@@ -50,6 +50,7 @@ import { checkQuota } from '../lib/quota.js';
 import { createRun, getRun, isClaimed, logEvent, phaseEnd, phaseStart, updateRun } from '../lib/db.js';
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
 import { log } from '../lib/log.js';
+import { publishPending } from '../lib/publish.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { closePhase, mergePhase } from './codephases.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
@@ -223,6 +224,12 @@ interface PhaseResult {
   /** phase_runs row, kept so a conductor-side overrule can correct the ledger. */
   rowId: number;
   out: PhaseOutput;
+  /**
+   * Set by a conductor-side overrule that must STOP the run rather than let
+   * the phase's onFail policy retry or cycle it — the evidence says no lap
+   * will help and a human (or the operator) has to look.
+   */
+  hardStop?: string;
 }
 
 /**
@@ -313,6 +320,12 @@ export async function runTicket(
   const branch = j.branch ?? branchFor(cfg.branches.prefix, iid, issue.title);
 
   const prior: Record<string, Record<string, unknown> | null> = {};
+
+  // Before the first phase, not only after one. A resumed run may be carrying
+  // artifacts from a session that predates the publisher, and a plan nobody can
+  // see is a plan nobody can object to.
+  await publishPending({ iid, runId, journal: j });
+  j = readJournal(iid) ?? j;
   /** Phases that must re-run even though they already succeeded — a cycle writes this. */
   const forced = new Set<string>();
 
@@ -413,6 +426,64 @@ export async function runTicket(
           log.error(`deploy overruled — ${why}`);
         }
       }
+
+      // A verify that executed the list but passed NOTHING is not a green
+      // phase, whatever its structured output says. Zero passes with blocked
+      // cases means the environment (or the change) is broken end to end, and
+      // letting it through is how unverified code reaches an MR with a
+      // clean-looking card. Hard stop — cycling to implement would burn an
+      // Opus lap on what is almost never a code problem.
+      if (r.cfg.name === 'verify' && r.out.ok) {
+        const res = (r.out.data?.results ?? []) as Array<{ result: string }>;
+        const passes = res.filter((x) => x.result === 'pass').length;
+        if (res.length > 0 && passes === 0) {
+          r.out.ok = false;
+          r.hardStop = `verify executed ${res.length} case(s) and NONE passed — an all-negative ` +
+            'local run means the environment or the change is broken end to end, and neither is ' +
+            'something a merge should ride through. A human decides whether the demo-server QA ' +
+            'gate alone is acceptable for this ticket.';
+          r.out.error = r.hardStop;
+          log.error(`verify overruled — ${r.hardStop}`);
+        }
+      }
+
+      // The overrule's mirror image. A verify session that dies at its turn cap
+      // returns no structured output, and without this the cycle re-pays an
+      // implement and a review lap for what was only the session's budgeting.
+      // The prompt has it rewrite verify-partial.json after every case, so a
+      // dead session's evidence survives it: salvage the recorded results,
+      // mark everything it never reached as skipped, and let the pipeline
+      // continue — qa executes this same list against the deployed build
+      // anyway, which is what makes a partial local pass acceptable.
+      if (r.cfg.name === 'verify' && !r.out.ok && !r.out.blocked) {
+        const partial = readArtifact<{ results?: Array<Record<string, unknown>> }>(
+          iid, 'verify-partial.json',
+        );
+        const recorded = partial?.results ?? [];
+        const recordedPasses = recorded.filter((x) => String(x.result) === 'pass').length;
+        if (recorded.length && recordedPasses > 0) {
+          const tc = readArtifact<{ cases?: Array<{ id: string }> }>(iid, 'testcases.json');
+          const seen = new Set(recorded.map((x) => String(x.id)));
+          const skipped = (tc?.cases ?? [])
+            .filter((c) => !seen.has(c.id))
+            .map((c) => ({
+              id: c.id, result: 'skipped',
+              evidence: 'session died at its turn cap before this case ran', screenshot: '',
+            }));
+          r.out.data = {
+            summary: `Salvaged from verify-partial.json: ${recorded.length} case(s) recorded ` +
+              `before the session died (${r.out.error ?? 'no error text'}); ${skipped.length} never ran.`,
+            blocked: null,
+            serverStarted: true,
+            port: port ?? 0,
+            results: [...recorded, ...skipped],
+            regressions: [],
+          };
+          r.out.ok = true;
+          writeArtifact(iid, 'verify.json', r.out.data);
+          log.warn(`verify salvaged from partial results — ${recorded.length} recorded, ${skipped.length} skipped`);
+        }
+      }
     }
 
     // Reconciled strictly in phase order, whatever order they finished in:
@@ -451,7 +522,18 @@ export async function runTicket(
 
       if (!r.out.ok) {
         prior[r.cfg.name] = null;
-        claim(afterFailure(r.cfg, r.index, r.out.blocked ?? r.out.error ?? 'phase failed'));
+        if (r.hardStop) {
+          claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.hardStop}` });
+        } else if (r.out.blocked && (r.cfg.onFail === 'retry' || r.cfg.onFail === 'cycle')) {
+          // The schema's contract for `blocked` is "no retry would help" — a
+          // missing input, an environment that is down, a decision only a human
+          // can make. Feeding that into retry/cycle spends laps re-proving what
+          // the session already established; skip/warn phases still degrade
+          // gracefully through afterFailure.
+          claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.out.blocked}` });
+        } else {
+          claim(afterFailure(r.cfg, r.index, r.out.blocked ?? r.out.error ?? 'phase failed'));
+        }
         continue;
       }
 
@@ -462,6 +544,13 @@ export async function runTicket(
     }
 
     await updateCard(j.slackTs ?? '', cardState(j));
+
+    // Publish whatever is now ready. Reconciling here rather than inside a
+    // phase means the plan reaches the ticket while it is still cheap to argue
+    // with, and evidence reaches the MR as it is produced instead of all at
+    // once from `document` two phases before the end.
+    await publishPending({ iid, runId, journal: j });
+    j = readJournal(iid) ?? j;
 
     if (opts.signal?.aborted) {
       return finish(j, 'aborted', 'the conductor asked this run to stop');
@@ -588,6 +677,11 @@ export async function runTicket(
     });
     j = readJournal(iid) ?? j;
     await updateCard(j.slackTs ?? '', cardState(j));
+
+    // The MR is created by the phase before merge, so this is the first pass
+    // where anything targeted at the MR can actually land.
+    await publishPending({ iid, runId, journal: j });
+    j = readJournal(iid) ?? j;
 
     if (done.ok) {
       if (isMilestone(p)) await thread(j.slackTs ?? null, milestoneText(p, prior[p.name] ?? null, iid));

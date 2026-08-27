@@ -14,7 +14,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, envOr } from '../src/lib/config.js';
+import { BASE_ENV, ROOT, envOr } from '../src/lib/config.js';
 
 const G = '\x1b[32m', R = '\x1b[31m', Y = '\x1b[33m', D = '\x1b[2m', X = '\x1b[0m';
 let fails = 0;
@@ -24,41 +24,77 @@ function warn(l: string, d = ''): void { console.log(`  ${Y}WARN${X}  ${l}${d ? 
 function fail(l: string, d = ''): void { fails += 1; console.log(`  ${R}FAIL${X}  ${l}${d ? ` ${D}${d}${X}` : ''}`); }
 
 /**
- * An MCP stdio server that started correctly stays alive waiting for input on
- * stdin. So "still running after N ms" is success, and an early exit — or a
- * hang with no process at all — is the failure.
+ * Spawn an MCP stdio server the way a PHASE spawns it, and make it prove
+ * itself by listing tools.
+ *
+ * Two things here were learned the hard way. The env is passed WHOLE rather
+ * than merged over process.env, because that is the SDK's semantics and the
+ * merge is what made this check lie: a server missing PATH dies with
+ * `env: node: No such file or directory` inside a phase while passing here.
+ * And "alive after N ms" is not the bar — the failure that actually happened
+ * was a server the SDK reported as `connected` that served ZERO tools, so the
+ * handshake and a non-empty tools/list are the only evidence worth anything.
  */
 function probeStdioServer(
   cmd: string, args: string[], env: Record<string, string>, ms = 6000,
-): Promise<{ ok: boolean; detail: string }> {
+): Promise<{ ok: boolean; detail: string; tools: number }> {
   return new Promise((resolve) => {
     let settled = false;
     let stderr = '';
+    let stdout = '';
     const child = spawn(cmd, args, {
-      env: { ...process.env, ...env },
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+
+    const done = (r: { ok: boolean; detail: string; tools: number }): void => {
+      if (settled) return;
+      settled = true;
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      resolve(r);
+    };
+
+    child.stdout?.on('data', (d) => { stdout += String(d); });
+
+    const send = (o: unknown): void => {
+      try { child.stdin?.write(`${JSON.stringify(o)}\n`); } catch { /* exit handler reports */ }
+    };
+    send({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05', capabilities: {},
+        clientInfo: { name: 'oneshot-doctor', version: '1' },
+      },
+    });
+    setTimeout(() => send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }), 1200);
+    setTimeout(() => {
+      const tools = stdout.split('\n').filter(Boolean).reduce((n, line) => {
+        try {
+          const m = JSON.parse(line) as { id?: number; result?: { tools?: unknown[] } };
+          return m.id === 2 ? (m.result?.tools ?? []).length : n;
+        } catch { return n; }
+      }, 0);
+      done(tools > 0
+        ? { ok: true, detail: `${tools} tools`, tools }
+        : {
+          ok: false, tools: 0,
+          detail: `handshake produced NO tools — a session would see the server as connected ` +
+            `and hold none of its tools. ${stderr.trim().slice(0, 160)}`,
+        });
+    }, ms);
 
     child.stderr?.on('data', (d) => { stderr += String(d).slice(0, 400); });
 
     child.on('error', (err) => {
-      if (settled) return;
-      settled = true;
-      resolve({ ok: false, detail: `spawn failed: ${err.message}` });
+      done({ ok: false, tools: 0, detail: `spawn failed: ${err.message}` });
     });
 
     child.on('exit', (code) => {
-      if (settled) return;
-      settled = true;
-      resolve({ ok: false, detail: `exited early (code ${code}) ${stderr.trim().slice(0, 160)}` });
+      done({
+        ok: false, tools: 0,
+        detail: `exited early (code ${code}) ${stderr.trim().slice(0, 160)}`,
+      });
     });
-
-    setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill('SIGKILL');
-      resolve({ ok: true, detail: `alive after ${ms}ms` });
-    }, ms);
   });
 }
 
@@ -90,13 +126,20 @@ async function main(): Promise<void> {
   if (!token) {
     warn('GITLAB_TOKEN unset — probing without auth');
   }
+  // The SAME env object a phase hands the SDK — whole, not merged over
+  // process.env. Merging is what let a server with no PATH pass this check and
+  // then die inside every phase.
   const probe = await probeStdioServer(cmd, args, {
+    ...BASE_ENV,
     GITLAB_PERSONAL_ACCESS_TOKEN: token || 'probe',
     GITLAB_API_URL: envOr('ONESHOT_GITLAB_API', 'https://gitlab.arbisoft.com/api/v4'),
+    USE_PIPELINE: 'true',
+    USE_GITLAB_WIKI: 'false',
+    USE_MILESTONE: 'false',
   });
   probe.ok
-    ? pass('server starts', probe.detail)
-    : fail('server does NOT start', probe.detail);
+    ? pass('server serves tools', probe.detail)
+    : fail('server serves NO tools', probe.detail);
 
   console.log('\nClaude Code binary');
   const which = spawnSync('which', ['claude'], { encoding: 'utf8' });
