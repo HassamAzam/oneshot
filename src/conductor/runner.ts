@@ -44,7 +44,10 @@ import {
 } from '../lib/artifacts.js';
 import { branchFor, newRunId, worktreeName } from '../lib/ids.js';
 import { leasePortFor, leaseWorktree, reapWorktree, releasePort } from '../lib/worktrees.js';
-import { addIssueNote, getIssue, issueNotes, issueUrl, swapLabel, type Issue } from '../lib/gitlab.js';
+import {
+  addIssueNote, createMergeRequest, findMergeRequests, getIssue, issueNotes, issueUrl,
+  swapLabel, type Issue,
+} from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion } from '../lib/promotion.js';
 import { checkQuota } from '../lib/quota.js';
 import { createRun, getRun, isClaimed, logEvent, phaseEnd, phaseStart, updateRun } from '../lib/db.js';
@@ -427,6 +430,28 @@ export async function runTicket(
         }
       }
 
+      // The MR is a mechanical API call wearing a session's clothes, and this
+      // pipeline already learned what happens when it is left to a tool the
+      // session might not hold: a phase that pushed its branch, could not open
+      // a merge request, and stopped the whole run one step short of the merge.
+      // The judgement in this phase is the title and the description; issuing
+      // the POST is not. So if the session did not come back with an MR, the
+      // conductor opens it — over the same REST path it uses for labels and
+      // merging, which needs no MCP server at all.
+      if (r.cfg.name === 'mr' && !DRY_RUN) {
+        const mrIid = Number(r.out.data?.mrIid ?? 0);
+        if (!r.out.ok || !mrIid) {
+          const made = await ensureMergeRequest(r.out.data);
+          if (made) {
+            r.out.ok = true;
+            r.out.blocked = null;
+            r.out.data = made;
+            writeArtifact(iid, r.cfg.artifact ?? 'mr.json', made);
+            log.ok(`mr opened by the conductor — ${made.mrUrl}`);
+          }
+        }
+      }
+
       // A verify that executed the list but passed NOTHING is not a green
       // phase, whatever its structured output says. Zero passes with blocked
       // cases means the environment (or the change) is broken end to end, and
@@ -774,6 +799,70 @@ export async function runTicket(
    * anything to this ticket: the phase claims a SHA and a healthy service, that
    * SHA contains this run's merge, and the site answers.
    */
+  /**
+   * Open the merge request in code, reusing one if it is already there.
+   *
+   * Returns an MR_SCHEMA-shaped object so the artifact and `prior.mr` look
+   * exactly the same whether the session or the conductor produced them —
+   * `merge` reads mrIid and cannot tell the difference. Returns null only when
+   * GitLab itself refuses, which is a real block rather than a missing tool.
+   */
+  async function ensureMergeRequest(
+    fromSession: Record<string, unknown> | null,
+  ): Promise<Record<string, unknown> | null> {
+    const cfgLocal = projectConfig();
+    const target = cfgLocal.branches.base;
+
+    const existing = await findMergeRequests({ sourceBranch: branch, state: 'opened' });
+    const found = existing.ok ? (existing.data ?? [])[0] : undefined;
+    if (found) {
+      return {
+        summary: `Reused the merge request already open for ${branch}.`,
+        blocked: null,
+        mrIid: found.iid,
+        mrUrl: found.web_url,
+        title: found.title,
+        targetBranch: found.target_branch,
+      };
+    }
+
+    // The session's words when it produced any, because they are the half of
+    // this phase that actually needed a model.
+    const impl = readArtifact<{ commits?: string[]; filesChanged?: string[] }>(iid, 'implement.json');
+    const title = String(fromSession?.title ?? '').trim()
+      || `${ticket.title} (#${iid})`;
+    const description = String(fromSession?.description ?? '').trim()
+      || [
+        ticket.description?.trim() ? `${ticket.description.trim()}\n` : '',
+        `Closes #${iid}.`,
+        '',
+        `Files changed: ${(impl?.filesChanged ?? []).length}`,
+        (impl?.filesChanged ?? []).map((f) => `- \`${f}\``).join('\n'),
+        '',
+        `_Opened by Oneshot run \`${runId}\`. Verification and QA evidence follow as notes._`,
+      ].filter(Boolean).join('\n');
+
+    const made = await createMergeRequest({
+      sourceBranch: branch, targetBranch: target, title, description,
+    });
+    if (!made.ok || !made.data) {
+      log.error('conductor could not open the merge request', {
+        status: made.status, error: made.error?.slice(0, 160),
+      });
+      return null;
+    }
+    updateJournal(iid, { mrIid: made.data.iid, mrUrl: made.data.web_url });
+    updateRun(runId, { mr_iid: made.data.iid });
+    return {
+      summary: `Opened !${made.data.iid} from ${branch} into ${target}.`,
+      blocked: null,
+      mrIid: made.data.iid,
+      mrUrl: made.data.web_url,
+      title: made.data.title,
+      targetBranch: made.data.target_branch,
+    };
+  }
+
   async function verifyDeploy(p: PhaseConfig): Promise<string | null> {
     if (DRY_RUN) return null;
 
