@@ -302,7 +302,7 @@ then-current order of recall → research → plan → testcases:
 | M | Ships | Status |
 |---|---|---|
 | M0 | skeleton, config, hooks + test suite, quota, breaker, watcher, doctor | **done** |
-| M1 | phase runner, schema-enforced handoffs, run journal, teardown, `recall`/`research`/`plan`/`testcases`, Slack card, Langfuse | **done, verified live** |
+| M1 | phase runner, schema-enforced handoffs, run journal, teardown, `recall`/`research`/`plan`/`testcases`, Slack card | **done, verified live** |
 | M2 | `implement`, `review` and the review cycle | built, unproven |
 | M3 | `verify`, `ui-evidence` — dev server on a leased port, Playwright, screenshots | built, unproven |
 | M4 | `mr`, `merge`, `document` — MR, merge, promote, documentation, uploads | built, unproven |

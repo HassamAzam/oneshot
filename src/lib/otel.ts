@@ -205,10 +205,18 @@ export function otelStatus(): { on: boolean; why: string; remote: boolean } {
       why: `${c.endpoint} is remote and allowRemote is false — set it to opt in, or self-host`,
     };
   }
+  // Configured is not the same as arriving. Measured 2026-08-27: a session
+  // spawned through the Agent SDK exports nothing, while the same env spawned
+  // as `claude -p` exports correctly — so "on" here means the variables are
+  // right, not that a phase will show up in Langfuse. Saying so is the whole
+  // point of this line: the previous version reported a healthy endpoint while
+  // not one phase had ever been recorded.
   let why = c.endpoint;
   if (remote) why += ' (remote)';
   if (c.logAssistantResponses) why += ' +responses';
   if (c.logUserPrompts) why += ' +PROMPTS';
+  why += ' — configured, but SDK-spawned phases are not known to export; '
+    + 'the transcripts under state/runs/<iid>/transcripts/ are the real record';
   return { on: true, remote, why };
 }
 
