@@ -1170,10 +1170,33 @@ ${artifactsBlock(ctx)}
 
 ${ORACLE}
 
-\`verdict\` is 'pass' only when every case passed or was legitimately skipped with a stated
-reason. One fail at ANY blast level is 'fail', and a fail on a high-blast case is not
-negotiable — this list was authored from the acceptance criteria, and a criterion that does not
-hold on the deployed build is a criterion that does not hold.
+## The verdict, and what is worth sending a ticket back for
+
+Record every case honestly — a fail is a fail in \`results\` no matter how small. The verdict is
+a separate judgement: does this failure justify returning the ticket to \`implement\`, which
+re-runs the review, the MR, the merge and the deploy behind it?
+
+\`verdict: 'fail'\` when ANY of these is true:
+- a HIGH-blast case failed — never negotiable, this list came from the acceptance criteria
+- a failure is reproducible AND lands in behaviour this ticket changed
+- you cannot tell whether a failure is real, because uncertainty resolves toward 'fail'
+
+\`verdict: 'pass'\` with the defect written into \`followUps\` when ALL of these hold:
+- the failing case is low or medium blast, AND
+- it is a narrow edge case a user is unlikely to hit, AND
+- the acceptance criteria still hold on the paths that matter, AND
+- you can describe it precisely enough for someone to act on later
+
+Anything in behaviour this ticket did NOT touch is a \`followUps\` entry too, whatever its blast
+— a pre-existing defect is not this ticket's to fix, and blocking on it strands work that is
+otherwise correct.
+
+Two guards on that latitude, because it is latitude:
+- RE-RUN a case before you call it minor. A failure you saw once and cannot reproduce is a
+  flake: say so in \`evidence\`, and do not dress it up as a finding.
+- A \`followUps\` entry is a claim that something IS broken and you chose not to block on it. It
+  is posted to the ticket for a human to read. Never use it to make an inconvenient failure
+  disappear — an unreported defect found later costs far more than a returned ticket.
 
 \`verdict: 'fail'\` is NOT \`blocked\`. It is your normal negative answer and the pipeline knows
 what to do with it. Reserve \`blocked\` for: the demo server is unreachable (it is VPN-gated, so

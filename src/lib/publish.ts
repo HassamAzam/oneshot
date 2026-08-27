@@ -277,6 +277,29 @@ const SPECS: Spec[] = [
     },
   },
   {
+    // Ticket, not MR: a follow-up outlives the merge request that happened to
+    // surface it, and the ticket is where someone decides whether to act.
+    key: 'qa-followups',
+    artifact: 'qa.json',
+    target: 'ticket',
+    build: (data, ctx) => {
+      const items = (data.followUps as string[]) ?? [];
+      if (!items.length) return null;
+      const failed = ((data.results as CaseResult[]) ?? []).filter((r) => r.result === 'fail');
+      return {
+        body: `**QA follow-ups** — real defects QA found on the deployed build and judged too ` +
+          `narrow to send this ticket back for. Verdict was **${String(data.verdict ?? '?')}**; ` +
+          `these are recorded so they are not lost, not because they blocked anything.\n\n` +
+          `${items.map((f) => `- ${f}`).join('\n')}\n\n` +
+          (failed.length
+            ? `_Failing cases: ${failed.map((f) => f.id).join(', ')} — full evidence on the MR._\n\n`
+            : '') +
+          `_Run ${ctx.runId}._`,
+        attachments: [],
+      };
+    },
+  },
+  {
     key: 'demo',
     artifact: 'demo.json',
     target: 'mr',

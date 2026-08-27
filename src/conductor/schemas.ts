@@ -260,7 +260,14 @@ export const QA_SCHEMA = phaseSchema({
     'Empty array if you changed nothing. This is a shared server other people use, so an ' +
     'unrecorded change is indistinguishable from someone else breaking their own environment.',
   ),
-}, ['deployedSha', 'results', 'verdict', 'dataChanges']);
+  followUps: strArr(
+    'Real defects that are NOT worth sending this ticket back — a low-blast edge case, or ' +
+    'behaviour this ticket never touched. One line each, written so someone can act on it ' +
+    'without you: what fails, under what conditions, and the case id. These are posted to the ' +
+    'ticket as a comment rather than blocking the run. A failing HIGH-blast case is never a ' +
+    'follow-up, and neither is anything you could not reproduce well enough to describe.',
+  ),
+}, ['deployedSha', 'results', 'verdict', 'dataChanges', 'followUps']);
 
 export const DEMO_SCHEMA = phaseSchema({
   files: strArr('Demo artefacts produced, under artifacts/.'),

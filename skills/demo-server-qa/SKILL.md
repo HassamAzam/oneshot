@@ -53,8 +53,24 @@ because it passed locally** — the deployed build is the one users get.
 
 ## Verdict
 
-- `pass` only when every case passed or was legitimately skipped with a reason.
-  One fail at any blast level is `fail`.
+Record every case honestly — a fail is a fail in `results` however small. The
+verdict is a separate question: is this failure worth returning the ticket,
+which re-runs review, MR, merge and deploy behind it?
+
+- `fail` when a **high-blast** case fails, when a failure is reproducible **and**
+  sits in behaviour this change touched, or when you cannot tell — uncertainty
+  resolves toward `fail`.
+- `pass`, with the defect written into `followUps`, when the failing case is
+  low or medium blast **and** is a narrow edge case **and** the acceptance
+  criteria still hold on the paths that matter **and** you can describe it well
+  enough for someone to act on later. A defect in behaviour this ticket never
+  touched belongs here too, whatever its blast — a pre-existing bug is not this
+  ticket's to fix, and blocking on it strands work that is otherwise correct.
+- **Re-run a case before calling it minor.** Seen once and not reproducible is a
+  flake; say so in `evidence` rather than dressing it up as a finding.
+- `followUps` is posted to the ticket for a human. It is a claim that something
+  IS broken and you chose not to block — never a way to make an inconvenient
+  failure disappear.
 - **`fail` is a normal answer, not a block.** A failing verdict is this phase
   working correctly; it sends the run back to fix something real.
 - Block only for: cannot reach the server, cannot log in, or the SHA does not
