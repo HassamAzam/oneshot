@@ -1,26 +1,28 @@
 {
-  "_comment": "QUOTA budget. UNITS ARE WEIGHTED TOKENS, NOT DOLLARS. This machine runs on a Claude Max subscription, so there is no metered bill to cap \u2014 the real constraint is the rolling 5-hour and 7-day usage windows, and those windows are SHARED with Hassam's own interactive Claude Code sessions. The job of this file is 'leave Hassam enough of his own window', not 'spend less money'. Enforced twice: hooks/budget-gate.js at SessionStart, and the conductor before it claims a ticket.",
-  "_units": "Raw token counts are not comparable \u2014 an output token costs ~5x an input token and a cache read ~0.1x \u2014 so every count is multiplied by the weights below before comparison. Weights are Sonnet list-price ratios, which makes 1 weighted token ~= 1 input token of burn regardless of origin.",
+  "_comment": "QUOTA budget. UNITS ARE WEIGHTED TOKENS, NOT DOLLARS. This machine runs on a Claude Max subscription, so there is no metered bill to cap — the real constraint is the rolling 5-hour and 7-day usage windows, and those windows are SHARED with Hassam's own interactive Claude Code sessions. The job of this file is 'leave Hassam enough of his own window', not 'spend less money'. Enforced twice: hooks/budget-gate.js at SessionStart, and the conductor before it claims a ticket.",
+  "_units": "Raw token counts are not comparable — an output token costs ~5x an input token and a cache read ~0.1x — so every count is multiplied by the weights below before comparison. Weights are Sonnet list-price ratios, which makes 1 weighted token ~= 1 input token of burn regardless of origin.",
   "weights": {
     "input": 1,
     "output": 5,
     "cache_creation": 1.25,
     "cache_read": 0.1
   },
+  "_enabled": "MASTER SWITCH for every self-imposed TOKEN ceiling in this file — window_tokens, day_tokens, ticket_tokens, the per-phase caps, and the reserve. false means none of them are consulted and a phase runs until maxTurns or timeoutMin in config/phases.json stops it; the time constraints are untouched. Off deliberately while the end-to-end workflow is being proven. The reasoning: this machine runs on a subscription whose real 5-hour and 7-day windows are hard external limits that cannot be overturned, so a second self-imposed ceiling underneath them cannot save anything that is not already saved — it only ends runs early. What is NOT disabled by this switch: state/PAUSE, and quotaParked() — that one reacts to an actual subscription limit already being hit, and removing it would retry into the wall. The gate mismatch that made this switch necessary is FIXED: hooks/budget-gate.cjs now scales the per-phase cap by attempt (cap x (lap+1)) exactly as src/lib/quota.ts does, reading ONESHOT_LAP from the phase environment, so the two gates agree and a phase can make the retries its own config promises. Setting this back to true is therefore safe on that count; the remaining reason to leave it false is the one above — a self-imposed ceiling under a hard external limit ends runs early without saving anything.",
+  "enabled": false,
   "_ceilings": "SELF-IMPOSED, not the plan limit. Anthropic publishes no token numbers for Max 20x. Deliberately conservative: one Oneshot ticket runs SIX Opus phases (research, plan, testcases, implement, review, qa), which is materially heavier per ticket than v1's per-loop sessions. Tune after a week against /usage.",
   "window_hours": 5,
   "window_tokens": 25000000,
   "day_tokens": 75000000,
   "warn_pct": 80,
-  "_reserve": "Headroom held back for Hassam. Compared against ACCOUNT-WIDE window utilisation read from the status-line signal file when it is being harvested (see README). At 70, Oneshot stops claiming new tickets once 70% of a window is gone. Without the signal file the token ceilings above apply alone \u2014 which is why they are conservative. A reading older than signal_max_age_min is treated as unknown and ignored.",
+  "_reserve": "Headroom held back for Hassam. Compared against ACCOUNT-WIDE window utilisation read from the status-line signal file when it is being harvested (see README). At 70, Oneshot stops claiming new tickets once 70% of a window is gone. Without the signal file the token ceilings above apply alone — which is why they are conservative. A reading older than signal_max_age_min is treated as unknown and ignored.",
   "reserve": {
     "pause_at_five_hour_pct": 70,
     "pause_at_seven_day_pct": 70,
     "signal_max_age_min": 90
   },
-  "_ticket": "Per-RUN ceiling, and the REAL cumulative guard \u2014 the per-phase numbers below bound a single attempt, so this is the only ceiling that counts a whole ticket. A run that blows it is escalated as BLOCKED rather than allowed to eat the window; the classic runaway is `implement` cycling against `review` findings it cannot satisfy. Set just ABOVE the sum of the per-phase caps (~13.4M) on purpose: under that sum, a ticket where every phase legitimately used its full budget would be killed on a clean single pass and the cap would be measuring the wrong thing. At 14M it only bites once cycling has added laps, which is the runaway it exists to catch.",
+  "_ticket": "Per-RUN ceiling, and the REAL cumulative guard — the per-phase numbers below bound a single attempt, so this is the only ceiling that counts a whole ticket. A run that blows it is escalated as BLOCKED rather than allowed to eat the window; the classic runaway is `implement` cycling against `review` findings it cannot satisfy. Set just ABOVE the sum of the per-phase caps (~13.4M) on purpose: under that sum, a ticket where every phase legitimately used its full budget would be killed on a clean single pass and the cap would be measuring the wrong thing. At 14M it only bites once cycling has added laps, which is the runaway it exists to catch.",
   "ticket_tokens": 14000000,
-  "_phases": "Per-ATTEMPT ceilings. checkQuota() scales the allowance by the lap about to run \u2014 cap x (lap+1) \u2014 so the number below is what ONE attempt may spend. It bounds an attempt rather than the run because the NUMBER of attempts is already bounded, by maxLaps for cycle phases and maxRetries for retry phases in config/phases.json; a cumulative per-phase ceiling on top of that is the same protection counted twice, and it fails by refusing the very retry the phase is configured to make. A phase refused here fails its onFail policy (cycle/warn/abort) exactly as if it had errored, so a runaway implement cannot starve qa. Every number is what that phase actually spent on a live ticket plus ~40% headroom. Do NOT raise one because laps ate it \u2014 that is sunk-cost inflation, it buries the lap count that is the real signal, and it permanently re-prices every future ticket.",
+  "_phases": "Per-ATTEMPT ceilings. checkQuota() scales the allowance by the lap about to run — cap x (lap+1) — so the number below is what ONE attempt may spend. It bounds an attempt rather than the run because the NUMBER of attempts is already bounded, by maxLaps for cycle phases and maxRetries for retry phases in config/phases.json; a cumulative per-phase ceiling on top of that is the same protection counted twice, and it fails by refusing the very retry the phase is configured to make. A phase refused here fails its onFail policy (cycle/warn/abort) exactly as if it had errored, so a runaway implement cannot starve qa. Every number is what that phase actually spent on a live ticket plus ~40% headroom. Do NOT raise one because laps ate it — that is sunk-cost inflation, it buries the lap count that is the real signal, and it permanently re-prices every future ticket.",
   "phases": {
     "recall": 150000,
     "research": 900000,
@@ -42,6 +44,6 @@
     "session_minutes": 60,
     "weekly_minutes": 360
   },
-  "_usd_note": "ESTIMATE ONLY \u2014 NOT A REAL CHARGE. On a subscription, total_cost_usd is computed locally from token counts at API list rates and, per Anthropic, is not relevant for billing. Nothing here is billed. This gates NOTHING.",
+  "_usd_note": "ESTIMATE ONLY — NOT A REAL CHARGE. On a subscription, total_cost_usd is computed locally from token counts at API list rates and, per Anthropic, is not relevant for billing. Nothing here is billed. This gates NOTHING.",
   "usd_cap_estimate": 60
 }

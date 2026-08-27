@@ -285,6 +285,67 @@ export const MEMORIZE_SCHEMA = phaseSchema({
   filesTouched: strArr('For file-overlap scoring on the next similar ticket.'),
 }, ['card', 'tags', 'filesTouched']);
 
+/**
+ * The remediation contract — the one schema whose most valuable answer is a
+ * negative one.
+ *
+ * `fixed` is what the conductor acts on, so an optimistic one is expensive in a
+ * way no other field here is: the run re-enters the pipeline, walks into the
+ * same wall, and the real cause is now buried under a record saying it was
+ * handled. `category` is the check on it. 'code' means the cause was a defect
+ * in the ticket's own change, which this phase may not touch at all, so 'code'
+ * with fixed:true is a contradiction — the prompt forbids it, and a reader who
+ * sees it should treat the run as faulty rather than the environment as
+ * repaired.
+ *
+ * `changes` exists for the same reason qa's `dataChanges` does: these repairs
+ * land on infrastructure other people share, and an unrecorded one is
+ * indistinguishable a week later from somebody breaking their own environment.
+ */
+export const REMEDIATE_SCHEMA = phaseSchema({
+  diagnosis: str(
+    'The causal account: what actually went wrong, the evidence you have for that, and why it ' +
+    'surfaced as the reason the blocked phase reported. Not a restatement of that reason — the ' +
+    'conductor already holds it.',
+  ),
+  category: {
+    type: 'string',
+    enum: ['environment', 'provisioning', 'credentials', 'infrastructure', 'code', 'unknown'],
+    description:
+      "Where the cause lives. 'environment' = this machine or this run's own state (a stale " +
+      "lock, a wedged process, a leaked lease, a config value wrong for this box). " +
+      "'provisioning' = something that was never set up: an account, a group, test data. " +
+      "'credentials' = something that was set up and is wrong, expired or rejected. " +
+      "'infrastructure' = a service or network beyond this machine: the VPN, GitLab, the demo " +
+      "server. 'code' = a defect in the ticket's own change, which is NOT this phase's to fix. " +
+      "'unknown' = you could not determine it, which is an honest answer and not a failure.",
+  },
+  fixed: {
+    type: 'boolean',
+    description:
+      'True ONLY when you changed something and the cause is gone. Never true for ' +
+      "category 'code': that cause belongs to `implement`, whose work is reviewed, and " +
+      'claiming it here ships an unreviewed change through a pipeline that will report it as ' +
+      'verified.',
+  },
+  changes: strArr(
+    'Every change you made, one per entry, precise enough that someone could undo it without ' +
+    'asking you: what you changed, where, from what to what. A group granted, a process ' +
+    'killed, a lock cleared. Empty when you changed nothing — which is a complete answer.',
+  ),
+  retryFrom: str(
+    'The phase the run should resume from: a name from config/phases.json, never this one. ' +
+    "Use '' when nothing should be retried, because a retry would repeat the failure " +
+    'identically. Everything between that phase and the block re-runs, so name the earliest ' +
+    'phase whose output your fix invalidates and no earlier.',
+  ),
+  humanNeeded: str(
+    "'' when no person is needed. Otherwise the exact action one must take, written for " +
+    'someone who has none of this context: the file and the value, the credential and the ' +
+    "account, or the service and the host. 'Investigate the login problem' is not an action.",
+  ),
+}, ['diagnosis', 'category', 'fixed', 'changes', 'retryFrom', 'humanNeeded']);
+
 export const SCHEMAS: Record<string, JsonSchema> = {
   recall: RECALL_SCHEMA,
   research: RESEARCH_SCHEMA,
@@ -300,6 +361,7 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   demo: DEMO_SCHEMA,
   document: DOCUMENT_SCHEMA,
   memorize: MEMORIZE_SCHEMA,
+  remediate: REMEDIATE_SCHEMA,
 };
 
 export function schemaFor(phase: string): JsonSchema | undefined {

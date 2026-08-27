@@ -220,6 +220,19 @@ type Action =
  * guessing merges something it should not.
  */
 function mergeabilityAction(mr: MergeRequest): Action {
+  // An MR with no head sha has nothing to merge — its source branch is missing
+  // on the remote or carries no commits. GitLab reports that state with
+  // has_conflicts:true, so it MUST be classified before the conflict check or a
+  // branch that was never pushed is reported as a merge conflict, which sends
+  // whoever reads it looking for conflicting files that do not exist.
+  if (!mr.sha) {
+    return {
+      kind: 'block',
+      why: `!${mr.iid} has no head commit — source branch '${mr.source_branch}' is missing on `
+        + 'the remote or carries no commits. This is NOT a conflict: nothing was pushed. '
+        + 'Check whether the branch reached origin before looking for conflicting files.',
+    };
+  }
   if (mr.has_conflicts || mr.merge_status === 'cannot_be_merged') return { kind: 'conflict' };
   const status = mr.detailed_merge_status;
   if (!status) return legacyAction(mr);
@@ -248,7 +261,15 @@ function legacyAction(mr: MergeRequest): Action {
 function conflictMessage(mr: MergeRequest, base: string): string {
   const paths = conflictingPaths(base, mr.source_branch);
   const where = paths.length ? ` Conflicting paths: ${paths.join(', ')}.` : '';
-  const why = mr.merge_error ?? `'${mr.source_branch}' conflicts with '${base}'`;
+  // Only assert a conflict when something actually evidences one — GitLab's own
+  // merge_error, or conflicting paths we resolved ourselves. With neither, say
+  // that the reason is unknown rather than inventing "X conflicts with Y": a
+  // fabricated diagnosis reads exactly like a real one and is acted on as such.
+  const why = mr.merge_error
+    ?? (paths.length
+      ? `'${mr.source_branch}' conflicts with '${base}'`
+      : `GitLab reports it unmergeable but supplied no merge_error, and no conflicting paths `
+        + `were found against '${base}' — the cause is undetermined`);
   return `!${mr.iid} cannot be merged: ${why}.${where} Resolve it on ${mr.web_url}`;
 }
 
@@ -780,6 +801,47 @@ async function resolveMrIid(ctx: CodePhaseCtx, journal: RunJournal): Promise<num
   return (merged ?? opened ?? res.data[0])?.iid ?? null;
 }
 
+/**
+ * What the run's own check phases concluded, re-read here rather than trusted
+ * from their phase status.
+ *
+ * `verify` and `review` can both finish with status ok while their ARTIFACT
+ * says the change is not ready: a verify salvaged from partial results records
+ * ok no matter how many cases failed, and a review records ok while returning
+ * verdict 'changes-requested'. Phase status answers "did the phase run", not
+ * "did the change pass", and merge was reading the first as if it were the
+ * second — so a branch with failing cases and unaddressed blockers reached the
+ * accept call with nothing in the way.
+ *
+ * This is the same shape the deploy phase already uses: the conductor re-derives
+ * the fact itself and overrules the phase rather than believing its verdict.
+ */
+function qualityGate(iid: number): string | null {
+  const verify = readArtifact<{ results?: Array<{ id?: string; result?: string }> }>(iid, 'verify.json');
+  const results = verify?.results ?? [];
+  const failed = results.filter((r) => r.result === 'fail');
+  if (failed.length) {
+    const ids = failed.map((r) => r.id ?? '?').join(', ');
+    const other = results.filter((r) => r.result === 'blocked' || r.result === 'skipped').length;
+    const tail = other ? ` (${other} further case(s) blocked or never run)` : '';
+    return `verify recorded ${failed.length} failing case(s) of ${results.length}: ${ids}${tail}. `
+      + 'Refusing to merge a change its own test cases do not pass.';
+  }
+
+  const review = readArtifact<{
+    verdict?: string; findings?: Array<{ id?: string; severity?: string }>;
+  }>(iid, 'findings.json');
+  const unaddressed = (review?.findings ?? [])
+    .filter((f) => f.severity === 'blocker' || f.severity === 'major');
+  if (review?.verdict === 'changes-requested' || unaddressed.length) {
+    const ids = unaddressed.map((f) => `${f.id ?? '?'} [${f.severity}]`).join(', ') || 'none listed';
+    return `review returned verdict '${review?.verdict ?? 'unknown'}' with ${unaddressed.length} `
+      + `blocker/major finding(s): ${ids}. Refusing to merge over an unaddressed review.`;
+  }
+
+  return null;
+}
+
 export async function mergePhase(ctx: CodePhaseCtx): Promise<{ ok: boolean; error?: string }> {
   const cfg = projectConfig();
   const base = cfg.branches.base;
@@ -799,6 +861,9 @@ export async function mergePhase(ctx: CodePhaseCtx): Promise<{ ok: boolean; erro
   rec.rebaseCount = carried?.rebaseCount ?? 0;
   rec.threadPosted = carried?.threadPosted === true;
   rec.promotion = carried?.promotion ?? null;
+
+  const gate = qualityGate(ctx.iid);
+  if (gate !== null) return failMerge(ctx, rec, gate);
 
   const mrIid = await resolveMrIid(ctx, journal);
   if (mrIid === null) {

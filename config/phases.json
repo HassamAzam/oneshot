@@ -122,6 +122,14 @@
     {
       "name": "close", "n": 15, "kind": "code",
       "timeoutMin": 5, "onFail": "warn"
+    },
+    {
+      "name": "remediate", "n": 16, "kind": "session", "tier": "heavy",
+      "cwd": "conductor", "maxTurns": 60, "timeoutMin": 30,
+      "writes": ["run"], "onFail": "warn", "onDemand": true,
+      "artifact": "remediate.json",
+      "skills": ["self-remediation"],
+      "_why": "ON DEMAND, and that field is the design: the main loop never schedules this phase, the conductor invokes it when another phase blocks. It exists because nearly every block this pipeline has produced was ENVIRONMENTAL and not a defect — a credential the demo snapshot does not carry, an account missing the group a feature is gated behind, a wedged MCP spawn that left a session with no tools at all, a turn cap that fitted the work when it was written. Those are diagnosable without a person, and the alternative is a watcher logging 'blocked cooldown' once a minute until someone runs an unblock command by hand. HEAVY tier because this is diagnosis from indirect evidence — a turn count, an absent artifact, a reason line — which is precisely the job a cheaper model does badly: it pattern-matches to the last failure it saw. cwd 'conductor' because the cause is almost never inside the ticket's worktree, and a phase that cannot see the diff cannot be tempted to fix it. writes 'run' only, so its repairs are ACTIONS on the environment rather than edits to this repo; config/ and src/ are denied to every phase by the write-scope hook in any case, which is why a too-small turn cap comes back as humanNeeded rather than as a patch. onFail 'warn' because a remediation that fails leaves the run exactly as blocked as it already was — making that an abort would give the recovery path teeth the thing it recovers from does not have."
     }
   ]
 }

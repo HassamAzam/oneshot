@@ -28,6 +28,13 @@
  * the box and the git graph, not from what the deploy phase said about itself;
  * and a promotion window is held by one run at a time, because the demo server
  * carries a branch tip rather than a SHA.
+ *
+ * One thing is attempted rather than surrendered. Most blocks this pipeline
+ * hits are not defects in the ticket's code — they are a missing credential, an
+ * account without the group a feature is gated behind, a wedged MCP server, a
+ * cap. Those are diagnosable, so a blocked stop is offered to the 'remediate'
+ * phase before it is allowed to end the run, and a run that heals itself
+ * continues from the phase remediation says to resume at.
  */
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -38,9 +45,10 @@ import {
   type PhaseConfig,
 } from '../lib/config.js';
 import {
-  archiveRun, ensureRunDirs, failedLapsOf, lapsOf, phaseSucceeded, readArtifact,
-  readJournal, recordPhase, reapScratch, updateJournal, writeArtifact, writeJournal,
-  type PhaseRecord, type RunJournal,
+  archiveRun, artifactPath, ensureRunDirs, failedLapsOf, lapsOf, phaseSucceeded, readArtifact,
+  readJournal, recordPhase, recordRemediation, reapScratch, updateJournal, writeArtifact,
+  writeJournal,
+  type PhaseRecord, type Remediation, type RunJournal,
 } from '../lib/artifacts.js';
 import { branchFor, newRunId, worktreeName } from '../lib/ids.js';
 import { leasePortFor, leaseWorktree, reapWorktree, releasePort } from '../lib/worktrees.js';
@@ -56,6 +64,7 @@ import { log } from '../lib/log.js';
 import { exportRun } from '../lib/langfuse.js';
 import { publishPending } from '../lib/publish.js';
 import { runPhase, type PhaseOutput } from './phase.js';
+import { schemaFor } from './schemas.js';
 import { closePhase, mergePhase } from './codephases.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { Ticket } from '../phases/types.js';
@@ -75,6 +84,28 @@ const BLOCK_COOLDOWN_MS = 60 * 60_000;
 
 /** The deterministic post-deploy checks get 15s to answer or they have failed. */
 const HEALTH_TIMEOUT_MS = 15_000;
+
+/**
+ * How many times ONE run may try to heal itself.
+ *
+ * Two, because the failure mode being bounded is not cost but conviction: an
+ * agent asked to remove an obstacle will always find something it can change,
+ * and a run that keeps being handed the same block will keep changing things
+ * around a cause that was never environmental. Two attempts is enough for the
+ * shape this actually takes in practice — one missing credential, then the
+ * thing the credential turns out to be gated behind — and short enough that
+ * the third failure reaches a person while the diagnosis is still worth
+ * reading.
+ */
+const MAX_REMEDIATIONS = 2;
+
+/**
+ * Phase records worth keeping when a phase is re-entered. Deliberately the same
+ * set scripts/unblock.ts prunes against, and for the reasons written up there:
+ * a succeeded record is what makes a resume cheap, and 'skipped' is a decision
+ * the run already made rather than a failure to retry.
+ */
+const KEPT_STATUSES = new Set<PhaseRecord['status']>(['ok', 'warned', 'skipped']);
 
 export interface RunOutcome {
   runId: string;
@@ -117,6 +148,10 @@ function cardLines(j: RunJournal, running: string[]): PhaseLine[] {
   const live = new Set(running);
   return phases()
     .filter((p) => isImplemented(p.name) || Boolean(CODE_PHASES[p.name]))
+    // An on-demand phase is not part of the sequence, so showing it 'pending'
+    // on every card would advertise a step that is never coming. It appears the
+    // moment it has actually run — which is the moment it is worth seeing.
+    .filter((p) => !p.onDemand || j.phases.some((r) => r.phase === p.name) || live.has(p.name))
     .map((p): PhaseLine => {
       const recs = j.phases.filter((r) => r.phase === p.name);
       const last = recs[recs.length - 1];
@@ -332,6 +367,13 @@ export async function runTicket(
   j = readJournal(iid) ?? j;
   /** Phases that must re-run even though they already succeeded — a cycle writes this. */
   const forced = new Set<string>();
+  /**
+   * What the last remediation concluded, in words a person can act on. Carried
+   * out of band because it belongs in the BLOCKED reason — the ticket note is
+   * the only thing a human reads after a run stops, and "qa failed" without
+   * "and here is what the machine already ruled out" wastes the attempt.
+   */
+  let remediationNote = '';
 
   let i = 0;
   while (i < list.length) {
@@ -341,6 +383,15 @@ export async function runTicket(
     // while a code phase is running must not be spent starting the next one.
     if (opts.signal?.aborted) {
       return finish(j, 'aborted', 'the conductor asked this run to stop');
+    }
+
+    // On-demand phases are stepped over before anything else looks at them:
+    // they are invoked by name when something needs them, so an unimplemented
+    // one must not stop the run the way a scheduled one does, and a resume must
+    // not walk into one because it has no succeeded record.
+    if (phase.onDemand) {
+      i += 1;
+      continue;
     }
 
     // A phase with no implementation STOPS the run — including 'code' phases.
@@ -356,7 +407,12 @@ export async function runTicket(
 
     if (CODE_PHASES[phase.name]) {
       const control = await runCodePhase(phase, i);
-      if (control.kind === 'stop') return finish(j, control.status, control.reason);
+      if (control.kind === 'stop') {
+        const resumeAt = await resumeAfterRemediation(control, phase.name);
+        if (resumeAt === null) return finish(j, control.status, stopReason(control));
+        i = resumeAt;
+        continue;
+      }
       i = nextIndex(control, i, i);
       continue;
     }
@@ -531,9 +587,12 @@ export async function runTicket(
     // every result is recorded and every success populates prior[] before any
     // of them is allowed to move the index. The first result whose outcome
     // changes the control flow wins; the others still land in the journal.
-    const flow: Control[] = [];
-    const claim = (c: Control): void => {
-      if (c.kind !== 'advance' && flow.length === 0) flow.push(c);
+    // The claiming PHASE travels with the control decision, not just its
+    // reason string: remediation is told which phase to diagnose, and reading
+    // that back out of a reason built for a human would be guesswork.
+    const flow: Array<{ control: Control; from: string }> = [];
+    const claim = (c: Control, from: string): void => {
+      if (c.kind !== 'advance' && flow.length === 0) flow.push({ control: c, from });
     };
 
     for (const r of results) {
@@ -557,23 +616,23 @@ export async function runTicket(
           kind: 'stop',
           status: 'blocked',
           reason: 'subscription usage limit — parked until the window resets',
-        });
+        }, r.cfg.name);
         continue;
       }
 
       if (!r.out.ok) {
         prior[r.cfg.name] = null;
         if (r.hardStop) {
-          claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.hardStop}` });
+          claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.hardStop}` }, r.cfg.name);
         } else if (r.out.blocked && (r.cfg.onFail === 'retry' || r.cfg.onFail === 'cycle')) {
           // The schema's contract for `blocked` is "no retry would help" — a
           // missing input, an environment that is down, a decision only a human
           // can make. Feeding that into retry/cycle spends laps re-proving what
           // the session already established; skip/warn phases still degrade
           // gracefully through afterFailure.
-          claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.out.blocked}` });
+          claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.out.blocked}` }, r.cfg.name);
         } else {
-          claim(afterFailure(r.cfg, r.index, r.out.blocked ?? r.out.error ?? 'phase failed'));
+          claim(afterFailure(r.cfg, r.index, r.out.blocked ?? r.out.error ?? 'phase failed'), r.cfg.name);
         }
         continue;
       }
@@ -597,8 +656,14 @@ export async function runTicket(
       return finish(j, 'aborted', 'the conductor asked this run to stop');
     }
 
-    const control = flow[0];
-    if (control?.kind === 'stop') return finish(j, control.status, control.reason);
+    const claimed = flow[0];
+    const control = claimed?.control;
+    if (control?.kind === 'stop') {
+      const resumeAt = await resumeAfterRemediation(control, claimed!.from);
+      if (resumeAt === null) return finish(j, control.status, stopReason(control));
+      i = resumeAt;
+      continue;
+    }
     i = nextIndex(control ?? { kind: 'advance' }, i, members[members.length - 1]!);
   }
 
@@ -807,6 +872,239 @@ export async function runTicket(
   }
 
   /**
+   * The blocked reason a human will read, with the machine's own findings in it.
+   *
+   * A block that says only "qa: the demo account cannot see the page" sends
+   * someone to look at exactly what the run already looked at. Saying what was
+   * tried, what it concluded and what it wants a person to do turns the ticket
+   * note into the first half of the investigation instead of the start of one.
+   */
+  function stopReason(control: Extract<Control, { kind: 'stop' }>): string {
+    if (control.status !== 'blocked' || !remediationNote) return control.reason;
+    return `${control.reason}\n\n${remediationNote}`;
+  }
+
+  /**
+   * Offer a blocked stop to remediation, and turn a fix back into an index.
+   *
+   * The third conductor-side intervention, beside the deploy overrule and the
+   * verify/qa salvage, and the same shape as both: the phase's verdict stands
+   * as a statement about the phase, and the conductor decides what it means for
+   * the RUN. Where the other two correct a phase that was wrong about itself,
+   * this one accepts that the phase was right and disputes that the run is over.
+   *
+   * Everything from the resumed phase onwards is forced, for the reason a cycle
+   * forces its window: a fix that reaches only the phase that failed never
+   * reaches the box that rejected it. `testcases` is the same exception it is
+   * there — the case list is written once and pinned, or verify and qa stop
+   * being comparable.
+   */
+  async function resumeAfterRemediation(
+    control: Extract<Control, { kind: 'stop' }>, from: string,
+  ): Promise<number | null> {
+    if (control.status !== 'blocked') return null;
+
+    const resumeFrom = await attemptRemediation(from, control.reason);
+    if (!resumeFrom) return null;
+
+    const idx = list.findIndex((p) => p.name === resumeFrom);
+    if (idx === -1) return null;
+
+    for (let k = idx; k < list.length; k += 1) {
+      const target = list[k]!;
+      if (target.name === 'testcases' || target.onDemand) continue;
+      forced.add(target.name);
+    }
+    log.ok(`remediation cleared the block — resuming from ${resumeFrom}`, {
+      blockedIn: from, forced: [...forced].join(', '),
+    });
+    return idx;
+  }
+
+  /**
+   * Try to remove the obstacle, rather than hand it to a person.
+   *
+   * Almost every block this pipeline produces is environmental — a credential
+   * that was never provisioned, an account missing the group a feature is gated
+   * behind, a wedged MCP server, a cap. None of those are defects in the
+   * ticket's code, and all of them are diagnosable from the same box the run is
+   * already on. So the run gets to look before it gives up.
+   *
+   * It runs through runPhase() like any other session phase, deliberately: the
+   * tool policy, the write scopes, the guard hooks, the transcript and the
+   * budget all apply to the phase that is allowed to change the environment
+   * exactly as they apply to the ones that are not. A privileged side channel
+   * here would be a hole in every guarantee the rest of the file makes.
+   *
+   * Returns the phase to resume from, or null when it could not help — and null
+   * is the ordinary answer. The guards below all exist to make sure the run
+   * reaches a person eventually: not while paused, not while dry, not more than
+   * MAX_REMEDIATIONS times, and never twice for the same block, because a cause
+   * that survives being fixed was not the cause.
+   */
+  async function attemptRemediation(blockedPhase: string, reason: string): Promise<string | null> {
+    remediationNote = '';
+
+    // A dry run changes nothing anywhere, and a pause is a freeze: neither is
+    // the moment to start editing the machine's configuration.
+    if (DRY_RUN || existsSync(PAUSE)) return null;
+
+    const cfgR = list.find((p) => p.name === 'remediate');
+    if (!cfgR || !isImplemented(cfgR.name) || !schemaFor(cfgR.name)) return null;
+
+    const already = j.remediations ?? [];
+    if (already.length >= MAX_REMEDIATIONS) {
+      remediationNote =
+        `Self-remediation was not attempted again: this run has already spent its ` +
+        `${MAX_REMEDIATIONS} attempts (${already.map((r) => `${r.phase}/${r.category}`).join(', ')}).`;
+      return null;
+    }
+    if (already.some((r) => r.phase === blockedPhase && r.reason === reason)) {
+      remediationNote =
+        'Self-remediation already fixed something for this exact block and it came back — ' +
+        'whatever is wrong is not the environment.';
+      return null;
+    }
+
+    const lap = already.length;
+    const startedAt = Date.now();
+    log.warn(`${blockedPhase} would block the run — diagnosing it first`, {
+      attempt: lap + 1, of: MAX_REMEDIATIONS,
+    });
+    await updateCard(j.slackTs ?? '', cardState(j, [cfgR.name]));
+    updateRun(runId, { phase: cfgR.name, status: 'running' });
+
+    // No worktree, whatever this run holds: the cause is almost never inside
+    // the ticket's diff, and a phase that cannot see the diff cannot be tempted
+    // to fix it. The block travels in its own field rather than in `prior`,
+    // which is keyed by phase name and read by every later prompt.
+    const ctx: PromptCtx = {
+      ticket, runId, lap, branch, port, prior, journal: j,
+      block: { phase: blockedPhase, reason },
+    };
+
+    const rowId = phaseStart(runId, cfgR.name, lap, modelFor(cfgR));
+    const out = await runPhase({
+      iid, runId, lap, cfg: cfgR,
+      prompt: promptFor(cfgR, ctx),
+      systemPrompt: systemPromptFor(cfgR, ctx),
+      branch,
+      signal: opts.signal,
+    });
+    phaseEnd(rowId, out.ok ? 'ok' : statusForFailure(cfgR), {
+      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+      detail: out.error ?? out.blocked ?? undefined,
+    });
+
+    const data = out.data ?? {};
+    const category = typeof data.category === 'string' ? data.category : 'unknown';
+    const changes = Array.isArray(data.changes) ? data.changes.map(String) : [];
+    const diagnosis = typeof data.diagnosis === 'string' ? data.diagnosis.trim() : '';
+    const humanNeeded = typeof data.humanNeeded === 'string' ? data.humanNeeded.trim() : '';
+    const retryFrom = typeof data.retryFrom === 'string' ? data.retryFrom.trim() : '';
+    const fixed = out.ok && data.fixed === true;
+
+    // Recorded before anything is decided, and whatever it decided. The attempt
+    // cost budget and may have changed the machine; a card and a ledger that
+    // show neither would describe a run that did not happen.
+    recordPhase(iid, {
+      phase: cfgR.name,
+      lap,
+      status: out.ok ? 'ok' : statusForFailure(cfgR),
+      startedAt,
+      endedAt: Date.now(),
+      model: modelFor(cfgR),
+      turns: out.turns,
+      weighted: out.weighted,
+      sessionId: out.sessionId,
+      error: out.error ?? out.blocked ?? undefined,
+    });
+    recordRemediation(iid, {
+      phase: blockedPhase, reason, category, fixed, changes, at: Date.now(),
+    });
+    j = readJournal(iid) ?? j;
+    await updateCard(j.slackTs ?? '', cardState(j));
+
+    if (!fixed) {
+      remediationNote = [
+        `Self-remediation ran and could not clear this (${category}).`,
+        diagnosis ? `Diagnosis: ${diagnosis}` : '',
+        humanNeeded ? `It needs a person to: ${humanNeeded}` : '',
+        changes.length ? `It did change: ${changes.join('; ')}` : '',
+      ].filter(Boolean).join(' ');
+      log.warn('remediation could not clear the block', {
+        category, why: (diagnosis || out.error || out.blocked || '').slice(0, 160),
+      });
+      return null;
+    }
+
+    const target = list.find((p) => p.name === retryFrom);
+    if (!target || target.onDemand) {
+      // Fixed, but with nowhere to go — a real answer from the schema when the
+      // repair only matters to the next run. The changes still go on the note,
+      // because someone is about to look at a machine that has moved.
+      remediationNote = [
+        `Self-remediation fixed something (${category})`,
+        changes.length ? `: ${changes.join('; ')}` : '',
+        `, but named no phase this run could resume from${retryFrom ? ` ('${retryFrom}')` : ''}.`,
+        humanNeeded ? ` It needs a person to: ${humanNeeded}` : '',
+      ].join('');
+      return null;
+    }
+
+    pruneFailedLaps(retryFrom);
+    log.ok(`remediation fixed a ${category} problem`, {
+      changes: changes.join('; ').slice(0, 200) || 'none listed', retryFrom,
+    });
+    return retryFrom;
+  }
+
+  /**
+   * Make a phase genuinely re-enterable — the surgery `npm run unblock` performs
+   * by hand, done in-process and scoped to one phase.
+   *
+   * Two rules, both taken from that script because both are load-bearing. A
+   * succeeded record is never dropped: the journal is what makes the rest of the
+   * run cost nothing, and re-running an Opus implement lap to arrive back where
+   * it started costs more than the block did. And an artifact is deleted only
+   * when its phase has no surviving success, because a stale artifact from a
+   * failed lap is worse than none at all — the next lap reads it as fact — while
+   * an artifact belonging to an EARLIER success is what every downstream phase
+   * reading `prior[name]` depends on.
+   */
+  function pruneFailedLaps(phase: string): void {
+    const journal = readJournal(iid);
+    if (!journal) return;
+
+    const survivors = journal.phases.filter(
+      (rec) => rec.phase !== phase || KEPT_STATUSES.has(rec.status),
+    );
+    const dropped = journal.phases.length - survivors.length;
+    journal.phases = survivors;
+    writeJournal(journal);
+    j = journal;
+
+    const stillSucceeds = survivors.some(
+      (rec) => rec.phase === phase && (rec.status === 'ok' || rec.status === 'warned'),
+    );
+    if (!stillSucceeds) {
+      // The phase's own artifact — whose NAME comes from phases.json, not from
+      // the phase name — and the `<phase>-partial.json` that verify and qa
+      // rewrite after every case. Carried into a fresh lap the partial would
+      // salvage results the new lap never produced.
+      const configured = list.find((p) => p.name === phase)?.artifact ?? `${phase}.json`;
+      for (const name of [configured, `${phase}-partial.json`]) {
+        rmSync(artifactPath(iid, name), { force: true });
+      }
+      delete prior[phase];
+    }
+
+    log.info(`cleared ${dropped} failed record(s) for '${phase}'`, {
+      artifacts: stillSucceeds ? 'kept — a later lap succeeded' : 'deleted',
+    });
+  }
+
+  /**
    * The deploy, re-derived from the box and the git graph.
    *
    * The phase decides HOW to deploy — which flags, which retry, whether to
@@ -944,6 +1242,16 @@ export async function runTicket(
 
     await updateCard(journal.slackTs ?? '', cardState(journal));
 
+    // A run that healed itself twice and then finished is a different story
+    // from one that sailed through, and the card tells the second story: a row
+    // of green phases, with nothing to say that the machine had to be changed
+    // underneath them to get there. What was changed outside the worktree is
+    // exactly the part somebody may need to undo.
+    const healed = journal.remediations ?? [];
+    if (healed.length) {
+      await thread(journal.slackTs ?? null, remediationText(journal.iid, healed));
+    }
+
     if (status === 'blocked') {
       await alert(`#${journal.iid} ${journal.title} — BLOCKED: ${reason}`);
       if (!DRY_RUN) {
@@ -1005,6 +1313,24 @@ function removeDeployLock(runId: string): void {
   } catch {
     rmSync(join(STATE, 'DEPLOY-LOCK'), { force: true });
   }
+}
+
+/**
+ * What the run had to change about the machine to get where it got.
+ *
+ * Every change is listed rather than counted. The whole point of recording them
+ * precisely enough to undo is that somebody can undo them, and a thread message
+ * saying "3 changes" is a message that sends them to the journal to find out
+ * which.
+ */
+function remediationText(iid: number, healed: Remediation[]): string {
+  const lines = healed.map((r) => {
+    const verdict = r.fixed ? 'fixed' : 'not fixed';
+    const changes = r.changes.length ? `\n   ${r.changes.join('\n   ')}` : '';
+    return `• \`${r.phase}\` blocked — ${r.category}, ${verdict}${changes}`;
+  });
+  return `*#${iid} self-remediation* — ${healed.length} intervention` +
+    `${healed.length === 1 ? '' : 's'} during this run\n${lines.join('\n')}`;
 }
 
 function isMilestone(p: PhaseConfig): boolean {

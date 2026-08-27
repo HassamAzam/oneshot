@@ -23,8 +23,8 @@ Stop and ask a human ONLY for something this document does not cover: a
 destructive action (deleting data, rewriting published history, changing another
 person's credentials), spending outside the configured budgets, or a change to a
 system that is not `arbisoft/workstreamai`, the demo box or this repo. A run that
-BLOCKS is not one of those — read the ticket note, fix the cause, `npm run
-unblock`, and carry on.
+BLOCKS is not one of those — it tries to repair itself first, and if it hands the
+block back, read the ticket note, fix the cause and carry on.
 
 ---
 
@@ -85,7 +85,39 @@ names the run id (`r-<base36 time>-<hex>`, which is also the worktree directory,
 the SQLite row and the Langfuse session). Read the note first — the phase that
 stopped has almost always already diagnosed it precisely.
 
-Then, once you have fixed the cause:
+**The run now tries to answer that note before you do.** A block invokes
+`remediate` — a phase that is never scheduled and only ever called when
+something stops. It reads the block reason, classifies the cause as
+environment, provisioning, credentials, infrastructure or code, repairs the ones
+that are environmental, verifies the repair against the surface that actually
+failed, and names the phase to resume from. Ticket #5 stopped about a dozen
+times and almost none of it was the ticket's code: a missing demo credential, an
+account outside a group the feature was gated behind, a wedged MCP spawn, a turn
+cap, a budget an earlier lap had eaten. A person answered every one of those by
+hand, and none of them needed a person.
+
+It is bounded on purpose:
+
+- **Two attempts per run.** A pipeline that can heal itself indefinitely is a
+  pipeline that can spend a whole ticket's budget healing.
+- **Never the same block twice.** The same reason arriving again after a
+  remediation means the repair did not work, and the second attempt is spent on
+  a different block or not at all.
+- **It repairs the environment, never the code.** A change made from `remediate`
+  would land after review, verify and QA have already run — so a real defect is
+  sent back to `implement` to meet those checks again, and is never patched in
+  place.
+- Every change it makes is written to `remediations[]` in
+  `state/runs/<iid>/run.json`, precisely enough to undo without asking it.
+
+When it declines, or when its repair does not hold, the run blocks exactly as it
+did before and the ticket note says what was tried and what a person has to do.
+
+### `npm run unblock` — the manual override
+
+Still here, still the right tool when self-healing declined, when you want one
+specific phase retried, or when you would simply rather drive it yourself. It is
+no longer the first thing anyone does.
 
 ```sh
 npm run unblock -- 6                    # see what it would do, then do it
@@ -111,18 +143,38 @@ watcher cannot loop on the same failure while you are still reading the note.
 ## The failures you should expect, and what they mean
 
 These all happened on ticket #5. Each is now either fixed in code or has a known
-response.
+response. **Self-heals** is what `remediate` handles on its own — you are reading
+those rows to understand a run that already recovered, not to act.
 
-| What you see | What it is | What to do |
-|---|---|---|
-| `BLOCKED — qa: no demo credential` / `cannot log in` | The demo box runs a **different anonymised snapshot** from the local seed, so local accounts do not exist there | `ONESHOT_DEMO_LOGIN` in `.env`. Preflight verifies it every time |
-| `qa` blocked on a permission, e.g. buttons never render | The demo account lacks a group the feature is gated behind | Provision `ONESHOT_DEMO_ADMIN_URL` + `ONESHOT_DEMO_ADMIN` and `qa` arranges its own preconditions through the admin panel, recording every change in `dataChanges` |
-| `phase '<name>' ceiling reached` immediately | Was a real bug: per-phase ceilings counted every lap, so failed attempts permanently ate the budget | Fixed — ceilings are **per attempt** now. If you still see it, the phase genuinely spent its budget in one go; do not raise the number, read the transcript |
-| `timed out after Nm while still working` | The phase was alive and simply ran out of clock | Its partial results are salvaged into a verdict automatically. If it recurs for the same phase, raise that phase's `maxTurns` in `config/phases.json` |
-| `timed out ... without a single message` | Genuinely different: the session never started | `npm run deps:verify` — this is the wedged-MCP-spawn shape |
-| `another conductor is already running` | A previous process still holds the lock, or died holding it | `npm run preflight` clears it when the process is gone |
-| `login rejected` locally with a correct password | This venv computes **corrupted password hashes** when `psycopg2` loads before `ssl`/`hashlib` | Never write passwords from an ad-hoc shell. `ONESHOT_TEST_LOGIN` is managed outside the session for exactly this reason |
-| Run stops at `deploy` | The demo box is VPN-gated and the phase will not retry through an outage | Reconnect, `npm run unblock -- <iid>`, restart |
+| What you see | What it is | What to do | Self-heals |
+|---|---|---|---|
+| `BLOCKED — qa: no demo credential` / `cannot log in` | The demo box runs a **different anonymised snapshot** from the local seed, so local accounts do not exist there | `ONESHOT_DEMO_LOGIN` in `.env`. Preflight verifies it every time | partly — it can re-point or re-verify a credential that exists; it cannot invent one |
+| `qa` blocked on a permission, e.g. buttons never render | The demo account lacks a group the feature is gated behind | Provision `ONESHOT_DEMO_ADMIN_URL` + `ONESHOT_DEMO_ADMIN` and `qa` arranges its own preconditions through the admin panel, recording every change in `dataChanges` | yes — same admin panel, same recording discipline |
+| `phase '<name>' ceiling reached` immediately | Was a real bug: per-phase ceilings counted every lap, so failed attempts permanently ate the budget | Fixed — ceilings are **per attempt** now. If you still see it, the phase genuinely spent its budget in one go; do not raise the number, read the transcript | yes, for a ceiling an earlier lap ate; **no** when the phase really spent it |
+| `timed out after Nm while still working` | The phase was alive and simply ran out of clock | Its partial results are salvaged into a verdict automatically. If it recurs for the same phase, raise that phase's `maxTurns` in `config/phases.json` | yes |
+| `timed out ... without a single message` | Genuinely different: the session never started | `npm run deps:verify` — this is the wedged-MCP-spawn shape | yes |
+| `another conductor is already running` | A previous process still holds the lock, or died holding it | `npm run preflight` clears it when the process is gone | yes |
+| `login rejected` locally with a correct password | This venv computes **corrupted password hashes** when `psycopg2` loads before `ssl`/`hashlib` | Never write passwords from an ad-hoc shell. `ONESHOT_TEST_LOGIN` is managed outside the session for exactly this reason | no — writing that password from a session is the thing that causes it |
+| Run stops at `deploy` | The demo box is VPN-gated and the phase will not retry through an outage | Reconnect, `npm run unblock -- <iid>`, restart | no — an outage is not a repair |
+
+### What it will not self-heal
+
+Three shapes are handed straight back, deliberately and quickly:
+
+- **A real defect in the ticket's own change.** Repairing that from `remediate`
+  would put code into the merge that review, verify and QA never saw. It goes
+  back to `implement` instead, or to you.
+- **An outage.** A dropped VPN tunnel, a box that is down, a registry that is not
+  answering. Nothing to fix, and waiting is not a phase.
+- **A credential nobody has provisioned.** It will wire up, re-point and verify a
+  secret that exists somewhere; it will not create one, and it will not read one
+  out of a store it was not given.
+
+In all three the run blocks as it always did — `Needs Human`, the run id, the
+original reason — and the note additionally carries the diagnosis, the category,
+whatever it did change (so you can undo it), and one line naming exactly what a
+person has to do. "Investigate the deploy" is not an acceptable version of that
+line, and the phase is told so.
 
 ---
 

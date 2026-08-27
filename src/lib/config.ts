@@ -108,9 +108,22 @@ export interface PhaseConfig {
    * happen to be far apart.
    */
   group?: string;
+  /**
+   * A phase the executor never SCHEDULES. It still carries a position in the
+   * list, a model tier, a turn cap and a write scope like any other — it is
+   * simply invoked by name at the moment something needs it, and stepped over
+   * by the main loop.
+   *
+   * The position matters even though the loop skips it: `n` is what keeps the
+   * phase in the ordering the config reads as a sequence, and being in the list
+   * at all is what lets ONESHOT_SKIP_PHASES switch it off exactly like the rest.
+   */
+  onDemand?: boolean;
 }
 
 export interface BudgetConfig {
+  /** false disables every self-imposed token ceiling below. Absent means enabled. */
+  enabled?: boolean;
   weights: { input: number; output: number; cache_creation: number; cache_read: number };
   window_hours: number;
   window_tokens: number;

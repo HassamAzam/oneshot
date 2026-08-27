@@ -507,6 +507,21 @@ function checkQuotaHeadroom(): void {
   section('Quota');
 
   const cfg = budgetConfig();
+
+  // With the ceilings switched off, reporting spend AGAINST them would read as a
+  // budget that still bites. Report the spend as an observation and say plainly
+  // what is bounding a phase instead.
+  if (cfg.enabled === false) {
+    skip('token ceilings disabled', 'budgets.json enabled:false — maxTurns/timeoutMin bound each phase');
+    pass(`${cfg.window_hours}h window spend`, `${millions(windowUsage())} weighted (not capped)`);
+    pass('day spend', `${millions(dayUsage())} weighted (not capped)`);
+    const parked = checkQuota();
+    parked.allowed
+      ? pass('not parked', 'no subscription limit currently in effect')
+      : fail('a run could not start now', parked.reason);
+    return;
+  }
+
   const win = windowUsage();
   const day = dayUsage();
   const winPct = Math.round((win / cfg.window_tokens) * 100);

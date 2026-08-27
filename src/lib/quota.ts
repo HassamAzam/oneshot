@@ -131,6 +131,12 @@ export function checkQuota(runId?: string, phase?: string, lap = 0): QuotaVerdic
   if (quotaParked()) return { allowed: false, reason: 'parked after a subscription usage limit' };
 
   const cfg = budgetConfig();
+  // budgets.enabled === false switches off every self-imposed TOKEN ceiling and
+  // leaves maxTurns/timeoutMin as the only thing bounding a phase. Deliberately
+  // placed AFTER quotaParked(): parking reacts to a real subscription limit that
+  // has already been hit, and is not ours to disable. See config/budgets.json.
+  if (cfg.enabled === false) return { allowed: true };
+
   const win = windowUsage();
   const day = dayUsage();
 

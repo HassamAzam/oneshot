@@ -40,6 +40,28 @@ export interface PhaseRecord {
   error?: string;
 }
 
+/**
+ * One conductor-side attempt at clearing a block without a person.
+ *
+ * Kept on the journal rather than only in an artifact because it is HISTORY,
+ * not a handoff: the artifact is overwritten by the next attempt, and the two
+ * facts that matter later — how many attempts this run has already spent, and
+ * whether it has already tried this exact block — are counts over the whole
+ * run. It is also the record of what was changed OUTSIDE the worktree, which
+ * is the part nothing else in this system would otherwise remember.
+ */
+export interface Remediation {
+  /** The phase whose failure was about to end the run. */
+  phase: string;
+  /** The blocked reason, verbatim — the dedupe key, with `phase`. */
+  reason: string;
+  category: string;
+  fixed: boolean;
+  /** Every change made, precise enough to undo by hand. */
+  changes: string[];
+  at: number;
+}
+
 export interface RunJournal {
   runId: string;
   iid: number;
@@ -67,6 +89,8 @@ export interface RunJournal {
   published?: string[];
   slackTs?: string;
   phases: PhaseRecord[];
+  /** Blocks this run diagnosed and tried to clear by itself, oldest first. */
+  remediations?: Remediation[];
 }
 
 function journalPath(iid: number): string {
@@ -106,6 +130,20 @@ export function recordPhase(iid: number, rec: PhaseRecord): void {
   const j = readJournal(iid);
   if (!j) return;
   j.phases.push(rec);
+  writeJournal(j);
+}
+
+/**
+ * Append a remediation attempt, whatever it concluded.
+ *
+ * A refused or useless attempt is recorded exactly like a successful one: the
+ * budget was spent either way, and an attempt that is not on the journal is an
+ * attempt the run is free to repeat.
+ */
+export function recordRemediation(iid: number, rec: Remediation): void {
+  const j = readJournal(iid);
+  if (!j) return;
+  j.remediations = [...(j.remediations ?? []), rec];
   writeJournal(j);
 }
 
