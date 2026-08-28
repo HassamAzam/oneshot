@@ -657,7 +657,7 @@ function headerHtml(m: ReportModel): string {
 </header>`;
 }
 
-function renderHtml(m: ReportModel): string {
+export function renderHtml(m: ReportModel): string {
   const cols = ['phase', 'lap', 'status', 'duration', 'model', 'turns', 'attempts', 'results', 'error'];
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
