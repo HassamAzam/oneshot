@@ -24,9 +24,12 @@
  *              then reconciled strictly in phase order, so concurrency changes
  *              the wall clock and never the semantics.
  *
- * Two things are asserted here rather than believed. A deploy is verified from
- * the box and the git graph, not from what the deploy phase said about itself;
- * and a promotion window is held by one run at a time, because the demo server
+ * Three things are asserted here rather than believed. A ticket is driven only
+ * by the conductor that can prove it owns the run — on a resumption as much as
+ * on a fresh claim, since a live run and an abandoned one both read 'running'
+ * from a journal. A deploy is verified from the box and the git graph, not from
+ * what the deploy phase said about itself. And a promotion window is held by one
+ * run at a time across every conductor on the machine, because the demo server
  * carries a branch tip rather than a SHA.
  *
  * One thing is attempted rather than surrendered. Most blocks this pipeline
@@ -37,11 +40,10 @@
  * continues from the phase remediation says to resume at.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, rmSync } from 'node:fs';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, PAUSE, SKIP_DEPLOY, STATE, WORK_REPO, deployConfig, modelFor, phases, projectConfig,
+  DRY_RUN, PAUSE, SKIP_DEPLOY, WORK_REPO, deployConfig, modelFor, phases, portPool, projectConfig,
   type PhaseConfig,
 } from '../lib/config.js';
 import {
@@ -58,10 +60,13 @@ import {
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion } from '../lib/promotion.js';
 import { checkQuota } from '../lib/quota.js';
-import { createRun, getRun, isClaimed, logEvent, phaseEnd, phaseStart, updateRun } from '../lib/db.js';
+import {
+  claimOwnership, claimTicket, getRun, logEvent, phaseEnd, phaseStart, updateRun,
+} from '../lib/db.js';
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
 import { log } from '../lib/log.js';
 import { exportRun } from '../lib/langfuse.js';
+import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
@@ -110,7 +115,13 @@ const KEPT_STATUSES = new Set<PhaseRecord['status']>(['ok', 'warned', 'skipped']
 export interface RunOutcome {
   runId: string;
   iid: number;
-  status: 'done' | 'blocked' | 'aborted';
+  /**
+   * 'refused' is not a failure and never becomes one. It is the answer when
+   * another conductor is legitimately driving this ticket, or when a block is
+   * still inside its cooldown — nothing was started, nothing was spent, and
+   * nothing needs looking at.
+   */
+  status: 'done' | 'blocked' | 'aborted' | 'refused';
   reason?: string;
 }
 
@@ -277,11 +288,12 @@ interface PhaseResult {
  */
 export async function runTicket(
   issue: Issue,
-  opts: { signal?: AbortSignal } = {},
+  opts: { conductor: string; signal?: AbortSignal },
 ): Promise<RunOutcome> {
   const cfg = projectConfig();
   const iid = issue.iid;
   const list = phases();
+  const owner = opts.conductor;
 
   // Claim here, not in the watcher. --ticket dispatches straight to runTicket,
   // so a guard living only in the scan path is a guard that is not there on the
@@ -289,19 +301,42 @@ export async function runTicket(
   const decision = decideResume(readJournal(iid));
   if (decision.kind === 'refuse') {
     log.warn(`#${iid} — ${decision.reason}`);
-    return { runId: '', iid, status: 'aborted', reason: decision.reason };
-  }
-  if (decision.kind !== 'resume' && isClaimed(iid)) {
-    log.warn(`#${iid} is already claimed by an in-flight run — refusing`);
-    return { runId: '', iid, status: 'aborted', reason: 'already claimed' };
-  }
-  if (decision.kind === 'fresh' && decision.archive) {
-    const moved = archiveRun(iid, decision.archive);
-    if (moved) log.info(`#${iid} had a completed run — archived to ${moved}`);
+    return { runId: '', iid, status: 'refused', reason: decision.reason };
   }
 
   const resuming = decision.kind === 'resume';
   const runId = resuming ? decision.journal.runId : newRunId();
+
+  // The claim is an OWNERSHIP test on both paths, and that is the whole point.
+  // Asking "is this ticket claimed?" and then exempting a resume from the
+  // question was a hole with a conductor-shaped gap in it: a LIVE run's journal
+  // says 'running', decideResume() reads 'running' as resumable, so a second
+  // conductor took the resume branch, never consulted the claim at all, and
+  // proceeded to drive a ticket the first one was already mid-phase on. A
+  // uniqueness constraint would not have caught it either — the second
+  // conductor UPDATEs the row it should never have been given.
+  //
+  // So: a fresh claim inserts and loses cleanly to whoever inserted first, and a
+  // resume has to prove the run is HIS — either already owned, or abandoned by a
+  // conductor the fleet no longer sees.
+  const claimed = resuming && getRun(runId)
+    ? claimOwnership(iid, runId, owner)
+    // A journal outlives the database on purpose (state/oneshot.db is a cache),
+    // so a resume can arrive with history on disk and no row to own yet.
+    : claimTicket(iid, runId, issue.title, owner) === 'claimed';
+
+  if (!claimed) {
+    const why = resuming
+      ? 'another conductor owns the in-flight run for this ticket'
+      : 'another conductor claimed this ticket first';
+    log.info(`#${iid} — ${why}`);
+    return { runId: '', iid, status: 'refused', reason: why };
+  }
+
+  if (decision.kind === 'fresh' && decision.archive) {
+    const moved = archiveRun(iid, decision.archive);
+    if (moved) log.info(`#${iid} had a completed run — archived to ${moved}`);
+  }
 
   let j: RunJournal = resuming ? decision.journal : {
     runId,
@@ -318,13 +353,13 @@ export async function runTicket(
     delete j.blockedWhy;
     delete j.blockedAt;
     writeJournal(j);
-    if (getRun(runId)) updateRun(runId, { status: 'running', ended_at: null, blocked_why: null });
-    else createRun(runId, iid, issue.title);
+    updateRun(runId, {
+      status: 'running', ended_at: null, blocked_why: null, owner_seen_at: Date.now(),
+    });
     log.banner(`▶ #${iid} ${issue.title}  (resuming ${runId})`);
   } else {
     ensureRunDirs(iid);
     writeJournal(j);
-    createRun(runId, iid, issue.title);
     log.banner(`▶ #${iid} ${issue.title}`);
   }
 
@@ -472,7 +507,14 @@ export async function runTicket(
 
     const running = members.map((k) => list[k]!.name);
     await updateCard(j.slackTs ?? '', cardState(j, running));
-    updateRun(runId, { phase: running.join(' + '), status: 'running' });
+    // owner_seen_at travels with every phase transition, not only with the
+    // conductor's own tick. It is what tells the rest of the fleet that this row
+    // belongs to something still breathing — and a phase boundary is the most
+    // honest moment to say so, because it is the last one this run is certain to
+    // reach before it spends ninety minutes inside a session.
+    updateRun(runId, {
+      phase: running.join(' + '), status: 'running', owner_seen_at: Date.now(),
+    });
     if (running.length > 1) log.phase(`running ${running.join(' + ')} concurrently`);
 
     const results = await Promise.all(members.map((k) => runOne(list[k]!, k)));
@@ -696,13 +738,14 @@ export async function runTicket(
       }
     }
     if (p.needsPort && !port) {
-      try {
-        port = leasePortFor(runId);
-        j = updateJournal(iid, { port }) ?? j;
-        updateRun(runId, { port });
-      } catch (err) {
-        return `port: ${(err as Error).message}`;
+      const leased = leasePortFor(runId);
+      if (leased === null) {
+        return `port: every port in PORT_POOL (${portPool().join(', ')}) is leased — ` +
+          'the fleet is at its real capacity, whatever the concurrency setting says';
       }
+      port = leased;
+      j = updateJournal(iid, { port }) ?? j;
+      updateRun(runId, { port });
     }
     return null;
   }
@@ -719,46 +762,45 @@ export async function runTicket(
     const wt = p.cwd === 'worktree' ? worktree : undefined;
     const ctx: PromptCtx = { ticket, runId, lap, branch, worktree: wt, port, prior, journal: j };
 
-    // The deploy lock is the cross-process shadow of the in-process promotion
-    // mutex: hooks/deploy-guard.cjs refuses deploy-surface commands while a
-    // DIFFERENT run holds it, so even a rogue second conductor cannot land two
-    // builds on the box at once. Written just-in-time and always removed —
-    // deploy-guard treats a lock older than the deploy timeout as stale.
-    if (p.name === 'deploy') writeDeployLock(runId, iid);
-    try {
-      // The ledger row is opened before the phase and closed after it, so an
-      // external watchdog can see a phase that has been 'running' for longer than
-      // its own timeout should allow — the one signal a wedged SDK spawn gives.
-      const rowId = phaseStart(runId, p.name, lap, modelFor(p));
-      const out = await runPhase({
-        iid, runId, lap, cfg: p,
-        prompt: promptFor(p, ctx),
-        systemPrompt: systemPromptFor(p, ctx),
-        worktree: wt, port, branch,
-        signal: opts.signal,
-      });
-      phaseEnd(rowId, out.ok ? 'ok' : statusForFailure(p), {
-        turns: out.turns,
-        weighted: out.weighted,
-        sessionId: out.sessionId,
-        detail: out.error ?? out.blocked ?? undefined,
-      });
+    // The ledger row is opened before the phase and closed after it, so an
+    // external watchdog can see a phase that has been 'running' for longer than
+    // its own timeout should allow — the one signal a wedged SDK spawn gives.
+    const rowId = phaseStart(runId, p.name, lap, modelFor(p));
+    const out = await runPhase({
+      iid, runId, lap, cfg: p,
+      prompt: promptFor(p, ctx),
+      systemPrompt: systemPromptFor(p, ctx),
+      worktree: wt, port, branch,
+      signal: opts.signal,
+    });
+    phaseEnd(rowId, out.ok ? 'ok' : statusForFailure(p), {
+      turns: out.turns,
+      weighted: out.weighted,
+      sessionId: out.sessionId,
+      detail: out.error ?? out.blocked ?? undefined,
+    });
 
-      return { cfg: p, index, lap, startedAt, endedAt: Date.now(), rowId, out };
-    } finally {
-      if (p.name === 'deploy') removeDeployLock(runId);
-    }
+    return { cfg: p, index, lap, startedAt, endedAt: Date.now(), rowId, out };
   }
 
   async function runCodePhase(p: PhaseConfig, index: number): Promise<Control> {
     // Taken before the merge rather than after it: the window this protects
-    // opens the moment anything of this run's lands on the base branch.
-    if (p.name === 'merge') await acquirePromotion(runId);
+    // opens the moment anything of this run's lands on the base branch. The wait
+    // can be long — the holder keeps the window through its own QA — so a run
+    // told to stop while queued stops there rather than being dragged through a
+    // merge it no longer has any reason to perform.
+    if (p.name === 'merge'
+      && !await acquirePromotion({ runId, iid, conductor: owner }, { signal: opts.signal })) {
+      return {
+        kind: 'stop', status: 'aborted',
+        reason: 'stopped while waiting for the promotion window',
+      };
+    }
 
     const lap = lapsOf(iid, p.name);
     const startedAt = Date.now();
     await updateCard(j.slackTs ?? '', cardState(j, [p.name]));
-    updateRun(runId, { phase: p.name, status: 'running' });
+    updateRun(runId, { phase: p.name, status: 'running', owner_seen_at: Date.now() });
 
     const rowId = phaseStart(runId, p.name, lap, 'code');
     const done = await CODE_PHASES[p.name]!({ iid, runId, journal: j, prior });
@@ -972,7 +1014,7 @@ export async function runTicket(
       attempt: lap + 1, of: MAX_REMEDIATIONS,
     });
     await updateCard(j.slackTs ?? '', cardState(j, [cfgR.name]));
-    updateRun(runId, { phase: cfgR.name, status: 'running' });
+    updateRun(runId, { phase: cfgR.name, status: 'running', owner_seen_at: Date.now() });
 
     // No worktree, whatever this run holds: the cause is almost never inside
     // the ticket's diff, and a phase that cannot see the diff cannot be tempted
@@ -1231,7 +1273,9 @@ export async function runTicket(
     if (reason) journal.blockedWhy = reason;
     if (status === 'blocked') journal.blockedAt = Date.now();
     writeJournal(journal);
-    updateRun(journal.runId, { status, ended_at: Date.now(), blocked_why: reason ?? null });
+    updateRun(journal.runId, {
+      status, ended_at: Date.now(), blocked_why: reason ?? null, owner_seen_at: Date.now(),
+    });
     logEvent('run_finished', { status, reason }, { runId: journal.runId });
 
     // Both leases go back on EVERY terminal status. Holding a port for a
@@ -1266,6 +1310,15 @@ export async function runTicket(
       log.warn(`■ #${journal.iid} stopped — ${reason ?? 'aborted'}`);
     }
 
+    // The readable account of what happened: which phases ran, which subagents
+    // each one dispatched, and the transcripts themselves. Written whether the
+    // run finished or stopped, because a run that stopped is the one somebody
+    // actually needs to read. Synchronous, never throws, and deliberately
+    // BEFORE the teardown below — archiveRun moves the directory, and a report
+    // written after that would land somewhere that no longer exists.
+    const reportPath = writeRunReport(journal.iid);
+    if (reportPath) log.ok(`report ${reportPath}`);
+
     // The run's own trace, written by the conductor rather than by the
     // sessions. Last, and never awaited for anything that matters: a Langfuse
     // that is down must not change how a run ends.
@@ -1282,36 +1335,6 @@ export async function runTicket(
     }
 
     return { runId: journal.runId, iid: journal.iid, status, reason };
-  }
-}
-
-/**
- * The deploy lock, as hooks/deploy-guard.cjs reads it. The in-process
- * promotion mutex already serializes the merge→qa window inside ONE conductor;
- * this file extends the same guarantee across processes, because the guard —
- * not the mutex — is what a session's Bash call actually meets. Best-effort on
- * both sides: a write failure is logged rather than fatal (the mutex still
- * holds), and the guard ignores locks older than the deploy deadline.
- */
-function writeDeployLock(runId: string, iid: number): void {
-  try {
-    writeFileSync(
-      join(STATE, 'DEPLOY-LOCK'),
-      `${JSON.stringify({ runId, iid, pid: process.pid, since: Date.now() })}\n`,
-    );
-  } catch (err) {
-    log.warn('could not write state/DEPLOY-LOCK', { error: (err as Error).message });
-  }
-}
-
-function removeDeployLock(runId: string): void {
-  try {
-    const file = join(STATE, 'DEPLOY-LOCK');
-    if (!existsSync(file)) return;
-    const lock = JSON.parse(readFileSync(file, 'utf8')) as { runId?: string };
-    if (lock.runId === runId) rmSync(file);
-  } catch {
-    rmSync(join(STATE, 'DEPLOY-LOCK'), { force: true });
   }
 }
 

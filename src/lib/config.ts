@@ -10,7 +10,7 @@
  * prompts about a detected key, it silently uses it, and a subscription fleet
  * becomes a metered API bill with no signal that anything changed.
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -253,7 +253,44 @@ export function narratorModel(): string {
 
 // ------------------------------------------------------------------ paths
 
-export const STATE = join(ROOT, 'state');
+export const DRY_RUN = envFlag('DRY_RUN');
+export const SKIP_DEPLOY = envFlag('ONESHOT_SKIP_DEPLOY');
+
+/**
+ * A dry run's own home, so DRY_RUN=1 cannot disturb the conductors doing real
+ * work.
+ *
+ * Sharing state/ was the flaw: a dry run's rows sat in the same claim table and
+ * the same port pool as everybody else's, so it hid tickets from the watcher and
+ * held ports nothing was listening on, and its journals were what a resumed real
+ * run read back. "Changes nothing" has to mean changes nothing HERE too, not
+ * just nothing on GitLab.
+ *
+ * It is a whole shadow home rather than a bare directory because the guard hooks
+ * have to agree. hooks/_common.cjs derives everything it reads from
+ * `$ONESHOT_HOME` — state/ for the journals and the pause switches, config/ for
+ * the branch policy, .env for the token — and deploy-guard refuses outright when
+ * it cannot read the run journal. So state-dry/ carries its own state/ and
+ * borrows the other two by symlink, and ONESHOT_HOME points at it: the hooks
+ * then resolve the same configuration the conductor loaded and the same journals
+ * the dry run is writing.
+ */
+function dryHome(): string {
+  const home = join(ROOT, 'state-dry');
+  mkdirSync(join(home, 'state'), { recursive: true });
+  for (const shared of ['config', '.env']) {
+    const link = join(home, shared);
+    if (existsSync(link) || !existsSync(join(ROOT, shared))) continue;
+    try {
+      symlinkSync(join(ROOT, shared), link);
+    } catch { /* another dry conductor got there first */ }
+  }
+  return home;
+}
+
+export const ONESHOT_HOME: string = DRY_RUN ? dryHome() : ROOT;
+
+export const STATE = join(ONESHOT_HOME, 'state');
 export const RUNS = join(STATE, 'runs');
 export const MEMORY = join(STATE, 'memory');
 export const PAUSE = join(STATE, 'PAUSE');
@@ -274,9 +311,6 @@ export function portPool(): number[] {
   return envOr('PORT_POOL', '8000,8001,8002')
     .split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
 }
-
-export const DRY_RUN = envFlag('DRY_RUN');
-export const SKIP_DEPLOY = envFlag('ONESHOT_SKIP_DEPLOY');
 
 // -------------------------------------------------------------- session env
 
@@ -335,8 +369,23 @@ function buildBaseEnv(): Record<string, string> {
     PATH: envOr('ONESHOT_SESSION_PATH', defaultSessionPath()),
     HOME: process.env.HOME ?? homedir(),
     LANG: 'en_US.UTF-8',
-    ONESHOT_HOME: ROOT,
+    ONESHOT_HOME,
   };
+
+  // Committer identity travels in the environment rather than in a config file.
+  // `git config user.name` inside a worktree writes the SHARED .git/config, so
+  // several worktrees being created at once contend for one lock and most of
+  // them lose. Nothing needs a file: git reads these four variables directly,
+  // they are per-session by construction, and a worktree that is deleted takes
+  // no configuration with it.
+  const gitAuthor = envOr('ONESHOT_GIT_AUTHOR_NAME', 'Oneshot');
+  const gitEmail = envOr('ONESHOT_GIT_AUTHOR_EMAIL');
+  env.GIT_AUTHOR_NAME = gitAuthor;
+  env.GIT_COMMITTER_NAME = gitAuthor;
+  if (gitEmail) {
+    env.GIT_AUTHOR_EMAIL = gitEmail;
+    env.GIT_COMMITTER_EMAIL = gitEmail;
+  }
 
   for (const v of IDENTITY_VARS) {
     const val = process.env[v];

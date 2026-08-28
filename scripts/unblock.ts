@@ -6,7 +6,7 @@
  * of state/runs/<iid>/run.json, clear status/blockedWhy/blockedAt, delete the
  * half-written artifact the failed lap left on disk, drop the quota rows that
  * lap already spent, put the entry label back on the ticket, and let go of the
- * lock and the port lease the dead run is still holding. Each one is mechanical;
+ * port lease the dead run is still holding. Each one is mechanical;
  * doing them by hand is how a journal ends up describing a run that never
  * happened, and how a ticket ends up carrying neither the entry label nor the
  * blocked one and therefore never being looked at again by anything.
@@ -28,15 +28,16 @@
  * Everything here is idempotent: a second run finds nothing left to prune, no
  * artifact to delete and the entry label already in place, and says so.
  */
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  STATE, phaseByName, projectConfig, runDir,
+  phaseByName, projectConfig, runDir,
 } from '../src/lib/config.js';
 import {
   readJournal, writeJournal, type PhaseRecord, type RunJournal,
 } from '../src/lib/artifacts.js';
 import { db, logEvent, updateRun } from '../src/lib/db.js';
+import { liveConductorIds } from '../src/lib/fleet.js';
 import { getIssue, swapLabel } from '../src/lib/gitlab.js';
 
 const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', D = '\x1b[2m', B = '\x1b[1m', X = '\x1b[0m';
@@ -96,43 +97,28 @@ ${B}npm run unblock -- <iid> [--phase <name>] [--dry-run]${X}
 
 // -------------------------------------------------------------- the conductor
 
-interface LockFile { pid: number; startedAt: number; argv: string[] }
-
-const LOCK = join(STATE, 'conductor.pid');
-
-/**
- * The lock is READ here, never acquired.
- *
- * src/lib/singleton.ts owns acquiring, and its acquire() reclaims a stale lock
- * by writing this process's pid into it — exactly the wrong thing for a tool
- * that must never become the conductor. So the shape is duplicated and the
- * verbs are not.
- */
-function readLock(): LockFile | null {
-  if (!existsSync(LOCK)) return null;
-  try {
-    return JSON.parse(readFileSync(LOCK, 'utf8')) as LockFile;
-  } catch {
-    return null;
-  }
-}
-
-/** Signal 0 tests for existence without touching the process. */
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-interface RunRowLite { run_id: string; status: string; phase: string | null }
+interface RunRowLite { run_id: string; status: string; phase: string | null; owner: string | null }
 
 function inFlightRows(iid: number): RunRowLite[] {
   return db.prepare(
-    "SELECT run_id, status, phase FROM runs WHERE iid = ? AND status IN ('claimed','running')",
+    `SELECT run_id, status, phase, owner FROM runs
+     WHERE iid = ? AND status IN ('claimed','running')`,
   ).all(iid) as RunRowLite[];
+}
+
+/**
+ * Rows for THIS ticket that a conductor still standing is actually driving.
+ *
+ * The question is ownership, not existence. "Is any conductor running?" was the
+ * right question while there could only be one; with a fleet it refuses to
+ * unblock #123 because somebody three terminals away is mid-QA on #456, and the
+ * two have nothing to do with each other. Equally, a claimed/running row whose
+ * owner is gone is precisely the residue this script exists to clear — it is
+ * what keeps the watcher skipping the ticket forever.
+ */
+function liveOwners(rows: RunRowLite[]): RunRowLite[] {
+  const live = new Set(liveConductorIds());
+  return rows.filter((r) => r.owner !== null && live.has(r.owner));
 }
 
 // ------------------------------------------------------------- the summaries
@@ -263,17 +249,17 @@ async function main(): Promise<void> {
   // Checked after the summary and before the first write: the operator gets the
   // state they asked about either way, and a refusal explains itself against
   // something they can already see. The runs table is the signal because it is
-  // the same one the conductor's own claim check reads (src/lib/db.ts
-  // isClaimed) — editing a journal under a live run is how it gets corrupted.
-  const lock = readLock();
-  const conductorAlive = lock !== null && alive(lock.pid);
+  // the same one the conductor's own claim reads (src/lib/db.ts claimOwnership)
+  // — editing a journal under a live run is how it gets corrupted.
   const inFlight = inFlightRows(iid);
-  if (conductorAlive && inFlight.length) {
+  const driven = liveOwners(inFlight);
+  if (driven.length) {
+    const who = [...new Set(driven.map((r) => r.owner!))].map((o) => o.slice(0, 6)).join(', ');
     console.log(
-      `\n${R}refusing${X} — a conductor (pid ${lock!.pid}) is alive and #${iid} is in flight ` +
-      `${D}(${inFlight.map((r) => `${r.run_id}:${r.phase ?? r.status}`).join(', ')})${X}`,
+      `\n${R}refusing${X} — conductor ${who} is alive and owns #${iid} ` +
+      `${D}(${driven.map((r) => `${r.run_id}:${r.phase ?? r.status}`).join(', ')})${X}`,
     );
-    console.log(`${D}Stop it first, or wait for the run to reach a terminal status:${X}`);
+    console.log(`${D}Stop that one, or wait for the run to reach a terminal status:${X}`);
     console.log('  pkill -f "src/index.ts"\n');
     process.exit(1);
   }
@@ -288,7 +274,7 @@ async function main(): Promise<void> {
     .flatMap((p) => artifactsOf(iid, p));
   const quota = quotaRowsFor(journal.runId, retried);
   const leases = portLeasesFor(journal.runId);
-  const staleLock = lock !== null && !conductorAlive;
+  const orphaned = [...new Set(inFlight.map((r) => r.owner).filter(Boolean))] as string[];
 
   console.log(`\n${B}PLAN${X}`);
   if (only !== undefined) console.log(`  ${D}scoped to --phase ${only}${X}`);
@@ -301,7 +287,7 @@ async function main(): Promise<void> {
   console.log(`  status    ${journal.status} -> running${journal.blockedWhy ? ', blockedWhy/blockedAt cleared' : ''}`);
   console.log(`  leases    ${leases.length ? `release port ${leases.join(', ')}` : `${D}no port held${X}`}`);
   console.log(`  runs row  ${inFlight.length ? `${inFlight.length} orphaned ${inFlight.map((r) => r.status).join('/')} row(s) -> aborted` : `${D}clean${X}`}`);
-  console.log(`  lock      ${staleLock ? `stale (pid ${lock!.pid} is gone) -> removed` : `${D}${conductorAlive ? `held by a live conductor, pid ${lock!.pid} — left alone` : 'none'}${X}`}`);
+  console.log(`  owner     ${orphaned.length ? `${orphaned.map((o) => o.slice(0, 6)).join(', ')} ${D}— no longer in the fleet${X}` : `${D}unowned${X}`}`);
 
   const cfg = projectConfig();
   const issue = await getIssue(iid);
@@ -349,8 +335,6 @@ async function main(): Promise<void> {
     updateRun(row.run_id, { status: 'aborted', ended_at: Date.now() });
   }
 
-  if (staleLock) rmSync(LOCK, { force: true });
-
   const swapped = await swapLabel(iid, [cfg.labels.blocked], [cfg.labels.entry]);
   if (!swapped.ok) {
     console.log(
@@ -361,7 +345,7 @@ async function main(): Promise<void> {
 
   logEvent('unblocked', {
     iid, phases: retried, records: doomed.size, artifacts: files.length,
-    quotaRows: quota.n, ports: leases, staleLock,
+    quotaRows: quota.n, ports: leases, orphanedOwners: orphaned,
   }, { runId: journal.runId });
 
   printJournal('AFTER', readJournal(iid) ?? journal);

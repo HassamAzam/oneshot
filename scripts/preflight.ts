@@ -23,18 +23,18 @@
  * "this would only surface as a confusing failure three phases in".
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { connect } from 'node:net';
-import { basename, join } from 'node:path';
+import { basename } from 'node:path';
 import {
-  PAUSE, PAUSE_DEPLOY, ROOT, STATE,
+  PAUSE, PAUSE_DEPLOY, ROOT,
   budgetConfig, deployConfig, envOr, phaseByName, portPool, projectConfig,
 } from '../src/lib/config.js';
-import { db, reconcileStaleRuns } from '../src/lib/db.js';
+import { db, reconcileForeignRuns } from '../src/lib/db.js';
+import { anyLive, liveConductors } from '../src/lib/fleet.js';
 import { ping } from '../src/lib/gitlab.js';
 import { accountWindowPct, checkQuota, dayUsage, windowUsage } from '../src/lib/quota.js';
 import { demoHostReachable } from '../src/lib/reachability.js';
-import { acquire, release } from '../src/lib/singleton.js';
 
 let fails = 0;
 let warns = 0;
@@ -140,17 +140,6 @@ async function checkNetwork(): Promise<void> {
 
 // ----------------------------------------------------------------- stale state
 
-const LOCK = join(STATE, 'conductor.pid');
-
-function peekLock(): { pid: number } | null {
-  if (!existsSync(LOCK)) return null;
-  try {
-    return JSON.parse(readFileSync(LOCK, 'utf8')) as { pid: number };
-  } catch {
-    return { pid: 0 };
-  }
-}
-
 function portLeasesTableExists(): boolean {
   const row = db.prepare(
     "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'port_leases'",
@@ -161,33 +150,34 @@ function portLeasesTableExists(): boolean {
 /**
  * Clear what a dead conductor left behind.
  *
- * The whole section is gated on there being no LIVE conductor, and the gate is
- * the load-bearing part. Every repair here decides "dead" from the runs table,
- * which is only trustworthy while nothing is writing to it: reconciling rows
- * out from under a running conductor would abort healthy in-flight runs and
- * hand their ports to somebody else. The PID lock answers that question
- * definitively, so it is taken first and the rest is skipped when it is held.
+ * The whole section is gated on the fleet being EMPTY, and the gate is the
+ * load-bearing part. Every repair here decides "dead" from the runs table, which
+ * is only trustworthy while nothing is writing to it: reconciling rows out from
+ * under a live conductor would abort healthy in-flight runs and hand their ports
+ * to somebody else. That question used to have a one-word answer because there
+ * could only ever be one conductor; now it is a roll call, and a single live
+ * peer is enough to make every repair below unsafe.
  *
- * The lock is acquired and immediately released rather than merely inspected —
- * acquire() already implements the exact staleness rule the conductor uses, and
- * a second copy of "is this PID alive" that drifts from it would be worse than
- * the hand clean-up it replaces.
+ * The fleet is asked rather than the PID lock, because the lock is only written
+ * by a --solo start and says nothing at all about the ordinary case.
  */
 function repairStaleState(): void {
   section('Stale state');
 
-  const before = peekLock();
-  const lock = acquire();
-  if (!lock.ok) {
-    warn(`a conductor is already running (pid ${lock.heldBy?.pid})`,
-      'its runs are live, so nothing below is repaired — stop it first if you meant to');
+  if (anyLive()) {
+    const live = liveConductors();
+    warn(`${live.length} conductor(s) are live`,
+      `${live.map((c) => `${c.conductor_id.slice(0, 6)}:${c.pid}`).join(', ')} — their runs are ` +
+      'in flight, ' +
+      'so nothing below is repaired; stop them first if you meant to');
+    reportPauseSwitches();
     return;
   }
-  release();
-  if (before) fixed('cleared a stale conductor lock', `pid ${before.pid} is gone`);
-  else pass('no conductor lock held');
+  pass('no conductor is live', 'nothing else is writing to the runs table');
 
-  const reaped = reconcileStaleRuns();
+  // An empty live set, so every claimed/running row in there is foreign to
+  // somebody who no longer exists.
+  const reaped = reconcileForeignRuns([]);
   if (reaped) {
     fixed(`buried ${reaped} run row(s) left claimed/running`,
       'their tickets are claimable again and resume from the last phase that succeeded');

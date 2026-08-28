@@ -47,39 +47,61 @@ export interface Lease {
 }
 
 /**
- * Lease a port for this run.
+ * Reclaim what is dead and take the first port still free — as ONE statement's
+ * worth of exclusivity.
  *
- * Ports are the real concurrency limit for phases that run a dev server.
- * Leased through SQLite rather than by probing, because a port that is free
- * *right now* can be taken by the next phase two seconds later.
+ * The reclaim is not housekeeping, it is the pool's only repair path. A lease is
+ * released in teardown, so a conductor that died mid-run leaves a row owning a
+ * port forever, and the pool is three entries wide. Ownership is decided by the
+ * runs table, which boot-time reconciliation has already truthed: a lease whose
+ * run is no longer claimed or running cannot be in use by anyone.
  *
- * The DELETE first is not housekeeping, it is the pool's only repair path. A
- * lease is released in teardown, so a conductor that dies mid-run — or a run
- * that ended blocked before teardown released anything — leaves a row owning a
- * port forever, and the pool is three entries wide. Three such rows and every
- * later run fails at its first server-holding phase with "all leased" while
- * nothing at all is listening. Ownership is decided by the runs table, which
- * boot-time reconciliation has already truthed: a lease whose run is no longer
- * claimed or running cannot be in use by anyone.
+ * IMMEDIATE, and not merely a transaction. Read-then-write is exactly the shape
+ * SQLite refuses to arbitrate on a deferred handle — the second writer takes its
+ * snapshot on the read, discovers the world moved under it on the write, and
+ * fails instantly with SQLITE_BUSY_SNAPSHOT without ever consulting
+ * busy_timeout. Taking the write lock up front turns that into a wait the loser
+ * survives, which is what makes the answer below trustworthy: with two
+ * conductors leasing at once, both used to see the same port free and one died
+ * on the primary key while two ports sat unused.
+ *
+ * The body is deliberately tiny for the same reason it is exclusive.
+ * better-sqlite3 is synchronous, so everything inside this transaction is time
+ * the event loop is not running — no tick, no abort, no Slack card. Two
+ * statements and a set membership test is the whole budget.
  */
-export function leasePortFor(runId: string): number {
-  db.exec(`CREATE TABLE IF NOT EXISTS port_leases (
-    port INTEGER PRIMARY KEY, run_id TEXT NOT NULL, leased_at INTEGER NOT NULL)`);
+const takeFreePort = db.transaction((runId: string, pool: number[]) => {
   const reaped = db.prepare(`DELETE FROM port_leases WHERE run_id NOT IN
-    (SELECT run_id FROM runs WHERE status IN ('claimed','running'))`).run();
-  if (reaped.changes) log.info(`reclaimed ${reaped.changes} port lease(s) from finished runs`);
-
+    (SELECT run_id FROM runs WHERE status IN ('claimed','running'))`).run().changes;
   const taken = new Set(
     (db.prepare('SELECT port FROM port_leases').all() as Array<{ port: number }>).map((r) => r.port),
   );
-  for (const p of portPool()) {
-    if (!taken.has(p)) {
-      db.prepare('INSERT INTO port_leases (port, run_id, leased_at) VALUES (?, ?, ?)')
-        .run(p, runId, Date.now());
-      return p;
-    }
+  for (const port of pool) {
+    if (taken.has(port)) continue;
+    db.prepare('INSERT INTO port_leases (port, run_id, leased_at) VALUES (?, ?, ?)')
+      .run(port, runId, Date.now());
+    return { port, reaped };
   }
-  throw new Error(`No free port in PORT_POOL (${portPool().join(', ')}) — all leased`);
+  return { port: null as number | null, reaped };
+});
+
+/**
+ * Lease a port for this run, or say plainly that there is none.
+ *
+ * Ports are the real concurrency limit for phases that run a dev server. Leased
+ * through SQLite rather than by probing, because a port that is free *right now*
+ * can be taken by the next phase two seconds later.
+ *
+ * null rather than a throw when the pool is exhausted: an empty pool is a
+ * capacity answer the caller can act on, and dressing it as an exception put it
+ * in the same catch as a genuinely broken database.
+ */
+export function leasePortFor(runId: string): number | null {
+  db.exec(`CREATE TABLE IF NOT EXISTS port_leases (
+    port INTEGER PRIMARY KEY, run_id TEXT NOT NULL, leased_at INTEGER NOT NULL)`);
+  const { port, reaped } = takeFreePort.immediate(runId, portPool());
+  if (reaped) log.info(`reclaimed ${reaped} port lease(s) from finished runs`);
+  return port;
 }
 
 export function releasePort(runId: string): void {
@@ -168,6 +190,46 @@ function forkPoint(worktree: string, base: string): string {
 }
 
 /**
+ * Give this worktree a committer identity WITHOUT touching the shared config.
+ *
+ * `git -C <worktree> config user.name` does not write a per-worktree setting —
+ * it writes .git/config, the one file every worktree of the repo shares, and
+ * concurrent worktree creations serialise on its lock and mostly lose. Two
+ * escapes exist and the repository decides which:
+ *
+ *   extensions.worktreeConfig on  — `config --worktree` writes
+ *                                   .git/worktrees/<name>/config, which nobody
+ *                                   else has open, so it is safe and it is what
+ *                                   the option is for.
+ *   otherwise                     — no file is written at all. Identity reaches
+ *                                   every commit through GIT_AUTHOR_* /
+ *                                   GIT_COMMITTER_* in the phase environment
+ *                                   (src/lib/config.ts, BASE_ENV), which git
+ *                                   honours ahead of any config and which
+ *                                   cannot contend with anything.
+ *
+ * Enabling the extension from here is deliberately not done: it is a repository
+ * -wide change to a repo Oneshot only borrows.
+ */
+function pinIdentity(worktree: string): void {
+  const perWorktree = (() => {
+    try { return git(['config', '--bool', 'extensions.worktreeConfig'], worktree) === 'true'; } catch { return false; }
+  })();
+  if (!perWorktree) return;
+
+  const author = envOr('ONESHOT_GIT_AUTHOR_NAME', 'Oneshot');
+  const email = envOr('ONESHOT_GIT_AUTHOR_EMAIL');
+  try {
+    git(['config', '--worktree', 'user.name', author], worktree);
+    if (email) git(['config', '--worktree', 'user.email', email], worktree);
+  } catch (err) {
+    log.warn('could not write the per-worktree identity — the environment carries it', {
+      error: (err as Error).message,
+    });
+  }
+}
+
+/**
  * Create (or re-attach to) the worktree for a ticket.
  *
  * Idempotent: a run resumed after a crash finds its existing worktree and
@@ -194,21 +256,29 @@ export function leaseWorktree(
       try { git(['rev-parse', '--verify', `refs/heads/${branch}`]); return true; } catch { return false; }
     })();
     if (branchExists) git(['worktree', 'add', worktree, branch]);
-    else git(['worktree', 'add', '-b', branch, worktree, `origin/${base}`]);
+    // --no-track is not about upstreams, it is about the lock. Creating a
+    // branch that tracks origin/<base> writes two keys into the SHARED
+    // .git/config, and several worktrees being created at the same moment
+    // contend for that one file: most of them fail with "could not lock config
+    // file" AFTER the local branch has already been created, leaving an orphan
+    // branch and no worktree. Nothing here ever pushes to the base or pulls
+    // from it — the MR is what moves work — so the tracking entry buys nothing
+    // and costs the only serialising write in the whole operation.
+    else git(['worktree', 'add', '--no-track', '-b', branch, worktree, `origin/${base}`]);
     log.ok(`worktree ${worktree}`, { branch, base: `origin/${base}` });
   } else {
     log.info(`re-attached to existing worktree ${worktree}`);
   }
 
   seed(worktree);
-
-  const author = envOr('ONESHOT_GIT_AUTHOR_NAME', 'Oneshot');
-  const email = envOr('ONESHOT_GIT_AUTHOR_EMAIL');
-  git(['config', 'user.name', author], worktree);
-  if (email) git(['config', 'user.email', email], worktree);
+  pinIdentity(worktree);
 
   const lease: Lease = { worktree, branch, baseSha: forkPoint(worktree, base) };
-  if (opts.withPort) lease.port = leasePortFor(runId);
+  if (opts.withPort) {
+    const port = leasePortFor(runId);
+    if (port === null) log.warn('no free port in the pool — the worktree is leased without one');
+    else lease.port = port;
+  }
   return lease;
 }
 

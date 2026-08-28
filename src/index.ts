@@ -11,25 +11,37 @@
  * Runs are NOT awaited: the tick loop keeps scanning while they are in flight,
  * which is what makes `concurrency` mean anything. --watch-only reports what it
  * would claim without claiming it.
+ *
+ * Several of these may run at once, on purpose. A conductor registers in the
+ * fleet at boot rather than refusing to start beside a sibling, and everything
+ * that used to be guaranteed by there being exactly one process is now decided
+ * against that registry: a ticket is claimed by ownership, a run row is buried
+ * only when the conductor that owned it is gone, and dispatch slots are counted
+ * across the whole machine because the port pool is shared between all of them.
+ * --solo puts the old refusal back for anyone who wants it.
  */
 import { existsSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   CONTEXT_REPO, DRY_RUN, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT, WORK_REPO,
-  auditAuth, envOr, phases, projectConfig, slackConfig,
+  auditAuth, envOr, phases, portPool, projectConfig, slackConfig,
 } from './lib/config.js';
-import { activeRuns, logEvent, reconcileStaleRuns } from './lib/db.js';
+import { activeRunsFleet, logEvent, reconcileForeignRuns } from './lib/db.js';
 import { ensureClaudeDir } from './lib/claudedir.js';
 import { probe, netState } from './lib/reachability.js';
 import { windowUsage, dayUsage, quotaParked } from './lib/quota.js';
 import { budgetConfig } from './lib/config.js';
 import { describe, scan } from './conductor/watcher.js';
 import { runTicket } from './conductor/runner.js';
+import {
+  deregister, heartbeat, liveConductorIds, liveConductors, peersEverSeen, register,
+} from './lib/fleet.js';
+import { renewPromotion } from './lib/promotion.js';
 import { getIssue, projectUrl } from './lib/gitlab.js';
 import { alert } from './lib/slack.js';
 import { log } from './lib/log.js';
-import { acquire, release } from './lib/singleton.js';
+import { refuseIfAnotherConductor } from './lib/singleton.js';
 
 const TICK_MS = 60_000;
 
@@ -43,6 +55,42 @@ const TICK_MS = 60_000;
 const OUTAGE_ALERT_MS = 30 * 60_000;
 
 const watchOnly = process.argv.includes('--watch-only');
+
+/**
+ * `--solo` — the old refusal, kept for the operator who wants it.
+ *
+ * Several conductors sharing a machine is now the ordinary case: they claim
+ * against each other through the database and divide the port pool between them.
+ * But "am I definitely the only one" is still a question worth being able to
+ * answer at boot, before a database is even opened, and the PID lock answers it
+ * for free. Anyone driving one careful ticket by hand can have the guarantee
+ * back by asking.
+ */
+const solo = process.argv.includes('--solo');
+
+/**
+ * This conductor's identity in the fleet. Set by register() at boot; every claim,
+ * every promotion lease and every reconciliation is decided against it.
+ */
+let me = '';
+
+/**
+ * Three conductors write to three terminals but into ONE log history, one Slack
+ * channel and one operator's memory. The id prefix is what makes a line
+ * attributable — and it only appears once a peer has actually been seen, so the
+ * ordinary single-conductor console stays exactly as readable as it was.
+ */
+function tag(msg: string): string {
+  return peersEverSeen() ? `${me.slice(0, 6)}  ${msg}` : msg;
+}
+
+const say = {
+  info: (msg: string, extra?: unknown) => log.info(tag(msg), extra),
+  ok: (msg: string, extra?: unknown) => log.ok(tag(msg), extra),
+  warn: (msg: string, extra?: unknown) => log.warn(tag(msg), extra),
+  error: (msg: string, extra?: unknown) => log.error(tag(msg), extra),
+  phase: (msg: string, extra?: unknown) => log.phase(tag(msg), extra),
+};
 
 /**
  * In-flight runs, keyed by ticket. This — not the SQLite view — is the
@@ -93,8 +141,9 @@ function banner(): void {
   log.info(`labels     "${cfg.labels.entry}" in  ->  "${cfg.labels.exit}" out`);
   log.info(`base       ${cfg.branches.base}   protected: ${cfg.branches.protected.join(', ')}`);
   log.info(`phases     ${phases().length} (${phases().filter((p) => p.kind === 'code').length} deterministic)`);
-  log.info(`concurrency ${cfg.concurrency}`);
-  if (DRY_RUN) log.warn('DRY_RUN is on — every write will be refused');
+  log.info(`concurrency ${cfg.concurrency} here · ${portPool().length} pool ports across the fleet`);
+  if (solo) log.info('mode       --solo, a second conductor is refused');
+  if (DRY_RUN) log.warn('DRY_RUN is on — every write will be refused, in its own state-dry home');
 }
 
 /**
@@ -173,56 +222,80 @@ async function noteNetworkHold(held: string | undefined): Promise<void> {
   );
 }
 
+/**
+ * How many tickets this conductor may still start.
+ *
+ * Two ceilings, and the fleet one is the reason this is a function. `concurrency`
+ * is a per-process setting, so three conductors reading concurrency:2 would
+ * happily start six runs against a three-port pool and the fourth would block at
+ * its first server-holding phase — a capacity failure surfacing hours later, in
+ * a phase that has nothing to do with capacity. The pool is the machine's real
+ * limit, so it is counted across everybody's rows and not just this process's
+ * map.
+ */
+function freeSlots(): { slots: number; mine: number; fleet: number; pool: number } {
+  const mine = projectConfig().concurrency - running.size;
+  const pool = portPool().length;
+  const fleet = pool - activeRunsFleet().length;
+  return { slots: Math.max(0, Math.min(mine, fleet)), mine, fleet, pool };
+}
+
 async function tick(): Promise<void> {
+  // The fleet's liveness and the promotion lease's renewal ride the same clock
+  // as everything else here. A conductor that has stopped ticking has stopped
+  // conducting, and that is exactly what both signals are for.
+  heartbeat();
+  renewPromotion(me);
+
   const outcome = await probe();
   if (outcome.changed) {
     logEvent('network_state', { state: outcome.state });
   }
 
   if (existsSync(PAUSE)) {
-    log.warn('paused (state/PAUSE) — not claiming');
+    say.warn('paused (state/PAUSE) — not claiming');
     return;
   }
   if (quotaParked()) {
-    log.warn('parked after a subscription usage limit — not claiming');
+    say.warn('parked after a subscription usage limit — not claiming');
     return;
   }
 
   if (ticketArg !== null) {
     const res = await getIssue(ticketArg);
     if (!res.ok || !res.data) {
-      log.error(`cannot read #${ticketArg}`, { kind: res.kind, status: res.status });
+      say.error(`cannot read #${ticketArg}`, { kind: res.kind, status: res.status });
       return;
     }
-    log.phase(`targeting #${ticketArg}  ${res.data.title.slice(0, 60)}`);
+    say.phase(`targeting #${ticketArg}  ${res.data.title.slice(0, 60)}`);
     // --ticket is the one awaited path: it exists to run exactly one ticket and
     // exit, so returning to a loop that is about to break would exit mid-phase.
-    await runTicket(res.data, { signal: aborter.signal });
+    await runTicket(res.data, { conductor: me, signal: aborter.signal });
     return;
   }
 
   const result = await scan();
   await noteNetworkHold(result.held);
 
-  const inFlight = activeRuns();
+  const inFlight = activeRunsFleet();
   const summary = describe(result);
   if (result.candidates.length || inFlight.length) {
-    log.info(`tick  ${summary}`, {
+    say.info(`tick  ${summary}`, {
       inFlight: inFlight.map((r) => `#${r.iid}:${r.phase ?? r.status}`),
     });
   } else {
-    log.info(`tick  ${summary}`);
+    say.info(`tick  ${summary}`);
   }
 
   for (const s of result.skipped) {
-    log.info(`skip       #${s.iid}  ${s.why}`);
+    say.info(`skip       #${s.iid}  ${s.why}`);
   }
 
   if (!result.candidates.length || stopping) return;
 
   if (watchOnly) {
-    for (const c of result.candidates) log.phase(`claimable  #${c.iid}  ${c.title.slice(0, 70)}`);
-    log.warn('--watch-only: not dispatching');
+    for (const c of result.candidates) say.phase(`claimable  #${c.iid}  ${c.title.slice(0, 70)}`);
+    say.warn('--watch-only: not dispatching');
     return;
   }
 
@@ -232,16 +305,21 @@ async function tick(): Promise<void> {
   // correctness constraint that used to justify serialising (the deploy script
   // ships a branch TIP, so two runs in the merge→deploy→qa window put both
   // changes on the demo box and QA's verdict stops being attributable) is now
-  // carried exactly where it belongs, by the promotion mutex.
-  const slots = projectConfig().concurrency - running.size;
+  // carried exactly where it belongs, by the promotion lease.
+  const { slots, mine, fleet, pool } = freeSlots();
   if (slots <= 0) {
-    log.info(`at capacity — ${running.size} run(s) in flight`);
+    say.info(mine > 0
+      ? `the fleet is at capacity — ${pool - fleet} of ${pool} pool ports are in use`
+      : `at capacity — ${running.size} run(s) in flight here`);
     return;
   }
 
+  // A losing claim is not an error and is not logged as one: several conductors
+  // scanning the same board see the same candidates, so exactly one of them
+  // wins each ticket and the rest come back on the next tick.
   for (const c of result.candidates.slice(0, slots)) {
-    const run = runTicket(c, { signal: aborter.signal }).catch((err) => {
-      log.error(`#${c.iid} run threw`, { error: (err as Error).message });
+    const run = runTicket(c, { conductor: me, signal: aborter.signal }).catch((err) => {
+      say.error(`#${c.iid} run threw`, { error: (err as Error).message });
       logEvent('run_threw', { iid: c.iid, error: (err as Error).message });
     });
     running.set(c.iid, run.finally(() => { running.delete(c.iid); }));
@@ -252,21 +330,26 @@ async function tick(): Promise<void> {
  * Wait out the runs still in flight. A phase can be 90 minutes long and is
  * mid-write for most of it, so the old fixed 250ms exit was not a shutdown —
  * it was a kill that left a half-written journal and the claimed/running row
- * that reconcileStaleRuns() now has to bury on the way back up.
+ * that reconcileForeignRuns() now has to bury on the way back up.
  */
 async function drain(): Promise<void> {
   if (!running.size) return;
   const names = (): string => [...running.keys()].map((i) => `#${i}`).join(' ');
-  log.warn(`waiting on ${running.size} run(s) to reach a phase boundary: ${names()}`);
+  say.warn(`waiting on ${running.size} run(s) to reach a phase boundary: ${names()}`);
 
   const progress = setInterval(() => {
-    log.info(`still finishing ${running.size} run(s): ${names()}`);
+    // The heartbeat has to keep beating through the drain, or a shutdown that
+    // takes longer than the lease TTL looks like a death to everybody else and
+    // this conductor's promotion window is taken while it is still using it.
+    heartbeat();
+    renewPromotion(me);
+    say.info(`still finishing ${running.size} run(s): ${names()}`);
   }, 15_000);
   progress.unref();
 
   await Promise.allSettled([...running.values()]);
   clearInterval(progress);
-  log.ok('all runs finished — they resume from their journals on the next boot');
+  say.ok('all runs finished — they resume from their journals on the next boot');
 }
 
 async function main(): Promise<void> {
@@ -280,22 +363,42 @@ async function main(): Promise<void> {
   mkdirSync(RUNS, { recursive: true });
   mkdirSync(MEMORY, { recursive: true });
 
-  const lock = acquire();
-  if (!lock.ok) {
-    log.error('another conductor is already running — refusing to start', {
-      pid: lock.heldBy?.pid,
-      since: new Date(lock.heldBy?.startedAt ?? 0).toLocaleTimeString(),
-      argv: lock.heldBy?.argv,
-    });
-    log.error('stop it first:  pkill -f "src/index.ts"');
-    process.exit(1);
+  // --solo refuses the second start the way this used to. Asked BEFORE
+  // registering, so the refusal is about the peers that were already there and
+  // this process never appears in its own roll call. Without it a second
+  // conductor is welcome, and joins the fleet instead.
+  if (solo) {
+    const refusal = refuseIfAnotherConductor(liveConductors());
+    if (!refusal.ok) {
+      log.error('--solo was asked for and another conductor is already running', {
+        conductor: refusal.heldBy?.conductor_id.slice(0, 6),
+        pid: refusal.heldBy?.pid,
+        since: new Date(refusal.heldBy?.started_at ?? 0).toLocaleTimeString(),
+        argv: refusal.heldBy?.argv,
+      });
+      log.error('stop it first:  pkill -f "src/index.ts"');
+      process.exit(1);
+    }
   }
-  process.on('exit', release);
 
-  const reaped = reconcileStaleRuns();
+  me = register().conductor_id;
+  process.on('exit', deregister);
+
+  const peers = liveConductors().filter((c) => c.conductor_id !== me);
+  if (peers.length) {
+    log.info(`fleet      ${peers.length} peer conductor(s) already live`, {
+      peers: peers.map((c) => `${c.conductor_id.slice(0, 6)}:${c.pid}`),
+    });
+  }
+
+  // Only rows belonging to conductors nobody can see any more. The old boot
+  // reconciliation buried EVERY claimed/running row, which was correct while the
+  // singleton guaranteed there was nothing else alive to own one — and is now a
+  // conductor starting up and aborting its neighbours' healthy in-flight runs.
+  const reaped = reconcileForeignRuns(liveConductorIds());
   if (reaped) {
     logEvent('runs_reconciled', { reaped });
-    log.warn(`reaped ${reaped} run row(s) a previous conductor left in flight — ` +
+    log.warn(`reaped ${reaped} run row(s) a dead conductor left in flight — ` +
       'their tickets are claimable again and resume from their journals');
   }
 
@@ -313,20 +416,20 @@ async function main(): Promise<void> {
 
   log.banner(once
     ? (ticketArg !== null ? `Single run: ticket #${ticketArg}.` : 'Single pass, then exit.')
-    : `Watching every ${TICK_MS / 1000}s. Ctrl-C to stop.`);
-  logEvent('conductor_start', { root: ROOT, watchOnly });
+    : `Watching every ${TICK_MS / 1000}s as ${me.slice(0, 6)}. Ctrl-C to stop.`);
+  logEvent('conductor_start', { root: ROOT, watchOnly, conductor: me, solo });
 
   // First signal: stop claiming, tell the runs to wind up at their next phase
   // boundary, then wait for them. Second signal: the operator has decided the
   // wait is not worth it, so take the loss.
   const shutdown = (sig: string) => {
     if (stopping) {
-      log.error(`${sig} again — hard exit, ${running.size} run(s) abandoned mid-phase`);
+      say.error(`${sig} again — hard exit, ${running.size} run(s) abandoned mid-phase`);
       process.exit(1);
     }
     stopping = true;
-    log.warn(`${sig} — no longer claiming; letting ${running.size} run(s) wind up`);
-    logEvent('conductor_stop', { signal: sig, inFlight: running.size });
+    say.warn(`${sig} — no longer claiming; letting ${running.size} run(s) wind up`);
+    logEvent('conductor_stop', { signal: sig, inFlight: running.size, conductor: me });
     aborter.abort();
     if (wake) wake();
   };
@@ -337,7 +440,7 @@ async function main(): Promise<void> {
     try {
       await tick();
     } catch (err) {
-      log.error('tick failed', { error: (err as Error).message });
+      say.error('tick failed', { error: (err as Error).message });
       logEvent('tick_error', { error: (err as Error).message });
     }
     if (stopping || once) break;
@@ -347,7 +450,10 @@ async function main(): Promise<void> {
   }
 
   await drain();
-  release();
+  // Deregistered only after the runs are done. Leaving the fleet earlier would
+  // make this conductor's own in-flight rows look foreign to anybody booting in
+  // the meantime, and they would be buried out from under phases still running.
+  deregister();
   process.exit(0);
 }
 
