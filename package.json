@@ -20,7 +20,8 @@
     "check": "tsc --noEmit && for f in hooks/*.cjs; do node --check \"$f\" || exit 1; done && echo 'check clean'",
     "deps:verify": "tsx scripts/verify-deps.ts",
     "langfuse": "tsx scripts/langfuse-export.ts",
-    "dashboard": "tsx scripts/serve.ts"
+    "dashboard": "tsx scripts/serve.ts",
+    "fleet:verify": "tsx scripts/verify-fleet.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.77",
