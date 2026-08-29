@@ -55,8 +55,8 @@
     },
     {
       "name": "verify", "n": 6, "kind": "session", "tier": "standard",
-      "cwd": "worktree", "maxTurns": 200, "timeoutMin": 90,
-      "_why_turns": "Measured live: driving webpack + the real login form + a ~19-case list through Bash-run Playwright exhausted 90 turns before the list finished. The turn cap must fit the whole list — a verify that dies at max_turns produces no artifact, and the cycle it triggers re-pays implement and review for what was only a budget problem.",
+      "cwd": "worktree", "maxTurns": 300, "timeoutMin": 120,
+      "_why_turns": "Measured live: driving webpack + the real login form through Bash-run Playwright costs ~12 turns per case, so the cap must scale with the list. A 20-case list (run #6) exhausted a 200-turn cap at case 17 and was salvaged from partial — an incomplete verdict that still gates the merge. 300 turns / 120 min fits a 20-case list with headroom; a verify that dies at max_turns produces a partial artifact, and the cycle it triggers re-pays implement and review for what was only a budget problem.",
       "writes": ["worktree", "run", "artifacts"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 2,
       "coding": true, "needsPort": true,
       "skills": ["local-browser-verify"],

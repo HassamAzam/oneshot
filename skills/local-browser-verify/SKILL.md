@@ -17,6 +17,13 @@ pole and it can run while you study the cases.
   serves the frontend and the backend together; `http://localhost:<leased>/` is
   the entry point. There is no separate API port. The leased port is in
   `ONESHOT_PORT`; never pick your own — another run holds the others.
+- **It must be a server YOU started from THIS worktree.** The leased port is
+  handed to you free. If something already answers on `ONESHOT_PORT` before you
+  start your own — a foreign dev server, an orphan from a crashed run — do NOT
+  drive it. It is almost certainly a different checkout, and then every value
+  you record is about the wrong code while reading green. Confirming "HTTP 200"
+  is not confirming it is *your* build. Start your own; if the port cannot be
+  freed, report it occupied and stop rather than verify a stranger's server.
 - **Not `manage.py runserver`.** That serves the backend alone and exists for
   Odoo-wired one-offs.
 - **Point the frontend at the leased port** in `frontend/src/constants/config.js`
@@ -57,6 +64,18 @@ pytest is unaffected and is fine to run.
 - Retry a flaky step twice with a bounded timeout. Playwright flake is the
   largest source of false failures here. Passed on retry is a pass, with the
   retry noted; still failing after retries is a fail.
+- **Wait for data, not skeletons.** These reports paint MUI Skeleton
+  placeholders while a drill-down's async call is in flight, and a modal's call
+  can take tens of seconds on a cold DB. A fixed short wait reads the shimmer
+  rows as empty and records a real, reconciling drill-down as all-null — the
+  single largest source of phantom "total not synced" failures. Wait for the
+  loading state to clear (the actual data cells present, or the network call
+  settled) before reading any value.
+- **Read cells by column header, never by position.** These tables are wide and
+  horizontally scrolled, so a hard-coded column index silently lands on the
+  wrong column. Never sum a percentage or utilization column as if it were cost:
+  a "drill-down total" that comes out near 200 is a utilization column adding to
+  ~100% per head, not money — check the header before you compare it to a cell.
 
 ## Record one result per case
 

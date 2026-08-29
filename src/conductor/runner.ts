@@ -53,7 +53,9 @@ import {
   type PhaseRecord, type Remediation, type RunJournal,
 } from '../lib/artifacts.js';
 import { branchFor, newRunId, worktreeName } from '../lib/ids.js';
-import { leasePortFor, leaseWorktree, reapWorktree, releasePort } from '../lib/worktrees.js';
+import {
+  leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort,
+} from '../lib/worktrees.js';
 import {
   addIssueNote, createMergeRequest, findMergeRequests, getIssue, issueNotes, issueUrl,
   swapLabel, type Issue,
@@ -1280,7 +1282,12 @@ export async function runTicket(
 
     // Both leases go back on EVERY terminal status. Holding a port for a
     // blocked run's forensics starves the pool with nothing to show for it —
-    // the worktree is where the forensics actually are.
+    // the worktree is where the forensics actually are. Kill the dev server the
+    // run left on that port BEFORE releasing the lease, so it dies while the
+    // port is still provably this run's and not something a newer run has since
+    // leased. Without this a blocked run's server outlives it and the next
+    // verify to lease the port drives a stale one.
+    reapPortServer(journal.port);
     releasePort(journal.runId);
     releasePromotion(journal.runId);
 

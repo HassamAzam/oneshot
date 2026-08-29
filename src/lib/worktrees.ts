@@ -70,20 +70,62 @@ export interface Lease {
  * the event loop is not running — no tick, no abort, no Slack card. Two
  * statements and a set membership test is the whole budget.
  */
-const takeFreePort = db.transaction((runId: string, pool: number[]) => {
+const takeFreePort = db.transaction((runId: string, pool: number[], unavailable: Set<number>) => {
   const reaped = db.prepare(`DELETE FROM port_leases WHERE run_id NOT IN
     (SELECT run_id FROM runs WHERE status IN ('claimed','running'))`).run().changes;
   const taken = new Set(
     (db.prepare('SELECT port FROM port_leases').all() as Array<{ port: number }>).map((r) => r.port),
   );
   for (const port of pool) {
-    if (taken.has(port)) continue;
+    if (taken.has(port) || unavailable.has(port)) continue;
     db.prepare('INSERT INTO port_leases (port, run_id, leased_at) VALUES (?, ?, ?)')
       .run(port, runId, Date.now());
     return { port, reaped };
   }
   return { port: null as number | null, reaped };
 });
+
+/**
+ * PIDs listening on a TCP port — empty when it is free.
+ *
+ * lsof is the probe: it is already on every macOS box this runs on and it tells
+ * a LISTEN apart from a client connection. Any spawn error (no lsof, timeout)
+ * returns [] — fail OPEN, because a lease that cannot probe must not refuse
+ * every port. The cost of failing open is the bug this guards against; the cost
+ * of failing closed is a run that can never lease a port at all.
+ */
+function portListeners(port: number): number[] {
+  try {
+    const out = execFileSync('lsof', [`-tiTCP:${port}`, '-sTCP:LISTEN'], {
+      encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return out ? out.split('\n').map(Number).filter(Number.isInteger) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Kill whatever is listening on a run's leased port.
+ *
+ * Called from a run's terminal path: `releasePort` only drops the SQLite row,
+ * so without this the dev server a phase started outlives the run, and the port
+ * pool fills with orphans from crashed and blocked runs — which is how a later
+ * verify came to drive a stale server and report on the wrong code. Best-effort
+ * and never throws: a port with nothing on it is the normal case.
+ *
+ * Only the leased port is reaped, never the shared webpack port — a concurrent
+ * run may be serving its own frontend there.
+ */
+export function reapPortServer(port: number | null | undefined): number {
+  if (!port) return 0;
+  let killed = 0;
+  for (const pid of portListeners(port)) {
+    try { process.kill(pid, 'SIGTERM'); killed += 1; } catch { /* already gone */ }
+  }
+  if (killed) log.info(`reaped ${killed} process(es) on port ${port}`);
+  return killed;
+}
 
 /**
  * Lease a port for this run, or say plainly that there is none.
@@ -99,8 +141,19 @@ const takeFreePort = db.transaction((runId: string, pool: number[]) => {
 export function leasePortFor(runId: string): number | null {
   db.exec(`CREATE TABLE IF NOT EXISTS port_leases (
     port INTEGER PRIMARY KEY, run_id TEXT NOT NULL, leased_at INTEGER NOT NULL)`);
-  const { port, reaped } = takeFreePort.immediate(runId, portPool());
+  const pool = portPool();
+  // A port that is free in the lease table but has a process listening on it is
+  // either an orphan from a run that never reaped or a foreign dev server
+  // sharing these ports. Leasing it anyway is exactly how a verify phase ends up
+  // driving somebody else's server and reporting on the wrong code. Probe here —
+  // outside the SQLite transaction, which must stay synchronous and tiny — and
+  // never hand out a port something is already answering on.
+  const occupied = new Set(pool.filter((p) => portListeners(p).length > 0));
+  const { port, reaped } = takeFreePort.immediate(runId, pool, occupied);
   if (reaped) log.info(`reclaimed ${reaped} port lease(s) from finished runs`);
+  if (occupied.size) {
+    log.warn(`skipped occupied port(s) ${[...occupied].join(', ')} — a process is already listening there`);
+  }
   return port;
 }
 
