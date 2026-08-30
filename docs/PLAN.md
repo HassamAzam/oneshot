@@ -253,8 +253,10 @@ one-loop-v2/
 `planning-methodology` · `django-backend-standards` · `django-migration-standards` ·
 `react-frontend-standards` · `django-query-optimisation` · `python-linting` ·
 `script-writing-standards` · `util-reuse-methodology` · `mr-metadata` · `mr-change-logger` ·
-`create-demo` · `erp-code-review` · `dead-code-sweep` · `graphify-knowledge-graph` ·
-`test-erp-ticket` (+ its 5 phase skills)
+`create-demo` · `erp-code-review` · `dead-code-sweep` · `test-erp-ticket` (+ its 5 phase skills)
+
+`graphify-knowledge-graph` was planned here and is now excluded in `src/lib/claudedir.ts`: it
+reads a pre-built graph from `graphify-out/`, which no repo on this machine has.
 
 Plus your agents, reused as SDK subagents in `implement` and `review`: `backend-agent`, `frontend-agent`,
 `qa-agent`, `backend-reviewer-agent`, `frontend-reviewer-agent`, `util-reuse-agent`.

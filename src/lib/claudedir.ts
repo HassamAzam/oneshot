@@ -43,6 +43,29 @@ import { log } from './log.js';
 /** Subdirectories taken whole from the context repo — no Oneshot equivalent exists. */
 const LINKED_SUBDIRS = ['agents', 'rules'] as const;
 
+/**
+ * Context-repo skills that must not reach a phase, and why each one is here.
+ *
+ * Taking the context repo wholesale is the right default: a skill the humans
+ * maintain is a skill a phase should have, and an allowlist would silently rot
+ * every time someone adds one. But wholesale means a skill arrives because it
+ * EXISTS, never because anybody decided a phase should have it — so a skill
+ * whose preconditions this machine cannot meet still gets enumerated by the
+ * harness, still advertises itself by description, and still costs a phase the
+ * turns it takes to find out.
+ *
+ * The bar for adding a name is deliberately narrow. Not "unlikely to be
+ * useful" — a phase can ignore those for free. It is "cannot work here, and
+ * discovering that is not free".
+ */
+const EXCLUDED_SKILLS = new Map<string, string>([
+  ['graphify-knowledge-graph',
+    'reads a pre-built graph from graphify-out/, which exists in neither the context repo ' +
+    'nor the work repo; the sandbox ships graphify-manifest.json as an explicit stub and the ' +
+    'real bundle only arrives via the interactive /get-graphify command, which nothing here ' +
+    'runs. Research spent its whole turn budget establishing that absence twice.'],
+]);
+
 function isSymlink(path: string): boolean {
   try { return lstatSync(path).isSymbolicLink(); } catch { return false; }
 }
@@ -80,11 +103,31 @@ function pruneDangling(dir: string): void {
   }
 }
 
+/**
+ * Remove links this repo used to compose and has since excluded.
+ *
+ * Skipping an excluded name in linkSkills() only stops NEW links; a worktree
+ * composed before the exclusion existed keeps its old one, and so does the
+ * conductor root. Without this the exclusion would apply to fresh worktrees
+ * only and the change would look like it had not worked.
+ *
+ * A real directory under this name is left alone — that is a human's file, and
+ * an exclusion list is not a licence to delete one.
+ */
+function unlinkExcluded(dir: string): void {
+  for (const [name, why] of EXCLUDED_SKILLS) {
+    const entry = join(dir, name);
+    if (!isSymlink(entry)) continue;
+    rmSync(entry, { force: true });
+    log.info(`unlinked excluded skill ${name}`, { why });
+  }
+}
+
 /** Link every skill directory under `from` whose name is not already claimed. */
 function linkSkills(from: string, into: string, claimed: Set<string>): void {
   if (!isDirectory(from)) return;
   for (const name of readdirSync(from)) {
-    if (name.startsWith('.') || claimed.has(name)) continue;
+    if (name.startsWith('.') || claimed.has(name) || EXCLUDED_SKILLS.has(name)) continue;
     const src = join(from, name);
     if (!isDirectory(src)) continue;
     claimed.add(name);
@@ -121,6 +164,7 @@ export function ensureClaudeDir(repoRoot: string): string[] {
     const skills = join(dotClaude, 'skills');
     mkdirSync(skills, { recursive: true });
     pruneDangling(skills);
+    unlinkExcluded(skills);
 
     for (const sub of LINKED_SUBDIRS) {
       const src = join(SKILLS_ROOT, sub);
