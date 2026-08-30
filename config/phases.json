@@ -15,9 +15,9 @@
     },
     {
       "name": "research", "n": 1, "kind": "session", "tier": "heavy",
-      "cwd": "worktree", "maxTurns": 60, "timeoutMin": 25,
+      "cwd": "worktree", "maxTurns": 120, "timeoutMin": 45,
       "writes": ["run"], "onFail": "abort",
-      "skills": ["ticket-research", "graphify-knowledge-graph"],
+      "skills": ["ticket-research"],
       "artifact": "research.json"
     },
     {
