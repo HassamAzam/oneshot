@@ -363,7 +363,17 @@ function maxFindingId(list: Finding[]): number {
 const ORACLE =
   "Each case's `expected` is the oracle. If the app does something reasonable that is not what\n" +
   'the case expects, that is a FAIL, not a pass with a note. The case was written from the\n' +
-  "acceptance criteria, and the criteria outrank anyone's opinion of what looks fine.";
+  "acceptance criteria, and the criteria outrank anyone's opinion of what looks fine.\n" +
+  '\n' +
+  'But read the app honestly before you score. A drill-down or modal must be FULLY loaded before\n' +
+  'you read it — no skeleton/placeholder rows, its own Total row present. If rows read as\n' +
+  "empty/null or the Total is absent, that is a READ FAILURE — re-open and re-poll, or mark the\n" +
+  "case 'blocked'; it is never a 'fail' with sum 0. When you reconcile a figure against a\n" +
+  'drill-down, compare like with like: report cells are rounded to whole units while drill-down\n' +
+  "rows carry cents, so grade the cell against the modal's Total (rendered the same way) and\n" +
+  'allow at least the display rounding unit of tolerance. A gap smaller than that rounding — or\n' +
+  'one that disappears when you compare cell-to-Total instead of cell-to-raw-row-sum — is a\n' +
+  'reading artifact, not a defect, and is not a fail.';
 
 /** How a phase names a screenshot the schema will only carry as a bare filename. */
 function artifactsBlock(ctx: PromptCtx): string {
@@ -571,6 +581,14 @@ nothing. Where the code and the criteria disagree, write the case the criteria d
 it fail — that failure is the most valuable line you can produce here, because \`review\`,
 \`verify\` and \`qa\` all come after you and a case that never fails cannot catch anything.
 Cover the criteria the diff does NOT appear to satisfy, not just the paths it does.
+
+When the ticket fixes no criterion for a point, the oracle is the PLAN's decision on it, not a
+stricter rule you supply. This is exactly where that bites: if the plan deliberately resolved an
+ambiguity the ticket left open — "the ticket never says which figure is authoritative, so expose
+the residual rather than force the cell to equal its drill-down" — then a case asserting the
+opposite ("cell must equal drill-down total") tests nothing about the ticket and fails a correct
+implementation. Do not give that case a hard \`expected\`. Disagreeing with the plan's call is a
+\`review\` finding or an open question in the case's notes, never a pass/fail oracle you invented.
 
 This ONE list is executed three times: locally in a browser by the \`verify\` phase, for
 screenshots by \`ui-evidence\`, and against the deployed demo server by \`qa\`. If you write a

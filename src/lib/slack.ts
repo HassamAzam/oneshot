@@ -114,7 +114,8 @@ function renderCard(s: CardState): string {
     const owner = envOr('ONESHOT_OWNER_SLACK_ID');
     footer += `\n:rotating_light: *BLOCKED* — ${s.blockedWhy ?? 'unknown'}${owner ? ` <@${owner}>` : ''}`;
   }
-  if (s.status === 'done') footer += '\n:tada: *Ready For Deployment*';
+  const reachedClose = s.lines.some((l) => l.phase === 'close' && l.state === 'done');
+  if (s.status === 'done' && reachedClose) footer += '\n:tada: *Ready For Deployment*';
 
   return `${head}\n${body}${footer}`;
 }
