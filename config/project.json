@@ -41,6 +41,6 @@
     { "from": "stage", "to": "master", "auto": false }
   ],
 
-  "_comment_concurrency": "In-flight TICKET cap. The old MUST-STAY-1 constraint is now carried by the promotion mutex (src/lib/promotion.ts): the deploy script ships the TIP of dev, so exactly one run may occupy the merge→deploy→qa window at a time — that is where attribution lives, and the mutex enforces it while every other phase pipelines freely. Residual cap reasons: worktrees symlink ONE shared node_modules/venv (a second webpack build during another run's verify contends on the babel cache), and the port pool (PORT_POOL, default 3) bounds server-holding phases. Raise toward the pool size once shared-cache contention is observed to be tolerable.",
-  "concurrency": 2
+  "_comment_concurrency": "In-flight TICKET cap. The old MUST-STAY-1 constraint is now carried by the promotion mutex (src/lib/promotion.ts): the deploy script ships the TIP of dev, so exactly one run may occupy the merge→deploy→qa window at a time — that is where attribution lives, and the mutex enforces it while every other phase pipelines freely. Residual cap reasons: worktrees symlink ONE shared node_modules/venv (a second webpack build during another run's verify contends on the babel cache), and the port pool (PORT_POOL, default 3) bounds server-holding phases. Raise toward the pool size once shared-cache contention is observed to be tolerable. Set to 1 deliberately: the operator runs one ticket per loop and scales by starting more conductors, so the fleet-wide ceiling is PORT_POOL and each process holds exactly one run — which also keeps the shared node_modules/venv contention this comment warns about at one build per conductor.",
+  "concurrency": 1
 }

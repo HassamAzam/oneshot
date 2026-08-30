@@ -19,7 +19,9 @@
  *    runs is noisy and `git add -A` would try to commit them.
  */
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ensureClaudeDir } from './claudedir.js';
 import {
@@ -163,6 +165,39 @@ export function releasePort(runId: string): void {
   } catch { /* table may not exist yet */ }
 }
 
+/**
+ * Copy a seed file by CONTENT, never with copyfile(3).
+ *
+ * cpSync() and copyFileSync() both go through copyfile(3), which replicates the
+ * source's extended attributes. On macOS that is not a metadata nicety, it is a
+ * failure mode: a file carrying `com.apple.provenance` — the TCC attribute the
+ * OS stamps on files a sandboxed app has touched — cannot have that attribute
+ * reproduced by a process without the matching entitlement, and the whole copy
+ * fails EPERM. Nothing about the file is unreadable; only the xattr is
+ * privileged.
+ *
+ * It is not fixable from the outside. Stripping the attribute works for exactly
+ * as long as it takes something to read the file again, at which point macOS
+ * puts it straight back, so any "clean the source once" repair is a repair that
+ * un-does itself.
+ *
+ * Observed as four runs blocked at `recall` with
+ * `EPERM: operation not permitted, copyfile '<seed>/frontend/src/constants/config.js'`
+ * while hrdb/local_settings.py — same source repo, same process, same instant —
+ * copied cleanly, because that one carries com.apple.macl instead. A whole
+ * conductor stopped claiming tickets over an xattr on one config file.
+ *
+ * read + write moves the bytes and lets the destination take whatever
+ * attributes the OS wants to give a newly created file, which is all a seeded
+ * config was ever supposed to have. The mode is carried across because
+ * local_settings.py and config.js are read by the app, not executed, but a seed
+ * list is free to grow a script one day.
+ */
+function copyContents(src: string, dst: string): void {
+  writeFileSync(dst, readFileSync(src));
+  try { chmodSync(dst, statSync(src).mode & 0o777); } catch { /* mode is a nicety, content is not */ }
+}
+
 function seed(worktree: string): void {
   const from = expandPath(envOr('ONESHOT_SEED_FROM', ''));
   if (!from || !existsSync(from)) {
@@ -188,7 +223,7 @@ function seed(worktree: string): void {
     const dst = join(worktree, rel);
     if (!existsSync(src) || existsSync(dst)) continue;
     mkdirSync(dirname(dst), { recursive: true });
-    cpSync(src, dst);
+    copyContents(src, dst);
     excluded.push(rel);
   }
 
