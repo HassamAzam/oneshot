@@ -142,6 +142,19 @@ function priorArt(ctx: PromptCtx): string {
   return r?.brief ? `\n## Prior art from past runs\n${r.brief}\n` : '';
 }
 
+/**
+ * Reviewer feedback rounds from the opt-in Review label's gates, read
+ * straight off the journal rather than passed as a separate context field —
+ * the journal is already ground truth for run-scoped facts (branch, MR,
+ * merged SHA) and every phase already receives it.
+ */
+function reviewGateFeedbackBlock(rounds: string[] | undefined, heading: string): string {
+  if (!rounds?.length) return '';
+  return `\n## ${heading}\nThis ticket carries **Review**: a human read an earlier version of this and replied ` +
+    'with the feedback below instead of `approved`. Address it directly.\n\n' +
+    `${rounds.map((f, i) => `### Round ${i + 1}\n${f}`).join('\n\n')}\n`;
+}
+
 // ------------------------------------------------------------------ slicing
 
 /** A prior artifact, read as the fields this builder actually wants. */
@@ -542,7 +555,7 @@ Work out what this ticket actually requires, and trace the code that implements 
 Do not write or modify any code.`,
 
   plan: (ctx) => `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
-
+${reviewGateFeedbackBlock(ctx.journal.planApproval?.feedback, 'Reviewer feedback on an earlier plan')}
 ## Research (phase 1)
 ${JSON.stringify(ctx.prior.research ?? {}, null, 2)}
 
@@ -643,6 +656,7 @@ ${cases.map((c) => `  - ${c.id} [${c.blast}] ${c.scenario}\n      expects: ${c.e
 
     return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 ${lapBlock}
+${reviewGateFeedbackBlock(ctx.journal.qaApproval?.feedback, 'QA-gate reviewer feedback')}
 ## Plan (phase 2) — this is your specification
 ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 

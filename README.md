@@ -110,6 +110,50 @@ also why a lap costs so much more from phase 11 than from phase 5.
 the agent itself gave up on, a cycle cap exhausted, an unresolvable MR conflict, GitLab
 unreachable past the breaker, or a quota park. That posts an @mention and applies `Needs Human`.
 
+## Optional human review gates
+
+Full auto, by default, for every ticket — the paragraph above is still true and stays true. This
+is an **off-by-default, opt-in mode** for the ticket that wants a second look, not a second label
+state machine: it does not touch the zero-human-gates default, and it cannot, structurally,
+because every check it adds is an *additional* `labels.includes('Review')` guard around code that
+already runs unconditionally. A ticket with no `Review` label drives exactly as described above,
+with the exact same phases, the exact same code paths, and the exact same absence of a gate.
+
+Why bother, given `README`'s own opening line and `docs/PLAN.md`'s "per your call: zero human
+gates"? Because that call was about the *default*, and `docs/HOOKS.md`'s decision rule — structure
+where the constraint can be made impossible, a hook where the model must not misuse a tool it
+holds — has a third row this mode fills without touching either of the first two: a ticket a human
+*chooses* to slow down for its own reasons (a sensitive module, a first run of a new kind of
+change) should be able to, without every OTHER ticket paying for it and without resurrecting
+`label-guard.js`'s closed label-state machine that v2 deliberately deleted (README's "Why this is
+not One Loop v2", above).
+
+Put the `Review` label on a ticket **alongside** `Loop` and three pause points activate:
+
+1. **Plan approval** — after phase 2 (`plan`), before phase 3 (`implement`). Oneshot posts a
+   sign-off request as a ticket comment (the plan itself is already posted there, same as any
+   `Loop`-only run) and the run **parks**.
+2. **Merge readiness** — inside phase 9 (`merge`), still pure code, still no model: before
+   accepting the MR, Oneshot checks GitLab's own `detailed_merge_status` and `head_pipeline` for
+   required approvals and a green pipeline. Not yet satisfied *parks* the same way; a genuinely
+   failed or cancelled pipeline still blocks, exactly as an ordinary merge failure would.
+3. **QA approval** — after phase 11 (`qa`) passes, before phase 12 (`demo`). The test cases
+   (already posted at phase 4) are re-surfaced next to a qa verdict summary, and the run parks.
+
+**Reply `approved`** (that exact word, case-insensitive, trimmed — not a substring of a longer
+reply) on the ticket to release a pause. **Any other reply is feedback**: the plan gate re-runs
+`plan` with it appended; the qa gate cycles back to `implement` through the same forced
+`implement → review → verify → mr → merge → deploy → qa` window a failing qa case already cycles
+through. There is no cap on how many rounds this can take.
+
+**Parked is not `Needs Human`.** A block swaps the ticket's label and needs a person to remove it;
+a park changes no label, sends no @mention, and is picked up by the next tick's ordinary scan
+exactly like a `running`/`aborted` resumption — the *only* new mechanism here is the label check
+and the reply-polling, described in `src/conductor/reviewgate.ts`'s file header. It also holds no
+dispatch slot, no port and no promotion window between checks, so a Review-labelled ticket parked
+for a slow reviewer does not starve every other ticket the way a naive "just wait inside the
+phase" implementation would.
+
 ## Mobilizing agents
 
 Sixteen phases deep, and most of them spend their time waiting — on a webpack build, on a

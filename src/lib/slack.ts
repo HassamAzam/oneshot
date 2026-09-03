@@ -89,7 +89,7 @@ export interface CardState {
   lines: PhaseLine[];
   elapsedMs: number;
   weighted: number;
-  status: 'running' | 'blocked' | 'done' | 'aborted';
+  status: 'running' | 'blocked' | 'done' | 'aborted' | 'parked';
   blockedWhy?: string;
 }
 
@@ -113,6 +113,9 @@ function renderCard(s: CardState): string {
   if (s.status === 'blocked') {
     const owner = envOr('ONESHOT_OWNER_SLACK_ID');
     footer += `\n:rotating_light: *BLOCKED* — ${s.blockedWhy ?? 'unknown'}${owner ? ` <@${owner}>` : ''}`;
+  }
+  if (s.status === 'parked') {
+    footer += `\n:pause_button: *awaiting review* — ${s.blockedWhy ?? 'Review label pause'}`;
   }
   const reachedClose = s.lines.some((l) => l.phase === 'close' && l.state === 'done');
   if (s.status === 'done' && reachedClose) footer += '\n:tada: *Ready For Deployment*';

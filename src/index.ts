@@ -24,7 +24,7 @@ import { existsSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  CONTEXT_REPO, DRY_RUN, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT, WORK_REPO,
+  CONTEXT_REPO, DRY_RUN, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT, TICK_MS, WORK_REPO,
   auditAuth, envOr, phases, portPool, projectConfig, slackConfig,
 } from './lib/config.js';
 import { activeRunsFleet, logEvent, reconcileForeignRuns } from './lib/db.js';
@@ -42,8 +42,6 @@ import { getIssue, projectUrl } from './lib/gitlab.js';
 import { alert } from './lib/slack.js';
 import { log } from './lib/log.js';
 import { refuseIfAnotherConductor } from './lib/singleton.js';
-
-const TICK_MS = 60_000;
 
 /**
  * How long the watcher may sit held by an unreachable GitLab before the owner

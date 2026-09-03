@@ -53,7 +53,8 @@ async function main(): Promise<void> {
   section('Config');
   const cfg = projectConfig();
   pass('project.json', `${cfg.gitlab.project} (id ${cfg.gitlab.projectId})`);
-  pass('labels', `"${cfg.labels.entry}" -> "${cfg.labels.exit}", blocked "${cfg.labels.blocked}"`);
+  pass('labels', `"${cfg.labels.entry}" -> "${cfg.labels.exit}", blocked "${cfg.labels.blocked}", ` +
+    `optional review gate "${cfg.labels.review}" (off unless a ticket carries it too)`);
 
   // The branch-TIP deploy still means only ONE run may hold the merge→deploy→qa
   // window, but that is now enforced by the in-process promotion mutex rather

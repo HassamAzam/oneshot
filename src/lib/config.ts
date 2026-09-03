@@ -75,6 +75,14 @@ export interface ProjectConfig {
     entry: string; entryId: number;
     exit: string; exitId: number;
     blocked: string; blockedId: number;
+    /**
+     * Optional, off-by-default. A ticket carrying this label ALONGSIDE `entry`
+     * gets three extra human sign-off pauses (plan, merge, qa) — see
+     * src/conductor/reviewgate.ts and README's "Optional human review gates".
+     * Never required, never swapped by Oneshot, and absent entirely changes
+     * nothing: every check that reads it is an additive `labels.includes(...)`.
+     */
+    review: string;
   };
   preserveLabels: string[];
   branches: { base: string; protected: string[]; prefix: string; pattern: string };
@@ -255,6 +263,16 @@ export function narratorModel(): string {
 
 export const DRY_RUN = envFlag('DRY_RUN');
 export const SKIP_DEPLOY = envFlag('ONESHOT_SKIP_DEPLOY');
+
+/**
+ * The conductor's own tick cadence — how often `src/index.ts` scans for
+ * claimable tickets. Exported so anything that needs to describe its own
+ * cadence as "the same as the tick loop" (e.g. the review-gate park state in
+ * src/conductor/reviewgate.ts, which relies on being re-checked on the next
+ * scan rather than running its own timer) points at the one number instead of
+ * repeating it.
+ */
+export const TICK_MS = 60_000;
 
 /**
  * A dry run's own home, so DRY_RUN=1 cannot disturb the conductors doing real
