@@ -3,6 +3,8 @@
 
   "channel": "",
 
+  "_comment_history": "The opt-in Review label's plan/qa gates (src/conductor/reviewgate.ts) read replies back out of the ticket's Slack thread via conversations.replies, which needs channels:history (public channel) or groups:history (private channel) on the bot token IN ADDITION to chat:write. A token cannot grant itself a scope, so add it in the Slack API console (OAuth & Permissions -> Bot Token Scopes) and reinstall the app before putting the Review label on a ticket -- without it the gates just sit 'pending' forever, never approved.",
+
   "_comment_card": "The root message per ticket is a live status card, EDITED IN PLACE as phases complete. Thread replies are milestones only. Without this, a 90-minute implement phase produces either silence or spam.",
   "card": {
     "editInPlace": true,

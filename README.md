@@ -128,23 +128,52 @@ change) should be able to, without every OTHER ticket paying for it and without 
 `label-guard.js`'s closed label-state machine that v2 deliberately deleted (README's "Why this is
 not One Loop v2", above).
 
-Put the `Review` label on a ticket **alongside** `Loop` and three pause points activate:
+Put the `Review` label on a ticket **alongside** `Loop` and three pause points activate. **Slack is
+the primary approval channel for the two model-adjacent gates** — Oneshot posts the request as a
+reply in the ticket's existing Slack thread (the same thread the status card and every milestone
+already post into) and waits for a reply THERE; GitLab receives only an audit note once a round
+resolves, never the request itself. That is a deliberate change from an earlier version of this
+mode, which asked and read on the ticket instead — reviewing a plan or a test-case list is more
+natural where the run's own status already lives, and the ticket stays a record of what happened
+rather than a second inbox to poll.
 
-1. **Plan approval** — after phase 2 (`plan`), before phase 3 (`implement`). Oneshot posts a
-   sign-off request as a ticket comment (the plan itself is already posted there, same as any
-   `Loop`-only run) and the run **parks**.
-2. **Merge readiness** — inside phase 9 (`merge`), still pure code, still no model: before
-   accepting the MR, Oneshot checks GitLab's own `detailed_merge_status` and `head_pipeline` for
-   required approvals and a green pipeline. Not yet satisfied *parks* the same way; a genuinely
-   failed or cancelled pipeline still blocks, exactly as an ordinary merge failure would.
+1. **Plan approval** — after phase 2 (`plan`), before phase 3 (`implement`). Oneshot posts the
+   plan itself into the ticket's Slack thread and the run **parks**.
+2. **Merge readiness** — inside phase 9 (`merge`), still pure code, still no model, and still
+   entirely GitLab-based (there is no Slack round-trip to wait on here): before accepting the MR,
+   Oneshot checks GitLab's own `detailed_merge_status` and `head_pipeline` for required approvals
+   and a green pipeline. Not yet satisfied *parks* the same way; a genuinely failed or cancelled
+   pipeline still blocks, exactly as an ordinary merge failure would.
 3. **QA approval** — after phase 11 (`qa`) passes, before phase 12 (`demo`). The test cases
-   (already posted at phase 4) are re-surfaced next to a qa verdict summary, and the run parks.
+   (from phase 4) and a qa verdict summary are posted into the same Slack thread, and the run
+   parks.
 
 **Reply `approved`** (that exact word, case-insensitive, trimmed — not a substring of a longer
-reply) on the ticket to release a pause. **Any other reply is feedback**: the plan gate re-runs
-`plan` with it appended; the qa gate cycles back to `implement` through the same forced
-`implement → review → verify → mr → merge → deploy → qa` window a failing qa case already cycles
-through. There is no cap on how many rounds this can take.
+reply) in the thread to release a pause. **Any other reply is feedback, and the two gates treat it
+differently:**
+
+- The **plan gate** re-runs `plan` with it appended, and posts the revised plan back into the
+  same thread for another round.
+- The **qa gate** reads it as edge case(s) to add rather than a reason to redo any work: each line
+  of the reply becomes a new case, appended straight into `testcases.json` (see
+  `appendEdgeCases()` in `src/conductor/reviewgate.ts`), and the SAME gate asks again in the same
+  thread with the updated list — no phase re-runs, no cycle back to `implement`.
+
+Either way, a round's outcome reaches GitLab only as an `addIssueNote` audit record — "the plan was
+approved", "QA approved, here is the final test-case list" — posted once the gate actually
+resolves. There is no cap on how many rounds either gate can take.
+
+**New Slack scope, and it is a manual step.** Every OTHER Slack call this app makes only posts or
+edits a message (`chat.postMessage` / `chat.update`), which the existing `chat:write` scope covers.
+Reading a reply back — `conversations.replies`, added for these two gates — needs
+`channels:history` (a public channel) or `groups:history` (a private one) granted to the bot token
+as well. A Slack token cannot grant itself a new scope, so **a human has to add it in the Slack API
+console** (the app's OAuth & Permissions page → Bot Token Scopes → add the scope → reinstall the
+app to the workspace) before either gate can see a reply at all. Skip it and a gate is not
+broken so much as permanently `pending`: the request goes out, `conversations.replies` comes back
+`missing_scope`, and every following check reads that same empty answer until the scope is added —
+a visible stall, not a silent one, and reversible with no other change once granted. See the scope
+requirement documented again at `threadReplies()`'s own header in `src/lib/slack.ts`.
 
 **Parked is not `Needs Human`.** A block swaps the ticket's label and needs a person to remove it;
 a park changes no label, sends no @mention, and is picked up by the next tick's ordinary scan

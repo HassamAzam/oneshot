@@ -65,15 +65,19 @@ export interface Remediation {
 /**
  * One review gate's state — the opt-in `Review` label's pause points.
  *
- * `requestNoteId` is the "since" marker: null means the run still owes a
- * fresh request note (armed the next time the gate is checked), non-null
- * means a request is standing and the gate is polling GitLab for a reply
- * newer than this id. `feedback` accumulates every non-`approved` reply,
- * oldest first, uncapped — the whole point is no limit on how many rounds a
- * reviewer gets.
+ * Slack is the primary approval channel (see src/conductor/reviewgate.ts):
+ * `requestTs` is the "since" marker, and it names a Slack message now rather
+ * than a GitLab note. Null means the run still owes a fresh request in the
+ * ticket's Slack thread (armed the next time the gate is checked); non-null
+ * means a request is standing there and the gate is polling
+ * `conversations.replies` for a human reply newer than this ts. `feedback`
+ * accumulates every non-`approved` reply, oldest first, uncapped — the whole
+ * point is no limit on how many rounds a reviewer gets. GitLab receives only
+ * an audit note once a round is actually approved; it is never where the
+ * decision is read from.
  */
 export interface ReviewGateState {
-  requestNoteId: number | null;
+  requestTs: string | null;
   approved: boolean;
   feedback: string[];
 }

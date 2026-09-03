@@ -74,10 +74,11 @@ import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import { closePhase, mergePhase } from './codephases.js';
 import {
-  checkApprovalGate, planApprovalRequestBody, qaApprovalRequestBody, reviewLabelPresent,
+  appendEdgeCases, checkApprovalGate, planApprovalRequestBody, planApprovedRecordBody,
+  qaApprovalRequestBody, qaApprovedRecordBody, reviewLabelPresent,
 } from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
-import type { Ticket } from '../phases/types.js';
+import type { Ticket, TestCase } from '../phases/types.js';
 
 const exec = promisify(execFile);
 
@@ -490,18 +491,22 @@ export async function runTicket(
     // The Review label's plan-approval gate — opt-in, additive, and checked
     // only once per run: `planApproval.approved` latches true and every later
     // pass (including an ordinary review/verify cycle back to `implement`)
-    // skips straight past this. One quick GitLab read, never a loop — see
-    // src/conductor/reviewgate.ts's file header for why.
+    // skips straight past this. One quick Slack read, never a loop — see
+    // src/conductor/reviewgate.ts's file header for why, and for why Slack
+    // rather than GitLab is what this polls.
     if (phase.name === 'implement' && phaseSucceeded(iid, 'plan')
       && reviewLabelPresent(ticket.labels) && !j.planApproval?.approved) {
       const gate = await checkApprovalGate({
-        iid, gate: 'plan', requestBody: planApprovalRequestBody(),
+        iid,
+        gate: 'plan',
+        requestBody: planApprovalRequestBody(prior.plan ?? null),
+        onApproved: async () => { await addIssueNote(iid, planApprovedRecordBody()); },
       });
       j = readJournal(iid) ?? j;
       if (gate.verdict === 'pending') {
         return finish(j, 'parked',
-          `awaiting plan approval — reply \`approved\` on the ticket to continue, or reply ` +
-          'with feedback to have the plan revised');
+          `awaiting plan approval — reply \`approved\` in the ticket's Slack thread to continue, ` +
+          'or reply there with feedback to have the plan revised');
       }
       if (gate.verdict === 'feedback') {
         const planIdx = list.findIndex((p) => p.name === 'plan');
@@ -509,7 +514,10 @@ export async function runTicket(
           forced.add('plan');
           // The revised plan.json must be republished — the FIRST plan
           // already occupies the 'plan' key in `published`, so publishPending
-          // would otherwise never post the reviewer's requested revision.
+          // would otherwise never post the reviewer's requested revision to
+          // the ticket. This is the ordinary, Review-label-agnostic publish
+          // flow (src/lib/publish.ts) doing what it always does; the gate
+          // itself never posts the revised plan anywhere but Slack.
           const withoutPlan = (j.published ?? []).filter((k) => k !== 'plan');
           j = updateJournal(iid, { published: withoutPlan }) ?? j;
           i = planIdx;
@@ -520,47 +528,39 @@ export async function runTicket(
       // configured phase list) — fall through into 'implement' below.
     }
 
-    // The Review label's qa-approval gate, mirroring the plan gate above but
-    // sitting after phase 11 (`qa`) and before phase 12 (`demo`). Feedback
-    // cycles back to `implement` through the SAME forced window a failing qa
-    // case already cycles through (mr, merge, deploy, qa re-run; `testcases`
-    // stays pinned) — this is not a new mechanism, just this mechanism
-    // triggered by a reply instead of a failed case.
+    // The Review label's qa-approval gate, sitting after phase 11 (`qa`) and
+    // before phase 12 (`demo`). Unlike the plan gate, a non-`approved` reply
+    // here never cycles a phase: it is read as edge case(s) to fold into the
+    // test-case list, appended in place by `appendEdgeCases` (mechanical, no
+    // model), and the SAME gate asks again in the SAME thread with the
+    // updated list. The run just stays parked between rounds; only
+    // `approved` moves the index.
     if (phase.name === 'demo' && phaseSucceeded(iid, 'qa')
       && reviewLabelPresent(ticket.labels) && !j.qaApproval?.approved) {
       const qaData = prior.qa as { verdict?: string; results?: Array<{ result?: string }> } | null;
       const results = qaData?.results ?? [];
       const passed = results.filter((r) => r.result === 'pass').length;
       const qaSummary = `verdict **${qaData?.verdict ?? 'unknown'}** (${passed}/${results.length} cases passed)`;
+      const cases = (prior.testcases as { cases?: TestCase[] } | null)?.cases ?? [];
 
       const gate = await checkApprovalGate({
-        iid, gate: 'qa', requestBody: qaApprovalRequestBody(qaSummary),
-        // Re-surface the test cases fresh next to the decision they inform —
-        // they were already posted back at phase 4 and would otherwise never
-        // be shown again anywhere near this gate.
-        onFirstArm: async () => {
-          const withoutTestcases = (j.published ?? []).filter((k) => k !== 'testcases');
-          j = updateJournal(iid, { published: withoutTestcases }) ?? j;
-          await publishPending({ iid, runId, journal: j });
-          j = readJournal(iid) ?? j;
+        iid,
+        gate: 'qa',
+        requestBody: qaApprovalRequestBody(cases, qaSummary),
+        onApproved: async () => {
+          const finalCases = (readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases) ?? cases;
+          await addIssueNote(iid, qaApprovedRecordBody(finalCases));
         },
       });
       j = readJournal(iid) ?? j;
-      if (gate.verdict === 'pending') {
-        return finish(j, 'parked',
-          `awaiting qa approval — reply \`approved\` on the ticket to continue to demo, or ` +
-          'reply with feedback to send it back to implement');
-      }
       if (gate.verdict === 'feedback') {
-        const implementIdx = list.findIndex((p) => p.name === 'implement');
-        const qaIdx = list.findIndex((p) => p.name === 'qa');
-        if (implementIdx !== -1 && qaIdx !== -1) {
-          for (let k = implementIdx; k <= qaIdx; k += 1) {
-            if (list[k]!.name !== 'testcases') forced.add(list[k]!.name);
-          }
-          i = implementIdx;
-          continue;
-        }
+        const updated = appendEdgeCases(iid, gate.feedback!);
+        if (updated) prior.testcases = { ...(prior.testcases ?? {}), cases: updated };
+      }
+      if (gate.verdict !== 'approved') {
+        return finish(j, 'parked',
+          `awaiting qa approval — reply \`approved\` in the ticket's Slack thread to continue ` +
+          'to demo, or reply there with edge case(s) to add to the test list');
       }
       // gate.verdict === 'approved' — fall through into 'demo' below.
     }
