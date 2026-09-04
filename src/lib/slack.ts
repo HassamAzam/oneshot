@@ -35,13 +35,25 @@ async function call(method: string, body: Record<string, unknown>): Promise<Reco
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), CALL_TIMEOUT_MS);
   try {
+    // Form-encoded, not JSON: confirmed live that conversations.replies (and
+    // likely conversations.history) reject an application/json body outright
+    // with invalid_arguments / "missing required field" for fields that ARE
+    // present — Slack's read-oriented Web API methods parse form bodies only.
+    // chat.postMessage/chat.update accept form encoding too (none of this
+    // file's calls pass a nested object needing JSON-stringified block/
+    // attachment fields), so one encoding covers every method here.
+    const form = new URLSearchParams();
+    for (const [k, v] of Object.entries(body)) {
+      if (v === undefined || v === null) continue;
+      form.set(k, String(v));
+    }
     const res = await fetch(`${API}/${method}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token()}`,
-        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
       },
-      body: JSON.stringify(body),
+      body: form,
       signal: ctl.signal,
     });
     const json = (await res.json()) as Record<string, unknown>;
