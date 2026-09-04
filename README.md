@@ -183,6 +183,15 @@ dispatch slot, no port and no promotion window between checks, so a Review-label
 for a slow reviewer does not starve every other ticket the way a naive "just wait inside the
 phase" implementation would.
 
+Plain `--ticket <iid>` has no scan loop behind it, though — it runs one pass and exits, parked or
+not, so a Review-gated ticket driven that way needs someone to notice the Slack reply and re-run
+the command by hand. `npm start -- --ticket <iid> --follow` closes that gap: it keeps the process
+alive and re-checks that SAME ticket — never anything else the board might also be claimable for —
+on the ordinary `TICK_MS` cadence until the run reaches `done` (exit 0) or a genuine `blocked`
+(exit non-zero, reason printed). A `parked` run is re-checked every tick, which is what actually
+picks up a human's `approved` Slack reply without a manual re-invoke; a transient failure to read
+the ticket from GitLab is retried the same way rather than ending the process.
+
 ## Mobilizing agents
 
 Sixteen phases deep, and most of them spend their time waiting — on a webpack build, on a
