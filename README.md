@@ -187,10 +187,16 @@ Plain `--ticket <iid>` has no scan loop behind it, though — it runs one pass a
 not, so a Review-gated ticket driven that way needs someone to notice the Slack reply and re-run
 the command by hand. `npm start -- --ticket <iid> --follow` closes that gap: it keeps the process
 alive and re-checks that SAME ticket — never anything else the board might also be claimable for —
-on the ordinary `TICK_MS` cadence until the run reaches `done` (exit 0) or a genuine `blocked`
-(exit non-zero, reason printed). A `parked` run is re-checked every tick, which is what actually
-picks up a human's `approved` Slack reply without a manual re-invoke; a transient failure to read
-the ticket from GitLab is retried the same way rather than ending the process.
+every three minutes (`FOLLOW_TICK_MS`) until the run reaches `done` (exit 0) or a genuine `blocked`
+(exit non-zero, reason printed). A `parked` run is re-checked on every one of those ticks and never
+gives up on its own: it keeps asking until the thread answers with `approved` or with feedback,
+which is what actually picks up a human's reply without a manual re-invoke. A transient failure to
+read the ticket from GitLab is retried the same way rather than ending the process.
+
+Three minutes rather than the watcher's `TICK_MS` minute, because a parked run re-enters the
+pipeline on every tick and any phase without a recorded success is re-attempted from scratch each
+time — a `skip`-on-fail phase like `recall` burns a full model lap per tick for as long as a human
+takes to reply. The slower cadence still reads a reply promptly while spending a third as much.
 
 ## Mobilizing agents
 

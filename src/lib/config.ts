@@ -275,6 +275,20 @@ export const SKIP_DEPLOY = envFlag('ONESHOT_SKIP_DEPLOY');
 export const TICK_MS = 60_000;
 
 /**
+ * How often `--follow` re-checks a single ticket while it sits parked at a
+ * Review gate, waiting for `approved` or feedback in the Slack thread.
+ *
+ * Deliberately slower than TICK_MS. A parked run re-enters the pipeline on
+ * every tick, and any phase that has NOT recorded a success is re-attempted
+ * from scratch each time — a `skip`-on-fail phase like `recall` re-runs a full
+ * model lap per tick, which at 60s costs a lap a minute for as long as a human
+ * takes to reply. Three minutes keeps a reply picked up promptly while cutting
+ * that waste threefold. It never stops on its own: only `approved` or feedback
+ * moves the run on.
+ */
+export const FOLLOW_TICK_MS = 180_000;
+
+/**
  * A dry run's own home, so DRY_RUN=1 cannot disturb the conductors doing real
  * work.
  *

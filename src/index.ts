@@ -24,7 +24,8 @@ import { existsSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  CONTEXT_REPO, DRY_RUN, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT, TICK_MS, WORK_REPO,
+  CONTEXT_REPO, DRY_RUN, FOLLOW_TICK_MS, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT, TICK_MS,
+  WORK_REPO,
   auditAuth, envOr, phases, portPool, projectConfig, slackConfig,
 } from './lib/config.js';
 import { activeRunsFleet, logEvent, reconcileForeignRuns } from './lib/db.js';
@@ -124,7 +125,8 @@ function nap(ms: number): Promise<void> {
  * two numbers never drift apart.
  */
 function tickDelayMs(): number {
-  return netState() === 'ok' ? TICK_MS : Math.max(TICK_MS, 30_000);
+  const base = followArg ? FOLLOW_TICK_MS : TICK_MS;
+  return netState() === 'ok' ? base : Math.max(base, 30_000);
 }
 
 /**
@@ -232,7 +234,7 @@ function banner(): void {
   log.info(`phases     ${phases().length} (${phases().filter((p) => p.kind === 'code').length} deterministic)`);
   log.info(`concurrency ${cfg.concurrency} here · ${portPool().length} pool ports across the fleet`);
   if (solo) log.info('mode       --solo, a second conductor is refused');
-  if (followArg) log.info(`mode       --follow #${ticketArg}, re-checked every ${TICK_MS / 1000}s until done/blocked`);
+  if (followArg) log.info(`mode       --follow #${ticketArg}, re-checked every ${FOLLOW_TICK_MS / 1000}s until done/blocked`);
   if (DRY_RUN) log.warn('DRY_RUN is on — every write will be refused, in its own state-dry home');
 }
 
@@ -512,7 +514,7 @@ async function main(): Promise<void> {
     `${Math.round(dayUsage() / 1e6)}M / ${Math.round(b.day_tokens / 1e6)}M today (weighted)`);
 
   log.banner(followArg
-    ? `Following ticket #${ticketArg} every ${TICK_MS / 1000}s until done or blocked. Ctrl-C to stop.`
+    ? `Following ticket #${ticketArg} every ${FOLLOW_TICK_MS / 1000}s until done or blocked. Ctrl-C to stop.`
     : once
       ? (ticketArg !== null ? `Single run: ticket #${ticketArg}.` : 'Single pass, then exit.')
       : `Watching every ${TICK_MS / 1000}s as ${me.slice(0, 6)}. Ctrl-C to stop.`);
