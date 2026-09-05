@@ -53,7 +53,8 @@ async function main(): Promise<void> {
   section('Config');
   const cfg = projectConfig();
   pass('project.json', `${cfg.gitlab.project} (id ${cfg.gitlab.projectId})`);
-  pass('labels', `"${cfg.labels.entry}" -> "${cfg.labels.exit}", blocked "${cfg.labels.blocked}"`);
+  pass('labels', `"${cfg.labels.entry}" -> "${cfg.labels.exit}", blocked "${cfg.labels.blocked}", ` +
+    `optional review gate "${cfg.labels.review}" (off unless a ticket carries it too)`);
 
   // The branch-TIP deploy still means only ONE run may hold the merge→deploy→qa
   // window, but that is now enforced by the in-process promotion mutex rather
@@ -201,6 +202,9 @@ async function main(): Promise<void> {
   if (!slackConfig().channel) warn('no channel configured', 'set ONESHOT_CHANNEL or config/slack.json');
   else pass('channel', slackConfig().channel);
   if (!slackConfig().allowlist.length) warn('command allowlist is empty', 'every Slack command will be refused');
+  warn('Review-label gates need channels:history/groups:history on the bot token',
+    'chat:write (posting) does not cover reading a reply back — see config/slack.json\'s ' +
+    '_comment_history and README\'s "Optional human review gates"');
 
   // -------------------------------------------------------------- verdict
   console.log(`\n${fails ? R : G}${fails} failed${X}, ${Y}${warns} warnings${X}\n`);

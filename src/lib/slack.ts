@@ -35,13 +35,25 @@ async function call(method: string, body: Record<string, unknown>): Promise<Reco
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), CALL_TIMEOUT_MS);
   try {
+    // Form-encoded, not JSON: confirmed live that conversations.replies (and
+    // likely conversations.history) reject an application/json body outright
+    // with invalid_arguments / "missing required field" for fields that ARE
+    // present — Slack's read-oriented Web API methods parse form bodies only.
+    // chat.postMessage/chat.update accept form encoding too (none of this
+    // file's calls pass a nested object needing JSON-stringified block/
+    // attachment fields), so one encoding covers every method here.
+    const form = new URLSearchParams();
+    for (const [k, v] of Object.entries(body)) {
+      if (v === undefined || v === null) continue;
+      form.set(k, String(v));
+    }
     const res = await fetch(`${API}/${method}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token()}`,
-        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
       },
-      body: JSON.stringify(body),
+      body: form,
       signal: ctl.signal,
     });
     const json = (await res.json()) as Record<string, unknown>;
@@ -89,7 +101,7 @@ export interface CardState {
   lines: PhaseLine[];
   elapsedMs: number;
   weighted: number;
-  status: 'running' | 'blocked' | 'done' | 'aborted';
+  status: 'running' | 'blocked' | 'done' | 'aborted' | 'parked';
   blockedWhy?: string;
 }
 
@@ -114,6 +126,9 @@ function renderCard(s: CardState): string {
     const owner = envOr('ONESHOT_OWNER_SLACK_ID');
     footer += `\n:rotating_light: *BLOCKED* — ${s.blockedWhy ?? 'unknown'}${owner ? ` <@${owner}>` : ''}`;
   }
+  if (s.status === 'parked') {
+    footer += `\n:pause_button: *awaiting review* — ${s.blockedWhy ?? 'Review label pause'}`;
+  }
   const reachedClose = s.lines.some((l) => l.phase === 'close' && l.state === 'done');
   if (s.status === 'done' && reachedClose) footer += '\n:tada: *Ready For Deployment*';
 
@@ -134,15 +149,96 @@ export async function updateCard(ts: string, s: CardState): Promise<void> {
   await call('chat.update', { channel: channel(), ts, text: renderCard(s) });
 }
 
-/** A milestone reply in the ticket's thread. Milestones only — the card is the status. */
-export async function thread(ts: string | null, text: string): Promise<void> {
-  if (!slackEnabled()) { log.info(`[slack] ${text.slice(0, 160)}`); return; }
-  await call('chat.postMessage', {
+/**
+ * A reply in the ticket's thread. Milestones only, ordinarily — the card is
+ * the status — but the opt-in Review label's gates (src/conductor/
+ * reviewgate.ts) also use this to post their approval requests, since Slack
+ * is their primary channel and a gate's request is just another threaded
+ * reply that happens to want an answer.
+ *
+ * Returns the posted message's own `ts`, so a caller that needs a "since"
+ * marker for polling replies (`threadReplies` below) does not have to make a
+ * second call just to learn what it already has the answer to. Null when
+ * Slack is unconfigured, unreachable, or the post itself failed — a caller
+ * that cares (the review gate) treats null as "try again next tick", exactly
+ * like every other Slack failure in this file degrades to the console.
+ */
+export async function thread(ts: string | null, text: string): Promise<string | null> {
+  if (!slackEnabled()) { log.info(`[slack] ${text.slice(0, 160)}`); return null; }
+  const res = await call('chat.postMessage', {
     channel: channel(),
     thread_ts: ts ?? undefined,
     text,
     unfurl_links: false,
   });
+  return typeof res.ts === 'string' ? res.ts : null;
+}
+
+let cachedBotUserId: string | null = null;
+
+/**
+ * This app's own Slack user id, resolved once via `auth.test` and cached.
+ *
+ * Needed to tell a human's reply apart from the bot's own messages when
+ * polling a thread (`threadReplies`): a message posted with this bot's token
+ * carries a `bot_id`, but so would a message from any OTHER bot in the same
+ * workspace, so `bot_id` alone is not a safe "that was me" test. The user id
+ * `auth.test` reports for THIS token is.
+ */
+async function botUserId(): Promise<string | null> {
+  if (cachedBotUserId) return cachedBotUserId;
+  if (!slackEnabled()) return null;
+  const res = await call('auth.test', {});
+  if (res.ok === true && typeof res.user_id === 'string' && res.user_id) {
+    cachedBotUserId = res.user_id;
+    return cachedBotUserId;
+  }
+  return null;
+}
+
+export interface ThreadReply {
+  ts: string;
+  text: string;
+}
+
+/**
+ * Human replies posted in a thread strictly after `sinceTs`, oldest first —
+ * the read half of the review gate's Slack polling (src/conductor/
+ * reviewgate.ts), which is otherwise post-only like the rest of this file.
+ *
+ * Backed by Slack's `conversations.replies` Web API method. This is a NEW
+ * scope requirement: every other call in this file only ever posts or edits
+ * a message, which `chat:write` alone covers, but reading a channel's history
+ * back — thread replies included — needs `channels:history` (a public
+ * channel) or `groups:history` (a private one) granted to the bot token on
+ * top of that. A token cannot grant itself a new scope, so this is a Slack
+ * app configuration change a human has to make manually in the Slack API
+ * console before the Review label's gates can see a reply at all — see
+ * README's "Optional human review gates". Absent the scope, Slack answers
+ * `missing_scope`, `call()` logs it and returns no `messages`, and this
+ * function degrades to an empty list rather than throwing — the gate then
+ * just stays 'pending' forever, which is a visible, diagnosable stall rather
+ * than a crash.
+ *
+ * Only the first page is read (Slack's default page, on the order of a
+ * hundred messages) — the same bet `issueNotes()` makes for GitLab comments:
+ * a thread this deep into unread replies before the first `approved` is not
+ * the case this gate exists to serve.
+ */
+export async function threadReplies(threadTs: string, sinceTs: string | null): Promise<ThreadReply[]> {
+  if (!slackEnabled() || !threadTs) return [];
+  const me = await botUserId();
+  const res = await call('conversations.replies', { channel: channel(), ts: threadTs });
+  const messages = Array.isArray(res.messages) ? (res.messages as Array<Record<string, unknown>>) : [];
+  const since = sinceTs ? Number(sinceTs) : 0;
+  return messages
+    .filter((m) => typeof m.ts === 'string' && Number(m.ts) > since)
+    .filter((m) => !m.bot_id && m.user !== me)
+    .filter((m): m is Record<string, unknown> & { ts: string; text: string } => (
+      typeof m.text === 'string' && m.text.trim() !== ''
+    ))
+    .map((m) => ({ ts: m.ts, text: m.text }))
+    .sort((a, b) => Number(a.ts) - Number(b.ts));
 }
 
 /** The only unprompted @mention. Full auto means nothing else should need attention. */

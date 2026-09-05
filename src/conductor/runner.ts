@@ -73,8 +73,12 @@ import { publishPending } from '../lib/publish.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import { closePhase, mergePhase } from './codephases.js';
+import {
+  appendEdgeCases, checkApprovalGate, planApprovalRequestBody, planApprovedRecordBody,
+  qaApprovalRequestBody, qaApprovedRecordBody, reviewLabelPresent,
+} from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
-import type { Ticket } from '../phases/types.js';
+import type { Ticket, TestCase } from '../phases/types.js';
 
 const exec = promisify(execFile);
 
@@ -123,7 +127,7 @@ export interface RunOutcome {
    * still inside its cooldown — nothing was started, nothing was spent, and
    * nothing needs looking at.
    */
-  status: 'done' | 'blocked' | 'aborted' | 'refused';
+  status: 'done' | 'blocked' | 'aborted' | 'refused' | 'parked';
   reason?: string;
 }
 
@@ -149,7 +153,18 @@ export interface CodePhaseCtx {
  */
 export const CODE_PHASES: Record<
   string,
-  ((ctx: CodePhaseCtx) => Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>) | undefined
+  ((ctx: CodePhaseCtx) => Promise<{
+    ok: boolean; error?: string; data?: Record<string, unknown>;
+    /**
+     * Set only by `merge`'s Review-gate pre-check: "not ready yet, try again"
+     * rather than an ordinary failure. Distinguished from `!ok` alone so the
+     * run can PARK (auto-resumed by the next tick, no label change, no
+     * BLOCKED alert) instead of following the phase's onFail policy, which
+     * for `merge` is 'blocked' — i.e. Needs Human, which a missing approval
+     * or a still-running pipeline is not.
+     */
+    park?: boolean;
+  }>) | undefined
 > = {
   merge: mergePhase,
   close: closePhase,
@@ -237,7 +252,11 @@ type ResumeDecision =
 function decideResume(existing: RunJournal | null): ResumeDecision {
   if (!existing) return { kind: 'fresh', archive: null };
 
-  if (existing.status === 'running' || existing.status === 'aborted') {
+  // 'parked' is the Review label's opt-in wait (plan approval, merge
+  // readiness, qa approval) — an ordinary, human-caused resumption exactly
+  // like 'running'/'aborted', not a block: no cooldown, no label swap, and
+  // the next scan's claim is what re-checks it. See src/conductor/reviewgate.ts.
+  if (existing.status === 'running' || existing.status === 'aborted' || existing.status === 'parked') {
     return { kind: 'resume', journal: existing };
   }
 
@@ -259,7 +278,7 @@ type Control =
   | { kind: 'advance' }
   | { kind: 'retry'; at: number }
   | { kind: 'cycle'; jumpTo: number; windowEnd: number }
-  | { kind: 'stop'; status: 'blocked' | 'aborted'; reason: string };
+  | { kind: 'stop'; status: 'blocked' | 'aborted' | 'parked'; reason: string };
 
 function statusForFailure(p: PhaseConfig): PhaseRecord['status'] {
   if (p.onFail === 'skip') return 'skipped';
@@ -371,6 +390,14 @@ export async function runTicket(
   }
   const ticket: Ticket = fetched;
 
+  // Re-derived every run, fresh and resumed alike, so a human adding or
+  // removing the Review label between conductor restarts takes effect on the
+  // next claim rather than freezing whatever it was when the run started.
+  // Stored on the journal (not just held locally) because the pure-code
+  // `merge` phase has no ticket object of its own to read labels from.
+  const reviewMode = reviewLabelPresent(ticket.labels);
+  if (j.reviewMode !== reviewMode) { j = updateJournal(iid, { reviewMode }) ?? j; }
+
   // The Slack card is posted once and edited in place for the rest of the run.
   if (!j.slackTs) {
     const ts = await postCard(cardState(j));
@@ -459,6 +486,83 @@ export async function runTicket(
       log.info(`skip ${phase.name} — already succeeded this run`);
       i += 1;
       continue;
+    }
+
+    // The Review label's plan-approval gate — opt-in, additive, and checked
+    // only once per run: `planApproval.approved` latches true and every later
+    // pass (including an ordinary review/verify cycle back to `implement`)
+    // skips straight past this. One quick Slack read, never a loop — see
+    // src/conductor/reviewgate.ts's file header for why, and for why Slack
+    // rather than GitLab is what this polls.
+    if (phase.name === 'implement' && phaseSucceeded(iid, 'plan')
+      && reviewLabelPresent(ticket.labels) && !j.planApproval?.approved) {
+      const gate = await checkApprovalGate({
+        iid,
+        gate: 'plan',
+        requestBody: planApprovalRequestBody(prior.plan ?? null),
+        onApproved: async () => { await addIssueNote(iid, planApprovedRecordBody()); },
+      });
+      j = readJournal(iid) ?? j;
+      if (gate.verdict === 'pending') {
+        return finish(j, 'parked',
+          `awaiting plan approval — reply \`approved\` in the ticket's Slack thread to continue, ` +
+          'or reply there with feedback to have the plan revised');
+      }
+      if (gate.verdict === 'feedback') {
+        const planIdx = list.findIndex((p) => p.name === 'plan');
+        if (planIdx !== -1) {
+          forced.add('plan');
+          // The revised plan.json must be republished — the FIRST plan
+          // already occupies the 'plan' key in `published`, so publishPending
+          // would otherwise never post the reviewer's requested revision to
+          // the ticket. This is the ordinary, Review-label-agnostic publish
+          // flow (src/lib/publish.ts) doing what it always does; the gate
+          // itself never posts the revised plan anywhere but Slack.
+          const withoutPlan = (j.published ?? []).filter((k) => k !== 'plan');
+          j = updateJournal(iid, { published: withoutPlan }) ?? j;
+          i = planIdx;
+          continue;
+        }
+      }
+      // gate.verdict === 'approved' (or 'plan' is somehow absent from the
+      // configured phase list) — fall through into 'implement' below.
+    }
+
+    // The Review label's qa-approval gate, sitting after phase 11 (`qa`) and
+    // before phase 12 (`demo`). Unlike the plan gate, a non-`approved` reply
+    // here never cycles a phase: it is read as edge case(s) to fold into the
+    // test-case list, appended in place by `appendEdgeCases` (mechanical, no
+    // model), and the SAME gate asks again in the SAME thread with the
+    // updated list. The run just stays parked between rounds; only
+    // `approved` moves the index.
+    if (phase.name === 'demo' && phaseSucceeded(iid, 'qa')
+      && reviewLabelPresent(ticket.labels) && !j.qaApproval?.approved) {
+      const qaData = prior.qa as { verdict?: string; results?: Array<{ result?: string }> } | null;
+      const results = qaData?.results ?? [];
+      const passed = results.filter((r) => r.result === 'pass').length;
+      const qaSummary = `verdict **${qaData?.verdict ?? 'unknown'}** (${passed}/${results.length} cases passed)`;
+      const cases = (prior.testcases as { cases?: TestCase[] } | null)?.cases ?? [];
+
+      const gate = await checkApprovalGate({
+        iid,
+        gate: 'qa',
+        requestBody: qaApprovalRequestBody(cases, qaSummary),
+        onApproved: async () => {
+          const finalCases = (readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases) ?? cases;
+          await addIssueNote(iid, qaApprovedRecordBody(finalCases));
+        },
+      });
+      j = readJournal(iid) ?? j;
+      if (gate.verdict === 'feedback') {
+        const updated = appendEdgeCases(iid, gate.feedback!);
+        if (updated) prior.testcases = { ...(prior.testcases ?? {}), cases: updated };
+      }
+      if (gate.verdict !== 'approved') {
+        return finish(j, 'parked',
+          `awaiting qa approval — reply \`approved\` in the ticket's Slack thread to continue ` +
+          'to demo, or reply there with edge case(s) to add to the test list');
+      }
+      // gate.verdict === 'approved' — fall through into 'demo' below.
     }
 
     // ONESHOT_SKIP_DEPLOY exists for driving the pipeline with no demo box —
@@ -836,6 +940,14 @@ export async function runTicket(
     if (done.ok) {
       if (isMilestone(p)) await thread(j.slackTs ?? null, milestoneText(p, prior[p.name] ?? null, iid));
       return { kind: 'advance' };
+    }
+    // A parked code phase (currently only the Review label's merge-readiness
+    // check) bypasses the phase's own onFail policy entirely — 'merge' is
+    // configured 'blocked', which is right for a genuine merge failure and
+    // wrong for "waiting on an approval/pipeline", which is neither an error
+    // nor something remediation should touch.
+    if (done.park) {
+      return { kind: 'stop', status: 'parked', reason: done.error ?? `${p.name}: parked` };
     }
     return afterFailure(p, index, done.error ?? 'phase failed');
   }
@@ -1269,7 +1381,7 @@ export async function runTicket(
   }
 
   async function finish(
-    journal: RunJournal, status: 'done' | 'blocked' | 'aborted', reason?: string,
+    journal: RunJournal, status: 'done' | 'blocked' | 'aborted' | 'parked', reason?: string,
   ): Promise<RunOutcome> {
     journal.status = status;
     if (reason) journal.blockedWhy = reason;

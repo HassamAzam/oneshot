@@ -62,13 +62,54 @@ export interface Remediation {
   at: number;
 }
 
+/**
+ * One review gate's state — the opt-in `Review` label's pause points.
+ *
+ * Slack is the primary approval channel (see src/conductor/reviewgate.ts):
+ * `requestTs` is the "since" marker, and it names a Slack message now rather
+ * than a GitLab note. Null means the run still owes a fresh request in the
+ * ticket's Slack thread (armed the next time the gate is checked); non-null
+ * means a request is standing there and the gate is polling
+ * `conversations.replies` for a human reply newer than this ts. `feedback`
+ * accumulates every non-`approved` reply, oldest first, uncapped — the whole
+ * point is no limit on how many rounds a reviewer gets. GitLab receives only
+ * an audit note once a round is actually approved; it is never where the
+ * decision is read from.
+ */
+export interface ReviewGateState {
+  requestTs: string | null;
+  approved: boolean;
+  feedback: string[];
+}
+
 export interface RunJournal {
   runId: string;
   iid: number;
   title: string;
   url: string;
   createdAt: number;
-  status: 'running' | 'blocked' | 'done' | 'aborted';
+  /**
+   * 'parked' is an opt-in-only, human-caused wait — the Review label's three
+   * pause points (plan approval, merge readiness, qa approval) and nothing
+   * else ever produces it. Unlike 'blocked' it swaps no label and alerts
+   * nobody: the ticket keeps carrying the entry label throughout, so the next
+   * tick's scan re-claims it and re-checks for a reply exactly like an
+   * ordinary resumption. See src/conductor/reviewgate.ts.
+   */
+  status: 'running' | 'blocked' | 'done' | 'aborted' | 'parked';
+  /**
+   * True when the ticket carried the `Review` label the last time its
+   * labels were read (at the top of `runTicket`). Read by the pure-code
+   * `merge` phase, which has no ticket object of its own, to decide whether
+   * to apply the approvals/pipeline pre-check. Re-derived every run (fresh
+   * and resumed), so adding or removing the label between conductor restarts
+   * takes effect on the next claim.
+   */
+  reviewMode?: boolean;
+  /** Plan-approval gate state (Review label, between `plan` and `implement`). */
+  planApproval?: ReviewGateState;
+  /** QA-approval gate state (Review label, between `qa` and `demo`). */
+  qaApproval?: ReviewGateState;
   branch?: string;
   worktree?: string;
   port?: number;

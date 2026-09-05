@@ -24,7 +24,8 @@ import { existsSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  CONTEXT_REPO, DRY_RUN, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT, WORK_REPO,
+  CONTEXT_REPO, DRY_RUN, FOLLOW_TICK_MS, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT, TICK_MS,
+  WORK_REPO,
   auditAuth, envOr, phases, portPool, projectConfig, slackConfig,
 } from './lib/config.js';
 import { activeRunsFleet, logEvent, reconcileForeignRuns } from './lib/db.js';
@@ -33,7 +34,7 @@ import { probe, netState } from './lib/reachability.js';
 import { windowUsage, dayUsage, quotaParked } from './lib/quota.js';
 import { budgetConfig } from './lib/config.js';
 import { describe, scan } from './conductor/watcher.js';
-import { runTicket } from './conductor/runner.js';
+import { runTicket, type RunOutcome } from './conductor/runner.js';
 import {
   deregister, heartbeat, liveConductorIds, liveConductors, peersEverSeen, register,
 } from './lib/fleet.js';
@@ -42,8 +43,6 @@ import { getIssue, projectUrl } from './lib/gitlab.js';
 import { alert } from './lib/slack.js';
 import { log } from './lib/log.js';
 import { refuseIfAnotherConductor } from './lib/singleton.js';
-
-const TICK_MS = 60_000;
 
 /**
  * How long the watcher may sit held by an unreachable GitLab before the owner
@@ -120,6 +119,17 @@ function nap(ms: number): Promise<void> {
 }
 
 /**
+ * How long until the next tick — TICK_MS ordinarily, backed off while the
+ * network breaker is open so a dead VPN is not hammered every TICK_MS. Shared
+ * by the main loop's own nap() and --follow's "next check in" logging, so the
+ * two numbers never drift apart.
+ */
+function tickDelayMs(): number {
+  const base = followArg ? FOLLOW_TICK_MS : TICK_MS;
+  return netState() === 'ok' ? base : Math.max(base, 30_000);
+}
+
+/**
  * `--ticket <iid>` — run exactly one ticket, then exit.
  *
  * The watcher claims the oldest-updated candidate, which is right for steady
@@ -132,7 +142,88 @@ const ticketArg = (() => {
   const n = Number(process.argv[i + 1]);
   return Number.isInteger(n) && n > 0 ? n : null;
 })();
-const once = process.argv.includes('--once') || ticketArg !== null;
+
+/**
+ * `--follow` — only meaningful together with `--ticket <iid>`. Keeps
+ * re-attempting that SAME ticket on the normal tick cadence instead of
+ * exiting after one pass, without ever calling scan() — so it never claims or
+ * even looks at any other ticket, exactly like plain `--ticket`. It exists for
+ * the gap plain `--ticket` leaves open: a run that PARKS (a Review-gate reply
+ * still pending) or hits a transient network 'aborted' has nobody left to
+ * re-invoke it once the one pass has exited. See handleFollowOutcome() below
+ * for what counts as terminal versus worth another tick.
+ */
+const followArg = process.argv.includes('--follow');
+if (followArg && ticketArg === null) {
+  log.error('--follow only makes sense together with --ticket <iid>');
+  process.exit(1);
+}
+
+const once = (process.argv.includes('--once') || ticketArg !== null) && !followArg;
+
+/**
+ * Set once `--follow`'s ticket reaches a state no further ticking would
+ * change. Checked in the same place `stopping` already is — the loop's own
+ * exit test — so a terminal outcome ends the process exactly like a signal
+ * does, just with an exit code that reflects the outcome instead of always 0.
+ */
+let followSettled = false;
+let followExitCode = 0;
+
+/**
+ * Classify one `--follow` pass. Keys off `RunOutcome.status` — the same
+ * vocabulary `runner.ts`'s `finish()` and `decideResume()` already use —
+ * rather than inventing a parallel one:
+ *
+ * - `done` — the ticket shipped. Terminal, exit 0.
+ * - `blocked` — genuine inability to proceed (a phase out of retries, a
+ *   missing implementation, a quota/lease failure). `finish()` swaps the
+ *   ticket's label and alerts a human for exactly this status, so treating it
+ *   as anything but terminal here would mean --follow retries forever against
+ *   something a human now has to act on. Terminal, exit 1.
+ * - `parked` — the Review label's gate, waiting on a Slack reply or a merge
+ *   precondition. `decideResume()` already treats 'parked' as an ordinary
+ *   resumption, not a block; this is the mechanism that makes a human's reply
+ *   actually get picked up without a manual re-run. Not terminal.
+ * - `aborted` — covers both `finish(j, 'aborted', 'could not read the ticket
+ *   from GitLab')` (the transient network case) and every other abort
+ *   `runner.ts` treats as resumable (a mid-phase pause, a stopped-while-queued
+ *   promotion wait). `decideResume()` resumes 'aborted' exactly like
+ *   'running', so retrying it here is consistent with how the rest of the
+ *   conductor already understands the status. Not terminal.
+ * - `refused` — this pass lost a race for ownership (another conductor holds
+ *   the run, or a block's cooldown has not elapsed). Not a failure of the
+ *   ticket itself. Not terminal.
+ */
+function handleFollowOutcome(outcome: RunOutcome): void {
+  // A shutdown signal already sets `stopping`, which ends the loop regardless
+  // of this outcome — saying "next check" when there will not be one would be
+  // wrong, not just unhelpful.
+  const wait = stopping ? 'shutting down' : `next check in ${Math.round(tickDelayMs() / 1000)}s`;
+  switch (outcome.status) {
+    case 'done':
+      say.ok(`#${outcome.iid} done — --follow is satisfied`);
+      followSettled = true;
+      followExitCode = 0;
+      break;
+    case 'blocked':
+      say.error(`#${outcome.iid} blocked — ${outcome.reason ?? 'no reason given'}`);
+      followSettled = true;
+      followExitCode = 1;
+      break;
+    case 'parked':
+      say.phase(`#${outcome.iid} parked — ${outcome.reason ?? 'waiting on a gate'} — ${wait}`);
+      break;
+    case 'aborted':
+      say.warn(`#${outcome.iid} aborted — ${outcome.reason ?? 'no reason given'} — ${wait}`);
+      break;
+    case 'refused':
+      say.info(`#${outcome.iid} refused — ${outcome.reason ?? 'no reason given'} — ${wait}`);
+      break;
+    default:
+      break;
+  }
+}
 
 function banner(): void {
   const cfg = projectConfig();
@@ -143,6 +234,7 @@ function banner(): void {
   log.info(`phases     ${phases().length} (${phases().filter((p) => p.kind === 'code').length} deterministic)`);
   log.info(`concurrency ${cfg.concurrency} here · ${portPool().length} pool ports across the fleet`);
   if (solo) log.info('mode       --solo, a second conductor is refused');
+  if (followArg) log.info(`mode       --follow #${ticketArg}, re-checked every ${FOLLOW_TICK_MS / 1000}s until done/blocked`);
   if (DRY_RUN) log.warn('DRY_RUN is on — every write will be refused, in its own state-dry home');
 }
 
@@ -265,12 +357,19 @@ async function tick(): Promise<void> {
     const res = await getIssue(ticketArg);
     if (!res.ok || !res.data) {
       say.error(`cannot read #${ticketArg}`, { kind: res.kind, status: res.status });
+      if (followArg) {
+        say.warn(`--follow: could not reach GitLab for #${ticketArg} — ` +
+          `next check in ${Math.round(tickDelayMs() / 1000)}s`);
+      }
       return;
     }
-    say.phase(`targeting #${ticketArg}  ${res.data.title.slice(0, 60)}`);
+    say.phase(`${followArg ? 'follow  ' : ''}targeting #${ticketArg}  ${res.data.title.slice(0, 60)}`);
     // --ticket is the one awaited path: it exists to run exactly one ticket and
     // exit, so returning to a loop that is about to break would exit mid-phase.
-    await runTicket(res.data, { conductor: me, signal: aborter.signal });
+    // --follow keeps the same one-ticket guarantee — it re-runs THIS call on
+    // the normal tick cadence, never scan()'s board-wide claim.
+    const runOutcome = await runTicket(res.data, { conductor: me, signal: aborter.signal });
+    if (followArg) handleFollowOutcome(runOutcome);
     return;
   }
 
@@ -414,10 +513,14 @@ async function main(): Promise<void> {
   log.info(`quota      ${Math.round(windowUsage() / 1e6)}M / ${Math.round(b.window_tokens / 1e6)}M this window · ` +
     `${Math.round(dayUsage() / 1e6)}M / ${Math.round(b.day_tokens / 1e6)}M today (weighted)`);
 
-  log.banner(once
-    ? (ticketArg !== null ? `Single run: ticket #${ticketArg}.` : 'Single pass, then exit.')
-    : `Watching every ${TICK_MS / 1000}s as ${me.slice(0, 6)}. Ctrl-C to stop.`);
-  logEvent('conductor_start', { root: ROOT, watchOnly, conductor: me, solo });
+  log.banner(followArg
+    ? `Following ticket #${ticketArg} every ${FOLLOW_TICK_MS / 1000}s until done or blocked. Ctrl-C to stop.`
+    : once
+      ? (ticketArg !== null ? `Single run: ticket #${ticketArg}.` : 'Single pass, then exit.')
+      : `Watching every ${TICK_MS / 1000}s as ${me.slice(0, 6)}. Ctrl-C to stop.`);
+  logEvent('conductor_start', {
+    root: ROOT, watchOnly, conductor: me, solo, ticket: ticketArg, follow: followArg,
+  });
 
   // First signal: stop claiming, tell the runs to wind up at their next phase
   // boundary, then wait for them. Second signal: the operator has decided the
@@ -443,10 +546,9 @@ async function main(): Promise<void> {
       say.error('tick failed', { error: (err as Error).message });
       logEvent('tick_error', { error: (err as Error).message });
     }
-    if (stopping || once) break;
+    if (stopping || once || followSettled) break;
     // Back off while the network breaker is open rather than hammering it.
-    const delay = netState() === 'ok' ? TICK_MS : Math.max(TICK_MS, 30_000);
-    await nap(delay);
+    await nap(tickDelayMs());
   }
 
   await drain();
@@ -454,7 +556,10 @@ async function main(): Promise<void> {
   // make this conductor's own in-flight rows look foreign to anybody booting in
   // the meantime, and they would be buried out from under phases still running.
   deregister();
-  process.exit(0);
+  // followSettled carries a real verdict (0 for done, 1 for blocked); every
+  // other exit path — --watch-only, plain --ticket, a signal, the ordinary
+  // watch loop — keeps the exit-0 it has always had.
+  process.exit(followSettled ? followExitCode : 0);
 }
 
 // A phase session the conductor deliberately aborts can still throw from the

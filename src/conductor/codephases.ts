@@ -842,7 +842,60 @@ function qualityGate(iid: number): string | null {
   return null;
 }
 
-export async function mergePhase(ctx: CodePhaseCtx): Promise<{ ok: boolean; error?: string }> {
+/**
+ * The Review label's merge gate: required approvals and a green pipeline,
+ * checked BEFORE this phase drives the MR to merged. Pure code, deterministic,
+ * no model — consistent with why `merge` is a code phase at all (docs/HOOKS.md
+ * §1: no model holds a merge tool, so no hook is needed to stop one merging).
+ *
+ * `park: true` distinguishes "not ready yet, try again" from a real failure:
+ * missing approvals and a pipeline still running are both ordinary, expected
+ * states for a fresh MR that the next tick's re-check resolves on its own. A
+ * definitively failed/cancelled pipeline is not something re-checking fixes,
+ * so that one is a genuine block instead.
+ */
+function reviewMergeReadiness(mr: MergeRequest): { ready: boolean; park: boolean; why: string } {
+  if (mr.detailed_merge_status === 'not_approved') {
+    return {
+      ready: false, park: true,
+      why: `!${mr.iid} is missing required approvals — this ticket carries Review, so Oneshot ` +
+        'waits for them rather than merging without a human sign-off.',
+    };
+  }
+
+  const pipe = mr.head_pipeline;
+  if (!pipe) {
+    return {
+      ready: false, park: true,
+      why: `!${mr.iid} has no pipeline yet — this ticket carries Review, so Oneshot waits for ` +
+        'one to run and pass before merging.',
+    };
+  }
+  if (TERMINAL_BAD_PIPELINE.has(pipe.status)) {
+    return {
+      ready: false, park: false,
+      why: `!${mr.iid}'s pipeline is '${pipe.status}' — this ticket carries Review and requires ` +
+        `a green pipeline before merging. ${pipe.web_url}`,
+    };
+  }
+  if (pipe.status !== 'success') {
+    // Anything short of 'success' that is not one of the terminal-bad
+    // statuses above is presumed still on its way there (running, pending,
+    // scheduled, or a status this code has not seen) — park and let the
+    // next tick re-read it rather than guess.
+    return {
+      ready: false, park: true,
+      why: `!${mr.iid}'s pipeline is '${pipe.status}' — this ticket carries Review, so Oneshot ` +
+        'waits for it to finish before merging.',
+    };
+  }
+
+  return { ready: true, park: false, why: '' };
+}
+
+export async function mergePhase(
+  ctx: CodePhaseCtx,
+): Promise<{ ok: boolean; error?: string; park?: boolean }> {
   const cfg = projectConfig();
   const base = cfg.branches.base;
   const budgetMs = (phaseByName('merge')?.timeoutMin ?? 10) * 60_000;
@@ -889,6 +942,19 @@ export async function mergePhase(ctx: CodePhaseCtx): Promise<{ ok: boolean; erro
   rec.sourceBranch = first.data.source_branch;
   rec.targetBranch = first.data.target_branch;
   rec.alreadyMerged = first.data.state === 'merged';
+
+  if (ctx.journal.reviewMode && !rec.alreadyMerged && !DRY_RUN) {
+    const gate = reviewMergeReadiness(first.data);
+    if (!gate.ready) {
+      if (gate.park) {
+        rec.summary = `[Review] parked: ${gate.why}`;
+        persistMerge(ctx, rec);
+        log.warn(`merge: parked awaiting Review gate — ${gate.why}`);
+        return { ok: false, error: gate.why, park: true };
+      }
+      return failMerge(ctx, rec, gate.why);
+    }
+  }
 
   if (DRY_RUN) {
     // Every write below is a guarded no-op, so polling for a merged state that
