@@ -110,6 +110,14 @@ export interface RunJournal {
   planApproval?: ReviewGateState;
   /** QA-approval gate state (Review label, between `qa` and `demo`). */
   qaApproval?: ReviewGateState;
+  /**
+   * When the `merge` phase last asked GitLab whether a human has merged the
+   * MR. A Review-labelled ticket is never merged by Oneshot, so this phase is
+   * a wait, not an action, and re-asking on every --follow tick is pure noise.
+   * Stamped on each real check; a tick inside MERGE_POLL_MS parks without
+   * touching the network.
+   */
+  humanMergeCheckAt?: number;
   branch?: string;
   worktree?: string;
   port?: number;

@@ -139,11 +139,14 @@ rather than a second inbox to poll.
 
 1. **Plan approval** — after phase 2 (`plan`), before phase 3 (`implement`). Oneshot posts the
    plan itself into the ticket's Slack thread and the run **parks**.
-2. **Merge readiness** — inside phase 9 (`merge`), still pure code, still no model, and still
-   entirely GitLab-based (there is no Slack round-trip to wait on here): before accepting the MR,
-   Oneshot checks GitLab's own `detailed_merge_status` and `head_pipeline` for required approvals
-   and a green pipeline. Not yet satisfied *parks* the same way; a genuinely failed or cancelled
-   pipeline still blocks, exactly as an ordinary merge failure would.
+2. **The merge itself** — inside phase 9 (`merge`), still pure code, still no model. On a
+   Review ticket Oneshot **never accepts the MR**, however green the pipeline or complete the
+   approvals: it opens the MR and from there only watches. Merging — and therefore deploying —
+   is a person's decision end to end, because it is the last irreversible step and that is
+   precisely the step this label exists to reserve for a human. The phase parks until the MR's
+   own state reads `merged`, whoever merged it and whenever, then the run carries on into
+   `deploy → qa` by itself. Because that decision is measured in hours, the question is put to
+   GitLab every 30 minutes (`MERGE_POLL_MS`); ticks in between park without a network round trip.
 3. **QA approval** — after phase 11 (`qa`) passes, before phase 12 (`demo`). The test cases
    (from phase 4) and a qa verdict summary are posted into the same Slack thread, and the run
    parks.

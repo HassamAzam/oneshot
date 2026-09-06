@@ -289,6 +289,14 @@ export const TICK_MS = 60_000;
 export const FOLLOW_TICK_MS = 180_000;
 
 /**
+ * How often the `merge` phase re-asks whether a human has merged a
+ * Review-labelled ticket's MR. Merging and deploying such a ticket is a
+ * person's decision end to end — Oneshot opens the MR and then only watches —
+ * so this is a slow, patient poll rather than the tick loop's cadence.
+ */
+export const MERGE_POLL_MS = 1_800_000;
+
+/**
  * A dry run's own home, so DRY_RUN=1 cannot disturb the conductors doing real
  * work.
  *
