@@ -23,7 +23,9 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readdirSync } from 'node:fs';
-import { DRY_RUN, WORK_REPO, deployConfig, phaseByName, projectConfig } from '../lib/config.js';
+import {
+  DRY_RUN, MERGE_POLL_MS, WORK_REPO, deployConfig, phaseByName, projectConfig,
+} from '../lib/config.js';
 import {
   artifactsDirFor, readArtifact, readJournal, updateJournal, writeArtifact, type RunJournal,
 } from '../lib/artifacts.js';
@@ -842,7 +844,9 @@ function qualityGate(iid: number): string | null {
   return null;
 }
 
-export async function mergePhase(ctx: CodePhaseCtx): Promise<{ ok: boolean; error?: string }> {
+export async function mergePhase(
+  ctx: CodePhaseCtx,
+): Promise<{ ok: boolean; error?: string; park?: boolean }> {
   const cfg = projectConfig();
   const base = cfg.branches.base;
   const budgetMs = (phaseByName('merge')?.timeoutMin ?? 10) * 60_000;
@@ -878,6 +882,19 @@ export async function mergePhase(ctx: CodePhaseCtx): Promise<{ ok: boolean; erro
   updateJournal(ctx.iid, { mrIid, mrUrl: rec.mrUrl });
   updateRun(ctx.runId, { mr_iid: mrIid });
 
+  // A Review ticket's merge is a person's decision, so this phase is a patient
+  // watcher. Between polls there is nothing to learn and nothing to do, so the
+  // tick is spent without a network round trip at all.
+  const sinceLastAsk = Date.now() - (journal.humanMergeCheckAt ?? 0);
+  if (journal.reviewMode && !DRY_RUN && sinceLastAsk < MERGE_POLL_MS) {
+    const mins = Math.ceil((MERGE_POLL_MS - sinceLastAsk) / 60_000);
+    const why = `!${mrIid} is not merged yet — merging is a person's call on a Review ticket. `
+      + `Next check in ${mins}m. ${rec.mrUrl}`;
+    rec.summary = `[Review] awaiting a human merge of !${mrIid}`;
+    persistMerge(ctx, rec);
+    return { ok: false, error: why, park: true };
+  }
+
   const settings = await projectSettings();
   const policy = settings.ok ? settings.data : null;
   rec.mergeMethod = policy?.merge_method ?? null;
@@ -889,6 +906,29 @@ export async function mergePhase(ctx: CodePhaseCtx): Promise<{ ok: boolean; erro
   rec.sourceBranch = first.data.source_branch;
   rec.targetBranch = first.data.target_branch;
   rec.alreadyMerged = first.data.state === 'merged';
+
+  // The Review label hands merge AND deploy to a person, end to end. Oneshot
+  // opens the MR and from here only watches: it never accepts one itself, no
+  // matter how green the pipeline or how complete the approvals. Anything else
+  // would put a machine's judgement on the last irreversible step, which is
+  // the one step this label exists to reserve for a human.
+  //
+  // So this is a wait, not a gate with a ready/not-ready verdict. The only
+  // thing that moves the run on is the MR's own state turning 'merged',
+  // whoever did it and whenever. Re-asking every --follow tick would be noise
+  // against a decision measured in hours, so the question is put to GitLab at
+  // MERGE_POLL_MS and the ticks in between park without touching the network.
+  if (journal.reviewMode && !rec.alreadyMerged && !DRY_RUN) {
+    updateJournal(ctx.iid, { humanMergeCheckAt: Date.now() });
+    const why = `!${mrIid} is not merged yet — this ticket carries Review, so merging is a `
+      + `person's call. Oneshot will not accept it; merge it yourself when you are ready and `
+      + `the run picks up from there. Next check in ${Math.round(MERGE_POLL_MS / 60_000)}m. `
+      + `${rec.mrUrl ?? ''}`;
+    rec.summary = `[Review] awaiting a human merge of !${mrIid}`;
+    persistMerge(ctx, rec);
+    log.warn(`merge: awaiting a human merge — ${why}`);
+    return { ok: false, error: why, park: true };
+  }
 
   if (DRY_RUN) {
     // Every write below is a guarded no-op, so polling for a merged state that

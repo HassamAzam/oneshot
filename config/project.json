@@ -15,14 +15,15 @@
     "skillsRoot": "~/Documents/erp/.claude"
   },
 
-  "_comment_labels": "ONE label in, one label out. There is no intermediate state machine — progress lives in the Slack card and the run journal, not on the board. All three ids below already exist on project 1491; Oneshot never creates, renames or deletes a label.",
+  "_comment_labels": "ONE label in, one label out. There is no intermediate state machine — progress lives in the Slack card and the run journal, not on the board. All three ids below already exist on project 1491; Oneshot never creates, renames or deletes a label. 'review' is a FOURTH, OPTIONAL label, never required and never swapped by Oneshot: a ticket carrying it alongside 'Loop' gets three extra human sign-off pauses (see README's 'Optional human review gates'). Its id is not yet verified against the live project (create the label there before relying on it) — the code only ever checks label MEMBERSHIP by name, never the id, so an unverified id costs nothing.",
   "labels": {
     "entry": "Loop",
     "entryId": 1308,
     "exit": "Ready For Deployment",
     "exitId": 1303,
     "blocked": "Needs Human",
-    "blockedId": 1310
+    "blockedId": 1310,
+    "review": "Review"
   },
 
   "_comment_markers": "Persistent labels Oneshot must copy through untouched on any label write. A label swap is one update_issue call carrying the full array, so anything not listed here and not the entry/exit label would be silently dropped.",

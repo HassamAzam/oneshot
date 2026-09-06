@@ -123,11 +123,18 @@ export async function issuesWithEntryLabel(): Promise<GitlabResult<Issue[]>> {
  *
  * So fetch newest-first to get the genuinely recent hundred, then reverse to
  * hand callers the oldest-first order their `.slice(-25)` expects.
+ *
+ * `system` is GitLab's own flag for a note it generated itself — a label
+ * change, an assignment, a "marked this issue as related to" — as opposed to
+ * one a person typed. Carried through (optional, since it is new and older
+ * callers never asked for it) so a caller distinguishing human replies from
+ * board noise — the review-gate poll in src/conductor/reviewgate.ts — does not
+ * have to guess from body text alone.
  */
 export async function issueNotes(
   iid: number,
-): Promise<GitlabResult<Array<{ id: number; body: string }>>> {
-  const res = await call<Array<{ id: number; body: string }>>(
+): Promise<GitlabResult<Array<{ id: number; body: string; system?: boolean }>>> {
+  const res = await call<Array<{ id: number; body: string; system?: boolean }>>(
     'GET',
     `/projects/${projectId()}/issues/${iid}/notes?per_page=100&order_by=created_at&sort=desc`,
   );
