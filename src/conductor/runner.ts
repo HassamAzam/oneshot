@@ -43,7 +43,8 @@ import { execFile } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, PAUSE, SKIP_DEPLOY, WORK_REPO, deployConfig, modelFor, phases, portPool, projectConfig,
+  DRY_RUN, MERGE_POLL_MS, PAUSE, SKIP_DEPLOY, WORK_REPO, deployConfig, modelFor, phases, portPool,
+  projectConfig,
   type PhaseConfig,
 } from '../lib/config.js';
 import {
@@ -408,6 +409,33 @@ export async function runTicket(
   // `merge` phase has no ticket object of its own to read labels from.
   const reviewMode = reviewLabelPresent(ticket.labels);
   if (j.reviewMode !== reviewMode) { j = updateJournal(iid, { reviewMode }) ?? j; }
+
+  // Waiting on a person to merge is the one park where re-entering the
+  // pipeline costs more than it can possibly learn. MERGE_POLL_MS spares the
+  // merge phase its GitLab round trip, but the tick still walks the whole
+  // phase list to reach it, and every phase without a recorded success is
+  // re-attempted on the way — a `skip`-on-fail phase like `recall` burns a
+  // full model lap per tick, against a decision measured in hours. So the
+  // window gates the RUN, not just the API call: until it is due, this
+  // returns exactly where it left off, having spent nothing.
+  //
+  // Bounded to before `merge` records a success, so a later park (the qa
+  // gate, which wants a prompt re-check every tick) is never held behind a
+  // merge poll that has already served its purpose. Removing the Review
+  // label still releases it immediately — `reviewMode` is re-derived above,
+  // and this is skipped the moment it reads false.
+  if (j.status === 'parked' && reviewMode && !DRY_RUN
+    && typeof j.humanMergeCheckAt === 'number' && !phaseSucceeded(iid, 'merge')) {
+    const dueIn = j.humanMergeCheckAt + MERGE_POLL_MS - Date.now();
+    if (dueIn > 0) {
+      log.info(`#${iid} parked on a human merge — next check in ${Math.ceil(dueIn / 60_000)}m`);
+      // Through finish(), not a bare return: the claim above has already
+      // flipped the journal and the run row to 'running'. Leaving them there
+      // would hold a dispatch slot with no phase behind it — the exact
+      // starvation a park exists to avoid.
+      return finish(j, 'parked', j.blockedWhy ?? 'awaiting a human merge');
+    }
+  }
 
   // The Slack card is posted once and edited in place for the rest of the run.
   if (!j.slackTs) {
