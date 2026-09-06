@@ -1,10 +1,18 @@
 /**
  * The opt-in `Review` label's two SESSION-side pause points: plan approval
- * (between phase 2 `plan` and phase 3 `implement`) and qa approval (between
- * phase 11 `qa` and phase 12 `demo`). The merge-readiness pre-check for phase
+ * (between phase 2 `plan` and phase 3 `implement`) and test-case approval
+ * (between phase 4 `testcases` and phase 5 `review`). The merge gate for phase
  * 9 is pure code and lives in codephases.ts instead, for the same reason
  * `merge` itself is code: no model should be involved in a gate that decides
  * whether the pipeline may proceed.
+ *
+ * The test-case gate sits BEFORE `review`, not after `qa`, and that position is
+ * the whole point of it. Approving a case list while the branch is still
+ * unreviewed and unmerged means an edge case a reviewer adds is tested by this
+ * run — it flows into `review`, the MR and `qa`. The same approval taken after
+ * `qa` would arrive once the code had already shipped, where feedback can only
+ * become a follow-up ticket. A gate that cannot change the thing it guards is
+ * decoration.
  *
  * Slack is the PRIMARY approval channel here, not GitLab. A gate posts its
  * request as a reply in the ticket's existing Slack thread (`journal.slackTs`)
@@ -46,7 +54,7 @@ import { slackEnabled, thread, threadReplies, type ThreadReply } from '../lib/sl
 import { log } from '../lib/log.js';
 import type { TestCase } from '../phases/types.js';
 
-export type Gate = 'plan' | 'qa';
+export type Gate = 'plan' | 'testcases';
 export type GateVerdict = 'approved' | 'feedback' | 'pending' | 'unavailable';
 
 export interface GateResult {
@@ -97,11 +105,13 @@ function blankState(): ReviewGateState {
 }
 
 function stateOf(j: RunJournal, gate: Gate): ReviewGateState {
-  return (gate === 'plan' ? j.planApproval : j.qaApproval) ?? blankState();
+  return (gate === 'plan' ? j.planApproval : j.testcasesApproval) ?? blankState();
 }
 
 function persist(iid: number, gate: Gate, state: ReviewGateState): RunJournal | null {
-  return gate === 'plan' ? updateJournal(iid, { planApproval: state }) : updateJournal(iid, { qaApproval: state });
+  return gate === 'plan'
+    ? updateJournal(iid, { planApproval: state })
+    : updateJournal(iid, { testcasesApproval: state });
 }
 
 export interface CheckGateOpts {
@@ -122,7 +132,7 @@ export interface CheckGateOpts {
   onApproved?: () => Promise<void>;
   /**
    * Invoked with the round's non-`approved` replies, BEFORE `onApproved` —
-   * so a caller that folds feedback into an artifact (the qa gate appending
+   * so a caller that folds feedback into an artifact (the test-case gate appending
    * edge cases to testcases.json) has already done so by the time the audit
    * record of what was approved is built from that same artifact.
    */
@@ -273,28 +283,38 @@ export function planApprovedRecordBody(): string {
     'proceeding to `implement`.';
 }
 
-// ---------------------------------------------------------------- qa gate
+// --------------------------------------------------------- testcases gate
 
 function renderCasesForSlack(cases: TestCase[]): string {
   if (!cases.length) return '_(no test cases)_';
   return cases.map((c) => `• *${c.id}* [${c.blast}] ${c.scenario}\n   _expects:_ ${c.expected}`).join('\n');
 }
 
-/** Posted to the ticket's Slack thread when the qa gate first arms, or re-arms after an edge case round. */
-export function qaApprovalRequestBody(cases: TestCase[], qaSummary: string): string {
+/**
+ * Posted to the ticket's Slack thread when the test-case gate first arms, or
+ * re-arms after an edge case round.
+ *
+ * Deliberately carries no verdict: `qa` has not run yet at this point in the
+ * pipeline, and inventing a summary for a phase that has not happened would be
+ * worse than saying nothing. What is under review here is the LIST — what this
+ * run intends to test — not a result.
+ */
+export function testcasesApprovalRequestBody(cases: TestCase[]): string {
   return 'Oneshot pauses here — this ticket carries *Review*.\n\n' +
-    `*QA on the demo server*: ${qaSummary}\n\n*Test cases*\n${renderCasesForSlack(cases)}\n\n` +
-    'Reply with the single word *`approved`* to continue to `demo`. Any other reply is treated ' +
+    `*Test cases to be verified* (${cases.length})\n${renderCasesForSlack(cases)}\n\n` +
+    'Reply with the single word *`approved`* to continue to `review`. Any other reply is treated ' +
     'as edge case(s) to add to this list — each line becomes a new case, appended to ' +
     '`testcases.json`, and this gate asks again with the updated list. There is no limit on how ' +
-    'many rounds this can take.';
+    'many rounds this can take. Anything added here is tested by THIS run, before the MR is ' +
+    'opened.';
 }
 
 /** The GitLab ticket's record of the final, approved test-case list — audit only. */
-export function qaApprovedRecordBody(cases: TestCase[]): string {
+export function testcasesApprovedRecordBody(cases: TestCase[]): string {
   const lines = cases.map((c) => `- **${c.id}** [${c.blast}] ${c.scenario} — _expects:_ ${c.expected}`);
-  return 'Oneshot record: QA was approved in this ticket\'s Slack thread — proceeding to `demo`.\n\n' +
-    `**Final approved test cases** (${cases.length}):\n${lines.join('\n') || '_(none recorded)_'}`;
+  return 'Oneshot record: the test-case list below was approved in this ticket\'s Slack thread — ' +
+    'proceeding to `review`.\n\n' +
+    `**Approved test cases** (${cases.length}):\n${lines.join('\n') || '_(none recorded)_'}`;
 }
 
 interface TestcasesArtifact {
@@ -327,7 +347,7 @@ function nextCaseNumber(cases: TestCase[]): number {
 
 /**
  * Turn a qa-gate reply into one or more new `TestCase` entries and append
- * them to this run's `testcases.json` — the qa gate's "anything but
+ * them to this run's `testcases.json` — the test-case gate's "anything but
  * `approved` is an edge case" rule, applied mechanically (this file never
  * runs a model).
  *

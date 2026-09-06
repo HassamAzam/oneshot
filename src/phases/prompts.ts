@@ -656,7 +656,7 @@ ${cases.map((c) => `  - ${c.id} [${c.blast}] ${c.scenario}\n      expects: ${c.e
 
     return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 ${lapBlock}
-${reviewGateFeedbackBlock(ctx.journal.qaApproval?.feedback, 'QA-gate reviewer feedback')}
+${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'Test-case gate reviewer feedback')}
 ## Plan (phase 2) — this is your specification
 ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 

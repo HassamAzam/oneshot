@@ -77,7 +77,7 @@ export interface ProjectConfig {
     blocked: string; blockedId: number;
     /**
      * Optional, off-by-default. A ticket carrying this label ALONGSIDE `entry`
-     * gets three extra human sign-off pauses (plan, merge, qa) — see
+     * gets three extra human sign-off pauses (plan, testcases, merge) — see
      * src/conductor/reviewgate.ts and README's "Optional human review gates".
      * Never required, never swapped by Oneshot, and absent entirely changes
      * nothing: every check that reads it is an additive `labels.includes(...)`.

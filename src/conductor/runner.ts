@@ -76,7 +76,7 @@ import { schemaFor } from './schemas.js';
 import { closePhase, mergePhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, planApprovalRequestBody, planApprovedRecordBody,
-  qaApprovalRequestBody, qaApprovedRecordBody, reviewLabelPresent,
+  reviewLabelPresent, testcasesApprovalRequestBody, testcasesApprovedRecordBody,
 } from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { Ticket, TestCase } from '../phases/types.js';
@@ -265,7 +265,7 @@ function decideResume(existing: RunJournal | null): ResumeDecision {
   if (!existing) return { kind: 'fresh', archive: null };
 
   // 'parked' is the Review label's opt-in wait (plan approval, merge
-  // readiness, qa approval) — an ordinary, human-caused resumption exactly
+  // test-case approval, merge) — an ordinary, human-caused resumption exactly
   // like 'running'/'aborted', not a block: no cooldown, no label swap, and
   // the next scan's claim is what re-checks it. See src/conductor/reviewgate.ts.
   if (existing.status === 'running' || existing.status === 'aborted' || existing.status === 'parked') {
@@ -568,25 +568,26 @@ export async function runTicket(
       // configured phase list) — fall through into 'implement' below.
     }
 
-    // The Review label's qa-approval gate, sitting after phase 11 (`qa`) and
-    // before phase 12 (`demo`). Unlike the plan gate, a non-`approved` reply
-    // here never cycles a phase: it is read as edge case(s) to fold into the
-    // test-case list, appended in place by `appendEdgeCases` (mechanical, no
-    // model), and the SAME gate asks again in the SAME thread with the
-    // updated list. The run just stays parked between rounds; only
-    // `approved` moves the index.
-    if (phase.name === 'demo' && phaseSucceeded(iid, 'qa')
-      && reviewLabelPresent(ticket.labels) && !j.qaApproval?.approved) {
-      const qaData = prior.qa as { verdict?: string; results?: Array<{ result?: string }> } | null;
-      const results = qaData?.results ?? [];
-      const passed = results.filter((r) => r.result === 'pass').length;
-      const qaSummary = `verdict **${qaData?.verdict ?? 'unknown'}** (${passed}/${results.length} cases passed)`;
+    // The Review label's test-case gate, sitting after phase 4 (`testcases`)
+    // and before phase 5 (`review`). Unlike the plan gate, a non-`approved`
+    // reply here never cycles a phase: it is read as edge case(s) to fold into
+    // the test-case list, appended in place by `appendEdgeCases` (mechanical,
+    // no model), and the SAME gate asks again in the SAME thread with the
+    // updated list. The run just stays parked between rounds; only `approved`
+    // moves the index.
+    //
+    // Placed here rather than after `qa` so that approval still has leverage:
+    // everything a reviewer adds is carried into `review`, the MR and the `qa`
+    // run that follows. Taken after `qa`, the same reply would land on merged
+    // code and could only become a follow-up ticket.
+    if (phase.name === 'review' && phaseSucceeded(iid, 'testcases')
+      && reviewLabelPresent(ticket.labels) && !j.testcasesApproval?.approved) {
       const cases = (prior.testcases as { cases?: TestCase[] } | null)?.cases ?? [];
 
       const gate = await checkApprovalGate({
         iid,
-        gate: 'qa',
-        requestBody: qaApprovalRequestBody(cases, qaSummary),
+        gate: 'testcases',
+        requestBody: testcasesApprovalRequestBody(cases),
         // Appending runs on EVERY round that carried replies, approved or
         // not, and always before onApproved — a reviewer who lists an edge
         // case and signs off in the same breath gets the case recorded and
@@ -597,17 +598,17 @@ export async function runTicket(
         },
         onApproved: async () => {
           const finalCases = (readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases) ?? cases;
-          await addIssueNote(iid, qaApprovedRecordBody(finalCases));
+          await addIssueNote(iid, testcasesApprovedRecordBody(finalCases));
         },
       });
       j = readJournal(iid) ?? j;
       if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
       if (gate.verdict !== 'approved') {
         return finish(j, 'parked',
-          `awaiting qa approval — reply \`approved\` in the ticket's Slack thread to continue ` +
-          'to demo, or reply there with edge case(s) to add to the test list');
+          `awaiting test-case approval — reply \`approved\` in the ticket's Slack thread to ` +
+          'continue to `review`, or reply there with edge case(s) to add to the test list');
       }
-      // gate.verdict === 'approved' — fall through into 'demo' below.
+      // gate.verdict === 'approved' — fall through into 'review' below.
     }
 
     // ONESHOT_SKIP_DEPLOY exists for driving the pipeline with no demo box —

@@ -139,7 +139,15 @@ rather than a second inbox to poll.
 
 1. **Plan approval** — after phase 2 (`plan`), before phase 3 (`implement`). Oneshot posts the
    plan itself into the ticket's Slack thread and the run **parks**.
-2. **The merge itself** — inside phase 9 (`merge`), still pure code, still no model. On a
+2. **Test-case approval** — after phase 4 (`testcases`), before phase 5 (`review`). The list of
+   cases this run intends to verify is posted into the same thread, and the run **parks**. It
+   sits here, and not after `qa`, because this is the last point at which approving still
+   changes anything: an edge case added here is carried into `review`, into the MR, and into
+   the `qa` run that follows. The same reply taken after `qa` would land on code that had
+   already been reviewed and merged, where it could only become a follow-up ticket — a gate
+   that cannot change what it guards is decoration. It carries no verdict, deliberately: `qa`
+   has not run yet, and there is no result to summarise.
+3. **The merge itself** — inside phase 9 (`merge`), still pure code, still no model. On a
    Review ticket Oneshot **never accepts the MR**, however green the pipeline or complete the
    approvals: it opens the MR and from there only watches. Merging — and therefore deploying —
    is a person's decision end to end, because it is the last irreversible step and that is
@@ -147,24 +155,20 @@ rather than a second inbox to poll.
    own state reads `merged`, whoever merged it and whenever, then the run carries on into
    `deploy → qa` by itself. Because that decision is measured in hours, the question is put to
    GitLab every 30 minutes (`MERGE_POLL_MS`); ticks in between park without a network round trip.
-3. **QA approval** — after phase 11 (`qa`) passes, before phase 12 (`demo`). The test cases
-   (from phase 4) and a qa verdict summary are posted into the same Slack thread, and the run
-   parks.
-
 **Reply `approved`** (that exact word, case-insensitive, trimmed — not a substring of a longer
 reply) in the thread to release a pause. **Any other reply is feedback, and the two gates treat it
 differently:**
 
 - The **plan gate** re-runs `plan` with it appended, and posts the revised plan back into the
   same thread for another round.
-- The **qa gate** reads it as edge case(s) to add rather than a reason to redo any work: each line
-  of the reply becomes a new case, appended straight into `testcases.json` (see
+- The **test-case gate** reads it as edge case(s) to add rather than a reason to redo any work:
+  each line of the reply becomes a new case, appended straight into `testcases.json` (see
   `appendEdgeCases()` in `src/conductor/reviewgate.ts`), and the SAME gate asks again in the same
-  thread with the updated list — no phase re-runs, no cycle back to `implement`.
+  thread with the updated list — no phase re-runs, no cycle back to `implement`. Because this
+  happens before `review`, those cases are part of what this run actually verifies.
 
 Either way, a round's outcome reaches GitLab only as an `addIssueNote` audit record — "the plan was
-approved", "QA approved, here is the final test-case list" — posted once the gate actually
-resolves. There is no cap on how many rounds either gate can take.
+approved", "here is the approved test-case list" — posted once the gate actually resolves. There is no cap on how many rounds either gate can take.
 
 **New Slack scope, and it is a manual step.** Every OTHER Slack call this app makes only posts or
 edits a message (`chat.postMessage` / `chat.update`), which the existing `chat:write` scope covers.

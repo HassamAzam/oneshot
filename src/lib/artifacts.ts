@@ -90,7 +90,7 @@ export interface RunJournal {
   createdAt: number;
   /**
    * 'parked' is an opt-in-only, human-caused wait — the Review label's three
-   * pause points (plan approval, merge readiness, qa approval) and nothing
+   * pause points (plan approval, test-case approval, merge) and nothing
    * else ever produces it. Unlike 'blocked' it swaps no label and alerts
    * nobody: the ticket keeps carrying the entry label throughout, so the next
    * tick's scan re-claims it and re-checks for a reply exactly like an
@@ -108,8 +108,8 @@ export interface RunJournal {
   reviewMode?: boolean;
   /** Plan-approval gate state (Review label, between `plan` and `implement`). */
   planApproval?: ReviewGateState;
-  /** QA-approval gate state (Review label, between `qa` and `demo`). */
-  qaApproval?: ReviewGateState;
+  /** Test-case approval gate state (Review label, between `testcases` and `review`). */
+  testcasesApproval?: ReviewGateState;
   /**
    * When the `merge` phase last asked GitLab whether a human has merged the
    * MR. A Review-labelled ticket is never merged by Oneshot, so this phase is
