@@ -83,6 +83,17 @@ import type { Ticket, TestCase } from '../phases/types.js';
 const exec = promisify(execFile);
 
 /**
+ * A Review-labelled ticket whose gates have no Slack to ask in. Blocked, not
+ * parked: a park waits for a human reply, and there is no channel here for a
+ * human to reply in — so the wait would never end, and the one status that
+ * deliberately alerts nobody would be the one that needs somebody.
+ */
+const GATE_UNAVAILABLE =
+  'this ticket carries the Review label, but Slack is not configured (token + channel), so its '
+  + 'approval gates have nowhere to ask — configure Slack, or remove the Review label to run '
+  + 'this ticket in the ordinary full-auto mode';
+
+/**
  * How long a block is respected before a re-claim is allowed.
  *
  * A block means the run wants a human. Re-claiming it immediately spends the
@@ -503,6 +514,7 @@ export async function runTicket(
         onApproved: async () => { await addIssueNote(iid, planApprovedRecordBody()); },
       });
       j = readJournal(iid) ?? j;
+      if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
       if (gate.verdict === 'pending') {
         return finish(j, 'parked',
           `awaiting plan approval — reply \`approved\` in the ticket's Slack thread to continue, ` +
@@ -547,16 +559,21 @@ export async function runTicket(
         iid,
         gate: 'qa',
         requestBody: qaApprovalRequestBody(cases, qaSummary),
+        // Appending runs on EVERY round that carried replies, approved or
+        // not, and always before onApproved — a reviewer who lists an edge
+        // case and signs off in the same breath gets the case recorded and
+        // the audit note built from the list that now contains it.
+        onFeedback: async (feedback) => {
+          const updated = appendEdgeCases(iid, feedback);
+          if (updated) prior.testcases = { ...(prior.testcases ?? {}), cases: updated };
+        },
         onApproved: async () => {
           const finalCases = (readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases) ?? cases;
           await addIssueNote(iid, qaApprovedRecordBody(finalCases));
         },
       });
       j = readJournal(iid) ?? j;
-      if (gate.verdict === 'feedback') {
-        const updated = appendEdgeCases(iid, gate.feedback!);
-        if (updated) prior.testcases = { ...(prior.testcases ?? {}), cases: updated };
-      }
+      if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
       if (gate.verdict !== 'approved') {
         return finish(j, 'parked',
           `awaiting qa approval — reply \`approved\` in the ticket's Slack thread to continue ` +

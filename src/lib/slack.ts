@@ -199,6 +199,13 @@ async function botUserId(): Promise<string | null> {
 export interface ThreadReply {
   ts: string;
   text: string;
+  /**
+   * The Slack user id that posted the reply, or null when Slack did not name
+   * one. Carried so a caller deciding whether a reply is AUTHORISED — the
+   * review gate's approval check against `slackConfig().allowlist` — has the
+   * one field that decision needs, rather than trusting whoever typed first.
+   */
+  user: string | null;
 }
 
 /**
@@ -237,7 +244,7 @@ export async function threadReplies(threadTs: string, sinceTs: string | null): P
     .filter((m): m is Record<string, unknown> & { ts: string; text: string } => (
       typeof m.text === 'string' && m.text.trim() !== ''
     ))
-    .map((m) => ({ ts: m.ts, text: m.text }))
+    .map((m) => ({ ts: m.ts, text: m.text, user: typeof m.user === 'string' ? m.user : null }))
     .sort((a, b) => Number(a.ts) - Number(b.ts));
 }
 

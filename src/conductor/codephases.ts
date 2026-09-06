@@ -886,7 +886,7 @@ export async function mergePhase(
   // watcher. Between polls there is nothing to learn and nothing to do, so the
   // tick is spent without a network round trip at all.
   const sinceLastAsk = Date.now() - (journal.humanMergeCheckAt ?? 0);
-  if (ctx.journal.reviewMode && !DRY_RUN && sinceLastAsk < MERGE_POLL_MS) {
+  if (journal.reviewMode && !DRY_RUN && sinceLastAsk < MERGE_POLL_MS) {
     const mins = Math.ceil((MERGE_POLL_MS - sinceLastAsk) / 60_000);
     const why = `!${mrIid} is not merged yet — merging is a person's call on a Review ticket. `
       + `Next check in ${mins}m. ${rec.mrUrl}`;
@@ -918,7 +918,7 @@ export async function mergePhase(
   // whoever did it and whenever. Re-asking every --follow tick would be noise
   // against a decision measured in hours, so the question is put to GitLab at
   // MERGE_POLL_MS and the ticks in between park without touching the network.
-  if (ctx.journal.reviewMode && !rec.alreadyMerged && !DRY_RUN) {
+  if (journal.reviewMode && !rec.alreadyMerged && !DRY_RUN) {
     updateJournal(ctx.iid, { humanMergeCheckAt: Date.now() });
     const why = `!${mrIid} is not merged yet — this ticket carries Review, so merging is a `
       + `person's call. Oneshot will not accept it; merge it yourself when you are ready and `

@@ -37,21 +37,27 @@
  * "Optional human review gates" for the one-time Slack app configuration
  * change a human has to make.
  */
-import { DRY_RUN, projectConfig } from '../lib/config.js';
+import { DRY_RUN, projectConfig, slackConfig } from '../lib/config.js';
 import {
   readArtifact, readJournal, updateJournal, writeArtifact,
   type ReviewGateState, type RunJournal,
 } from '../lib/artifacts.js';
-import { thread, threadReplies } from '../lib/slack.js';
+import { slackEnabled, thread, threadReplies, type ThreadReply } from '../lib/slack.js';
 import { log } from '../lib/log.js';
 import type { TestCase } from '../phases/types.js';
 
 export type Gate = 'plan' | 'qa';
-export type GateVerdict = 'approved' | 'feedback' | 'pending';
+export type GateVerdict = 'approved' | 'feedback' | 'pending' | 'unavailable';
 
 export interface GateResult {
   verdict: GateVerdict;
-  /** Only set when verdict === 'feedback' — the reply text, newest included. */
+  /**
+   * Every non-`approved` reply read this round. Set on 'feedback', and ALSO
+   * on 'approved' when replies preceded the sign-off — a reviewer who lists
+   * two edge cases and then types `approved` said both things, and dropping
+   * the first half because the second one arrived is how a gate loses exactly
+   * the content it exists to collect.
+   */
   feedback?: string;
 }
 
@@ -67,6 +73,23 @@ function isApprovedReply(text: string): boolean {
   // the whole point of requiring the bare word is that a reviewer who wants
   // changes cannot accidentally also approve them.
   return text.trim().toLowerCase() === 'approved';
+}
+
+/**
+ * Whether this reply's author may sign off.
+ *
+ * `slackConfig().allowlist` is already "Slack user ids permitted to issue
+ * commands" (config/slack.json), and an approval is the highest-consequence
+ * command in the system: it is the one that lets a machine proceed past the
+ * point a human asked to stop it at. So the same list governs both. Left
+ * empty — the shipped default — anyone in the channel may approve, which is
+ * the behaviour a private channel holding only the reviewers already relies
+ * on; filling it in narrows the gate without changing anything else.
+ */
+function mayApprove(reply: ThreadReply): boolean {
+  const allowed = slackConfig().allowlist;
+  if (!allowed.length) return true;
+  return reply.user !== null && allowed.includes(reply.user);
 }
 
 function blankState(): ReviewGateState {
@@ -97,6 +120,13 @@ export interface CheckGateOpts {
    * decision itself has already been made in Slack.
    */
   onApproved?: () => Promise<void>;
+  /**
+   * Invoked with the round's non-`approved` replies, BEFORE `onApproved` —
+   * so a caller that folds feedback into an artifact (the qa gate appending
+   * edge cases to testcases.json) has already done so by the time the audit
+   * record of what was approved is built from that same artifact.
+   */
+  onFeedback?: (feedback: string) => Promise<void>;
 }
 
 /**
@@ -108,20 +138,41 @@ export interface CheckGateOpts {
  * the dry run forever waiting for something it can never ask for.
  */
 export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult> {
-  const { iid, gate, requestBody, onApproved } = opts;
+  const { iid, gate, requestBody, onApproved, onFeedback } = opts;
 
   if (DRY_RUN) {
     log.warn(`[dry-run] would pause at the '${gate}' review gate — auto-approving`, { iid });
     return { verdict: 'approved' };
   }
 
+  // No Slack, no gate — and 'pending' would be a lie, because nothing about
+  // waiting longer can produce a reply from a channel this process cannot
+  // post to or read. A park is the one status that swaps no label and alerts
+  // nobody, so parking on a question that can never be asked is a run that
+  // waits forever in silence. Say so instead, and let the caller BLOCK: this
+  // is a configuration mistake, and a configuration mistake needs the person
+  // who can fix it.
+  if (!slackEnabled()) return { verdict: 'unavailable' };
+
   const journal = readJournal(iid);
   if (!journal) return { verdict: 'pending' };
+
+  // The gate asks IN the ticket's thread and reads replies back out of that
+  // same thread, so without its ts there is nowhere to poll. Arming anyway
+  // would post the request as a stray top-level message and latch requestTs
+  // against a thread that is never read — permanently pending, with the
+  // request sitting in the channel looking answered. runTicket re-posts the
+  // card at the top of every run, so waiting is what actually heals this.
+  const threadTs = journal.slackTs ?? null;
+  if (threadTs === null) {
+    log.warn(`${gate} gate has no Slack thread to ask in yet — retrying next tick`, { iid });
+    return { verdict: 'pending' };
+  }
 
   let state = stateOf(journal, gate);
 
   if (state.requestTs === null) {
-    const ts = await thread(journal.slackTs ?? null, requestBody);
+    const ts = await thread(threadTs, requestBody);
     if (ts === null) {
       log.warn(`${gate} approval request could not be posted to Slack — will retry next tick`, { iid });
       return { verdict: 'pending' };
@@ -132,19 +183,38 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
     return { verdict: 'pending' };
   }
 
-  const replies = await threadReplies(journal.slackTs ?? '', state.requestTs);
-  const approvedReply = replies.find((r) => isApprovedReply(r.text));
-  if (approvedReply) {
-    state = { ...state, approved: true };
-    persist(iid, gate, state);
-    if (onApproved) await onApproved();
-    await thread(journal.slackTs ?? null, `*#${iid} — ${gate} approved.*`);
-    log.ok(`${gate} approved on #${iid}`);
-    return { verdict: 'approved' };
+  const replies = await threadReplies(threadTs, state.requestTs);
+  const approvedAt = replies.findIndex((r) => isApprovedReply(r.text) && mayApprove(r));
+  for (const r of replies) {
+    if (isApprovedReply(r.text) && !mayApprove(r)) {
+      log.warn(`${gate} gate ignored an 'approved' from a user outside the Slack allowlist`, { iid, user: r.user });
+    }
   }
 
-  if (replies.length) {
-    const feedback = replies.map((r) => r.text.trim()).filter(Boolean).join('\n');
+  // Replies BEFORE the sign-off are the round's feedback; an `approved` is
+  // never also feedback, whoever sent it.
+  const feedback = (approvedAt === -1 ? replies : replies.slice(0, approvedAt))
+    .filter((r) => !isApprovedReply(r.text))
+    .map((r) => r.text.trim())
+    .filter(Boolean)
+    .join('\n');
+
+  if (feedback && onFeedback) await onFeedback(feedback);
+
+  if (approvedAt !== -1) {
+    state = {
+      ...state,
+      approved: true,
+      feedback: feedback ? [...state.feedback, feedback] : state.feedback,
+    };
+    persist(iid, gate, state);
+    if (onApproved) await onApproved();
+    await thread(threadTs, `*#${iid} — ${gate} approved.*`);
+    log.ok(`${gate} approved on #${iid}`);
+    return { verdict: 'approved', feedback: feedback || undefined };
+  }
+
+  if (feedback) {
     // requestTs resets to null: the NEXT check re-arms with a fresh request
     // reply, so the reply that follows the revision is measured from here
     // rather than from the round that just ended.
@@ -239,6 +309,23 @@ const EDGE_CASE_PASS_TAG = 'boundary';
 const EDGE_CASE_BLAST: TestCase['blast'] = 'medium';
 
 /**
+ * The first free `TC-NN` number.
+ *
+ * Counting the list is not the same as reading it: a phase-4 list that skips
+ * or renumbers an id at all — three cases numbered TC-01, TC-02, TC-04 —
+ * makes `cases.length + 1` collide with an id already in the file, and two
+ * cases sharing an id is a qa result that cannot be attributed to either.
+ * Take the highest number actually present instead.
+ */
+function nextCaseNumber(cases: TestCase[]): number {
+  const highest = cases.reduce((max, c) => {
+    const m = /^TC-(\d+)$/.exec(c.id ?? '');
+    return m ? Math.max(max, Number(m[1])) : max;
+  }, 0);
+  return Math.max(highest, cases.length) + 1;
+}
+
+/**
  * Turn a qa-gate reply into one or more new `TestCase` entries and append
  * them to this run's `testcases.json` — the qa gate's "anything but
  * `approved` is an edge case" rule, applied mechanically (this file never
@@ -265,8 +352,9 @@ export function appendEdgeCases(iid: number, feedback: string): TestCase[] | nul
 
   const cases = data.cases ?? [];
   const lines = feedback.split('\n').map((l) => l.trim()).filter(Boolean);
+  const first = nextCaseNumber(cases);
   const added: TestCase[] = lines.map((line, idx) => {
-    const n = cases.length + idx + 1;
+    const n = first + idx;
     return {
       id: `TC-${String(n).padStart(2, '0')}`,
       scenario: /^verify that/i.test(line) ? line : `Verify that ${line}`,
