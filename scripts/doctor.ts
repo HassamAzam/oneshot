@@ -86,14 +86,18 @@ async function main(): Promise<void> {
 
   // ---------------------------------------------------------------- paths
   section('Paths');
-  for (const [label, p, required] of [
-    ['WORK_REPO', WORK_REPO, true],
-    ['CONTEXT_REPO', CONTEXT_REPO, false],
-    ['SKILLS_ROOT', SKILLS_ROOT, false],
-  ] as Array<[string, string, boolean]>) {
+  // The env var is printed with the failure because it is not always the
+  // label: SKILLS_ROOT is overridden by ONESHOT_SKILLS_ROOT. Reporting the
+  // path alone leaves the reader guessing which knob moves it, and the
+  // defaults below are one machine's layout, so a fresh clone hits all three.
+  for (const [label, p, required, envVar] of [
+    ['WORK_REPO', WORK_REPO, true, 'WORK_REPO'],
+    ['CONTEXT_REPO', CONTEXT_REPO, false, 'CONTEXT_REPO'],
+    ['SKILLS_ROOT', SKILLS_ROOT, false, 'ONESHOT_SKILLS_ROOT'],
+  ] as Array<[string, string, boolean, string]>) {
     if (existsSync(p)) pass(label, p);
-    else if (required) fail(label, `${p} does not exist`);
-    else warn(label, `${p} does not exist`);
+    else if (required) fail(label, `${p} does not exist — set ${envVar}`);
+    else warn(label, `${p} does not exist — set ${envVar}`);
   }
 
   if (existsSync(WORK_REPO)) {
@@ -165,7 +169,9 @@ async function main(): Promise<void> {
     const last = verify.stdout.trim().split('\n').pop() ?? '';
     pass('guard test suite', last.replace(/\x1b\[[0-9;]*m/g, ''));
   } else {
-    fail('guard test suite failed', 'run: npm run hooks:verify');
+    fail('guard test suite failed',
+      'run: npm run hooks:verify — note an absent SKILLS_ROOT fails its symlink test on its '
+      + 'own, so this and the path check above are usually one cause, not two');
   }
 
   // --------------------------------------------------------------- deploy

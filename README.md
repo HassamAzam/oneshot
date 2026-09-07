@@ -267,8 +267,23 @@ failure three phases into a real ticket.
 - **Kill switches:** `touch state/PAUSE` freezes everything, including sessions already mid-phase.
   `state/PAUSE-QUOTA` is the machine's own park after a usage limit and clears itself — a
   separate file precisely so nothing automatic ever lifts a pause you set.
+- **Paths:** the four path defaults are one machine's layout (`~/Documents/...`), so a fresh
+  clone almost certainly needs to override them. Note the third is **not** named after its label:
+
+  | Env var | Default | What it is |
+  |---|---|---|
+  | `WORK_REPO` | `~/Documents/workstreamai` | the clone phases actually commit in |
+  | `CONTEXT_REPO` | `~/Documents/erp` | read-only clone for research |
+  | `ONESHOT_SKILLS_ROOT` | `~/Documents/erp/.claude` | skills handed to the phases |
+  | `WT_ROOT` | `~/Documents/oneshot-wt` | where per-run worktrees are leased |
+
+  A missing `SKILLS_ROOT` also fails `hooks:verify`'s symlink test, so one wrong path reports as
+  two failures — fix the path and both clear.
 - **Dry run:** `DRY_RUN=1 npm start` runs every phase and denies every write. This is how you
-  watch the pipeline drive a real ticket without touching it.
+  watch the pipeline drive a real ticket without touching it. Its journal goes to
+  `state-dry/state/runs`, not `state/runs`, so view it with a dashboard that resolves the same
+  home: `DRY_RUN=1 ONESHOT_DASHBOARD_PORT=8788 npm run dashboard`. A dry run will not appear on
+  the ordinary dashboard, and neither will anything that did not go through the conductor.
 
 ## Guardrails
 
