@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "One orchestrator, one label: a deterministic conductor that drives GitLab tickets from label to Ready For Deployment through fresh per-phase Claude sessions — pipelined, with one ticket at a time in the merge→deploy→qa window.",
+  "description": "One orchestrator, one label: a deterministic conductor that drives GitLab tickets from label to Ready For Deployment through fresh per-phase Claude sessions \u2014 pipelined, with one ticket at a time in the merge\u2192deploy\u2192qa window.",
   "engines": {
     "node": ">=20"
   },
@@ -21,6 +21,10 @@
     "deps:verify": "tsx scripts/verify-deps.ts",
     "langfuse": "tsx scripts/langfuse-export.ts",
     "dashboard": "tsx scripts/serve.ts",
+    "board": "node scripts/board/index.mjs",
+    "board:once": "node scripts/board/index.mjs --once",
+    "board:dry": "node scripts/board/index.mjs --once --dry-run",
+    "board:stats": "node scripts/board/index.mjs --stats",
     "fleet:verify": "tsx scripts/verify-fleet.ts"
   },
   "dependencies": {
