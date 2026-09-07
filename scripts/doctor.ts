@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
   CONTEXT_REPO, SKILLS_ROOT, WORK_REPO, WT_ROOT,
-  auditAuth, budgetConfig, deployConfig, envOr, phases, portPool,
+  auditAuth, budgetConfig, deployConfig, envOr, expandPath, phases, portPool,
   projectConfig, slackConfig,
 } from '../src/lib/config.js';
 import { ping, listBranches } from '../src/lib/gitlab.js';
@@ -118,6 +118,25 @@ async function main(): Promise<void> {
   if (existsSync(WT_ROOT)) {
     if (statSync(WT_ROOT).isDirectory()) pass('WT_ROOT', WT_ROOT);
   } else warn('WT_ROOT will be created on first run', WT_ROOT);
+
+  // The seed repo is read when a worktree is leased, not at boot, so an absent
+  // one is silent until phase 3 and only *hurts* at phase 6, where `verify`
+  // needs a runnable app. That is exactly the "confusing failure three phases
+  // in" this script exists to pull forward.
+  const seedFrom = expandPath(envOr('ONESHOT_SEED_FROM', ''));
+  if (!seedFrom) {
+    warn('no seed repo configured', 'set ONESHOT_SEED_FROM — without it a leased worktree has '
+      + 'no node_modules/venv, so `verify` cannot run the app');
+  } else if (!existsSync(seedFrom)) {
+    warn('seed repo does not exist', `${seedFrom} — set ONESHOT_SEED_FROM to a repo that is `
+      + 'already installed (node_modules, venv)');
+  } else {
+    const links = envOr('ONESHOT_SEED_LINKS', '').split(',').map((s) => s.trim()).filter(Boolean);
+    const copies = envOr('ONESHOT_SEED_COPIES', '').split(',').map((s) => s.trim()).filter(Boolean);
+    const missing = [...links, ...copies].filter((rel) => !existsSync(join(seedFrom, rel)));
+    if (missing.length) warn('seed entries missing from the seed repo', missing.join(', '));
+    else pass('seed repo', `${seedFrom} (${links.length} linked, ${copies.length} copied)`);
+  }
 
   const ports = portPool();
   if (ports.length) pass('port pool', ports.join(', '));

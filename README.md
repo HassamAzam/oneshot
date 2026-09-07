@@ -276,6 +276,11 @@ failure three phases into a real ticket.
   | `CONTEXT_REPO` | `~/Documents/erp` | read-only clone for research |
   | `ONESHOT_SKILLS_ROOT` | `~/Documents/erp/.claude` | skills handed to the phases |
   | `WT_ROOT` | `~/Documents/oneshot-wt` | where per-run worktrees are leased |
+  | `ONESHOT_SEED_FROM` | _(unset)_ | an already-installed clone whose `node_modules`/`venv` are linked into each new worktree, with `ONESHOT_SEED_LINKS` / `ONESHOT_SEED_COPIES` naming what to carry |
+
+  Leave `ONESHOT_SEED_FROM` unset and a leased worktree has no dependencies, so `verify`
+  (phase 6) cannot start the app — a failure that surfaces three phases after the cause.
+  `doctor` now warns about this at boot instead.
 
   A missing `SKILLS_ROOT` also fails `hooks:verify`'s symlink test, so one wrong path reports as
   two failures — fix the path and both clear.
