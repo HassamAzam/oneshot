@@ -75,6 +75,68 @@ export function reviewLabelPresent(labels: string[]): boolean {
   return Boolean(label) && labels.includes(label);
 }
 
+/**
+ * Which of `highScrutinyPaths` this run's files touch.
+ *
+ * The `Review` label is applied by a person, so it is forgettable — and the
+ * tickets worth pausing on are precisely the ones nobody thinks to label. A
+ * fix to payroll or leaves is not less consequential because it arrived as an
+ * ordinary bug report. So the gates key off what the run actually TOUCHES as
+ * well as off the label.
+ *
+ * Substring matching against repo-relative paths, deliberately: `apps/payroll/`
+ * should catch everything beneath it, and a pattern list is easier to audit
+ * than a set of regexes nobody can read. Configured per project, and an empty
+ * list turns the whole behaviour off.
+ */
+export function highScrutinyHits(files: string[]): string[] {
+  const guarded = projectConfig().highScrutinyPaths ?? [];
+  if (!guarded.length) return [];
+  const hit = new Set<string>();
+  for (const f of files) {
+    for (const g of guarded) if (f.includes(g)) hit.add(g);
+  }
+  return [...hit].sort();
+}
+
+/** Every file this run has said it will touch, or has touched. */
+export function declaredFiles(
+  plan: Record<string, unknown> | null, implemented: Record<string, unknown> | null,
+): string[] {
+  const steps = Array.isArray(plan?.steps) ? (plan.steps as Array<{ files?: unknown }>) : [];
+  const planned = steps.flatMap((s) => (Array.isArray(s.files) ? s.files.map(String) : []));
+  const changed = Array.isArray(implemented?.filesChanged)
+    ? (implemented.filesChanged as unknown[]).map(String) : [];
+  return [...planned, ...changed];
+}
+
+export interface GateTrigger {
+  on: boolean;
+  /** Non-empty when the guarded paths, rather than the label, armed the gates. */
+  hits: string[];
+}
+
+/**
+ * Do the gates apply to this run? Label OR guarded paths — never label alone.
+ *
+ * Evaluated fresh at each gate rather than once per run, because the answer
+ * changes as the run learns: at the plan gate only the plan's declared files
+ * exist, and by the test-case gate `implement` has reported what it really
+ * touched. A plan that swore off payroll and a diff that edited it anyway is
+ * exactly the case worth catching, and only the later evaluation sees it.
+ */
+export function gatesApply(labels: string[], files: string[]): GateTrigger {
+  const hits = highScrutinyHits(files);
+  return { on: reviewLabelPresent(labels) || hits.length > 0, hits };
+}
+
+/** The one line a gate request needs about why it is asking. */
+export function triggerLine(trigger: GateTrigger): string {
+  if (!trigger.hits.length) return 'This ticket carries *Review*.';
+  return 'This run touches guarded paths — *' + trigger.hits.join('*, *') + '* — so the review '
+    + 'gates apply whether or not the ticket carries the `Review` label.';
+}
+
 function isApprovedReply(text: string): boolean {
   // Exact match, case-insensitive, trimmed — deliberately NOT a substring
   // test. "approved, but see my comment above" is feedback, not a sign-off:
@@ -270,8 +332,8 @@ function renderPlanForSlack(plan: Record<string, unknown> | null): string {
 }
 
 /** Posted to the ticket's Slack thread when the plan gate first arms, or re-arms after feedback. */
-export function planApprovalRequestBody(plan: Record<string, unknown> | null): string {
-  return `Oneshot pauses here — this ticket carries *Review*.\n\n${renderPlanForSlack(plan)}\n\n` +
+export function planApprovalRequestBody(plan: Record<string, unknown> | null, why: string): string {
+  return `Oneshot pauses here — ${why}\n\n${renderPlanForSlack(plan)}\n\n` +
     'Reply with the single word *`approved`* to continue to `implement`. Any other reply is ' +
     'treated as feedback and `plan` is re-run with it — there is no limit on how many rounds ' +
     'this can take.';
@@ -299,8 +361,8 @@ function renderCasesForSlack(cases: TestCase[]): string {
  * worse than saying nothing. What is under review here is the LIST — what this
  * run intends to test — not a result.
  */
-export function testcasesApprovalRequestBody(cases: TestCase[]): string {
-  return 'Oneshot pauses here — this ticket carries *Review*.\n\n' +
+export function testcasesApprovalRequestBody(cases: TestCase[], why: string): string {
+  return `Oneshot pauses here — ${why}\n\n` +
     `*Test cases to be verified* (${cases.length})\n${renderCasesForSlack(cases)}\n\n` +
     'Reply with the single word *`approved`* to continue to `review`. Any other reply is treated ' +
     'as edge case(s) to add to this list — each line becomes a new case, appended to ' +
