@@ -80,11 +80,10 @@ async function main(): Promise<void> {
   });
   const ctx = await ask('CONTEXT_REPO', {
     default: detectRepo('erp') || '~/Documents/erp',
-    hint: 'Read-only reference AND the source of every skill.',
+    hint: 'Read-only reference for prior art. Skills come from this repo\'s harness/, not from here.',
   });
   body = setKey(body, 'WORK_REPO', work);
   body = setKey(body, 'CONTEXT_REPO', ctx);
-  body = setKey(body, 'ONESHOT_SKILLS_ROOT', `${ctx}/.claude`);
   body = setKey(body, 'ONESHOT_SEED_FROM', ctx);
 
   console.log(`\n${B}Slack${X} ${D}(optional — Enter to skip, status stays on the console)${X}`);

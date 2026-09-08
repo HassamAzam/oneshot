@@ -3,8 +3,8 @@
  *
  * Sessions are spawned with `settingSources: ['project']`, so the only place a
  * skill, agent or rule can come from is a `.claude` directory in the session's
- * cwd. Worktree phases had one — seed() symlinked the whole of the context
- * repo's `.claude` into the worktree — but conductor-cwd phases (recall, qa,
+ * cwd. Worktree phases had one — seed() symlinked the whole of the skills
+ * root's `.claude` into the worktree — but conductor-cwd phases (recall, qa,
  * demo, document, memorize) run in the Oneshot repo root, which had no
  * `.claude` at all. Every skill their prompts named silently failed to resolve:
  * the recorded run-5 transcripts show the recall session listing eight built-in
@@ -14,20 +14,17 @@
  *
  * A whole-dir symlink cannot fix that, because the five pipeline skills
  * (local-browser-verify, ui-evidence-pack, demo-server-qa, mr-documentation,
- * ticket-memory-write) describe THIS system and live in THIS repo — a fresh
- * clone has to carry them, and writing them into the context repo would make
- * Oneshot's own method something you have to remember to install next to it. So
+ * ticket-memory-write) describe THIS system and live in `skills/` here. So
  * `.claude` is composed instead: a real directory whose `skills/` holds one
- * symlink per skill, taken from the context repo first and topped up from
- * `skills/` here.
+ * symlink per skill, taken from SKILLS_ROOT first and topped up from `skills/`.
  *
- * Context-repo-first is the collision rule. If the ERP repo ever ships a skill
- * under one of these names, that copy wins — it is the one humans maintain and
- * the one an interactive session on this machine would get. Oneshot only fills
- * gaps, and a name that appears on both sides is a signal to delete ours, not
- * to shadow theirs.
+ * SKILLS_ROOT is `harness/` in this repo: the wsai `.claude/` tree, vendored
+ * verbatim so Oneshot owns and improves it (it used to be the read-only ERP
+ * clone's `.claude`, which nobody here could change). Harness-first is the
+ * collision rule: if a name appears in both `harness/skills/` and `skills/`,
+ * the harness copy wins and the duplicate should be deleted, not shadowed.
  *
- * `settings.json` is deliberately not linked. It carries the context repo's own
+ * `settings.json` is deliberately not linked. It carries the wsai repo's own
  * hook wiring and permission set; Oneshot supplies its guards through the SDK's
  * `hooks` option so they travel with this repo and apply at every cwd. A
  * second, unversioned guard configuration arriving through project settings is
@@ -40,13 +37,13 @@ import { join } from 'node:path';
 import { ROOT, SKILLS_ROOT } from './config.js';
 import { log } from './log.js';
 
-/** Subdirectories taken whole from the context repo — no Oneshot equivalent exists. */
+/** Subdirectories taken whole from SKILLS_ROOT — no Oneshot equivalent exists. */
 const LINKED_SUBDIRS = ['agents', 'rules'] as const;
 
 /**
- * Context-repo skills that must not reach a phase, and why each one is here.
+ * Harness skills that must not reach a phase, and why each one is here.
  *
- * Taking the context repo wholesale is the right default: a skill the humans
+ * Taking the harness wholesale is the right default: a skill the humans
  * maintain is a skill a phase should have, and an allowlist would silently rot
  * every time someone adds one. But wholesale means a skill arrives because it
  * EXISTS, never because anybody decided a phase should have it — so a skill

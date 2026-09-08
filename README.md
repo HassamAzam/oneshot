@@ -288,7 +288,7 @@ failure three phases into a real ticket.
   |---|---|---|
   | `WORK_REPO` | `~/Documents/workstreamai` | the clone phases actually commit in |
   | `CONTEXT_REPO` | `~/Documents/erp` | read-only clone for research |
-  | `ONESHOT_SKILLS_ROOT` | `~/Documents/erp/.claude` | skills handed to the phases |
+  | `ONESHOT_SKILLS_ROOT` | `<oneshot>/harness` | skills, agents and rules handed to the phases — the vendored wsai `.claude/` tree this repo owns |
   | `WT_ROOT` | `~/Documents/oneshot-wt` | where per-run worktrees are leased |
   | `ONESHOT_SEED_FROM` | _(unset)_ | an already-installed clone whose `node_modules`/`venv` are linked into each new worktree, with `ONESHOT_SEED_LINKS` / `ONESHOT_SEED_COPIES` naming what to carry |
 
@@ -321,10 +321,10 @@ The guards (`npm run hooks:verify` — offline assertions, no network, no sessio
   calls while the VPN breaker is open. Reads stay allowed, so an interrupted phase can still
   write a coherent summary.
 - **`write-scope`** — per-phase write allowlist, plus two absolute denials for every phase: the
-  Oneshot runtime itself, and the read-only context repo. It **realpath-resolves before
-  comparing**, which is load-bearing: each worktree has `.claude/` symlinked into `~/Documents/erp`
-  so phases get the real skills, and a prefix-only check would let an `implement` phase rewrite
-  the skills that govern it.
+  Oneshot runtime itself (including `harness/` and `skills/`), and the read-only context repo. It
+  **realpath-resolves before comparing**, which is load-bearing: each worktree has `.claude/*`
+  symlinked into `harness/` so phases get the real skills, and a prefix-only check would let an
+  `implement` phase rewrite the skills that govern it.
 - **`git-guard`** — no force-push ever; no push to `dev`/`stage`/`master`/`main`; no push to any
   ref but the leased branch; no protected-branch deletes; no `remote set-url`; no `gh`/`glab`;
   and no git command whose working directory escapes the worktree. `~/Documents/erp` is a live

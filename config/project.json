@@ -6,11 +6,10 @@
     "project": "arbisoft/workstreamai",
     "projectId": 1491
   },
-  "_comment_context": "Read-only. Oneshot reads this repo for prior art, conventions and skills; it NEVER writes to it, and hooks/write-scope.js denies every write under contextRepo for every phase. See docs/HOOKS.md 4.1.",
+  "_comment_context": "Read-only. Oneshot reads this repo for prior art and conventions; it NEVER writes to it, and hooks/write-scope.js denies every write under contextRepo for every phase. Skills, agents and rules do NOT come from here any more: they live in this repo's harness/ (ONESHOT_SKILLS_ROOT), see src/lib/claudedir.ts. See docs/HOOKS.md 4.1.",
   "contextRepo": {
     "path": "~/Documents/erp",
-    "gitlabProject": "arbisoft/erp",
-    "skillsRoot": "~/Documents/erp/.claude"
+    "gitlabProject": "arbisoft/erp"
   },
   "_comment_labels": "ONE label in, one label out. There is no intermediate state machine \u2014 progress lives in the Slack card and the run journal, not on the board. All three ids below already exist on project 1491; Oneshot never creates, renames or deletes a label. 'review' is a FOURTH, OPTIONAL label, never required and never swapped by Oneshot: a ticket carrying it alongside 'Loop' gets three extra human sign-off pauses (see README's 'Optional human review gates'). Its id is not yet verified against the live project (create the label there before relying on it) \u2014 the code only ever checks label MEMBERSHIP by name, never the id, so an unverified id costs nothing.",
   "labels": {

@@ -127,6 +127,8 @@ echo "write-scope"
 expect_deny  "hooks/ (its own guards)" write-scope.cjs "$(write_payload "$ROOT/hooks/git-guard.cjs")"
 expect_deny  "config/"                 write-scope.cjs "$(write_payload "$ROOT/config/project.json")"
 expect_deny  "src/"                    write-scope.cjs "$(write_payload "$ROOT/src/index.ts")"
+expect_deny  "harness/ (the skills)"   write-scope.cjs "$(write_payload "$ROOT/harness/skills/erp-code-review/SKILL.md")"
+expect_deny  "skills/ (Oneshot's own)" write-scope.cjs "$(write_payload "$ROOT/skills/local-browser-verify/SKILL.md")"
 expect_deny  "~/.claude/settings.json" write-scope.cjs "$(write_payload "$HOME/.claude/settings.json")"
 expect_deny  "context repo directly"   write-scope.cjs "$(write_payload "$CONTEXT_REPO/apps/leaves/models.py")"
 expect_deny  "outside every scope"     write-scope.cjs "$(write_payload "/tmp/somewhere-else/x.py")"
@@ -142,18 +144,21 @@ expect_deny  "phase with no scopes at all" \
                                        write-scope.cjs "$(write_payload "$ONESHOT_WORKTREE/apps/leaves/models.py")"
 export ONESHOT_WRITE_SCOPES="$SAVED_SCOPES"
 
-# The symlink case: a worktree's .claude points into the context repo, so a
+# The symlink case: a worktree's .claude/* points into the Oneshot harness, so a
 # prefix-only check would accept this and let a phase rewrite its own skills.
+SKILLS_ROOT="${ONESHOT_SKILLS_ROOT:-$ROOT/harness}"
+SKILLS_ROOT="${SKILLS_ROOT/#\~/$HOME}"
 if command -v ln >/dev/null 2>&1; then
     rm -rf "$ONESHOT_WORKTREE/.claude"
-    if [ -d "$CONTEXT_REPO/.claude" ]; then
-        ln -s "$CONTEXT_REPO/.claude" "$ONESHOT_WORKTREE/.claude" 2>/dev/null
+    if [ -d "$SKILLS_ROOT/skills" ]; then
+        mkdir -p "$ONESHOT_WORKTREE/.claude"
+        ln -s "$SKILLS_ROOT/skills" "$ONESHOT_WORKTREE/.claude/skills" 2>/dev/null
         expect_deny "symlinked .claude/skills (realpath escape)" \
             write-scope.cjs "$(write_payload "$ONESHOT_WORKTREE/.claude/skills/erp-code-review/SKILL.md")"
     else
         # A silent skip here is worse than a failure: this is the test for the
         # one escape that lets a phase rewrite its own governing skills.
-        red "  FAIL  symlink test could not run — $CONTEXT_REPO/.claude not present"
+        red "  FAIL  symlink test could not run — $SKILLS_ROOT/skills not present"
         FAIL=$((FAIL+1))
     fi
 fi

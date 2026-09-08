@@ -136,11 +136,11 @@ function networkPaused() {
  * Resolve a path for scope comparison, following symlinks.
  *
  * This is the single most important line in the guard layer. Every worktree
- * gets .claude/ symlinked to the context repo so phases can use the real
- * skills — which means a plain string-prefix check would happily accept
- * <worktree>/.claude/skills/foo/SKILL.md as "inside the worktree" while the
- * write lands in ~/Documents/erp. A phase could edit the skills that govern
- * it. realpath closes that.
+ * gets .claude/* symlinked into the Oneshot harness (harness/, skills/) so
+ * phases can use the real skills — which means a plain string-prefix check
+ * would happily accept <worktree>/.claude/skills/foo/SKILL.md as "inside the
+ * worktree" while the write lands in the Oneshot repo. A phase could edit the
+ * skills that govern it. realpath closes that.
  *
  * The target may not exist yet (a new file), so walk up to the nearest
  * existing ancestor and resolve that, then re-join the remainder.

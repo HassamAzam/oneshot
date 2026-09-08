@@ -70,7 +70,7 @@ function loadJson<T>(name: string): T {
 
 export interface ProjectConfig {
   gitlab: { host: string; apiUrl: string; project: string; projectId: number };
-  contextRepo: { path: string; gitlabProject: string; skillsRoot: string };
+  contextRepo: { path: string; gitlabProject: string };
   labels: {
     entry: string; entryId: number;
     exit: string; exitId: number;
@@ -385,7 +385,13 @@ export const DB_PATH = join(STATE, 'oneshot.db');
 
 export const WORK_REPO = expandPath(envOr('WORK_REPO', '~/Documents/workstreamai'));
 export const CONTEXT_REPO = expandPath(envOr('CONTEXT_REPO', '~/Documents/erp'));
-export const SKILLS_ROOT = expandPath(envOr('ONESHOT_SKILLS_ROOT', '~/Documents/erp/.claude'));
+/**
+ * Where phases get their skills, agents and rules. Defaults to the vendored
+ * harness/ in THIS repo (a verbatim copy of the wsai .claude/ tree), so a fresh
+ * clone carries its own harness and improvements to it ship with Oneshot.
+ * Override only to trial another tree; the context repo is reference, not source.
+ */
+export const SKILLS_ROOT = expandPath(envOr('ONESHOT_SKILLS_ROOT', join(ROOT, 'harness')));
 export const WT_ROOT = expandPath(envOr('WT_ROOT', '~/Documents/oneshot-wt'));
 
 export function runDir(iid: number): string { return join(RUNS, String(iid)); }
