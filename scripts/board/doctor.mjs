@@ -79,10 +79,32 @@ else {
   } catch (e) { bad(`ingest unreachable: ${e.message}`); }
 }
 
-// ---- 4. queued work
+// ---- 4. is the collector actually running?
+console.log(`\n${D}Collector${X}`);
+let running = false;
+try {
+  const { execFileSync } = await import('node:child_process');
+  const ps = execFileSync('ps', ['-eo', 'pid,command'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const line = ps.split('\n').find((l) => /board\/index\.mjs/.test(l) && !/doctor\.mjs/.test(l));
+  running = Boolean(line);
+  if (running) ok(`running  ${D}pid ${line.trim().split(/\s+/)[0]}${X}`);
+} catch { /* ps unavailable — fall through to the state check below */ }
+
+const stateFile = join(CFG.stateDir, 'state.json');
+const everRan = existsSync(stateFile);
+if (!running) {
+  bad(everRan ? 'not running right now' : 'has never run on this machine',
+      'start it with `npm run board` (or `npm run board:once` for a single pass). '
+      + 'This is separate from `npm start`, which only produces transcripts.');
+}
+
+// ---- 5. queued work
 console.log(`\n${D}Outbox  ${CFG.stateDir}${X}`);
 const ob = join(CFG.stateDir, 'outbox.json');
-if (!existsSync(ob)) ok('empty (nothing queued)');
+if (!existsSync(ob)) {
+  if (everRan) ok('empty (everything shipped)');
+  else warn('no outbox yet — nothing has been extracted', 'run `npm run board:once`');
+}
 else {
   try {
     const j = JSON.parse(readFileSync(ob, 'utf8'));
