@@ -36,6 +36,7 @@ export const CFG = {
   maxBatchBytes: num('BOARD_MAX_BATCH_BYTES', 1_500_000),
   maxToolOutputBytes: num('BOARD_MAX_TOOL_OUTPUT_BYTES', 512_000),
   maxLineBytes: num('BOARD_MAX_LINE_BYTES', 1_000_000),
-  abandonAfterMs: num('BOARD_ABANDON_AFTER_MS', 15 * 60_000),
+  // How long a live phase may be silent before it is FLAGGED (not killed off).
+  stalledAfterMs: num('BOARD_STALLED_AFTER_MS', 15 * 60_000),
   dryRun: flag('BOARD_DRY_RUN'),
 };

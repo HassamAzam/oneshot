@@ -67,6 +67,7 @@ export function extractTranscript({ file, journal, iid, operatorId, sinceLine, h
     started_at: ts(rec?.startedAt) ?? born.toISOString(), ended_at: null, duration_ms: null,
     result_text: null, error_text: rec?.error ? String(rec.error).slice(0, 4000) : null,
     transcript_path: file, transcript_lines: 0, seq: st.size, operator_id: operatorId,
+    last_activity_at: null,
   };
 
   const agents = new Map();
@@ -189,27 +190,41 @@ export function extractTranscript({ file, journal, iid, operatorId, sinceLine, h
     a.turns = u.n; a.tokens_in = u.input; a.tokens_out = u.output; a.cache_read = u.cr; a.cache_write = u.cw;
   }
 
-  // Status: the result line says the session ended; the journal says what the conductor concluded.
+  // Status, in order of authority:
+  //   a `result` line  — the session itself said it finished
+  //   the journal      — the conductor recorded an outcome for this phase
+  //   the run's status — a finished run cannot have a live phase
+  //   silence          — the weakest signal, and only ever a hint
+  //
+  // Transcript silence is NOT death. A phase waiting on a long Bash, a test suite or
+  // a Playwright run writes nothing for many minutes and is perfectly alive; an
+  // `implement` phase was marked abandoned here while its `claude` process was still
+  // running. So while the run is going and the journal has recorded no end for this
+  // phase, the session stays live — 'stalled' once it has been quiet long enough to
+  // be worth a look, which is a report, not a verdict.
   const journalStatus = rec?.status ?? null;
   const journalEnded = rec?.endedAt ? ts(rec.endedAt) : null;
   const runFinished = ['done', 'blocked', 'aborted'].includes(runStatus ?? journal?.status ?? '');
   const staleMs = Date.now() - st.mtimeMs;
+  session.last_activity_at = st.mtime.toISOString();
   if (sawResult) {
     session.status = journalStatus ?? (resultOk ? 'ok' : 'failed');
     session.ended_at = journalEnded ?? st.mtime.toISOString();
   } else if (journalEnded) {
     session.status = journalStatus && journalStatus !== 'ok' ? journalStatus : 'abandoned';
     session.ended_at = journalEnded;
-  } else if (runFinished || staleMs > CFG.abandonAfterMs) {
+  } else if (runFinished) {
+    // The run is over and this phase never returned a verdict — that one really is dead.
     session.status = 'abandoned';
     session.ended_at = st.mtime.toISOString();
   } else {
-    session.status = 'running';
+    session.status = staleMs > CFG.stalledAfterMs ? 'stalled' : 'running';
   }
   if (!session.duration_ms && session.started_at && session.ended_at) {
     session.duration_ms = Math.max(0, Date.parse(session.ended_at) - Date.parse(session.started_at));
   }
-  for (const a of agents.values()) if (a.status === 'running' && session.status !== 'running') a.status = 'abandoned';
+  const sessionLive = session.status === 'running' || session.status === 'stalled';
+  for (const a of agents.values()) if (a.status === 'running' && !sessionLive) a.status = 'abandoned';
 
   const timing = timingFor(session.claude_session_id ? hookIndex?.get(session.claude_session_id) : null, tools);
   for (const t of tools) { const x = timing.get(t.tool_use_id); if (x) Object.assign(t, x); }
