@@ -108,6 +108,15 @@ export async function issuesWithEntryLabel(): Promise<GitlabResult<Issue[]>> {
   );
 }
 
+export interface IssueNote {
+  id: number;
+  body: string;
+  /** GitLab's own flag for a note it generated (a label swap, an assignment). */
+  system?: boolean;
+  /** Who typed it. Absent only when GitLab declines to name an author. */
+  author?: { username?: string };
+}
+
 /**
  * A ticket's comments, OLDEST FIRST — but only the NEWEST hundred of them.
  *
@@ -130,11 +139,17 @@ export async function issuesWithEntryLabel(): Promise<GitlabResult<Issue[]>> {
  * callers never asked for it) so a caller distinguishing human replies from
  * board noise — the review-gate poll in src/conductor/reviewgate.ts — does not
  * have to guess from body text alone.
+ *
+ * `author.username` is the field the review gate decides AUTHORISATION on: a
+ * gate that reads its verdict out of ticket comments has to know who typed
+ * one, and matching a display name would let two people who share a name sign
+ * off for each other. Optional for the same reason `system` is — every older
+ * caller reads only `body`.
  */
 export async function issueNotes(
   iid: number,
-): Promise<GitlabResult<Array<{ id: number; body: string; system?: boolean }>>> {
-  const res = await call<Array<{ id: number; body: string; system?: boolean }>>(
+): Promise<GitlabResult<IssueNote[]>> {
+  const res = await call<IssueNote[]>(
     'GET',
     `/projects/${projectId()}/issues/${iid}/notes?per_page=100&order_by=created_at&sort=desc`,
   );

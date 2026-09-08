@@ -257,6 +257,35 @@ export function slackConfig(): SlackConfig {
   return _slack;
 }
 
+/**
+ * The two sign-off groups, by GitLab username (config/reviewers.json).
+ *
+ * Not merged into `slackConfig().allowlist`, which it replaces as the review
+ * gates' authorisation source: that list holds SLACK user ids, and the gates
+ * now read their verdict from GitLab ticket comments, where the only identity
+ * on a note is a GitLab username. Keeping one list for both would mean an id
+ * from one system silently failing to match a name from the other — the
+ * failure mode being a gate that waits forever, which is indistinguishable
+ * from a reviewer who has not looked yet.
+ *
+ * Unknown roles resolve to an empty list rather than throwing: `checkApprovalGate`
+ * already treats empty as `unavailable` and blocks the run, which surfaces the
+ * mistake to the person who can fix it instead of killing the conductor.
+ */
+export interface ReviewersConfig { dev: string[]; qa: string[] }
+
+let _reviewers: ReviewersConfig | null = null;
+export function reviewersConfig(): ReviewersConfig {
+  if (!_reviewers) {
+    const c = loadJson<Partial<ReviewersConfig>>('reviewers.json');
+    _reviewers = {
+      dev: Array.isArray(c.dev) ? c.dev : [],
+      qa: Array.isArray(c.qa) ? c.qa : [],
+    };
+  }
+  return _reviewers;
+}
+
 export function modelFor(phase: PhaseConfig): string {
   const m = loadJson<{
     tiers: Record<string, string>;
