@@ -13,7 +13,7 @@
 import { readFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
 
 export const ROOT: string = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -43,6 +43,22 @@ export function envOr(name: string, fallback = ''): string {
     if (typeof legacy === 'string' && legacy !== '' && !isPlaceholder(legacy)) return legacy;
   }
   return fallback;
+}
+
+/**
+ * Whose desk this conductor is.
+ *
+ * Shown on the Slack card so several loops sharing one channel are tellable
+ * apart, and written into the ticket's claim note so a person reading it can
+ * see who to talk to. ONESHOT_OPERATOR is explicit; BOARD_OPERATOR is the same
+ * fact the telemetry board already asks for, so a desk configured for the
+ * board needs nothing more; the OS username is what both of those default to
+ * on the board side too. Never the git author — that is deliberately the bot.
+ */
+export function operatorName(): string {
+  const explicit = envOr('ONESHOT_OPERATOR') || envOr('BOARD_OPERATOR');
+  if (explicit) return explicit;
+  try { return userInfo().username; } catch { return 'oneshot'; }
 }
 
 export function envFlag(name: string): boolean {

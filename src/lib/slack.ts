@@ -103,6 +103,8 @@ export interface CardState {
   weighted: number;
   status: 'running' | 'blocked' | 'done' | 'aborted' | 'parked';
   blockedWhy?: string;
+  /** Whose desk is driving this run — see `operatorName()` in lib/config.ts. */
+  owner?: string;
 }
 
 function fmtElapsed(ms: number): string {
@@ -112,7 +114,9 @@ function fmtElapsed(ms: number): string {
 
 function renderCard(s: CardState): string {
   const cfg = slackConfig();
-  const head = `*<${s.url}|#${s.iid}> ${s.title}*`;
+  // The owner rides on the head line: when several desks post into one
+  // channel, whose ticket a card is has to be readable at a glance.
+  const head = `*<${s.url}|#${s.iid}> ${s.title}*${s.owner ? ` · _${s.owner}_` : ''}`;
   const body = s.lines
     .map((l) => `${ICON[l.state]} ${l.phase}${l.detail ? ` — ${l.detail}` : ''}`)
     .join('\n');

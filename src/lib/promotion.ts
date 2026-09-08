@@ -288,7 +288,8 @@ function reclaim(lease: LeaseRow): void {
   });
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+/** Sleep that a shutdown can cut short. Shared with the claim settle in runner.ts. */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
     signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });

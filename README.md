@@ -294,15 +294,75 @@ failure three phases into a real ticket.
 
   Leave `ONESHOT_SEED_FROM` unset and a leased worktree has no dependencies, so `verify`
   (phase 6) cannot start the app — a failure that surfaces three phases after the cause.
-  `doctor` now warns about this at boot instead.
+  `doctor` warns about this at boot instead.
 
-  A missing `SKILLS_ROOT` also fails `hooks:verify`'s symlink test, so one wrong path reports as
+- **Seeding — the seed clone must be *installed*, not just present.** A leased worktree is a bare
+  `git worktree`: it has none of the gitignored pieces a checkout needs to *run*. Oneshot never
+  installs them (that would cost `npm install` minutes per ticket); it carries them over from
+  `ONESHOT_SEED_FROM` when the worktree is leased. `npm run setup` writes that path for you but
+  installs nothing — **you install the seed clone once, by hand**, following the work repo's own
+  README (*Conventional Setup → Installation*). Four entries are carried, named in `.env`:
+
+  | Entry | How | Why that way |
+  |---|---|---|
+  | `venv` | symlinked | heavy, read-mostly — one copy serves every worktree |
+  | `node_modules` | symlinked | same; lives at the repo **root** (the root `package.json`), not under `frontend/` |
+  | `hrdb/local_settings.py` | copied | settings — a worktree that edits its own must not edit the seed's |
+  | `frontend/src/constants/config.js` | copied | same |
+
+  Two things the work repo's README will not tell you:
+
+  - **Name the virtualenv `venv`.** That README says `virtualenv -p python3.12 my_env`; the phases
+    run `source venv/bin/activate` inside the worktree, so a `my_env` is invisible to them and the
+    `venv` seed entry stays missing. Create it as `venv`, or `ln -s my_env venv` in the seed clone.
+  - **Both settings files are hand-written** — there is no `.example` to copy. Their contents are in
+    that README (`local_settings.py` under the backend steps, `config.js` under the frontend steps).
+
+  Reading `doctor`'s two seed-related lines:
+
+  | Line | Meaning | Action |
+  |---|---|---|
+  | `WT_ROOT will be created on first run` | expected — the worktree root is made on the first lease | none |
+  | `no seed repo configured` | `ONESHOT_SEED_FROM` is unset | set it (or re-run `npm run setup`) |
+  | `seed entries missing from the seed repo: …` | the clone exists but is not installed — the list names exactly what to create | install the clone; re-run `doctor` |
+
+  You are done when `doctor` prints `seed repo <path> (2 linked, 2 copied)`. Both warnings are
+  **non-blocking for `doctor` and blocking for the first ticket**: a missing entry does not fail at
+  boot, it fails when `verify` tries to start the dev server, three phases in.
+
+- A missing `SKILLS_ROOT` also fails `hooks:verify`'s symlink test, so one wrong path reports as
   two failures — fix the path and both clear.
 - **Dry run:** `DRY_RUN=1 npm start` runs every phase and denies every write. This is how you
   watch the pipeline drive a real ticket without touching it. Its journal goes to
   `state-dry/state/runs`, not `state/runs`, so view it with a dashboard that resolves the same
   home: `DRY_RUN=1 ONESHOT_DASHBOARD_PORT=8788 npm run dashboard`. A dry run will not appear on
   the ordinary dashboard, and neither will anything that did not go through the conductor.
+
+## Claims across machines
+
+The SQLite claim proves a ticket is yours on *this* machine, and nothing on another laptop can see
+that row. Two conductors on two desks both pass it, both start, and the second finds out three
+phases later when the merge collides. The only state every conductor shares is GitLab, so the
+claim lives there too — in the ticket's comments (`src/lib/claims.ts`):
+
+- Every run posts `Oneshot claimed this ticket — run \`r-…\` (<operator>)` at its top. It always
+  did; now it is read back.
+- **The oldest live claim note owns the ticket.** Note ids are monotonic, so this is an integer
+  compare, not a clock compare across machines that disagree.
+- Before a fresh claim counts, the conductor posts its note and **waits `ONESHOT_CLAIM_SETTLE_MS`
+  (15s)** for a simultaneous claimant's note to land. Then oldest wins; the loser **deletes its
+  note and stands down** (`aborted`, leases released, no label swap). The scan skips a
+  foreign-owned ticket for as long as that claim is live, so a lost ticket costs one notes read
+  per tick, not a retry.
+- A claim is *live* while no later note reports its run stopped/complete **and** it is younger
+  than `ONESHOT_CLAIM_STALE_HOURS` (24). The bound is the escape hatch for a conductor that died
+  without a stop note; it is a day, not an hour, because a parked run legitimately waits days on a
+  human. To release a ticket sooner, **delete the stale claim note on the ticket by hand.**
+- The Slack card carries the owner (`ONESHOT_OPERATOR`, else `BOARD_OPERATOR`, else the OS
+  username), so several desks posting into one channel stay tellable apart.
+
+Peers still on the previous version of this code post the same claim phrase and are honoured as
+owners; they just never yield, so until they upgrade the newer conductor is the one that backs off.
 
 ## Guardrails
 

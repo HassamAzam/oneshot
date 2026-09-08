@@ -45,8 +45,10 @@ import { promisify } from 'node:util';
 import {
   DRY_RUN, MERGE_POLL_MS, PAUSE, SKIP_DEPLOY, WORK_REPO, deployConfig, modelFor, phases, portPool,
   projectConfig,
+  operatorName,
   type PhaseConfig,
 } from '../lib/config.js';
+import { claimNoteBody, readOwnership, settleMs } from '../lib/claims.js';
 import {
   archiveRun, artifactPath, ensureRunDirs, failedLapsOf, lapsOf, phaseSucceeded, readArtifact,
   readJournal, recordPhase, recordRemediation, reapScratch, updateJournal, writeArtifact,
@@ -58,10 +60,10 @@ import {
   leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort,
 } from '../lib/worktrees.js';
 import {
-  addIssueNote, createMergeRequest, findMergeRequests, getIssue, issueNotes, issueUrl,
-  swapLabel, type Issue,
+  addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, issueNotes,
+  issueUrl, swapLabel, type Issue,
 } from '../lib/gitlab.js';
-import { acquirePromotion, releasePromotion } from '../lib/promotion.js';
+import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
 import { checkQuota } from '../lib/quota.js';
 import {
   claimOwnership, claimTicket, getRun, logEvent, phaseEnd, phaseStart, updateRun,
@@ -216,6 +218,7 @@ function cardState(j: RunJournal, running: string[] = []): CardState {
     weighted: j.phases.reduce((a, p) => a + (p.weighted ?? 0), 0),
     status: j.status,
     blockedWhy: j.blockedWhy,
+    owner: operatorName(),
   };
 }
 
@@ -450,9 +453,47 @@ export async function runTicket(
     if (ts) { j.slackTs = ts; writeJournal(j); updateRun(runId, { slack_ts: ts }); }
   }
 
-  // Once per run, not once per resumption.
-  if (!DRY_RUN && !resuming) {
-    await addIssueNote(iid, `Oneshot claimed this ticket — run \`${runId}\`.`);
+  // The cross-machine claim (lib/claims.ts). The SQLite claim above proves
+  // this ticket is ours on THIS machine; nothing on another laptop can see
+  // that row. The claim note is the half every conductor can see, and the
+  // rule is the oldest live note owns the ticket.
+  //
+  // Post, then WAIT before trusting it. Two conductors that scanned the same
+  // tick post within the same second, and whichever re-reads first would see
+  // only its own note and proceed. The settle window is how long a
+  // simultaneous claimant's note is given to land before the decision is
+  // made; after it, oldest wins and the loser deletes its note and stands
+  // down. A resume whose own claim is still live re-asserts nothing — it only
+  // re-checks that it is still the oldest.
+  if (!DRY_RUN) {
+    const before = await readOwnership(iid);
+    const mineLive = before?.active.some((c) => c.runId === runId) ?? false;
+    if (!mineLive) {
+      const posted = await addIssueNote(iid, claimNoteBody(runId, operatorName()));
+      if (posted.ok && posted.data) {
+        j.claimNoteId = posted.data.id;
+        writeJournal(j);
+      }
+      await sleep(settleMs(), opts.signal);
+    }
+    const after = await readOwnership(iid);
+    if (!after) {
+      log.warn(`#${iid} — could not read the ticket's claims; proceeding on the local claim alone`);
+    } else if (after.earliest && after.earliest.runId !== runId) {
+      // Lost. Not an error and not a block: the ticket is somebody's, and the
+      // scan will skip it for as long as their claim is live. Take our note
+      // off so the ticket shows one owner, then stand down with the leases
+      // released. 'aborted' resumes if their claim ever goes stale.
+      if (j.claimNoteId) {
+        await deleteIssueNote(iid, j.claimNoteId);
+        j.claimNoteId = undefined;
+        writeJournal(j);
+      }
+      const who = after.earliest.author ? ` (${after.earliest.author})` : '';
+      log.warn(`#${iid} — yielding: run ${after.earliest.runId}${who} claimed this ticket first`);
+      logEvent('claim_yielded', { iid, to: after.earliest.runId, author: after.earliest.author }, { runId });
+      return finish(j, 'aborted', `yielded — run ${after.earliest.runId}${who} claimed this ticket first`);
+    }
   }
 
   // Worktree is leased lazily: phases 0-3 do not need one, and leasing early
@@ -1488,6 +1529,16 @@ export async function runTicket(
       log.error(`■ #${journal.iid} BLOCKED — ${reason}`);
     } else if (status === 'done') {
       if (!DRY_RUN) await swapLabel(journal.iid, [cfg.labels.entry], [cfg.labels.exit]);
+      // The claim note has done its job — with the exit label on, nothing
+      // scans this ticket again — and a claim that outlives its run is exactly
+      // the stale note lib/claims.ts otherwise has to age out. Only 'done'
+      // tidies it: a blocked or aborted run expects to resume, and its place
+      // in line is the note.
+      if (!DRY_RUN && journal.claimNoteId) {
+        await deleteIssueNote(journal.iid, journal.claimNoteId);
+        journal.claimNoteId = undefined;
+        writeJournal(journal);
+      }
       log.ok(`■ #${journal.iid} done`);
     } else {
       log.warn(`■ #${journal.iid} stopped — ${reason ?? 'aborted'}`);

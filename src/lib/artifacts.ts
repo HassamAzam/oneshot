@@ -142,6 +142,13 @@ export interface RunJournal {
   blockedAt?: number;
   /** The closing note on the ticket, so a re-run of `close` edits instead of repeating. */
   closeNoteId?: number;
+  /**
+   * This run's claim note on the ticket — the cross-machine claim (lib/
+   * claims.ts). Kept so a losing claim can be taken back off the ticket, and
+   * so a finished run can tidy its own. Absent on a resume whose note the
+   * previous conductor posted; the protocol re-asserts by run id, not by note id.
+   */
+  claimNoteId?: number;
   /** Publication keys already posted to GitLab — see lib/publish.ts. */
   published?: string[];
   slackTs?: string;
