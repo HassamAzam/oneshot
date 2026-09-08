@@ -20,7 +20,8 @@
  * across the whole machine because the port pool is shared between all of them.
  * --solo puts the old refusal back for anyone who wants it.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, openSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -242,6 +243,41 @@ function banner(): void {
  * Refuse to start on a misconfiguration that would only surface as a confusing
  * failure three phases into a real ticket.
  */
+/**
+ * Make sure something is shipping this desk's runs to the board.
+ *
+ * The conductor and the collector are separate processes by design — the
+ * collector holds an outbox so an offline laptop loses nothing, and it must
+ * outlive any one conductor. But "separate" kept turning into "not running":
+ * restarting the loop does not start the collector, and a desk that shows
+ * nothing on the board was, every time it was looked into, a desk whose
+ * operator had not started one. So the loop starts it. Detached and
+ * unreferenced, so it survives this process and never holds it open; the
+ * collector's own pid lock makes a second start exit at once, so every
+ * `npm start` on a machine can call this and exactly one collector runs.
+ * Its output goes to state/board-collector.log — `npm run board:doctor` is
+ * still the diagnostic.
+ */
+function ensureCollector(): void {
+  if (watchOnly || once || DRY_RUN) return;
+  if (!envOr('BOARD_URL')) {
+    log.info('board      BOARD_URL unset — collector not started');
+    return;
+  }
+  const script = join(ROOT, 'scripts', 'board', 'index.mjs');
+  if (!existsSync(script)) return;
+  try {
+    const out = openSync(join(ROOT, 'state', 'board-collector.log'), 'a');
+    const child = spawn(process.execPath, [script], {
+      cwd: ROOT, detached: true, stdio: ['ignore', out, out], env: process.env,
+    });
+    child.unref();
+    log.ok(`board      collector ensured (pid ${child.pid}; exits itself if one is already running)`);
+  } catch (err) {
+    log.warn('board      could not start the collector', { error: (err as Error).message });
+  }
+}
+
 function preflight(): boolean {
   let fatal = false;
 
@@ -508,6 +544,7 @@ async function main(): Promise<void> {
 
   banner();
   if (!preflight()) process.exit(1);
+  ensureCollector();
 
   const b = budgetConfig();
   log.info(`quota      ${Math.round(windowUsage() / 1e6)}M / ${Math.round(b.window_tokens / 1e6)}M this window · ` +

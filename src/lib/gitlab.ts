@@ -50,7 +50,7 @@ function classify(status: number): FailKind {
 }
 
 async function call<T>(
-  method: 'GET' | 'POST' | 'PUT',
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
   path: string,
   body?: unknown,
   useWriteToken = false,
@@ -73,7 +73,10 @@ async function call<T>(
       const text = await res.text().catch(() => '');
       return { ok: false, kind, status: res.status, data: null, error: text.slice(0, 300) };
     }
-    return { ok: true, kind: 'ok', status: res.status, data: (await res.json()) as T };
+    // A DELETE answers 204 with no body; res.json() on nothing throws and would
+    // report a successful delete as a network failure.
+    const text = await res.text();
+    return { ok: true, kind: 'ok', status: res.status, data: (text ? JSON.parse(text) : null) as T };
   } catch (err) {
     // Timeout, DNS failure, connection refused — the VPN case.
     return {
@@ -115,6 +118,8 @@ export interface IssueNote {
   system?: boolean;
   /** Who typed it. Absent only when GitLab declines to name an author. */
   author?: { username?: string };
+  /** ISO timestamp. The claim protocol (lib/claims.ts) ages claims by it. */
+  created_at?: string;
 }
 
 /**
@@ -155,6 +160,19 @@ export async function issueNotes(
   );
   if (res.ok && res.data) return { ...res, data: [...res.data].reverse() };
   return res;
+}
+
+/**
+ * Remove one of our own notes. Only the claim protocol calls this, to take a
+ * losing claim back off the ticket — GitLab lets the author delete a note, and
+ * the write token is the author of every note this conductor posts.
+ */
+export async function deleteIssueNote(iid: number, noteId: number): Promise<GitlabResult<null>> {
+  if (DRY_RUN) {
+    log.warn(`[dry-run] would delete note ${noteId} on #${iid}`);
+    return { ok: true, kind: 'ok', status: 204, data: null };
+  }
+  return call<null>('DELETE', `/projects/${projectId()}/issues/${iid}/notes/${noteId}`, undefined, true);
 }
 
 export async function addIssueNote(

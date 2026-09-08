@@ -2,16 +2,19 @@
  * The watcher: find tickets carrying the entry label and hand them to the
  * queue.
  *
- * This is the whole claim protocol. v1 needed a distributed one — post a note,
- * re-fetch, verify the newest claim is yours, roll back if not — because seven
- * peer loops could each decide they owned the same ticket. Oneshot has one
- * process and one queue, so "is this claimed" is a SQLite row.
+ * "Is this claimed" has two halves. On this machine it is a SQLite row. Across
+ * machines it is the ticket's own comments — the OLDEST live claim note owns
+ * the ticket (lib/claims.ts). v1 needed exactly that distributed protocol and
+ * it was dropped when Oneshot became one process; it came back the day a
+ * second laptop ran a conductor against the same board and both sides passed
+ * their local row.
  *
  * Every tick is a RESUMPTION, not a fresh start: a ticket with an in-flight
  * run is skipped, and a ticket whose run died mid-phase is picked up from its
  * journal rather than restarted.
  */
 import { projectConfig } from '../lib/config.js';
+import { foreignOwner } from '../lib/claims.js';
 import { isClaimed, logEvent, seeTicket } from '../lib/db.js';
 import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
 import { isReachable, netState } from '../lib/reachability.js';
@@ -72,6 +75,18 @@ export async function scan(): Promise<WatchResult> {
     }
     if (isClaimed(issue.iid)) {
       skipped.push({ iid: issue.iid, why: 'run already in flight' });
+      continue;
+    }
+    // The other machine's claim. This has to be a scan-time skip and not only a
+    // claim-time refusal: with one slot, a foreign-owned ticket at the head of
+    // the list would be attempted and refused every tick and nothing behind it
+    // would ever be tried. One notes read per surviving candidate per tick.
+    const foreign = await foreignOwner(issue.iid);
+    if (foreign) {
+      skipped.push({
+        iid: issue.iid,
+        why: `claimed by another conductor — run ${foreign.runId}${foreign.author ? ` (${foreign.author})` : ''}`,
+      });
       continue;
     }
     candidates.push(issue);
