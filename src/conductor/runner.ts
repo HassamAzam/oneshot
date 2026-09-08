@@ -76,7 +76,7 @@ import { schemaFor } from './schemas.js';
 import { closePhase, mergePhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, declaredFiles, gatesApply, planApprovalRequestBody,
-  planApprovedRecordBody, reviewLabelPresent, testcasesApprovalRequestBody,
+  planApprovedRecordBody, reviewAllRuns, reviewLabelPresent, testcasesApprovalRequestBody,
   testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
@@ -412,7 +412,7 @@ export async function runTicket(
   // nothing has declared a file yet — so the path half is re-evaluated at each
   // gate below and persisted when it fires, which is what lets the pure-code
   // `merge` phase honour a gate that no label ever asked for.
-  const reviewMode = reviewLabelPresent(ticket.labels)
+  const reviewMode = reviewAllRuns() || reviewLabelPresent(ticket.labels)
     || gatesApply(ticket.labels, declaredFiles(readArtifact(iid, 'plan.json'),
       readArtifact(iid, 'implement.json'))).on;
   if (j.reviewMode !== reviewMode) { j = updateJournal(iid, { reviewMode }) ?? j; }

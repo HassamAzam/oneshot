@@ -76,6 +76,17 @@ export function reviewLabelPresent(labels: string[]): boolean {
 }
 
 /**
+ * Gates on every run, regardless of label or path.
+ *
+ * The label and the path list remain the finer-grained answer and are deliberately
+ * left in place: they are what still gates the tickets that matter when this is
+ * switched back off, and turning it off should not silently ungate `apps/auth/`.
+ */
+export function reviewAllRuns(): boolean {
+  return projectConfig().reviewAllRuns === true;
+}
+
+/**
  * Which of `highScrutinyPaths` this run's files touch.
  *
  * The `Review` label is applied by a person, so it is forgettable — and the
@@ -127,12 +138,16 @@ export interface GateTrigger {
  */
 export function gatesApply(labels: string[], files: string[]): GateTrigger {
   const hits = highScrutinyHits(files);
-  return { on: reviewLabelPresent(labels) || hits.length > 0, hits };
+  return { on: reviewAllRuns() || reviewLabelPresent(labels) || hits.length > 0, hits };
 }
 
 /** The one line a gate request needs about why it is asking. */
 export function triggerLine(trigger: GateTrigger): string {
-  if (!trigger.hits.length) return 'This ticket carries *Review*.';
+  if (!trigger.hits.length) {
+    return reviewAllRuns()
+      ? 'The review gates are on for every run (`reviewAllRuns` in config/project.json).'
+      : 'This ticket carries *Review*.';
+  }
   return 'This run touches guarded paths — *' + trigger.hits.join('*, *') + '* — so the review '
     + 'gates apply whether or not the ticket carries the `Review` label.';
 }

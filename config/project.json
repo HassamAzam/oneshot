@@ -1,21 +1,18 @@
 {
   "_comment": "The GitLab project Oneshot works in, and the two labels that are its entire external state. Verified against gitlab.arbisoft.com on 2026-08-25: project id 1491, 16 labels, dev/stage/master protected with can_push=false.",
-
   "gitlab": {
     "host": "gitlab.arbisoft.com",
     "apiUrl": "https://gitlab.arbisoft.com/api/v4",
     "project": "arbisoft/workstreamai",
     "projectId": 1491
   },
-
   "_comment_context": "Read-only. Oneshot reads this repo for prior art, conventions and skills; it NEVER writes to it, and hooks/write-scope.js denies every write under contextRepo for every phase. See docs/HOOKS.md 4.1.",
   "contextRepo": {
     "path": "~/Documents/erp",
     "gitlabProject": "arbisoft/erp",
     "skillsRoot": "~/Documents/erp/.claude"
   },
-
-  "_comment_labels": "ONE label in, one label out. There is no intermediate state machine — progress lives in the Slack card and the run journal, not on the board. All three ids below already exist on project 1491; Oneshot never creates, renames or deletes a label. 'review' is a FOURTH, OPTIONAL label, never required and never swapped by Oneshot: a ticket carrying it alongside 'Loop' gets three extra human sign-off pauses (see README's 'Optional human review gates'). Its id is not yet verified against the live project (create the label there before relying on it) — the code only ever checks label MEMBERSHIP by name, never the id, so an unverified id costs nothing.",
+  "_comment_labels": "ONE label in, one label out. There is no intermediate state machine \u2014 progress lives in the Slack card and the run journal, not on the board. All three ids below already exist on project 1491; Oneshot never creates, renames or deletes a label. 'review' is a FOURTH, OPTIONAL label, never required and never swapped by Oneshot: a ticket carrying it alongside 'Loop' gets three extra human sign-off pauses (see README's 'Optional human review gates'). Its id is not yet verified against the live project (create the label there before relying on it) \u2014 the code only ever checks label MEMBERSHIP by name, never the id, so an unverified id costs nothing.",
   "labels": {
     "entry": "Loop",
     "entryId": 1308,
@@ -25,8 +22,9 @@
     "blockedId": 1310,
     "review": "Review"
   },
-
-  "_comment_high_scrutiny": "Paths the ERP's own .claude/rules/security.md marks 'escalate immediately'. A ticket whose PLAN or DIFF touches one gets the Review gates even without the Review label, because the label is human-applied and therefore forgettable — and the tickets most worth pausing on are exactly the ones nobody remembers to label. Matching is a plain substring test against repo-relative paths, so 'apps/payroll/' catches everything under it. Empty this array to switch the behaviour off entirely. Note the last two entries: authentication on the FRONTEND has no single directory the way apps/auth/ does, so its entry points are listed by name. Found the hard way — ticket #8 is an auth-context bug with 600+ production occurrences, and a backend-only list would not have gated it.",
+  "_comment_reviewAllRuns": "TRUE = the review gates apply to EVERY run, not only tickets carrying the Review label or touching highScrutinyPaths. This is a deliberate change of posture: with it on, every run pauses after `plan` and after `testcases` for a human, and never merges its own MR. The label and the path list still work and are still worth keeping \u2014 they are what makes a gate survive this being switched back off. Requires channels:history (or groups:history) on the Slack bot token; without it every gate sits 'pending' forever and every run parks, which is why doctor FAILS rather than warns while this is true.",
+  "reviewAllRuns": true,
+  "_comment_high_scrutiny": "Paths the ERP's own .claude/rules/security.md marks 'escalate immediately'. A ticket whose PLAN or DIFF touches one gets the Review gates even without the Review label, because the label is human-applied and therefore forgettable \u2014 and the tickets most worth pausing on are exactly the ones nobody remembers to label. Matching is a plain substring test against repo-relative paths, so 'apps/payroll/' catches everything under it. Empty this array to switch the behaviour off entirely. Note the last two entries: authentication on the FRONTEND has no single directory the way apps/auth/ does, so its entry points are listed by name. Found the hard way \u2014 ticket #8 is an auth-context bug with 600+ production occurrences, and a backend-only list would not have gated it.",
   "highScrutinyPaths": [
     "apps/auth/",
     "apps/payroll/",
@@ -36,23 +34,35 @@
     "frontend/src/components/login/",
     "frontend/src/components/AuthenticatedComponent.js"
   ],
-
   "_comment_markers": "Persistent labels Oneshot must copy through untouched on any label write. A label swap is one update_issue call carrying the full array, so anything not listed here and not the entry/exit label would be silently dropped.",
-  "preserveLabels": ["AI", "Agentic", "Minor", "Major", "No QA", "Design"],
-
-  "_comment_branches": "base is what ticket branches are cut from and what their MRs target. NOTE: the project's GitLab default branch is 'main', NOT 'dev' — do not infer the base from the default branch. 'main' is protected but currently reports can_push=true for our token, which is why it is in protectedBranches: the guard must refuse it even though the server would allow it.",
+  "preserveLabels": [
+    "AI",
+    "Agentic",
+    "Minor",
+    "Major",
+    "No QA",
+    "Design"
+  ],
+  "_comment_branches": "base is what ticket branches are cut from and what their MRs target. NOTE: the project's GitLab default branch is 'main', NOT 'dev' \u2014 do not infer the base from the default branch. 'main' is protected but currently reports can_push=true for our token, which is why it is in protectedBranches: the guard must refuse it even though the server would allow it.",
   "branches": {
     "base": "dev",
-    "protected": ["dev", "stage", "master", "main"],
+    "protected": [
+      "dev",
+      "stage",
+      "master",
+      "main"
+    ],
     "prefix": "oneshot",
     "pattern": "oneshot/ticket-<iid>-<slug>"
   },
-
-  "_comment_promotion": "dev is FINAL. A ticket MR merges into base and the run is done — nothing is promoted onward. dev -> stage is deliberately absent rather than auto:false, because auto:false reads as 'a human owns this hop' (which is what it means for stage -> master) and that is not the reason here: the hop is switched off while the pipeline earns trust. With no entry whose `from` is the base branch, runPromotions() records no promotion and merge reports 'no automatic promotion applies to this base'. Restore by putting { from: dev, to: stage, auto: true } back — nothing else has to change, and note that config/deploy.json already ships dev (defaultRef), so the deploy never depended on this hop. stage -> master stays listed and stays manual: production release is a human act.",
+  "_comment_promotion": "dev is FINAL. A ticket MR merges into base and the run is done \u2014 nothing is promoted onward. dev -> stage is deliberately absent rather than auto:false, because auto:false reads as 'a human owns this hop' (which is what it means for stage -> master) and that is not the reason here: the hop is switched off while the pipeline earns trust. With no entry whose `from` is the base branch, runPromotions() records no promotion and merge reports 'no automatic promotion applies to this base'. Restore by putting { from: dev, to: stage, auto: true } back \u2014 nothing else has to change, and note that config/deploy.json already ships dev (defaultRef), so the deploy never depended on this hop. stage -> master stays listed and stays manual: production release is a human act.",
   "promotions": [
-    { "from": "stage", "to": "master", "auto": false }
+    {
+      "from": "stage",
+      "to": "master",
+      "auto": false
+    }
   ],
-
-  "_comment_concurrency": "In-flight TICKET cap. The old MUST-STAY-1 constraint is now carried by the promotion mutex (src/lib/promotion.ts): the deploy script ships the TIP of dev, so exactly one run may occupy the merge→deploy→qa window at a time — that is where attribution lives, and the mutex enforces it while every other phase pipelines freely. Residual cap reasons: worktrees symlink ONE shared node_modules/venv (a second webpack build during another run's verify contends on the babel cache), and the port pool (PORT_POOL, default 3) bounds server-holding phases. Raise toward the pool size once shared-cache contention is observed to be tolerable. Set to 1 deliberately: the operator runs one ticket per loop and scales by starting more conductors, so the fleet-wide ceiling is PORT_POOL and each process holds exactly one run — which also keeps the shared node_modules/venv contention this comment warns about at one build per conductor.",
+  "_comment_concurrency": "In-flight TICKET cap. The old MUST-STAY-1 constraint is now carried by the promotion mutex (src/lib/promotion.ts): the deploy script ships the TIP of dev, so exactly one run may occupy the merge\u2192deploy\u2192qa window at a time \u2014 that is where attribution lives, and the mutex enforces it while every other phase pipelines freely. Residual cap reasons: worktrees symlink ONE shared node_modules/venv (a second webpack build during another run's verify contends on the babel cache), and the port pool (PORT_POOL, default 3) bounds server-holding phases. Raise toward the pool size once shared-cache contention is observed to be tolerable. Set to 1 deliberately: the operator runs one ticket per loop and scales by starting more conductors, so the fleet-wide ceiling is PORT_POOL and each process holds exactly one run \u2014 which also keeps the shared node_modules/venv contention this comment warns about at one build per conductor.",
   "concurrency": 1
 }

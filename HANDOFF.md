@@ -335,6 +335,38 @@ those instead.
 
 ---
 
+## The review gates
+
+Every run pauses for a person at three points — `reviewAllRuns: true` in
+`config/project.json`:
+
+| After | The question |
+|---|---|
+| `plan` | Is this the right approach, before any code is written? |
+| `testcases` | Do these cases cover the ticket? They are the oracle for `verify` and `qa`. |
+| at `merge` | A person merges the MR. Oneshot never merges a gated run itself. |
+
+A gate **parks** the run — it holds no port, no promotion lease and no conductor, so
+an unanswered gate costs latency and nothing else. Answer in the ticket's **Slack
+thread**; the reply must be the bare word `approved`, because "approved, but see my
+comment" is feedback and must not read as a sign-off. Anything else is recorded as
+feedback and the phase runs again with it.
+
+The board's **Interventions** tab lists every gate still owed an answer, across every
+desk. It is deliberately read-only: the answer belongs in Slack or on the ticket,
+where the audit trail is.
+
+**This needs `channels:history` (or `groups:history`) on the Slack bot token.**
+Without it a gate posts its question and never hears the reply, so every run parks at
+`plan` and none of them resume. `npm run doctor` FAILS on that while
+`reviewAllRuns` is true, rather than warning.
+
+To go back to gating only the tickets that ask for it — the `Review` label, or a diff
+touching `highScrutinyPaths` — set `reviewAllRuns: false`. Both of those keep working
+either way.
+
+---
+
 ## Reading a transcript
 
 A transcript is the complete record of one phase: every message in and out, every tool

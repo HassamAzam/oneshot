@@ -52,11 +52,12 @@ const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', D = '\x1b[2m', B = '\x1b[1
  */
 const KEPT_STATUSES = new Set<PhaseRecord['status']>(['ok', 'warned', 'skipped']);
 
-interface Args { iid: number; phase?: string; dryRun: boolean }
+interface Args { iid: number; phase?: string; forcePhase?: string; dryRun: boolean }
 
 function parseArgs(argv: string[]): Args | string {
   let iid = 0;
   let phase: string | undefined;
+  let forcePhase: string | undefined;
   let dryRun = false;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -74,24 +75,40 @@ function parseArgs(argv: string[]): Args | string {
       if (!phase) return '--phase needs a phase name';
       continue;
     }
+    if (a === '--force-phase') {
+      const next = argv[i + 1];
+      if (!next || next.startsWith('-')) return '--force-phase needs a phase name';
+      forcePhase = next;
+      i += 1;
+      continue;
+    }
+    if (a.startsWith('--force-phase=')) {
+      forcePhase = a.slice('--force-phase='.length);
+      if (!forcePhase) return '--force-phase needs a phase name';
+      continue;
+    }
     if (/^#?\d+$/.test(a)) { iid = Number(a.replace('#', '')); continue; }
     return `unrecognised argument '${a}'`;
   }
 
   if (!iid) return 'no ticket iid given';
-  return { iid, phase, dryRun };
+  return { iid, phase, forcePhase, dryRun };
 }
 
 function usage(): void {
   console.log(`
-${B}npm run unblock -- <iid> [--phase <name>] [--dry-run]${X}
+${B}npm run unblock -- <iid> [--phase <name>] [--force-phase <name>] [--dry-run]${X}
 
   ${D}Drops the failed phase records from a blocked run's journal, deletes the
   artifacts those laps half-wrote, refunds their phase quota, and puts the
   entry label back so the watcher picks the ticket up again.${X}
 
-  --phase <name>   prune only this phase's failed records
-  --dry-run        print every change and make none
+  --phase <name>         prune only this phase's failed records
+  --force-phase <name>   ALSO drop this phase even if it succeeded, and delete
+                         its artifact, so a phase whose record is 'ok' but whose
+                         result is stale (a verify that hit its turn cap after
+                         correcting its verdicts) can be forced to re-run
+  --dry-run              print every change and make none
 `);
 }
 
@@ -212,7 +229,7 @@ async function main(): Promise<void> {
     usage();
     process.exit(1);
   }
-  const { iid, phase: only, dryRun } = parsed;
+  const { iid, phase: only, forcePhase, dryRun } = parsed;
 
   const journal = readJournal(iid);
   if (!journal) {
@@ -223,7 +240,15 @@ async function main(): Promise<void> {
 
   const doomed = new Set(
     journal.phases.filter(
-      (rec) => !KEPT_STATUSES.has(rec.status) && (only === undefined || rec.phase === only),
+      (rec) => (
+        // --force-phase drops EVERY record of the named phase, ok included, so a
+        // phase whose journal says 'ok' but whose artifact is stale (a verify
+        // that corrected its verdicts, then hit its turn cap before rewriting the
+        // partial) can be made to re-run — the one thing an ordinary unblock
+        // cannot do, because KEPT_STATUSES keeps ok/warned/skipped.
+        (forcePhase !== undefined && rec.phase === forcePhase)
+        || (!KEPT_STATUSES.has(rec.status) && (only === undefined || rec.phase === only))
+      ),
     ),
   );
 

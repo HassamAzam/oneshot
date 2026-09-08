@@ -230,10 +230,17 @@ async function main(): Promise<void> {
   // Only where the gates could actually run: an install with no Slack, or no
   // Review label configured, cannot hit this and does not need a standing
   // warning telling it so on every doctor run.
-  if (slackConfig().channel && cfg.labels.review) {
-    warn('Review-label gates need channels:history/groups:history on the bot token',
-      'chat:write (posting) does not cover reading a reply back — see config/slack.json\'s ' +
-      '_comment_history and README\'s "Optional human review gates"');
+  const allRuns = cfg.reviewAllRuns === true;
+  if (slackConfig().channel && (cfg.labels.review || allRuns)) {
+    const why = 'chat:write (posting) does not cover reading a reply back — see config/slack.json\'s '
+      + '_comment_history and README\'s "Optional human review gates"';
+    // With reviewAllRuns on this is not a degraded label: EVERY run parks at `plan`
+    // and never resumes. That is an outage, and a warning is the wrong volume for it.
+    if (allRuns) {
+      fail('gates are on for EVERY run and need channels:history/groups:history on the bot token',
+        `${why}. Without it every run parks at plan and never resumes — set reviewAllRuns:false `
+        + 'in config/project.json to go back to label-and-path gating.');
+    } else warn('Review-label gates need channels:history/groups:history on the bot token', why);
   }
 
   // -------------------------------------------------------------- verdict

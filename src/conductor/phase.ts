@@ -230,10 +230,27 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   // whoever reads the journal after the wrong thing entirely.
   const ac = new AbortController();
   let timedOut = false;
-  const killer = setTimeout(() => { timedOut = true; ac.abort(); }, cfg.timeoutMin * 60_000);
-  const cancel = (): void => ac.abort();
+  // A wedged session ignores ac.abort(): if the CLI stops yielding stream
+  // frames (a hung MCP call, a child that never returns), the consume loop
+  // below never advances and the phase promise never settles — so the
+  // conductor deadlocks forever awaiting a phase that cannot die (observed
+  // live: run #18 verify sat wedged 4h past its own 120m timeout). After ANY
+  // abort we therefore arm a short grace timer that force-settles the phase
+  // even when the stream refuses to unwind. The abandoned subprocess is reaped
+  // separately; the invariant this restores is that the conductor always gets
+  // its phase back, on the deadline, no matter what the CLI is stuck on.
+  let forceTimer: ReturnType<typeof setTimeout> | undefined;
+  let forceSettle: (err: Error) => void = () => {};
+  const hardDeadline = new Promise<never>((_, reject) => { forceSettle = reject; });
+  const armForce = (): void => {
+    if (!forceTimer) {
+      forceTimer = setTimeout(() => forceSettle(new Error('the session did not unwind within the abort grace window')), 30_000);
+    }
+  };
+  const killer = setTimeout(() => { timedOut = true; ac.abort(); armForce(); }, cfg.timeoutMin * 60_000);
+  const cancel = (): void => { ac.abort(); armForce(); };
   if (input.signal) {
-    if (input.signal.aborted) ac.abort();
+    if (input.signal.aborted) { ac.abort(); armForce(); }
     else input.signal.addEventListener('abort', cancel, { once: true });
   }
 
@@ -283,7 +300,16 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       },
     });
 
-    for await (const msg of q) {
+    // Manual iteration, not `for await`, so each pull can be raced against the
+    // hard deadline: a wedged CLI leaves `next()` pending forever, and only a
+    // race lets the phase settle on the timer instead of hanging with it.
+    const iterator = q[Symbol.asyncIterator]();
+    for (;;) {
+      const nextFrame = iterator.next();
+      nextFrame.catch(() => { /* swallow if the deadline wins and we abandon it */ });
+      const step = await Promise.race([nextFrame, hardDeadline]);
+      if (step.done === true) break;
+      const msg = step.value;
       sawActivity += 1;
       try {
         appendFileSync(tee, `${JSON.stringify(msg)}\n`);
@@ -367,6 +393,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     }
   } finally {
     clearTimeout(killer);
+    if (forceTimer) clearTimeout(forceTimer);
     input.signal?.removeEventListener('abort', cancel);
   }
 

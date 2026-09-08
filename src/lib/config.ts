@@ -85,6 +85,14 @@ export interface ProjectConfig {
     review: string;
   };
   /**
+   * Apply the review gates to EVERY run, not only to tickets carrying `labels.review`
+   * or touching `highScrutinyPaths`. A change of posture rather than a tuning knob:
+   * with it on, every run pauses after `plan` and after `testcases`, and never merges
+   * its own MR. The label and the path list are still honoured and still matter — they
+   * are what keeps the consequential tickets gated if this is switched back off.
+   */
+  reviewAllRuns?: boolean;
+  /**
    * Repo-relative path fragments whose modules are too consequential to ship
    * unwatched. A run whose plan or diff touches one gets the `Review` label's
    * gates whether or not anybody remembered to apply the label — see
