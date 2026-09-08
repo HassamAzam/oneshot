@@ -28,7 +28,7 @@
       "artifact": "plan.json"
     },
     {
-      "name": "implement", "n": 3, "kind": "session", "tier": "heavy",
+      "name": "implement", "n": 3, "kind": "session", "tier": "standard",
       "cwd": "worktree", "maxTurns": 220, "timeoutMin": 90,
       "writes": ["worktree", "run"], "onFail": "retry", "maxRetries": 2,
       "coding": true,
