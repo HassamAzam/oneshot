@@ -79,8 +79,8 @@ git clone https://github.com/HassamAzam/oneshot.git ~/Documents/oneshot
 cd ~/Documents/oneshot && npm install
 ```
 
-`WORK_REPO` (what Oneshot commits to) and `CONTEXT_REPO` (read for prior art) must
-also exist on disk.
+`WORK_REPO` (the clone worktrees are cut from, with `node_modules` and `venv` installed) must
+also exist on disk. `CONTEXT_REPO` defaults to it; skills come from this repo's `harness/`.
 
 ### 4. Configure
 

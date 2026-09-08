@@ -29,10 +29,11 @@ export ONESHOT_TICKET="0"
 export ONESHOT_BRANCH="oneshot/ticket-0-verify"
 export ONESHOT_WORKTREE="/tmp/oneshot-verify-wt"
 export ONESHOT_WRITE_SCOPES="/tmp/oneshot-verify-wt:$ROOT/state/runs/0"
-# Expand a leading ~ ourselves. .env carries `CONTEXT_REPO=~/Documents/erp`, and a
-# tilde arriving through the environment is a literal character, not $HOME — which
-# silently turned the symlink-escape test into a SKIP when doctor ran this suite.
-CONTEXT_REPO="${CONTEXT_REPO:-$HOME/Documents/erp}"
+# Expand a leading ~ ourselves. .env may carry `CONTEXT_REPO=~/Documents/...`, and
+# a tilde arriving through the environment is a literal character, not $HOME —
+# which silently turned the symlink-escape test into a SKIP when doctor ran this
+# suite. Default is the work repo's main checkout, as in src/lib/config.ts.
+CONTEXT_REPO="${CONTEXT_REPO:-$HOME/Documents/workstreamai}"
 export CONTEXT_REPO="${CONTEXT_REPO/#\~/$HOME}"
 
 mkdir -p "$ONESHOT_WORKTREE"
@@ -84,9 +85,9 @@ expect_deny  "remote set-url"          git-guard.cjs "$(bash_payload 'git remote
 expect_deny  "reset --hard origin/dev" git-guard.cjs "$(bash_payload 'git reset --hard origin/dev')"
 expect_deny  "gh CLI"                  git-guard.cjs "$(bash_payload 'gh pr merge 12 --squash')"
 expect_deny  "glab CLI"                git-guard.cjs "$(bash_payload 'glab mr merge 12')"
-expect_deny  "cd into the context repo" git-guard.cjs "$(bash_payload 'cd ~/Documents/erp && git commit -am wip')"
-expect_deny  "git -C into the context repo" \
-                                       git-guard.cjs "$(bash_payload 'git -C /Users/'"$USER"'/Documents/erp status')"
+expect_deny  "cd into another clone"   git-guard.cjs "$(bash_payload 'cd ~/Documents/workstreamai && git commit -am wip')"
+expect_deny  "git -C into another clone" \
+                                       git-guard.cjs "$(bash_payload 'git -C /Users/'"$USER"'/Documents/workstreamai status')"
 expect_deny  "chained push to dev after a legal command" \
                                        git-guard.cjs "$(bash_payload 'git add -A && git push origin dev')"
 expect_allow "push to the leased branch" \

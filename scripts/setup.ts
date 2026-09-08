@@ -76,15 +76,14 @@ async function main(): Promise<void> {
   console.log(`\n${B}Repositories${X}`);
   const work = await ask('WORK_REPO', {
     default: detectRepo('workstreamai') || '~/Documents/workstreamai',
-    hint: 'Clone of the project Oneshot builds in. Worktrees are cut from it.',
+    hint: 'Clone of the project Oneshot builds in. Worktrees are cut from it, and its ' +
+      'installed node_modules/venv are linked into each one — so install them there first.',
   });
-  const ctx = await ask('CONTEXT_REPO', {
-    default: detectRepo('erp') || '~/Documents/erp',
-    hint: 'Read-only reference for prior art. Skills come from this repo\'s harness/, not from here.',
-  });
+  // Two repositories, not three: skills come from this repo's harness/, and the
+  // work repo's main checkout is both the read-only reference and the seed.
   body = setKey(body, 'WORK_REPO', work);
-  body = setKey(body, 'CONTEXT_REPO', ctx);
-  body = setKey(body, 'ONESHOT_SEED_FROM', ctx);
+  body = setKey(body, 'CONTEXT_REPO', work);
+  body = setKey(body, 'ONESHOT_SEED_FROM', work);
 
   console.log(`\n${B}Slack${X} ${D}(optional — Enter to skip, status stays on the console)${X}`);
   const slackToken = await ask('SLACK_BOT_TOKEN', {

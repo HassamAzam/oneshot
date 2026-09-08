@@ -7,12 +7,13 @@
  *    already-working repo: heavy read-mostly things symlinked, settings copied
  *    (so a worktree editing its settings does not edit the seed repo's).
  *
- * 2. SKILLS. `.claude/` is composed by ensureClaudeDir() so phases get the
- *    context repo's real, current skills with no vendoring and no sync step,
- *    plus the pipeline skills that live in the Oneshot repo. Note what the
- *    symlinks inside it imply: writes through one land in the context repo,
- *    which is exactly why hooks/write-scope.cjs realpath-resolves before
- *    comparing.
+ * 2. SKILLS. The checkout's own `.claude/` is hidden from the worktree
+ *    (dropCheckedInClaude), then `.claude/` is composed by
+ *    ensureClaudeDir() so phases get the harness/ in the Oneshot repo — the
+ *    one place skills are edited — plus the pipeline skills in skills/. Note
+ *    what the symlinks inside it imply: writes through one land in the Oneshot
+ *    repo, which is exactly why hooks/write-scope.cjs realpath-resolves before
+ *    comparing and denies harness/ and skills/ for every phase.
  *
  * 3. EXCLUDE. Those symlinks are untracked files in a real checkout, so they
  *    are written to .git/info/exclude — otherwise every `git status` a phase
@@ -20,7 +21,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import {
-  chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ensureClaudeDir } from './claudedir.js';
@@ -235,15 +236,61 @@ function seed(worktree: string): void {
 }
 
 /**
+ * Take the work repo's own checked-in `.claude/` OUT of the worktree, so the
+ * harness in this repo is the only `.claude/` a phase can see.
+ *
+ * The work repo tracks a `.claude/` of its own (the tree harness/ was vendored
+ * from). Checked out, it is a directory of REAL files, and ensureClaudeDir()
+ * never replaces a real file with a link — so every skill that exists on both
+ * sides would resolve to the checkout's copy and an improvement made in
+ * harness/ would silently not reach a single phase. Deleting the files alone
+ * would put 62 `.claude/` deletions into `git status`, and an implement
+ * phase's `git add -A` would carry them into the MR.
+ *
+ * So the tracked entries are marked assume-unchanged in this worktree's own
+ * index BEFORE the files are removed. Git then never stats them: `status`
+ * shows nothing, `add -A` and `commit -a` stage nothing, and the composed
+ * symlinks that ensureClaudeDir() puts in their place are hidden by the
+ * `.claude` line addExcludes() writes. Sparse checkout was tried first and is
+ * the wrong primitive here: its skip-worktree bits are cleared by git for any
+ * path that "exists" on disk, and every tracked file does exist once
+ * `.claude/agents` is a symlink into harness/ — git then reports all of them
+ * deleted. assume-unchanged is never cleared by git on its own.
+ *
+ * Applied ONCE, when the worktree is created: a run resumed into an existing
+ * worktree is mid-flight and its checkout is not to be reshaped under it.
+ */
+function dropCheckedInClaude(worktree: string): void {
+  try {
+    const tracked = git(['ls-files', '-z', '--', '.claude'], worktree).split('\0').filter(Boolean);
+    if (!tracked.length) return;
+    git(['update-index', '--assume-unchanged', '--', ...tracked], worktree);
+    rmSync(join(worktree, '.claude'), { recursive: true, force: true });
+    log.info(`hid the checkout's own .claude/ (${tracked.length} files) so harness/ is the only one`);
+  } catch (err) {
+    log.warn('could not hide the checkout\'s own .claude/ — its skills will shadow harness/ ' +
+      'for this run', { error: (err as Error).message });
+  }
+}
+
+/**
  * Keep seeded paths out of `git status`.
  *
  * .git/info/exclude rather than .gitignore: it is per-checkout and untracked,
  * so it cannot leak into a commit or an MR diff.
+ *
+ * The COMMON git dir, not `--git-dir`. For a linked worktree the latter is
+ * .git/worktrees/<name>/, and git reads info/exclude from the common dir only
+ * (gitrepository-layout: info/ "is ignored if $GIT_COMMON_DIR is set"), so an
+ * exclude written there is never consulted. That was the bug behind the
+ * composed skill symlinks showing as untracked in every worktree — one
+ * `git add -A` away from an MR. Entries are repo-relative, so one shared file
+ * serves every worktree.
  */
 function addExcludes(worktree: string, paths: string[]): void {
   if (!paths.length) return;
   try {
-    const gitDir = git(['rev-parse', '--git-dir'], worktree);
+    const gitDir = git(['rev-parse', '--git-common-dir'], worktree);
     const abs = gitDir.startsWith('/') ? gitDir : join(worktree, gitDir);
     const file = join(abs, 'info', 'exclude');
     mkdirSync(dirname(file), { recursive: true });
@@ -356,6 +403,7 @@ export function leaseWorktree(
     // and costs the only serialising write in the whole operation.
     else git(['worktree', 'add', '--no-track', '-b', branch, worktree, `origin/${base}`]);
     log.ok(`worktree ${worktree}`, { branch, base: `origin/${base}` });
+    dropCheckedInClaude(worktree);
   } else {
     log.info(`re-attached to existing worktree ${worktree}`);
   }

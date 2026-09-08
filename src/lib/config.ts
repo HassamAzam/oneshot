@@ -384,7 +384,13 @@ export const PAUSE_DEPLOY = join(STATE, 'PAUSE-DEPLOY');
 export const DB_PATH = join(STATE, 'oneshot.db');
 
 export const WORK_REPO = expandPath(envOr('WORK_REPO', '~/Documents/workstreamai'));
-export const CONTEXT_REPO = expandPath(envOr('CONTEXT_REPO', '~/Documents/erp'));
+/**
+ * The clone phases may READ but never write or run git in. Defaults to the
+ * work repo's own main checkout: Oneshot needs exactly two repositories on a
+ * machine — this one and the work repo — and the worktrees are cut from the
+ * latter, so its main checkout is the one live clone a phase could stray into.
+ */
+export const CONTEXT_REPO = expandPath(envOr('CONTEXT_REPO', WORK_REPO));
 /**
  * Where phases get their skills, agents and rules. Defaults to the vendored
  * harness/ in THIS repo (a verbatim copy of the wsai .claude/ tree), so a fresh

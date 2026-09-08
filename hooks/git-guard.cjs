@@ -17,8 +17,8 @@
  *   - no `git remote set-url` (repointing origin defeats every other rule)
  *   - no `gh` / `glab` CLI, which are unguarded paths to the same operations
  *   - no git command whose working directory is outside the leased worktree.
- *     ~/Documents/erp is a live repo with a real remote on this machine; a
- *     `git commit -am` with the wrong cwd would land there
+ *     the work repo's main checkout is a live repo with a real remote on
+ *     this machine; a `git commit -am` with the wrong cwd would land there
  *   - no push at all under DRY_RUN. The dry-run banner promises that every
  *     write is refused, and the SDK's own tool policy cannot make that true on
  *     the Bash surface: a push is just a command there
@@ -170,7 +170,7 @@ function checkCwd(cmd) {
 
   for (const raw of explicit) {
     if (raw.startsWith('-')) continue;
-    // Expand ~ and $HOME BEFORE resolving. Without this, `cd ~/Documents/erp`
+    // Expand ~ and $HOME BEFORE resolving. Without this, `cd ~/Documents/<repo>`
     // is a relative path that joins onto the worktree and lands "inside" it —
     // the guard then waves through a commit into the context repo.
     const target = C.expandTilde(raw.replace(/^\$HOME|^\$\{HOME\}/, C.HOME));

@@ -287,10 +287,10 @@ failure three phases into a real ticket.
   | Env var | Default | What it is |
   |---|---|---|
   | `WORK_REPO` | `~/Documents/workstreamai` | the clone phases actually commit in |
-  | `CONTEXT_REPO` | `~/Documents/erp` | read-only clone for research |
+  | `CONTEXT_REPO` | `WORK_REPO` | a clone phases may read but never write to or run git in; the write-scope and git-guard denial target |
   | `ONESHOT_SKILLS_ROOT` | `<oneshot>/harness` | skills, agents and rules handed to the phases — the vendored wsai `.claude/` tree this repo owns |
   | `WT_ROOT` | `~/Documents/oneshot-wt` | where per-run worktrees are leased |
-  | `ONESHOT_SEED_FROM` | _(unset)_ | an already-installed clone whose `node_modules`/`venv` are linked into each new worktree, with `ONESHOT_SEED_LINKS` / `ONESHOT_SEED_COPIES` naming what to carry |
+  | `ONESHOT_SEED_FROM` | _(unset; setup writes `WORK_REPO`)_ | an already-installed clone whose `node_modules`/`venv` are linked into each new worktree, with `ONESHOT_SEED_LINKS` / `ONESHOT_SEED_COPIES` naming what to carry. Two repositories per machine: this one and the work repo, whose main checkout is both seed and context |
 
   Leave `ONESHOT_SEED_FROM` unset and a leased worktree has no dependencies, so `verify`
   (phase 6) cannot start the app — a failure that surfaces three phases after the cause.
@@ -327,7 +327,7 @@ The guards (`npm run hooks:verify` — offline assertions, no network, no sessio
   `implement` phase rewrite the skills that govern it.
 - **`git-guard`** — no force-push ever; no push to `dev`/`stage`/`master`/`main`; no push to any
   ref but the leased branch; no protected-branch deletes; no `remote set-url`; no `gh`/`glab`;
-  and no git command whose working directory escapes the worktree. `~/Documents/erp` is a live
+  and no git command whose working directory escapes the worktree. The work repo's main checkout is a live
   repo with a real remote on this machine, and a `git commit -am` with the wrong cwd lands there.
   `--no-verify` is deliberately allowed — the husky pre-commit hook is broken locally.
 - **`budget-gate`** — refuses a phase whose per-phase, per-ticket, per-window or per-day weighted
@@ -366,16 +366,18 @@ per Anthropic, is not relevant for billing on a subscription. The real constrain
 5-hour and 7-day usage windows — **and Oneshot shares them with your own Claude Code.** An
 unsupervised run does not cost you money; it costs you your own window at 4pm on a Thursday.
 
-- **Token ceilings (always on).** Every session's counts are weighted into input-token-equivalents
-  — `in×1 + out×5 + cache-write×1.25 + cache-read×0.1` — so one number compares across models and
-  cache states. Enforced by the conductor before claiming and by `budget-gate` at `SessionStart`.
-  One ticket runs **six Opus phases**, which is materially heavier than a One Loop iteration, so
-  `config/budgets.json` starts conservative.
+- **Token ceilings (OFF — `enabled: false` in `config/budgets.json`).** Every session's counts are
+  still weighted into input-token-equivalents — `in×1 + out×5 + cache-write×1.25 + cache-read×0.1`
+  — and recorded, so the dashboard and `report` can show what a phase and a ticket cost. But no
+  self-imposed ceiling is consulted: the per-window, per-day, per-ticket and per-phase numbers in
+  that file, and the 70% reserve below, are all behind the one switch, and it is off. A phase runs
+  until its `maxTurns` or `timeoutMin` in `config/phases.json` stops it. The only token-shaped stop
+  that stays on is the real one: a subscription limit actually being hit (next bullet).
 - **The reserve (one opt-in step).** The only first-party signal for account-wide window use is
   the `rate_limits` object Claude Code passes to an *interactive* status line; headless sessions
   never see it. Wire a harvester that tees your status-line stdin to
   `~/.claude/state/ratelimit.json` and Oneshot stands down at 70% consumed, keeping the last 30%
-  yours. Without it, the token ceilings alone apply.
+  yours — once the switch above is on. While it is off, the reserve is not consulted either.
 - **A real limit means stop, not retry.** `src/lib/quota.ts` matches the reset strings, parses the
   time, and writes `state/PAUSE-QUOTA`, which clears itself. 529/overloaded and "temporarily
   limiting requests (not your usage limit)" are explicitly *not* treated as quota events.

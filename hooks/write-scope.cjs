@@ -18,8 +18,9 @@
  *      session. C.isInside() realpath-resolves before comparing. See
  *      docs/HOOKS.md 4.1.
  *
- *   2. The context repo (~/Documents/erp). Read-only reference for prior art,
- *      and a live clone with a real remote — never written to.
+ *   2. The context repo — by default the work repo's own main checkout, the
+ *      clone worktrees are cut from. A live clone with a real remote, never
+ *      written to.
  *
  * A phase that arrives with NO scopes is refused rather than waved through.
  * Empty means the conductor's scope expansion produced nothing — a
@@ -50,7 +51,8 @@ const RUNTIME_DENY = [
 
 function contextRepo() {
   const fromEnv = process.env.CONTEXT_REPO || C.envFile('CONTEXT_REPO');
-  return C.expandTilde(fromEnv || path.join(C.HOME, 'Documents', 'erp'));
+  const work = process.env.WORK_REPO || C.envFile('WORK_REPO');
+  return C.expandTilde(fromEnv || work || path.join(C.HOME, 'Documents', 'workstreamai'));
 }
 
 /**
