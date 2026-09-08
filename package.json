@@ -25,6 +25,7 @@
     "board:once": "node scripts/board/index.mjs --once",
     "board:dry": "node scripts/board/index.mjs --once --dry-run",
     "board:stats": "node scripts/board/index.mjs --stats",
+    "board:doctor": "node scripts/board/doctor.mjs",
     "fleet:verify": "tsx scripts/verify-fleet.ts"
   },
   "dependencies": {
