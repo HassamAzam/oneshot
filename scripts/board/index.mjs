@@ -18,6 +18,7 @@ import { CFG } from './config.mjs';
 import { resolveOperator } from './identity.mjs';
 import { journalToRun, readJournal, runDirs, sessionKey, ts } from './journal.mjs';
 import { extractTranscript, parseTranscriptName } from './extract.mjs';
+import { gatesFor } from './gates.mjs';
 import { loadHookIndex } from './hooks.mjs';
 import { Outbox, atomicWrite } from './outbox.mjs';
 import { postBatch, postRetention } from './ship.mjs';
@@ -69,7 +70,10 @@ function scan() {
 
   for (const { dir, iid, archived } of runDirs(CFG.oneshotHome)) {
     const j = readJournal(dir);
-    if (j) outbox.put('runs', journalToRun(j, operator.id, archived));
+    if (j) {
+      outbox.put('runs', journalToRun(j, operator.id, archived));
+      for (const g of gatesFor(j, operator.id)) outbox.put('interventions', g);
+    }
     const tdir = join(dir, 'transcripts');
     const files = existsSync(tdir) ? readdirSync(tdir).filter((f) => f.endsWith('.jsonl')) : [];
     const seen = new Set();
@@ -171,7 +175,8 @@ if (STATS) {
   process.exit(0);
 }
 
-const held = claimLock();
+// --stats only reads; it must never be blocked by a running daemon.
+const held = STATS ? 0 : claimLock();
 if (held) {
   log(`another collector is already running (pid ${held}) using ${CFG.stateDir} — exiting. `
     + 'Two would race on the outbox and the watermark.');
