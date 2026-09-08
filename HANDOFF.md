@@ -5,7 +5,8 @@ Everything needed to take a GitLab ticket from the `Loop` label to
 2026-08-27; that run needed about a dozen human interventions, and this document
 exists because each one of them is now either automated or written down.
 
-Read the **Run it** section. The rest is for when something stops.
+New machine? Start at **Set it up**. Already running? **Run it** is the whole of
+it, and the rest is for when something stops.
 
 ---
 
@@ -25,6 +26,101 @@ person's credentials), spending outside the configured budgets, or a change to a
 system that is not `arbisoft/workstreamai`, the demo box or this repo. A run that
 BLOCKS is not one of those — it tries to repair itself first, and if it hands the
 block back, read the ticket note, fix the cause and carry on.
+
+---
+
+## Set it up
+
+Skip to **Run it** if this machine already has a working `.env`.
+
+### What arrives separately
+
+Never commit these; they belong in `.env` and nowhere else.
+
+| Value | What it is |
+|---|---|
+| `GITLAB_TOKEN` | project access token — reads tickets, opens and merges MRs |
+| `BOARD_INGEST_TOKEN` | 64 hex characters; the telemetry board's write credential |
+| `WORK_REPO`, `CONTEXT_REPO`, `ONESHOT_GITLAB_PROJECT` | which repos, and where they are on *your* disk |
+| `SLACK_BOT_TOKEN` | optional — progress cards. Oneshot runs without it |
+| a board login | separate from the ingest token; ask for one |
+
+### 1. Prerequisites
+
+```sh
+node --version      # >= 20
+git --version
+claude --version
+```
+
+**FortiClient must be connected.** GitLab and the demo box are on a gated subnet,
+and `npm install` itself can fail without it.
+
+> If `npm install` hangs with `ETIMEDOUT` while `curl` to the same host works, Node
+> is resolving `registry.npmjs.org` to IPv6 addresses the VPN black-holes. Force
+> IPv4: `NODE_OPTIONS="--require $PWD/scripts/ipv4-dns.cjs" npm install`,
+> or tether for the install.
+
+### 2. Sign in as yourself
+
+```sh
+claude login
+python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.claude.json')))['oauthAccount']['emailAddress'])"
+```
+
+If that prints somebody else's address, you are spending their subscription. Board
+attribution is unaffected — a desk is identified by its OS username precisely so a
+shared account cannot make two people post as one — but the bill is not.
+
+### 3. Clone and install
+
+```sh
+git clone https://github.com/HassamAzam/oneshot.git ~/Documents/oneshot
+cd ~/Documents/oneshot && npm install
+```
+
+`WORK_REPO` (what Oneshot commits to) and `CONTEXT_REPO` (read for prior art) must
+also exist on disk.
+
+### 4. Configure
+
+```sh
+npm run setup
+```
+
+An interactive wizard; every prompt has a working default, and `npm start` runs it
+automatically when there is no `.env`. It writes `.env` at mode 600 and offers to
+install the guardrail hooks into `~/.claude/settings.json` — **say yes**. Those hooks
+are what stop a phase pushing to a protected branch or reaching a host it should not.
+
+Then paste in the values you were sent. If you were handed a whole `.env`, check
+these three point at **your** home directory — a copied path is the most common way
+a working config fails:
+
+```
+ONESHOT_HOME=/Users/<you>/Documents/oneshot
+WORK_REPO=/Users/<you>/Documents/<work repo>
+WT_ROOT=/Users/<you>/Documents/oneshot-wt
+```
+
+Add the board, two lines in the same file:
+
+```
+BOARD_URL=https://oneshot-board.vercel.app
+BOARD_INGEST_TOKEN=<the 64-character token>
+```
+
+Leave `BOARD_OPERATOR` blank — your identity resolves to your OS username.
+
+### 5. Verify before spending anything
+
+```sh
+npm run doctor         # auth, GitLab, paths, deploy target, hooks
+npm run board:doctor   # identity, transcripts, board reachability, the collector
+```
+
+Fix what they report and re-run until both are clean. Each failure prints its own
+fix on the next line.
 
 ---
 
@@ -155,6 +251,7 @@ those rows to understand a run that already recovered, not to act.
 | `timed out ... without a single message` | Genuinely different: the session never started | `npm run deps:verify` — this is the wedged-MCP-spawn shape | yes |
 | `another conductor is already running` | A previous process still holds the lock, or died holding it | `npm run preflight` clears it when the process is gone | yes |
 | `login rejected` locally with a correct password | This venv computes **corrupted password hashes** when `psycopg2` loads before `ssl`/`hashlib` | Never write passwords from an ad-hoc shell. `ONESHOT_TEST_LOGIN` is managed outside the session for exactly this reason | no — writing that password from a session is the thing that causes it |
+| Nothing of yours on the board | The collector is not running — it is a separate process from `npm start` | `npm run board:doctor`; then `npm run board` | no — nothing is running to heal it |
 | Run stops at `deploy` | The demo box is VPN-gated and the phase will not retry through an outage | Reconnect, `npm run unblock -- <iid>`, restart | no — an outage is not a repair |
 
 ### What it will not self-heal
@@ -194,20 +291,131 @@ state/runs/<iid>/artifacts/                   screenshots, demo, reports
 state/memory/                                 cards, so the next similar ticket starts warm
 ```
 
-**In Langfuse:** one trace per run, one span per phase, with models and real
-token counts.
+**On the telemetry board** (https://oneshot-board.vercel.app): every session, the
+subagents and skills each one called, every tool call with its input and output, and
+the complete transcript — filterable by whose desk it ran on.
 
 ```sh
-npm run langfuse -- 6      # re-export one run (idempotent)
-npm run langfuse           # backfill everything on disk
+npm run board          # the daemon: notices new work in 5s, posts every 60s
+npm run board:once     # one pass, then exit
+npm run board:doctor   # why is this desk not on the board?
 ```
 
-Worth knowing: the CLI's own OpenTelemetry **does not work through the Agent
-SDK** — measured, not assumed. A session spawned by `query()` exports nothing
-while the identical environment spawned as `claude -p` exports every time, and
-it is not a flush race. So the conductor writes the trace itself from the
-journal. You lose per-tool-call spans; you keep the run, the phases, the
-timings, the models and the spend.
+**The conductor and the collector are separate processes.** `npm start` produces
+transcripts; the collector ships them. Restarting the loop does not start the
+collector — that is the single most common reason a desk shows nothing.
+
+The collector only reads `state/`, holds unsent rows in a local outbox so an offline
+laptop loses nothing, and refuses to start if another instance is already running
+against the same state directory. To survive a reboot, install it as a login item:
+
+```sh
+NODE=$(which node); cat > ~/Library/LaunchAgents/com.oneshot.board.collector.plist <<EOT
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.oneshot.board.collector</string>
+  <key>ProgramArguments</key><array><string>$NODE</string><string>$HOME/Documents/oneshot/scripts/board/index.mjs</string></array>
+  <key>WorkingDirectory</key><string>$HOME/Documents/oneshot</string>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/oneshot-board-collector.log</string>
+  <key>StandardErrorPath</key><string>/tmp/oneshot-board-collector.log</string>
+</dict></plist>
+EOT
+launchctl load ~/Library/LaunchAgents/com.oneshot.board.collector.plist
+```
+
+Why a board and not Langfuse: Claude Code's own telemetry anonymises user-defined
+subagents to the literal string `custom`, so `backend-agent` and `qa-agent` are
+indistinguishable in it — and the CLI's OpenTelemetry does not emit the tool span
+tree through the Agent SDK at all (measured: `query()` exports nothing where the
+identical environment as `claude -p` exports every time; upstream closed it as not
+planned). The transcripts on disk carry the real names, so the board is built from
+those instead.
+
+---
+
+## Reading a transcript
+
+A transcript is the complete record of one phase: every message in and out, every tool
+call with its real arguments and its real output. It is the only place that says what
+actually happened, and it is where nearly every diagnosis ends up.
+
+```
+state/runs/<iid>/transcripts/<phase>-lap<n>.jsonl
+```
+
+One JSON object per line, in order. Four line types matter:
+
+| `type` | What it is |
+|---|---|
+| `system` (`subtype: init`) | the session opening: model, cwd, which tools and MCP servers it was given |
+| `assistant` | what the model produced — text, and `tool_use` blocks with the exact arguments |
+| `user` | what the harness fed back — `tool_result` blocks with the real output |
+| `result` | the closing verdict: `subtype`, `num_turns`, `duration_ms`, the final message |
+
+That alternation *is* the agent loop: the model asks for a tool, the harness runs it,
+the output comes back, repeat. A `parent_tool_use_id` on a line means it happened
+inside a subagent rather than the main session.
+
+### The fastest way
+
+**Open the session on the board.** It renders the same file with the tool calls
+threaded, subagent lines tinted and labelled with which agent produced them, and raw
+JSON one click away per line. The Activity tab is the sequence of actions; the
+Transcript tab is the verbatim record.
+
+### At the terminal
+
+Start at the end, because the verdict is there:
+
+```sh
+T=state/runs/8/transcripts/research-lap0.jsonl
+tail -1 $T | python3 -m json.tool | head -20        # how it ended
+grep -c . $T                                        # how long it ran
+```
+
+Then the shape of the work:
+
+```sh
+# every tool call, in order
+grep -o '"name":"[A-Za-z]*","input"' $T | cut -d'"' -f4 | uniq -c
+
+# which subagents and skills were used
+grep -o '"subagent_type":"[^"]*"' $T | cut -d'"' -f4 | sort | uniq -c
+grep -o '"skill":"[^"]*"'         $T | cut -d'"' -f4 | sort | uniq -c
+
+# what it said, without the tool noise
+python3 -c "
+import json,sys
+for l in open('$T'):
+    d=json.loads(l)
+    for b in (d.get('message',{}).get('content') or []):
+        if isinstance(b,dict) and b.get('type')=='text': print(b['text'][:400],'\n---')
+"
+```
+
+### Reading the numbers
+
+Every `assistant` line carries a `usage` block, and it does not mean what it looks
+like. The model is stateless, so **every turn re-sends the whole conversation**:
+
+- `cache_read_input_tokens` — the context re-read this turn. The real size number, and
+  it grows every turn. Climbing fast means a tool is dumping bulk into the context.
+- `input_tokens` — only the genuinely new bytes. Near zero is *good*: caching is working.
+- `output_tokens` — what the model actually wrote. The one that costs.
+
+### Three shapes worth recognising
+
+| What you see | What it means |
+|---|---|
+| Many turns, tiny duration | A crash loop, not hard work. 120 turns in 5 seconds is auth failing and retrying — read the first `assistant` line and it will say so |
+| `cache_read` exploding | A tool is dumping huge output into the context; the phase will hit its cap on volume, not difficulty |
+| Few turns, hit the cap | Genuinely hard, or stuck re-reading the same files. Raise `maxTurns` only after reading why |
+
+The first row is the one that misleads. `error_max_turns` reads like "the task was too
+hard, raise the cap" — but a phase that burned 120 turns in five seconds never ran at
+all, and the cap is not the problem.
 
 ---
 
@@ -255,6 +463,7 @@ npm run check          # tsc + syntax-check every guard
 npm run hooks:verify   # 89 offline guard assertions, no network
 npm run doctor         # auth, config, paths, GitLab, deploy target
 npm run preflight      # everything above plus live credentials and stale state
+npm run board:doctor   # identity, transcripts, board reachability, the collector
 ```
 
 `tsx` compiles at process start, so a running conductor keeps executing the code
