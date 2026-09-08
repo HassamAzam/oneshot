@@ -136,7 +136,15 @@ async function retention() {
 }
 
 if (STATS) {
-  console.log(JSON.stringify({ operator, pending: outbox.counts(), files: Object.keys(state.files).length, stateDir: CFG.stateDir }, null, 2));
+  const files = Object.keys(state.files).length;
+  console.log(JSON.stringify({ operator, pending: outbox.counts(), files, stateDir: CFG.stateDir }, null, 2));
+  const notes = [...(operator.warnings ?? [])];
+  if (!files) {
+    notes.push(`no transcripts found under ${CFG.oneshotHome}/state/runs — either this checkout has not run a `
+      + 'ticket yet, or ONESHOT_HOME points somewhere else.');
+  }
+  if (!CFG.boardUrl || !CFG.ingestToken) notes.push('BOARD_URL / BOARD_INGEST_TOKEN are not both set in .env — nothing will ship.');
+  if (notes.length) { console.log('\nWarnings:'); for (const n of notes) console.log(`  ! ${n}`); console.log(); }
   process.exit(0);
 }
 
@@ -145,6 +153,7 @@ log('oneshot-board collector', {
   operator: operator.id, via: operator.github_login ? 'github' : operator.user_email ? 'claude-email' : 'hostname',
   state: CFG.stateDir, dryRun: DRY,
 });
+for (const w of operator.warnings ?? []) log(`identity warning: ${w}`);
 if (!CFG.boardUrl || !CFG.ingestToken) {
   log('BOARD_URL / BOARD_INGEST_TOKEN are not set in .env — extracting locally, shipping nothing');
 }

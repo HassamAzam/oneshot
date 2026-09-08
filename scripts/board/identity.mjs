@@ -5,19 +5,23 @@ import { execFileSync } from 'node:child_process';
 import { CFG } from './config.mjs';
 
 /**
- * Who this desk is, as a GitHub username.
+ * Who this desk is.
  *
  * Resolution order:
  *   1. BOARD_OPERATOR in .env — explicit, and the only one that needs no tooling
- *   2. `gh api user` — the authenticated GitHub login, cached for a week
- *   3. `git config github.user`
- *   4. Claude Code's authenticated account email (~/.claude.json)
- *   5. git config user.email
- *   6. os_user@hostname
+ *   2. the OS username — per-machine, always present, and needs nothing installed
+ *   3. the GitHub login from `gh`, cached for a week
+ *   4. unknown@hostname
  *
- * The gh lookup is a network call, so its answer is cached: a laptop on a slow
- * VPN must not pay for it on every scan, and must still report an identity when
- * GitHub is unreachable.
+ * The OS username leads deliberately. The obvious candidates above it are all
+ * ACCOUNT identities — the Claude Code login, the git email — and an account can
+ * be shared across desks, at which point two people silently post as one and the
+ * board attributes one person's work to the other. That is not a hypothetical:
+ * it is what happened the first time a second desk was added here. The OS user
+ * is a property of the machine, so it cannot collide that way.
+ *
+ * The account emails and the GitHub login are still recorded, as metadata worth
+ * having; they just do not decide who you are.
  */
 const CACHE_TTL_MS = 7 * 24 * 60 * 60_000;
 
@@ -69,20 +73,38 @@ function gitEmail() {
 
 export function resolveOperator() {
   const explicit = CFG.operator;
-  const github = explicit || cachedGithubLogin();
   const email = claudeEmail();
   const git = gitEmail();
   const host = hostname();
   let osUser = '';
   try { osUser = userInfo().username; } catch { /* ignore */ }
+  // Only pay for the gh lookup when it is not already settled by BOARD_OPERATOR.
+  const github = explicit ? '' : cachedGithubLogin();
 
-  const id = github || email || git || `${osUser || 'unknown'}@${host}`;
+  const id = explicit || osUser || github || `unknown@${host}`;
+
+  // Two ways a desk ends up posting under someone else's name, both silent:
+  // a shared Claude Code login, or a git identity copied along with a cloned .env.
+  // Neither is detectable from the id alone, so say so and name the one-line fix.
+  // The identity itself can no longer be borrowed, but a shared account is still
+  // worth flagging: it means someone's model usage is billing to another person.
+  const warnings = [];
+  if (!osUser && !explicit) {
+    warnings.push(`could not read the OS username — identity fell back to "${id}". Set BOARD_OPERATOR in .env.`);
+  }
+  const local = (email || '').split('@')[0].toLowerCase();
+  if (local && osUser && !local.includes(osUser.toLowerCase()) && !osUser.toLowerCase().includes(local)) {
+    warnings.push(`this machine's user is "${osUser}" but Claude Code is signed in as "${email}" — `
+      + 'telemetry is attributed correctly, but that account\'s usage bills to its owner.');
+  }
+
   return {
     id,
-    github_login: github || null,
+    github_login: github || explicit || null,
     user_email: email || null,
     git_email: git || null,
     hostname: host,
     os_user: osUser || null,
+    warnings,
   };
 }
