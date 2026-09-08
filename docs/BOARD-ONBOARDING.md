@@ -8,8 +8,11 @@ subagents to the literal string `custom`, so `backend-agent` and `qa-agent` are
 indistinguishable in it. The collector reads the transcripts Oneshot already writes
 to `state/runs/<iid>/transcripts/`, where the real names are.
 
-This document is written to be handed to Claude Code. Work through it in order; each
-step verifies before moving on.
+This document is written to be handed to Claude Code, and assumes Oneshot already
+runs on this machine. Setting up from scratch instead? Use
+[`docs/ONBOARDING.md`](ONBOARDING.md), which covers everything including this.
+
+Work through it in order; each step verifies before moving on.
 
 ## Standing authorization — do not stop to ask
 
