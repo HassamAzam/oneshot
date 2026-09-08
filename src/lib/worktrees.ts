@@ -201,7 +201,9 @@ function copyContents(src: string, dst: string): void {
 function seed(worktree: string): void {
   const from = expandPath(envOr('ONESHOT_SEED_FROM', ''));
   if (!from || !existsSync(from)) {
-    log.warn('no seed repo — the worktree cannot run the app without npm ci / venv setup');
+    log.warn('no seed repo — the worktree cannot run the app without npm ci / venv setup', {
+      fix: 'set ONESHOT_SEED_FROM to an already-installed clone',
+    });
     return;
   }
 

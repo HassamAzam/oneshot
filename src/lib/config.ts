@@ -84,6 +84,13 @@ export interface ProjectConfig {
      */
     review: string;
   };
+  /**
+   * Repo-relative path fragments whose modules are too consequential to ship
+   * unwatched. A run whose plan or diff touches one gets the `Review` label's
+   * gates whether or not anybody remembered to apply the label — see
+   * `highScrutinyHits()` in src/conductor/reviewgate.ts. Empty disables it.
+   */
+  highScrutinyPaths: string[];
   preserveLabels: string[];
   branches: { base: string; protected: string[]; prefix: string; pattern: string };
   promotions: Array<{ from: string; to: string; auto: boolean }>;

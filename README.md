@@ -75,6 +75,10 @@ Three things fall out of that:
   15  close           code      label → Ready For Deployment, teardown
 
   ∥  runs concurrently with the phase above it
+
+  ⟨R⟩ the optional `Review` label adds three human pauses to this same list —
+      before 3, before 5, and inside 9. Nothing else changes: no phase is
+      added, removed or reordered. See "Optional human review gates".
 ```
 
 `merge` and `close` are **code, not sessions**. No model holds a merge tool, which is why One
@@ -137,6 +141,14 @@ mode, which asked and read on the ticket instead — reviewing a plan or a test-
 natural where the run's own status already lives, and the ticket stays a record of what happened
 rather than a second inbox to poll.
 
+```
+ … plan ──▶[ R1 approve the plan ]──▶ implement ──▶ testcases ──▶[ R2 approve the case list ]──▶ review …
+ … mr ──▶[ R3 a human merges the MR ]──▶ deploy ──▶ qa ──▶ demo ──▶ close
+
+ R1, R2   a Slack reply of `approved` releases the pause; anything else is feedback
+ R3       no keyword — the MR's own state turning `merged` is the signal
+```
+
 1. **Plan approval** — after phase 2 (`plan`), before phase 3 (`implement`). Oneshot posts the
    plan itself into the ticket's Slack thread and the run **parks**.
 2. **Test-case approval** — after phase 4 (`testcases`), before phase 5 (`review`). The list of
@@ -155,6 +167,20 @@ rather than a second inbox to poll.
    own state reads `merged`, whoever merged it and whenever, then the run carries on into
    `deploy → qa` by itself. Because that decision is measured in hours, the question is put to
    GitLab every 30 minutes (`MERGE_POLL_MS`); ticks in between park without a network round trip.
+**The label is not the only trigger.** A person applies it, so it is forgettable — and the
+tickets most worth pausing on are exactly the ones nobody remembers to label. So the gates also
+arm themselves when a run *touches* anything in `highScrutinyPaths` (config/project.json):
+`apps/auth/`, `apps/payroll/`, `apps/leaves/`, `apps/project_logs/`, `common/permissions.py` —
+the same paths the ERP's own `security.md` marks "escalate immediately".
+
+The check runs against what the run has declared it will touch: the `files` on each plan step at
+the plan gate, plus `implement`'s reported `filesChanged` by the test-case gate. Evaluating it
+twice is deliberate — a plan that swore off payroll and a diff that edited it anyway is precisely
+the case worth catching, and only the second evaluation sees it. When paths arm the gates,
+`reviewMode` is persisted on the journal so the pure-code `merge` phase honours a pause no label
+ever asked for, and the request says which path armed it rather than claiming a label that is not
+there. Empty the array to switch the behaviour off.
+
 **Reply `approved`** (that exact word, case-insensitive, trimmed — not a substring of a longer
 reply) in the thread to release a pause. **Any other reply is feedback, and the two gates treat it
 differently:**
@@ -255,8 +281,28 @@ failure three phases into a real ticket.
 - **Kill switches:** `touch state/PAUSE` freezes everything, including sessions already mid-phase.
   `state/PAUSE-QUOTA` is the machine's own park after a usage limit and clears itself — a
   separate file precisely so nothing automatic ever lifts a pause you set.
+- **Paths:** the four path defaults are one machine's layout (`~/Documents/...`), so a fresh
+  clone almost certainly needs to override them. Note the third is **not** named after its label:
+
+  | Env var | Default | What it is |
+  |---|---|---|
+  | `WORK_REPO` | `~/Documents/workstreamai` | the clone phases actually commit in |
+  | `CONTEXT_REPO` | `~/Documents/erp` | read-only clone for research |
+  | `ONESHOT_SKILLS_ROOT` | `~/Documents/erp/.claude` | skills handed to the phases |
+  | `WT_ROOT` | `~/Documents/oneshot-wt` | where per-run worktrees are leased |
+  | `ONESHOT_SEED_FROM` | _(unset)_ | an already-installed clone whose `node_modules`/`venv` are linked into each new worktree, with `ONESHOT_SEED_LINKS` / `ONESHOT_SEED_COPIES` naming what to carry |
+
+  Leave `ONESHOT_SEED_FROM` unset and a leased worktree has no dependencies, so `verify`
+  (phase 6) cannot start the app — a failure that surfaces three phases after the cause.
+  `doctor` now warns about this at boot instead.
+
+  A missing `SKILLS_ROOT` also fails `hooks:verify`'s symlink test, so one wrong path reports as
+  two failures — fix the path and both clear.
 - **Dry run:** `DRY_RUN=1 npm start` runs every phase and denies every write. This is how you
-  watch the pipeline drive a real ticket without touching it.
+  watch the pipeline drive a real ticket without touching it. Its journal goes to
+  `state-dry/state/runs`, not `state/runs`, so view it with a dashboard that resolves the same
+  home: `DRY_RUN=1 ONESHOT_DASHBOARD_PORT=8788 npm run dashboard`. A dry run will not appear on
+  the ordinary dashboard, and neither will anything that did not go through the conductor.
 
 ## Guardrails
 

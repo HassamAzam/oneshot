@@ -75,8 +75,9 @@ import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import { closePhase, mergePhase } from './codephases.js';
 import {
-  appendEdgeCases, checkApprovalGate, planApprovalRequestBody, planApprovedRecordBody,
-  reviewLabelPresent, testcasesApprovalRequestBody, testcasesApprovedRecordBody,
+  appendEdgeCases, checkApprovalGate, declaredFiles, gatesApply, planApprovalRequestBody,
+  planApprovedRecordBody, reviewLabelPresent, testcasesApprovalRequestBody,
+  testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { Ticket, TestCase } from '../phases/types.js';
@@ -407,7 +408,13 @@ export async function runTicket(
   // next claim rather than freezing whatever it was when the run started.
   // Stored on the journal (not just held locally) because the pure-code
   // `merge` phase has no ticket object of its own to read labels from.
-  const reviewMode = reviewLabelPresent(ticket.labels);
+  // Label OR guarded paths. On a fresh run only the label can be known here —
+  // nothing has declared a file yet — so the path half is re-evaluated at each
+  // gate below and persisted when it fires, which is what lets the pure-code
+  // `merge` phase honour a gate that no label ever asked for.
+  const reviewMode = reviewLabelPresent(ticket.labels)
+    || gatesApply(ticket.labels, declaredFiles(readArtifact(iid, 'plan.json'),
+      readArtifact(iid, 'implement.json'))).on;
   if (j.reviewMode !== reviewMode) { j = updateJournal(iid, { reviewMode }) ?? j; }
 
   // Waiting on a person to merge is the one park where re-entering the
@@ -533,12 +540,17 @@ export async function runTicket(
     // skips straight past this. One quick Slack read, never a loop — see
     // src/conductor/reviewgate.ts's file header for why, and for why Slack
     // rather than GitLab is what this polls.
+    const planGate = gatesApply(ticket.labels, declaredFiles(prior.plan ?? null, null));
     if (phase.name === 'implement' && phaseSucceeded(iid, 'plan')
-      && reviewLabelPresent(ticket.labels) && !j.planApproval?.approved) {
+      && planGate.on && !j.planApproval?.approved) {
+      if (planGate.hits.length && !j.reviewMode) {
+        j = updateJournal(iid, { reviewMode: true }) ?? j;
+        log.warn('review gates armed by guarded paths, not by the label', { iid, hits: planGate.hits });
+      }
       const gate = await checkApprovalGate({
         iid,
         gate: 'plan',
-        requestBody: planApprovalRequestBody(prior.plan ?? null),
+        requestBody: planApprovalRequestBody(prior.plan ?? null, triggerLine(planGate)),
         onApproved: async () => { await addIssueNote(iid, planApprovedRecordBody()); },
       });
       j = readJournal(iid) ?? j;
@@ -580,14 +592,20 @@ export async function runTicket(
     // everything a reviewer adds is carried into `review`, the MR and the `qa`
     // run that follows. Taken after `qa`, the same reply would land on merged
     // code and could only become a follow-up ticket.
+    const caseGate = gatesApply(ticket.labels,
+      declaredFiles(prior.plan ?? null, prior.implement ?? null));
     if (phase.name === 'review' && phaseSucceeded(iid, 'testcases')
-      && reviewLabelPresent(ticket.labels) && !j.testcasesApproval?.approved) {
+      && caseGate.on && !j.testcasesApproval?.approved) {
       const cases = (prior.testcases as { cases?: TestCase[] } | null)?.cases ?? [];
+      if (caseGate.hits.length && !j.reviewMode) {
+        j = updateJournal(iid, { reviewMode: true }) ?? j;
+        log.warn('review gates armed by guarded paths, not by the label', { iid, hits: caseGate.hits });
+      }
 
       const gate = await checkApprovalGate({
         iid,
         gate: 'testcases',
-        requestBody: testcasesApprovalRequestBody(cases),
+        requestBody: testcasesApprovalRequestBody(cases, triggerLine(caseGate)),
         // Appending runs on EVERY round that carried replies, approved or
         // not, and always before onApproved — a reviewer who lists an edge
         // case and signs off in the same breath gets the case recorded and

@@ -26,6 +26,17 @@
     "review": "Review"
   },
 
+  "_comment_high_scrutiny": "Paths the ERP's own .claude/rules/security.md marks 'escalate immediately'. A ticket whose PLAN or DIFF touches one gets the Review gates even without the Review label, because the label is human-applied and therefore forgettable — and the tickets most worth pausing on are exactly the ones nobody remembers to label. Matching is a plain substring test against repo-relative paths, so 'apps/payroll/' catches everything under it. Empty this array to switch the behaviour off entirely. Note the last two entries: authentication on the FRONTEND has no single directory the way apps/auth/ does, so its entry points are listed by name. Found the hard way — ticket #8 is an auth-context bug with 600+ production occurrences, and a backend-only list would not have gated it.",
+  "highScrutinyPaths": [
+    "apps/auth/",
+    "apps/payroll/",
+    "apps/leaves/",
+    "apps/project_logs/",
+    "common/permissions.py",
+    "frontend/src/components/login/",
+    "frontend/src/components/AuthenticatedComponent.js"
+  ],
+
   "_comment_markers": "Persistent labels Oneshot must copy through untouched on any label write. A label swap is one update_issue call carrying the full array, so anything not listed here and not the entry/exit label would be silently dropped.",
   "preserveLabels": ["AI", "Agentic", "Minor", "Major", "No QA", "Design"],
 
