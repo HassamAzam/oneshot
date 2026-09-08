@@ -537,9 +537,9 @@ export async function runTicket(
     // The Review label's plan-approval gate — opt-in, additive, and checked
     // only once per run: `planApproval.approved` latches true and every later
     // pass (including an ordinary review/verify cycle back to `implement`)
-    // skips straight past this. One quick Slack read, never a loop — see
-    // src/conductor/reviewgate.ts's file header for why, and for why Slack
-    // rather than GitLab is what this polls.
+    // skips straight past this. One quick GitLab read, never a loop — see
+    // src/conductor/reviewgate.ts's file header for why, and for why the
+    // ticket rather than Slack is what this polls.
     const planGate = gatesApply(ticket.labels, declaredFiles(prior.plan ?? null, null));
     if (phase.name === 'implement' && phaseSucceeded(iid, 'plan')
       && planGate.on && !j.planApproval?.approved) {
@@ -557,8 +557,8 @@ export async function runTicket(
       if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
       if (gate.verdict === 'pending') {
         return finish(j, 'parked',
-          `awaiting plan approval — reply \`approved\` in the ticket's Slack thread to continue, ` +
-          'or reply there with feedback to have the plan revised');
+          'awaiting plan approval — a dev reviewer comments `approved` on the ticket to continue, ' +
+          'or comments feedback there to have the plan revised');
       }
       if (gate.verdict === 'feedback') {
         const planIdx = list.findIndex((p) => p.name === 'plan');
@@ -569,7 +569,7 @@ export async function runTicket(
           // would otherwise never post the reviewer's requested revision to
           // the ticket. This is the ordinary, Review-label-agnostic publish
           // flow (src/lib/publish.ts) doing what it always does; the gate
-          // itself never posts the revised plan anywhere but Slack.
+          // itself only ever posts its own request comment.
           const withoutPlan = (j.published ?? []).filter((k) => k !== 'plan');
           j = updateJournal(iid, { published: withoutPlan }) ?? j;
           i = planIdx;
@@ -584,7 +584,7 @@ export async function runTicket(
     // and before phase 5 (`review`). Unlike the plan gate, a non-`approved`
     // reply here never cycles a phase: it is read as edge case(s) to fold into
     // the test-case list, appended in place by `appendEdgeCases` (mechanical,
-    // no model), and the SAME gate asks again in the SAME thread with the
+    // no model), and the SAME gate asks again on the SAME ticket with the
     // updated list. The run just stays parked between rounds; only `approved`
     // moves the index.
     //
@@ -623,8 +623,8 @@ export async function runTicket(
       if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
       if (gate.verdict !== 'approved') {
         return finish(j, 'parked',
-          `awaiting test-case approval — reply \`approved\` in the ticket's Slack thread to ` +
-          'continue to `review`, or reply there with edge case(s) to add to the test list');
+          'awaiting test-case approval — a QA reviewer comments `approved` on the ticket to ' +
+          'continue to `review`, or comments edge case(s) there to add to the test list');
       }
       // gate.verdict === 'approved' — fall through into 'review' below.
     }

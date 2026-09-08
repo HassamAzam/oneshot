@@ -69,15 +69,23 @@ export interface Remediation {
  * `requestTs` is the "since" marker, and it names a Slack message now rather
  * than a GitLab note. Null means the run still owes a fresh request in the
  * ticket's Slack thread (armed the next time the gate is checked); non-null
- * means a request is standing there and the gate is polling
- * `conversations.replies` for a human reply newer than this ts. `feedback`
- * accumulates every non-`approved` reply, oldest first, uncapped — the whole
- * point is no limit on how many rounds a reviewer gets. GitLab receives only
- * an audit note once a round is actually approved; it is never where the
- * decision is read from.
+ * means a request is standing there and the gate is polling the ticket's
+ * comments for a reply newer than it. `feedback` accumulates every
+ * non-`approved` reply, oldest first, uncapped — the whole point is no limit
+ * on how many rounds a reviewer gets.
+ *
+ * `requestNoteId` is the GitLab note id of the standing request and is the
+ * live watermark; `requestTs` is the Slack thread ts this gate used to arm
+ * with, kept only so a journal written before the gates moved to GitLab still
+ * parses. A run mid-flight across that change has a `requestTs` and no
+ * `requestNoteId`, which reads as "not yet armed" and simply re-asks on the
+ * ticket — the one safe interpretation, since the two ids are not
+ * interchangeable and comparing a note id against a Slack ts would match
+ * nothing forever.
  */
 export interface ReviewGateState {
   requestTs: string | null;
+  requestNoteId?: number | null;
   approved: boolean;
   feedback: string[];
 }

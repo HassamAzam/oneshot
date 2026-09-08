@@ -3,7 +3,7 @@
 
   "channel": "",
 
-  "_comment_history": "The opt-in Review label's plan/test-case gates (src/conductor/reviewgate.ts) read replies back out of the ticket's Slack thread via conversations.replies, which needs channels:history (public channel) or groups:history (private channel) on the bot token IN ADDITION to chat:write. A token cannot grant itself a scope, so add it in the Slack API console (OAuth & Permissions -> Bot Token Scopes) and reinstall the app before putting the Review label on a ticket -- without it the gates just sit 'pending' forever, never approved.",
+  "_comment_history": "NO LONGER REQUIRED, and deliberately recorded rather than deleted. The review gates USED to read their verdict out of the ticket's Slack thread via conversations.replies, which needed channels:history (public channel) or groups:history (private channel) on the bot token in addition to chat:write. They now ask and read on the GitLab ticket instead (src/conductor/reviewgate.ts), because approval is restricted to named GitLab usernames in config/reviewers.json and a Slack reply carries only a Slack user id, which cannot be matched against one. chat:write alone is enough for everything Oneshot still posts here. If a history scope is already granted it is harmless; nothing reads it.",
 
   "_comment_card": "The root message per ticket is a live status card, EDITED IN PLACE as phases complete. Thread replies are milestones only. Without this, a 90-minute implement phase produces either silence or spam.",
   "card": {
