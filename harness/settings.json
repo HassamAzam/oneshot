@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__gitlab-mcp__create_merge_request|mcp__gitlab-mcp__update_merge_request",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/scripts/mr_metadata_gate.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/scripts/migration_check_hook.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "backend-agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/scripts/migration_check_hook.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
