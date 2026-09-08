@@ -12,7 +12,7 @@
  * and state/hook-events.jsonl; writes nothing into state/. Its own bookkeeping
  * lives in BOARD_STATE_DIR (default ~/.oneshot-board).
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CFG } from './config.mjs';
 import { resolveOperator } from './identity.mjs';
@@ -28,6 +28,29 @@ const DRY = CFG.dryRun || args.has('--dry-run');
 const STATS = args.has('--stats');
 
 mkdirSync(CFG.stateDir, { recursive: true });
+
+/**
+ * One collector per state directory.
+ *
+ * Two of them share an outbox and a watermark file and will race on both: one
+ * advances the watermark past lines the other has not shipped, and the loser's
+ * write wins. The lock is a pid file, checked for liveness rather than trusted —
+ * a killed collector must not wedge the next one out.
+ */
+const LOCK = join(CFG.stateDir, 'collector.pid');
+function claimLock() {
+  try {
+    const prev = Number(readFileSync(LOCK, 'utf8').trim());
+    if (prev && prev !== process.pid) {
+      try { process.kill(prev, 0); return prev; } catch { /* stale — the process is gone */ }
+    }
+  } catch { /* no lock file yet */ }
+  try { writeFileSync(LOCK, String(process.pid)); } catch { /* best effort */ }
+  return 0;
+}
+function releaseLock() {
+  try { if (Number(readFileSync(LOCK, 'utf8').trim()) === process.pid) unlinkSync(LOCK); } catch { /* ignore */ }
+}
 const STATE_FILE = join(CFG.stateDir, 'state.json');
 let state = { files: {} };
 if (existsSync(STATE_FILE)) {
@@ -148,6 +171,13 @@ if (STATS) {
   process.exit(0);
 }
 
+const held = claimLock();
+if (held) {
+  log(`another collector is already running (pid ${held}) using ${CFG.stateDir} — exiting. `
+    + 'Two would race on the outbox and the watermark.');
+  process.exit(0);
+}
+
 log('oneshot-board collector', {
   oneshot: CFG.oneshotHome, board: CFG.boardUrl || '(unset)',
   operator: operator.id, via: operator.github_login ? 'github' : operator.user_email ? 'claude-email' : 'hostname',
@@ -159,12 +189,12 @@ if (!CFG.boardUrl || !CFG.ingestToken) {
 }
 scan();
 await flush();
-if (ONCE) { log('once: done', outbox.counts()); process.exit(0); }
+if (ONCE) { releaseLock(); log('once: done', outbox.counts()); process.exit(0); }
 await retention();
 setInterval(() => retention(), 24 * 60 * 60_000);
 
 setInterval(scan, CFG.scanMs);
 setInterval(() => flush().catch((e) => log(`flush error: ${e.message}`)), CFG.flushMs);
-const stop = () => { outbox.persist(); atomicWrite(STATE_FILE, JSON.stringify(state)); log('stopped', outbox.counts()); process.exit(0); };
+const stop = () => { outbox.persist(); atomicWrite(STATE_FILE, JSON.stringify(state)); releaseLock(); log('stopped', outbox.counts()); process.exit(0); };
 process.on('SIGINT', stop);
 process.on('SIGTERM', stop);
