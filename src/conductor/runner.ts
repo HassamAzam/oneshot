@@ -50,7 +50,8 @@ import {
 } from '../lib/config.js';
 import { claimNoteBody, readOwnership, settleMs } from '../lib/claims.js';
 import {
-  archiveRun, artifactPath, ensureRunDirs, failedLapsOf, lapsOf, phaseSucceeded, readArtifact,
+  archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
+  phaseSucceeded, readArtifact,
   readJournal, recordPhase, recordRemediation, reapScratch, updateJournal, writeArtifact,
   writeJournal,
   type PhaseRecord, type Remediation, type RunJournal,
@@ -296,11 +297,53 @@ type Control =
   | { kind: 'cycle'; jumpTo: number; windowEnd: number }
   | { kind: 'stop'; status: 'blocked' | 'aborted' | 'parked'; reason: string };
 
-function statusForFailure(p: PhaseConfig): PhaseRecord['status'] {
+function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] {
   if (p.onFail === 'skip') return 'skipped';
   if (p.onFail === 'warn') return 'warned';
+  // Recorded before the onFail policy is consulted, because the policy is about
+  // what a WRONG RESULT means and an infra death produced no result at all.
+  if (infra) return 'infra';
   return 'failed';
 }
+
+/**
+ * The one-screen account of a run that did not finish.
+ *
+ * A stopped run previously said only what went wrong, on a single line that
+ * long reasons truncate. What a person actually asks next is "which phase",
+ * "how did it get there" and "what do I do" — so the phase history, the
+ * attempts already spent and the recovery command are printed together, with
+ * infra deaths marked as such so nobody spends time investigating a phase that
+ * was merely cancelled.
+ */
+function logStopDetail(journal: RunJournal, headline: string): void {
+  const laps = journal.phases.filter((p) => p.status === 'failed').length;
+  const infra = journal.phases.filter((p) => p.status === 'infra').length;
+  const trail = journal.phases.slice(-6)
+    .map((p) => `${p.phase}:${p.status}${p.status === 'infra' ? '(no lap)' : ''}`)
+    .join(' → ');
+
+  log.info(`   ${headline} at '${journal.stoppedPhase ?? 'no phase'}'`, {
+    run: journal.runId,
+    failedLaps: laps,
+    infraDeaths: infra,
+  });
+  if (trail) log.info(`   trail  ${trail}`);
+  if (journal.blockedWhy) log.info(`   why    ${journal.blockedWhy.split('\n')[0]}`);
+  if (journal.status === 'blocked') {
+    log.info(`   next   npm run unblock -- ${journal.iid}   (drops the failed records, re-labels)`);
+  }
+}
+
+/**
+ * Free re-attempts a phase gets for deaths that were never its own verdict.
+ *
+ * Two, because the failures this exists for are one-offs — a conductor
+ * restart, a cancelled session, a machine hiccup — and anything that survives
+ * two clean re-attempts is a real problem that should reach a person through
+ * the ordinary onFail policy rather than spin here.
+ */
+const MAX_INFRA_ATTEMPTS = 2;
 
 interface PhaseResult {
   cfg: PhaseConfig;
@@ -852,7 +895,7 @@ export async function runTicket(
       recordPhase(iid, {
         phase: r.cfg.name,
         lap: r.lap,
-        status: r.out.ok ? 'ok' : statusForFailure(r.cfg),
+        status: r.out.ok ? 'ok' : statusForFailure(r.cfg, r.out.infra),
         startedAt: r.startedAt,
         endedAt: r.endedAt,
         model: modelFor(r.cfg),
@@ -885,7 +928,12 @@ export async function runTicket(
           // gracefully through afterFailure.
           claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.out.blocked}` }, r.cfg.name);
         } else {
-          claim(afterFailure(r.cfg, r.index, r.out.blocked ?? r.out.error ?? 'phase failed'), r.cfg.name);
+          claim(
+            afterFailure(
+              r.cfg, r.index, r.out.blocked ?? r.out.error ?? 'phase failed', r.out.infra,
+            ),
+            r.cfg.name,
+          );
         }
         continue;
       }
@@ -984,7 +1032,7 @@ export async function runTicket(
       worktree: wt, port, branch,
       signal: opts.signal,
     });
-    phaseEnd(rowId, out.ok ? 'ok' : statusForFailure(p), {
+    phaseEnd(rowId, out.ok ? 'ok' : statusForFailure(p, out.infra), {
       turns: out.turns,
       weighted: out.weighted,
       sessionId: out.sessionId,
@@ -1057,12 +1105,33 @@ export async function runTicket(
     return afterFailure(p, index, done.error ?? 'phase failed');
   }
 
-  /** What a failed phase means for the index. The onFail policy, and nothing else. */
-  function afterFailure(p: PhaseConfig, index: number, why: string): Control {
+  /**
+   * What a failed phase means for the index: an infra re-attempt if the phase
+   * died rather than judged, and otherwise the onFail policy and nothing else.
+   */
+  function afterFailure(p: PhaseConfig, index: number, why: string, infra = false): Control {
     // A pause is a freeze, not a failure. No label swap, no alert, no lap
     // spent: the run stops where it stands and the same journal resumes it.
     if (existsSync(PAUSE)) {
       return { kind: 'stop', status: 'aborted', reason: 'paused mid-phase — resumes when unpaused' };
+    }
+
+    // An infra death gets re-attempted AS IT WAS, ahead of the onFail policy.
+    // The policy answers "the work came back wrong, now what" — cycle to
+    // implement, block, abort — and none of those answers fit a phase that was
+    // cancelled or killed before it could produce any work to be wrong about.
+    // Past the cap it falls through and is treated exactly as before.
+    if (infra && p.onFail !== 'skip' && p.onFail !== 'warn') {
+      const spent = infraAttemptsOf(iid, p.name);
+      if (spent <= MAX_INFRA_ATTEMPTS) {
+        log.warn(`${p.name} died of infrastructure — re-attempting, no lap spent`, {
+          attempt: spent, of: MAX_INFRA_ATTEMPTS, why: why.slice(0, 120),
+        });
+        return { kind: 'retry', at: index };
+      }
+      log.warn(`${p.name} died of infrastructure ${spent} times — treating as a real failure`, {
+        why: why.slice(0, 120),
+      });
     }
 
     if (p.onFail === 'skip' || p.onFail === 'warn') {
@@ -1252,7 +1321,7 @@ export async function runTicket(
       branch,
       signal: opts.signal,
     });
-    phaseEnd(rowId, out.ok ? 'ok' : statusForFailure(cfgR), {
+    phaseEnd(rowId, out.ok ? 'ok' : statusForFailure(cfgR, out.infra), {
       turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
       detail: out.error ?? out.blocked ?? undefined,
     });
@@ -1271,7 +1340,7 @@ export async function runTicket(
     recordPhase(iid, {
       phase: cfgR.name,
       lap,
-      status: out.ok ? 'ok' : statusForFailure(cfgR),
+      status: out.ok ? 'ok' : statusForFailure(cfgR, out.infra),
       startedAt,
       endedAt: Date.now(),
       model: modelFor(cfgR),
@@ -1491,6 +1560,13 @@ export async function runTicket(
     journal.status = status;
     if (reason) journal.blockedWhy = reason;
     if (status === 'blocked') journal.blockedAt = Date.now();
+    // Where it stopped, not only why. The last record that is not a success is
+    // the phase a person needs to look at; a run that stopped between phases
+    // (a yielded claim, a pause) has none, and says so rather than guessing.
+    const lastBad = [...journal.phases].reverse()
+      .find((p) => p.status !== 'ok' && p.status !== 'skipped' && p.status !== 'warned');
+    journal.stoppedPhase = lastBad?.phase ?? journal.phases[journal.phases.length - 1]?.phase;
+    journal.stoppedAt = Date.now();
     writeJournal(journal);
     updateRun(journal.runId, {
       status, ended_at: Date.now(), blocked_why: reason ?? null, owner_seen_at: Date.now(),
@@ -1527,6 +1603,7 @@ export async function runTicket(
         await addIssueNote(journal.iid, `Oneshot stopped: **${reason}**\n\nRun \`${journal.runId}\`.`);
       }
       log.error(`■ #${journal.iid} BLOCKED — ${reason}`);
+      logStopDetail(journal, 'BLOCKED');
     } else if (status === 'done') {
       if (!DRY_RUN) await swapLabel(journal.iid, [cfg.labels.entry], [cfg.labels.exit]);
       // The claim note has done its job — with the exit label on, nothing
@@ -1542,6 +1619,7 @@ export async function runTicket(
       log.ok(`■ #${journal.iid} done`);
     } else {
       log.warn(`■ #${journal.iid} stopped — ${reason ?? 'aborted'}`);
+      logStopDetail(journal, status === 'parked' ? 'PARKED' : 'ABORTED');
     }
 
     // The readable account of what happened: which phases ran, which subagents

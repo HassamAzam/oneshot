@@ -30,7 +30,18 @@ const RUNS_ARCHIVE = join(STATE, 'runs-archive');
 export interface PhaseRecord {
   phase: string;
   lap: number;
-  status: 'ok' | 'failed' | 'skipped' | 'refused' | 'warned';
+  /**
+   * 'infra' is a failure of the MACHINERY, not a verdict about the work: a
+   * conductor cancellation, a session killed by a signal, a wall-clock
+   * timeout. It is separated from 'failed' because the two want opposite
+   * responses — a verdict means the work is wrong and the run should cycle
+   * back to `implement` and try again differently, while an infra death means
+   * the phase never got to say anything and should simply be re-attempted as
+   * it was. Conflating them is how a run spends its cycle budget on deaths
+   * that produced no findings, then blocks on the bookkeeping rather than on
+   * anything wrong with the ticket.
+   */
+  status: 'ok' | 'failed' | 'infra' | 'skipped' | 'refused' | 'warned';
   startedAt: number;
   endedAt: number;
   model?: string;
@@ -135,6 +146,20 @@ export interface RunJournal {
   deployedSha?: string;
   blockedWhy?: string;
   /**
+   * The phase the run stopped at, recorded for EVERY terminal status rather
+   * than only for a block.
+   *
+   * `blockedWhy` alone answers "why" but never "where", and the two together
+   * are what makes a stopped run legible without opening the journal and
+   * reading the phase array by eye — which is the only way it could be
+   * answered before. Set for aborted and parked runs too, because "yielded the
+   * claim" and "waiting on a human merge" are just as much things somebody has
+   * to be able to see at a glance.
+   */
+  stoppedPhase?: string;
+  /** When the run reached its terminal status, whatever that status was. */
+  stoppedAt?: number;
+  /**
    * When the run was blocked. A block is a request for a human, so a resume
    * that ignores it just burns the same budget on the same failure — the
    * conductor honours a cooldown against this stamp before it re-claims.
@@ -229,7 +254,24 @@ export function lapsOf(iid: number, phase: string): number {
 export function failedLapsOf(iid: number, phase: string): number {
   const j = readJournal(iid);
   if (!j) return 0;
+  // 'infra' is deliberately not counted. A phase cancelled by the conductor or
+  // killed by a signal never reached a verdict, so charging it a lap spends the
+  // budget for revising the work on an attempt that never assessed any.
   return j.phases.filter((p) => p.phase === phase && p.status === 'failed').length;
+}
+
+/**
+ * How many times this phase has died of infrastructure at its current lap.
+ *
+ * Bounded separately from laps so an infra retry cannot loop forever: a phase
+ * that times out every single attempt is not an infra blip, it is a phase whose
+ * budget or workload is wrong, and past the cap it degrades to the ordinary
+ * onFail policy so a person still hears about it.
+ */
+export function infraAttemptsOf(iid: number, phase: string): number {
+  const j = readJournal(iid);
+  if (!j) return 0;
+  return j.phases.filter((p) => p.phase === phase && p.status === 'infra').length;
 }
 
 /** True if the phase completed successfully at any lap — the resume check. */

@@ -110,6 +110,22 @@ the deploy, so a lap back to `implement` is worth nothing unless `mr → merge �
 on the way forward. They do: a cycle marks every phase in the window as owing a re-run, which is
 also why a lap costs so much more from phase 11 than from phase 5.
 
+**A death is not a verdict.** A phase that is cancelled by the conductor, killed by a signal, or
+run out of wall clock never reached an opinion about the work, so it is recorded `infra` rather
+than `failed` and re-attempted in place. It costs no lap and triggers no cycle: cycling back to
+`implement` answers "the work came back wrong", and a session that died before producing any work
+has said nothing to be wrong about. Two free re-attempts, after which it degrades to the phase's
+ordinary `onFail` policy so a person still hears about it. This is what stops an interrupted run
+from spending a phase's whole cycle budget on deaths that produced no findings, and then blocking
+on the bookkeeping rather than on anything wrong with the ticket.
+
+**A long phase says it is still alive.** Every minute, a session phase logs its turns and elapsed
+time against their caps — `verify working turns=120/300 elapsed=47m/120m messages=1231` — because
+a phase is otherwise silent for up to its entire timeout, and "working" and "wedged" look
+identical from outside. A run that stops prints where it stopped, the trail of the last few
+phases, and the recovery command, so the question "why did it stop" is answered on the console
+rather than by reading the journal by hand.
+
 **Full auto.** There are no human gates. The only thing that stops a run is `BLOCKED` — a deploy
 the agent itself gave up on, a cycle cap exhausted, an unresolvable MR conflict, GitLab
 unreachable past the breaker, or a quota park. That posts an @mention and applies `Needs Human`.
