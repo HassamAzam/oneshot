@@ -8,45 +8,87 @@ description: Bring a checkout's app up on a leased port and execute an existing 
 Execution, not authorship. The case list is an input. You establish what is true
 about this branch, in a browser, and record it.
 
-## Bring the app up first
+## Bring the app up with the harness. Do not do it by hand.
 
-Start the server before you read anything else — the first compile is the long
-pole and it can run while you study the cases.
+```
+node .claude/skills/local-browser-verify/scripts/harness.cjs up
+```
 
-- **One process, one origin.** `PORT=<leased> npm start` from the worktree
-  serves the frontend and the backend together; `http://localhost:<leased>/` is
-  the entry point. There is no separate API port. The leased port is in
-  `ONESHOT_PORT`; never pick your own — another run holds the others.
-- **It must be a server YOU started from THIS worktree.** The leased port is
-  handed to you free. If something already answers on `ONESHOT_PORT` before you
-  start your own — a foreign dev server, an orphan from a crashed run — do NOT
-  drive it. It is almost certainly a different checkout, and then every value
-  you record is about the wrong code while reading green. Confirming "HTTP 200"
-  is not confirming it is *your* build. Start your own; if the port cannot be
-  freed, report it occupied and stop rather than verify a stranger's server.
-- **Not `manage.py runserver`.** That serves the backend alone and exists for
-  Odoo-wired one-offs.
-- **Point the frontend at the leased port** in `frontend/src/constants/config.js`
-  before starting. It is a seeded *copy*, so editing it cannot touch the seed
-  repo, and it is in `.git/info/exclude`, so it cannot reach a commit.
+One command. It starts both processes on the leased ports, patches the two files
+that pin them, waits until the app can actually render, and writes
+`state/runs/<iid>/harness/app-env.json`. It is idempotent: if the app is already
+up it reuses it.
+
+**Everything below the command is context, not a procedure.** The harness already
+does it. If `up` fails it returns a named code (`E_PORT_BUSY_FOREIGN`,
+`E_WEBPACK_DEAD`, `E_DB_UNREACHABLE`, …) and a hint. Report that code. Do not
+start improvising a bring-up of your own — every run that did spent between a
+third and four fifths of its budget on it and several never reached a test.
+
+What the harness knows, and why each fact cost a run to learn:
+
+- **The app is TWO processes, and you navigate to Django.** `npm start` is
+  webpack-dev-server alone. Django serves the SPA for every route through a
+  catch-all (`hrdb/urls.py:93`), so one origin answers for the whole app. The
+  webpack port is never navigated to; it only serves the bundle.
+- **Use the hostname `localhost`, never `127.0.0.1`.** `ALLOWED_HOSTS` does not
+  carry the bare address, so the IP returns 400 from a perfectly healthy server.
+- **Readiness is `static/webpack-stats.dev.json` reaching `"status":"done"`**, not
+  a log line. That file is written once at the start of a compile and again at the
+  end, and Django raises a bare 500 on anything but `done`. A `Compiled
+  successfully` from an earlier build stays in the log forever.
+- **Django runs `--noasgi`.** With Channels' ASGI dev server, a browser's
+  keep-alive connections exhaust it and the process then keeps its pid and its
+  socket while answering nothing at all.
+- **Websockets are blocked in the browser.** They carry reminders and mood cards,
+  nothing under test, and they are the other half of the wedge above.
+- **It must be a server YOU started from THIS worktree.** The harness verifies the
+  listener's working directory. Confirming HTTP 200 is not confirming it is *your*
+  build — a phase that drove a stranger's server recorded every value against the
+  wrong code while reading green.
 - **Never `npm ci`, never rebuild the venv.** `node_modules` and `venv` are
   symlinks into a working repo. Reinstalling rewrites that repo's dependencies
   for every other worktree on this machine.
-- **Detached start needs stdin held open:** `tail -f /dev/null | npm start`.
+- **A detached dev server needs `CI=true`.** `frontend/scripts/start.js` exits when
+  stdin closes unless that is set, which is why detached starts died silently and
+  phases then polled a dead port for minutes. The harness sets it; the old
+  `tail -f /dev/null | npm start` workaround is no longer needed.
 - **The first webpack compile takes tens of minutes; incremental rebuilds take
   seconds.** Poll a readiness URL on an interval and keep waiting. Silence is
   not failure and a blind `sleep` is not a readiness check. Report the wait; do
   not abandon it early and call the phase blocked.
 - **Run migrations before the first request** whenever the change added any.
 
-## Log in like a user
+## Log in, and reach a module
 
-Through the real login form, with the seeded settings' credentials. Never stub
-auth, never inject a session cookie, never route around the login screen — half
-the bugs worth finding live in what the logged-in user is allowed to see.
+```
+node .claude/skills/local-browser-verify/scripts/harness.cjs smoke        # up + login + two modules
+node .claude/skills/local-browser-verify/scripts/harness.cjs goto <key>   # one module
+node .claude/skills/local-browser-verify/scripts/harness.cjs modules      # the 46 known keys
+```
 
-`/admin` is available if you need to reset a password or find an account's
-email.
+Login goes through the real form with the credentials in `ONESHOT_TEST_LOGIN`.
+Never stub auth, never inject a session cookie, never route around the login
+screen — half the bugs worth finding live in what the logged-in user may see.
+The harness saves the session, so later phases skip the form entirely.
+
+Three things it handles that cost earlier runs their budget:
+
+- **Never `waitForURL` after submitting.** The app navigates with `history.push`,
+  a same-document transition, so the default wait never resolves. That is what
+  stalled run 24's login until it timed out.
+- **The verdict comes off the wire, not the DOM.** The error toast only renders
+  when the token is empty, so a stale session made failures invisible.
+- **A disabled submit button means the trial expired**, not a slow page. Force-
+  clicking it hid that as a generic timeout.
+
+`modules.json` carries the route and the assertion for each module, taken from
+the components. Assert on `data-testid` only: several skeletons reuse the page's
+`aria-label`, so an `aria-label` check passes while the screen is still a shimmer.
+
+`/admin` is available if you need to reset a password or read an account's
+groups. It takes a Django **username**, not an email — feeding it the email is a
+mistake run 20 made and could not diagnose.
 
 ## Drive it with Playwright
 
@@ -55,10 +97,10 @@ Babel drift, a missing enzyme adapter, ESM transform gaps — CI never runs it,
 and hours have already been lost trying to repair it. Do not try again. Backend
 pytest is unaffected and is fine to run.
 
-- Playwright is **not** in the worktree's symlinked `node_modules`. Resolve it
-  explicitly from the Oneshot repo's install (`NODE_PATH`, or an absolute
-  `require`/import of that path). The chromium build it needs is already on the
-  machine.
+- Playwright is **not** in the worktree's symlinked `node_modules`. The harness
+  resolves it from the Oneshot repo's install for you; if you write your own
+  script, `require` it through that path. Never `npm install` it into a worktree —
+  that rewrites the shared `node_modules` for every other worktree on the machine.
 - Prefer real data. Intercept `**/api/v1/**` only for a state real data cannot
   produce, and say in the evidence that the state was mocked.
 - Retry a flaky step twice with a bounded timeout. Playwright flake is the
@@ -99,8 +141,16 @@ pytest is unaffected and is fine to run.
   say the case may be wrong.
 - Do not declare the run green because the build compiled.
 
-## Teardown
+## Teardown — leave it running
 
-Kill the server you started. Leave one you inherited running if a later phase
-needs the port. Free the port either way — the next run's verify is waiting on
-it.
+**Do not stop the servers.** `ui-evidence` runs next, on the same worktree, and it
+starts within two seconds of you finishing. When verify tore its own servers down,
+that phase found a dead port every time and spent between a third and four fifths
+of its budget rebuilding what had just been working; three of six died at the turn
+cap before taking a screenshot.
+
+The conductor reaps both processes by recorded pid when the run ends, and the
+harness is idempotent, so leaving them up costs nothing and saves the next phase
+its entire bring-up.
+
+Run `harness.cjs down` only if you are told the run is finishing with you.
