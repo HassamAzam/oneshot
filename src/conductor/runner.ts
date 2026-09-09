@@ -43,8 +43,8 @@ import { execFile } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, MERGE_POLL_MS, PAUSE, SKIP_DEPLOY, WORK_REPO, deployConfig, modelFor, phases, portPool,
-  projectConfig,
+  DRY_RUN, GITLAB_USERNAME, MERGE_POLL_MS, PAUSE, SKIP_DEPLOY, WORK_REPO, deployConfig, modelFor,
+  phases, portPool, projectConfig,
   operatorName,
   type PhaseConfig,
 } from '../lib/config.js';
@@ -332,9 +332,13 @@ export async function runTicket(
   const list = phases();
   const owner = opts.conductor;
 
-  // Claim here, not in the watcher. --ticket dispatches straight to runTicket,
-  // so a guard living only in the scan path is a guard that is not there on the
-  // path most likely to be used for a manual re-run.
+  if (GITLAB_USERNAME && issue.assignees.length > 0
+    && !issue.assignees.some((a) => a.username === GITLAB_USERNAME)) {
+    const owners = issue.assignees.map((a) => a.username).join(', ');
+    log.info(`#${iid} — assigned to ${owners}, not to ${GITLAB_USERNAME}`);
+    return { runId: '', iid, status: 'refused', reason: `assigned to ${owners}` };
+  }
+
   const decision = decideResume(readJournal(iid));
   if (decision.kind === 'refuse') {
     log.warn(`#${iid} — ${decision.reason}`);

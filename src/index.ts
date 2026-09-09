@@ -25,8 +25,8 @@ import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  CONTEXT_REPO, DRY_RUN, FOLLOW_TICK_MS, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT, TICK_MS,
-  WORK_REPO,
+  CONTEXT_REPO, DRY_RUN, FOLLOW_TICK_MS, GITLAB_USERNAME, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT,
+  TICK_MS, WORK_REPO,
   auditAuth, envOr, phases, portPool, projectConfig, slackConfig,
 } from './lib/config.js';
 import { activeRunsFleet, logEvent, reconcileForeignRuns } from './lib/db.js';
@@ -234,6 +234,11 @@ function banner(): void {
   log.info(`base       ${cfg.branches.base}   protected: ${cfg.branches.protected.join(', ')}`);
   log.info(`phases     ${phases().length} (${phases().filter((p) => p.kind === 'code').length} deterministic)`);
   log.info(`concurrency ${cfg.concurrency} here · ${portPool().length} pool ports across the fleet`);
+  if (GITLAB_USERNAME) {
+    log.info(`operator   ${GITLAB_USERNAME} (only tickets assigned to this user)`);
+  } else {
+    log.warn('operator   unset — claims any assignable ticket (set ONESHOT_GITLAB_USERNAME to filter)');
+  }
   if (solo) log.info('mode       --solo, a second conductor is refused');
   if (followArg) log.info(`mode       --follow #${ticketArg}, re-checked every ${FOLLOW_TICK_MS / 1000}s until done/blocked`);
   if (DRY_RUN) log.warn('DRY_RUN is on — every write will be refused, in its own state-dry home');
