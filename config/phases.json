@@ -40,7 +40,7 @@
       "name": "testcases", "n": 4, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
       "writes": ["run"], "onFail": "abort", "group": "check",
-      "skills": ["test-case-writing"],
+      "skills": [],
       "artifact": "testcases.json",
       "_why": "Opus, and its own phase: verify and qa must execute the SAME list or a green local run and a green demo run cover different ground and cannot be compared. It runs AFTER implement so the cases can name the real symbols and routes the change actually produced — the cost of that is a list authored with the implementation in view, so the prompt makes the acceptance criteria, not the diff, the source of truth."
     },
