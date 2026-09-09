@@ -635,8 +635,8 @@ export async function runTicket(
     // code and could only become a follow-up ticket.
     const caseGate = gatesApply(ticket.labels,
       declaredFiles(prior.plan ?? null, prior.implement ?? null));
-    if (phase.name === 'review' && phaseSucceeded(iid, 'testcases')
-      && caseGate.on && !j.testcasesApproval?.approved) {
+    const caseGatePending = caseGate.on && !j.testcasesApproval?.approved;
+    if (phase.name === 'review' && phaseSucceeded(iid, 'testcases') && caseGatePending) {
       const cases = (prior.testcases as { cases?: TestCase[] } | null)?.cases ?? [];
       if (caseGate.hits.length && !j.reviewMode) {
         j = updateJournal(iid, { reviewMode: true }) ?? j;
@@ -698,6 +698,10 @@ export async function runTicket(
         const next = list[k]!;
         if (next.group !== phase.group || next.kind !== 'session') break;
         if (!isImplemented(next.name) || shouldSkip(next)) break;
+        // Batching 'review' in with 'testcases' would run it before the loop
+        // ever visits 'review' on its own — the only place the gate above
+        // fires. Hold it back so the next iteration lands on it solo.
+        if (next.name === 'review' && caseGatePending) break;
         members.push(k);
       }
     }
