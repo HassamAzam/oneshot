@@ -10,14 +10,14 @@
       "name": "recall", "n": 0, "kind": "session", "tier": "light",
       "cwd": "conductor", "maxTurns": 20, "timeoutMin": 6,
       "writes": ["run"], "onFail": "skip",
-      "skills": ["ticket-recall"],
+      "skills": [],
       "artifact": "recall.json"
     },
     {
       "name": "research", "n": 1, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 120, "timeoutMin": 45,
       "writes": ["run"], "onFail": "abort",
-      "skills": ["ticket-research"],
+      "skills": [],
       "artifact": "research.json"
     },
     {
@@ -40,7 +40,7 @@
       "name": "testcases", "n": 4, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
       "writes": ["run"], "onFail": "abort", "group": "check",
-      "skills": ["test-case-writing"],
+      "skills": [],
       "artifact": "testcases.json",
       "_why": "Opus, and its own phase: verify and qa must execute the SAME list or a green local run and a green demo run cover different ground and cannot be compared. It runs AFTER implement so the cases can name the real symbols and routes the change actually produced — the cost of that is a list authored with the implementation in view, so the prompt makes the acceptance criteria, not the diff, the source of truth."
     },
@@ -55,7 +55,7 @@
     },
     {
       "name": "verify", "n": 6, "kind": "session", "tier": "standard",
-      "cwd": "worktree", "maxTurns": 300, "timeoutMin": 120,
+      "cwd": "worktree", "maxTurns": 450, "timeoutMin": 150,
       "_why_turns": "Measured live: driving webpack + the real login form through Bash-run Playwright costs ~12 turns per case, so the cap must scale with the list. A 20-case list (run #6) exhausted a 200-turn cap at case 17 and was salvaged from partial — an incomplete verdict that still gates the merge. 300 turns / 120 min fits a 20-case list with headroom; a verify that dies at max_turns produces a partial artifact, and the cycle it triggers re-pays implement and review for what was only a budget problem.",
       "writes": ["worktree", "run", "artifacts"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 2,
       "coding": true, "needsPort": true,
@@ -101,7 +101,7 @@
       "name": "demo", "n": 12, "kind": "session", "tier": "standard",
       "cwd": "conductor", "maxTurns": 60, "timeoutMin": 30,
       "writes": ["run", "artifacts"], "onFail": "warn", "group": "wrap",
-      "skills": ["create-demo"],
+      "skills": [],
       "artifact": "demo.json"
     },
     {

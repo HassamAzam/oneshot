@@ -20,7 +20,7 @@
  *    attributed to this ticket.
  */
 import {
-  artifactDir, deployConfig, envOr, phaseByName, phases, projectConfig, runDir,
+  STATE, artifactDir, deployConfig, envOr, phaseByName, phases, projectConfig, runDir,
   type PhaseConfig,
 } from '../lib/config.js';
 import type { Remediation, RunJournal } from '../lib/artifacts.js';
@@ -524,13 +524,14 @@ export const PROMPTS: Record<string, (ctx: PromptCtx) => string> = {
 
 Search this system's memory of past completed runs for tickets that overlap this one.
 
-The memory lives at \`state/memory/\`: \`index.jsonl\` has one line per completed run
+The memory lives at \`${STATE}/memory/\` — that ABSOLUTE path, not a path under any other
+repo this session can see. \`index.jsonl\` there has one line per completed run
 ({iid, title, labels, modules, files, symbols, mr, verdict, tags, ts}), and
 \`tickets/<iid>.md\` holds each full card. Read the index, score candidates on file-path
 overlap first (in a monorepo that is the strongest signal for "similar ticket"), then module,
 label and title-token overlap. Read the top 3 cards at most.
 
-FIRST, check whether \`state/memory/index.jsonl\` exists at all. If it does not, or it is
+FIRST, check whether \`${STATE}/memory/index.jsonl\` exists at all. If it does not, or it is
 empty, STOP IMMEDIATELY and return an empty list and an empty brief. Do not search the
 filesystem for alternatives, do not look for other memory formats, do not explore. On a
 system with no completed runs yet this is the expected answer and it costs one tool call.
@@ -607,10 +608,23 @@ This ONE list is executed three times: locally in a browser by the \`verify\` ph
 screenshots by \`ui-evidence\`, and against the deployed demo server by \`qa\`. If you write a
 thin list, all three are thin, and a green QA verdict will mean very little.
 
-Follow the \`test-case-writing\` skill exactly — the format matches the team's existing suite,
-so cases written here drop into it unchanged. Run every brainstorm pass it names, including
-the hostile-QA one, and record any pass that legitimately produced nothing in \`passesEmpty\`.
-A skipped pass and a clean pass must not look the same.
+Author the list by brainstorm passes, not as one checklist. Run every pass below, in order,
+and tag each case with the passes that produced it:
+
+  - \`happy\`        every acceptance criterion, exercised the way the ticket describes it
+  - \`boundary\`     zero, one, many, empty, maximum, the day a period rolls over
+  - \`negative\`     wrong input, missing permission, a record that no longer exists
+  - \`state\`        the same action from each state the entity can be in
+  - \`side-effect\`  what else the change writes, sends, enqueues or logs, and that it does so once
+  - \`cross-module\` the other side of any module pair the research phase named in its blast radius
+  - \`regression\`   what worked before the change and must still work after it
+  - \`hostile\`      what a QA engineer trying to break this would try first
+
+Record any pass that legitimately produced nothing in \`passesEmpty\`. A skipped pass and a clean
+pass must not look the same. The output shape is the team's existing suite (module, LV header,
+id, scenario, precondition, steps, expected), so cases written here drop into it unchanged.
+Every \`expected\` is a concrete, observable value or message that a person could mark pass or
+fail without reading the code.
 
 Read whatever you need to. Do not run the app and do not change a line of code — you are
 authoring the list, not executing it and not fixing what it finds.`,
@@ -1398,9 +1412,8 @@ ${caseList(script, { steps: true })}
 ## Assets ui-evidence already produced — reuse before you capture
 ${shots.map((s) => `  - ${s.file}: ${s.caption}`).join('\n') || '  (none)'}
 
-Try the \`create-demo\` skill first; it carries the recording pipeline this team already uses.
-If the Skill tool cannot resolve it here, do NOT go looking for it and do not try to install
-anything — fall back to these steps inline:
+Do not look for a demo skill and do not try to install anything. The recording method is
+these steps:
 
   - drive the happy path in a real browser with Playwright from Bash, recording video, and keep
     the recording;
@@ -1461,7 +1474,7 @@ achieved nothing.
 Try the \`ticket-memory-write\` skill first. If the Skill tool cannot resolve it here, follow
 these steps as written — they are the whole contract.
 
-## 1. The card: state/memory/tickets/${ctx.ticket.iid}.md
+## 1. The card: ${STATE}/memory/tickets/${ctx.ticket.iid}.md
 
 Write it for a run six months from now that has none of this context.
 
@@ -1478,7 +1491,7 @@ Write it for a run six months from now that has none of this context.
 Omit anything merely true. "It touched the invoices module" helps nobody, and it crowds out the
 line that would have.
 
-## 2. The index line: append ONE line to state/memory/index.jsonl
+## 2. The index line: append ONE line to ${STATE}/memory/index.jsonl
 
 Exactly this shape, on one line, APPENDED — never rewritten; other runs' lines share that file.
 

@@ -5,7 +5,7 @@ description: Write the memory card and index line that let a future run find thi
 
 # Ticket Memory Write
 
-You are writing the input to `ticket-recall`'s scorer. Design every field for
+You are writing the input to the recall phase's scorer (phase 0). Design every field for
 retrieval, not for narrative. Nobody will read this card in full unless the
 scorer surfaces it first.
 
