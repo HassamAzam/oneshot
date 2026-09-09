@@ -48,7 +48,7 @@
       "name": "review", "n": 5, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 70, "timeoutMin": 30,
       "writes": ["run"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 3, "group": "check",
-      "_why_group": "testcases and review both consume only implement's output and neither reads the other's artifact, so they run concurrently. The one interaction — a review cycle lap re-entering implement — leaves testcases pinned (the case list is written once), so the group simply degrades to review alone on later laps.",
+      "_why_group": "testcases and review both consume only implement's output and neither reads the other's artifact, so they run concurrently. The one interaction — a review cycle lap re-entering implement — leaves testcases pinned (the case list is written once), so the group simply degrades to review alone on later laps. A pending test-case approval gate (src/conductor/reviewgate.ts) is a second exception: the runner holds review back out of the batch so the gate gets a solo iteration to check it, rather than the two running concurrently and the gate never firing.",
       "skills": ["erp-code-review", "dead-code-sweep"],
       "agents": ["backend-reviewer-agent", "frontend-reviewer-agent", "util-reuse-agent"],
       "artifact": "findings.json"
