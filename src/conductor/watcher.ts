@@ -73,10 +73,15 @@ export async function scan(): Promise<WatchResult> {
       skipped.push({ iid: issue.iid, why: `carries ${cfg.labels.blocked}` });
       continue;
     }
-    if (GITLAB_USERNAME && issue.assignees.length > 0
-      && !issue.assignees.some((a) => a.username === GITLAB_USERNAME)) {
-      skipped.push({ iid: issue.iid, why: `assigned to ${issue.assignees.map((a) => a.username).join(', ')}` });
-      continue;
+    if (issue.assignees.length > 0) {
+      if (!GITLAB_USERNAME) {
+        skipped.push({ iid: issue.iid, why: 'assigned ticket, but ONESHOT_GITLAB_USERNAME is unset' });
+        continue;
+      }
+      if (!issue.assignees.some((a) => a.username === GITLAB_USERNAME)) {
+        skipped.push({ iid: issue.iid, why: `assigned to ${issue.assignees.map((a) => a.username).join(', ')}` });
+        continue;
+      }
     }
     if (isClaimed(issue.iid)) {
       skipped.push({ iid: issue.iid, why: 'run already in flight' });

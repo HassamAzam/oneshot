@@ -219,7 +219,13 @@ function handleFollowOutcome(outcome: RunOutcome): void {
       say.warn(`#${outcome.iid} aborted — ${outcome.reason ?? 'no reason given'} — ${wait}`);
       break;
     case 'refused':
-      say.info(`#${outcome.iid} refused — ${outcome.reason ?? 'no reason given'} — ${wait}`);
+      if (outcome.reason?.includes('assigned to') || outcome.reason?.includes('GITLAB_USERNAME')) {
+        say.error(`#${outcome.iid} refused — ${outcome.reason} — not retrying`);
+        followSettled = true;
+        followExitCode = 1;
+      } else {
+        say.info(`#${outcome.iid} refused — ${outcome.reason ?? 'no reason given'} — ${wait}`);
+      }
       break;
     default:
       break;
@@ -237,7 +243,7 @@ function banner(): void {
   if (GITLAB_USERNAME) {
     log.info(`operator   ${GITLAB_USERNAME} (only tickets assigned to this user)`);
   } else {
-    log.warn('operator   unset — claims any assignable ticket (set ONESHOT_GITLAB_USERNAME to filter)');
+    log.warn('operator   unset — assigned tickets will be skipped (set ONESHOT_GITLAB_USERNAME)');
   }
   if (solo) log.info('mode       --solo, a second conductor is refused');
   if (followArg) log.info(`mode       --follow #${ticketArg}, re-checked every ${FOLLOW_TICK_MS / 1000}s until done/blocked`);

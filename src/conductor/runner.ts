@@ -332,11 +332,16 @@ export async function runTicket(
   const list = phases();
   const owner = opts.conductor;
 
-  if (GITLAB_USERNAME && issue.assignees.length > 0
-    && !issue.assignees.some((a) => a.username === GITLAB_USERNAME)) {
-    const owners = issue.assignees.map((a) => a.username).join(', ');
-    log.info(`#${iid} — assigned to ${owners}, not to ${GITLAB_USERNAME}`);
-    return { runId: '', iid, status: 'refused', reason: `assigned to ${owners}` };
+  if (issue.assignees.length > 0) {
+    if (!GITLAB_USERNAME) {
+      log.info(`#${iid} — assigned ticket, but ONESHOT_GITLAB_USERNAME is unset`);
+      return { runId: '', iid, status: 'refused', reason: 'assigned ticket, but ONESHOT_GITLAB_USERNAME is unset' };
+    }
+    if (!issue.assignees.some((a) => a.username === GITLAB_USERNAME)) {
+      const owners = issue.assignees.map((a) => a.username).join(', ');
+      log.info(`#${iid} — assigned to ${owners}, not to ${GITLAB_USERNAME}`);
+      return { runId: '', iid, status: 'refused', reason: `assigned to ${owners}` };
+    }
   }
 
   const decision = decideResume(readJournal(iid));
