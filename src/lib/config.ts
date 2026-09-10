@@ -323,6 +323,7 @@ export function narratorModel(): string {
 
 export const DRY_RUN = envFlag('DRY_RUN');
 export const SKIP_DEPLOY = envFlag('ONESHOT_SKIP_DEPLOY');
+export const GITLAB_USERNAME = envOr('ONESHOT_GITLAB_USERNAME');
 
 /**
  * The conductor's own tick cadence — how often `src/index.ts` scans for

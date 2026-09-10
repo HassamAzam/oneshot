@@ -93,6 +93,7 @@ export interface Issue {
   title: string;
   description: string | null;
   labels: string[];
+  assignees: Array<{ username: string }>;
   state: string;
   web_url: string;
   updated_at: string;

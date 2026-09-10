@@ -13,7 +13,7 @@
  * run is skipped, and a ticket whose run died mid-phase is picked up from its
  * journal rather than restarted.
  */
-import { projectConfig } from '../lib/config.js';
+import { GITLAB_USERNAME, projectConfig } from '../lib/config.js';
 import { foreignOwner } from '../lib/claims.js';
 import { isClaimed, logEvent, seeTicket } from '../lib/db.js';
 import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
@@ -72,6 +72,16 @@ export async function scan(): Promise<WatchResult> {
       // just reproduce whatever blocked it the first time.
       skipped.push({ iid: issue.iid, why: `carries ${cfg.labels.blocked}` });
       continue;
+    }
+    if (issue.assignees.length > 0) {
+      if (!GITLAB_USERNAME) {
+        skipped.push({ iid: issue.iid, why: 'assigned ticket, but ONESHOT_GITLAB_USERNAME is unset' });
+        continue;
+      }
+      if (!issue.assignees.some((a) => a.username === GITLAB_USERNAME)) {
+        skipped.push({ iid: issue.iid, why: `assigned to ${issue.assignees.map((a) => a.username).join(', ')}` });
+        continue;
+      }
     }
     if (isClaimed(issue.iid)) {
       skipped.push({ iid: issue.iid, why: 'run already in flight' });
