@@ -38,11 +38,12 @@
     },
     {
       "name": "testcases", "n": 4, "kind": "session", "tier": "heavy",
-      "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
+      "cwd": "worktree", "maxTurns": 110, "timeoutMin": 30,
       "writes": ["run"], "onFail": "abort", "group": "check",
       "skills": [],
       "artifact": "testcases.json",
-      "_why": "Opus, and its own phase: verify and qa must execute the SAME list or a green local run and a green demo run cover different ground and cannot be compared. It runs AFTER implement so the cases can name the real symbols and routes the change actually produced — the cost of that is a list authored with the implementation in view, so the prompt makes the acceptance criteria, not the diff, the source of truth."
+      "_why": "Opus, and its own phase: verify and qa must execute the SAME list or a green local run and a green demo run cover different ground and cannot be compared. It runs AFTER implement so the cases can name the real symbols and routes the change actually produced — the cost of that is a list authored with the implementation in view, so the prompt makes the acceptance criteria, not the diff, the source of truth.",
+      "_why_turns": "40 was never sized for this job — it is the number this phase was born with in 37f3978, when testcases was n:3 and ran BEFORE implement, authoring from the ticket and the plan with nothing to read. 0d64e2d moved the block to n:4 verbatim while the prompt gained implement's artifact, 'read git diff before you start' and 'read whatever you need to'. The job doubled; the budget did not move, and unlike verify (200->300->450), research (60->120) and document (40->70) it never got a measured raise. Run 237 (r-mtvacbt9-7a23b5) is where that came due: 40 turns spent entirely on context-gathering, 11,719 output tokens, not one case written, and onFail abort blocked the run. The driver is NOT diff size — that diff was 9 files and 211 insertions. It is whether the diff carries the UI vocabulary the cases need: run 8 changed loginTestIds.js and displayText.js and finished in 26 turns, run 19 was backend-only and finished in 18, and run 237 was a date-math fix behind a browser modal, so the routes, the permission gate and the PL_* labels all had to be excavated from files the diff never touched. research.uiPath now supplies that vocabulary, which is what makes 110 a real ceiling rather than a bigger number in front of an unbounded search. 30 minutes because the 15 was equally inherited, and this phase has already died on the CLOCK once (r-mtfu7ph1-e56363, 119 stream messages, no result)."
     },
     {
       "name": "review", "n": 5, "kind": "session", "tier": "heavy",

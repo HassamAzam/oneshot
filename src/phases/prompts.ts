@@ -550,6 +550,15 @@ Work out what this ticket actually requires, and trace the code that implements 
 - Determine the blast radius. Consult the module-linkage table in CLAUDE.md: payroll↔leaves,
   payroll↔costing, costing↔invoices, allowances↔payroll, leaves↔costing, payroll↔odoo. A
   change inside one of those pairs affects the other side.
+- Trace the UI path to this behaviour and fill \`uiPath\`: the route a case starts at, the
+  clicks from there to the thing that changes, the permission or feature flag that hides it
+  from a default account, and the testid constants, button labels and DISPLAY_STRINGS keys a
+  step can be written against — each with the file it lives in. Do this EVEN WHEN the fix
+  itself is one line of date maths in a helper. You are the only phase positioned to do it
+  cheaply: \`testcases\`, \`verify\`, \`ui-evidence\` and \`qa\` all need this vocabulary, and
+  the only source they are given is the diff — which for a logic-layer fix contains none of
+  it, so each of them re-excavates the screen from scratch. Set \`reachable\` false and leave
+  the rest empty when the change genuinely has no UI surface.
 - List what you could NOT determine. An explicit unknown is worth more than a confident
   guess — the plan phase can work around a stated gap and cannot work around a wrong claim.
 
@@ -587,6 +596,15 @@ The code is already written and sitting on \`${ctx.branch ?? 'the ticket branch'
 worktree. Read \`git diff origin/${baseBranch()}\` before you start: it gives you the real
 component names, routes, ids and error strings, so your steps can be concrete instead of
 approximate, and it shows you what the change actually touched.
+
+Where the diff does NOT give you those — and for a fix that lands in a helper, a serializer or
+a date utility it will not, because none of that vocabulary is in the changed lines — take it
+from \`uiPath\` in the research block above: the route, the clicks to the behaviour, the gate,
+and the testid and label constants with the files they live in. That field exists because this
+phase used to go and find them itself, one grep at a time, and a session that spends its budget
+reconstructing a screen never reaches the cases. If \`uiPath.reachable\` is false, this change
+has no UI surface and your steps are API-, command- or data-level; do not go looking for one.
+If it is true but thin, fill the gap with a handful of targeted reads, not a survey.
 
 That advantage cuts both ways, and this is the one thing to get right in this phase: the
 ORACLE for every case comes from the acceptance criteria and the ticket, never from the diff.
@@ -627,7 +645,25 @@ Every \`expected\` is a concrete, observable value or message that a person coul
 fail without reading the code.
 
 Read whatever you need to. Do not run the app and do not change a line of code — you are
-authoring the list, not executing it and not fixing what it finds.`,
+authoring the list, not executing it and not fixing what it finds.
+
+## Turn economy — this phase has died at its cap, so it is a protocol, not advice
+
+Reading is not the deliverable and cannot be salvaged; cases can. So:
+
+- Read in BATCHES. One Bash call that cats several files beats five that cat one each, and the
+  diff plus \`uiPath\` above should leave you a handful of targeted reads, not a survey.
+- Use ABSOLUTE paths. Your shell's cwd persists between calls, so a \`cd\` in one command
+  silently breaks the relative path in the next — that alone has cost this phase turns.
+- LAND THE PLANE. Keep a rough count of your own tool calls. At ~60% of your budget, stop
+  reading and start writing cases, whatever you have not yet read. A list of eight cases built
+  on what you know beats twenty you never wrote down.
+- WRITE AS YOU GO — the backstop for all of it. Every few cases, rewrite
+  \`${runDir(ctx.ticket.iid)}/testcases-partial.json\` as
+  \`{"module": "<module>", "lv": "LV_TBD", "cases": [<Case so far>]}\` (same shape as your
+  final fields). If this session dies at its cap anyway, the conductor salvages that file
+  instead of blocking the run and throwing every turn you spent away. A session that kept it
+  current has already succeeded, whatever happens to its last turn.`,
 
   implement: (ctx) => {
     const r = (ctx.prior.research ?? {}) as {

@@ -75,9 +75,42 @@ export const RESEARCH_SCHEMA = phaseSchema({
     },
   },
   blastRadius: strArr('Other modules/features this change can affect. Consult CLAUDE.md linkages.'),
+  uiPath: {
+    type: 'object',
+    additionalProperties: false,
+    description:
+      'How a person reaches this behaviour in the browser. testcases, verify, ui-evidence ' +
+      'and qa all need this and NONE of them can get it from the diff when the change is a ' +
+      'logic-layer fix behind a screen — that gap cost run 237 its whole turn budget.',
+    properties: {
+      reachable: {
+        type: 'boolean',
+        description:
+          'False for a change with no UI surface at all (a management command, a Celery ' +
+          'task, an API-only contract). False is a real answer and leaves the rest empty.',
+      },
+      route: str(
+        'The URL path a case starts at, e.g. /project-logs/v2/person/:id. Empty if not reachable.',
+      ),
+      entryPoint: str(
+        'The clicks from that route to the behaviour, in one line: which control opens ' +
+        'which modal/tab. Empty if not reachable.',
+      ),
+      gate: str(
+        'Any permission, feature flag or role that hides this from a default account, named ' +
+        'as the constant. Empty string if nothing gates it.',
+      ),
+      vocabulary: strArr(
+        'The concrete strings a step can be written against: testid constants, button ' +
+        'labels, DISPLAY_STRINGS keys, error messages — each with the file it lives in. ' +
+        'This is the field that stops a later phase from re-deriving the screen.',
+      ),
+    },
+    required: ['reachable', 'route', 'entryPoint', 'gate', 'vocabulary'],
+  },
   unknowns: strArr('What you could NOT determine. State these rather than guessing.'),
   module: str('Primary module, e.g. Payroll, Leaves, Project Logs.'),
-}, ['understanding', 'acceptanceCriteria', 'codePath', 'blastRadius', 'unknowns', 'module']);
+}, ['understanding', 'acceptanceCriteria', 'codePath', 'blastRadius', 'uiPath', 'unknowns', 'module']);
 
 export const PLAN_SCHEMA = phaseSchema({
   approach: str('The chosen approach and, in one line, why over the alternative.'),
