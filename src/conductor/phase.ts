@@ -60,8 +60,27 @@ export interface PhaseOutput {
   weighted: number;
   sessionId: string;
   error?: string;
+  /**
+   * The failure was the machinery, not the work: cancelled, killed by a
+   * signal, or out of wall clock. The runner re-attempts these in place
+   * instead of spending a cycle lap on them. See PhaseRecord['status'].
+   */
+  infra?: boolean;
   rateLimited: boolean;
 }
+
+/** A session killed by a signal — never a verdict about the work. */
+const SIGNAL_DEATH_RE = /terminated by signal|SIGKILL|SIGTERM|SIGSEGV/i;
+
+/**
+ * How often a long phase says it is still alive.
+ *
+ * A session phase is otherwise silent for up to its whole timeout — two hours
+ * for `verify` — which leaves no way to tell "working" from "wedged" without
+ * reading the raw transcript. One line a minute is enough to answer that at a
+ * glance and far too little to drown the console.
+ */
+const PROGRESS_EVERY_MS = 60_000;
 
 /** Write scopes handed to hooks/write-scope.cjs. Anything outside is denied. */
 function writeScopes(cfg: PhaseConfig, iid: number, worktree?: string): string[] {
@@ -263,6 +282,9 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   /** Stream messages seen — the only honest way to tell a wedged spawn from a slow phase. */
   let sawActivity = 0;
   let settled = false;
+  let turnsSoFar = 0;
+  const phaseStartedAt = Date.now();
+  let lastProgressAt = phaseStartedAt;
 
   try {
     const schema = schemaFor(cfg.name);
@@ -311,9 +333,26 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       if (step.done === true) break;
       const msg = step.value;
       sawActivity += 1;
+      if (msg.type === 'assistant') turnsSoFar += 1;
       try {
         appendFileSync(tee, `${JSON.stringify(msg)}\n`);
       } catch { /* the tee is best-effort; never fail a phase over logging */ }
+
+      // Heartbeat. `turns` arrives only in the result frame, so a session that
+      // is still working reports nothing about itself until it finishes —
+      // counting assistant frames is the only turn number available while it
+      // matters. Both numbers are shown against their caps because "which
+      // budget am I about to run out of" is the actual question being asked.
+      const sinceProgress = Date.now() - lastProgressAt;
+      if (sinceProgress >= PROGRESS_EVERY_MS) {
+        lastProgressAt = Date.now();
+        const mins = Math.round((Date.now() - phaseStartedAt) / 60_000);
+        log.info(`${cfg.name} working`, {
+          turns: `${turnsSoFar}/${cfg.maxTurns ?? '-'}`,
+          elapsed: `${mins}m/${cfg.timeoutMin}m`,
+          messages: sawActivity,
+        });
+      }
 
       if (msg.type === 'result') {
         // The FIRST result frame settles the phase, and only the first.
@@ -382,13 +421,20 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
         : `timed out after ${cfg.timeoutMin}m while still working (${sawActivity} stream `
           + 'messages, no final result). The phase needs a larger budget or less to do; any '
           + 'partial artifact it wrote on the way is the only salvageable evidence.';
+      out.infra = true;
       limitSignals.push(m);
     } else if (ac.signal.aborted) {
       // A cancellation the conductor asked for reports nothing about the
       // account, so its text is kept away from the usage-limit detector.
       out.error = 'cancelled by the conductor';
+      out.infra = true;
     } else {
       out.error = m;
+      // A signal death is the machinery, not a verdict. Note this is matched on
+      // the message rather than an exit code on purpose: the SDK reports
+      // "exited with code 1" on sessions that SUCCEEDED (see the trailing
+      // result frame above), so an exit code proves nothing either way.
+      if (SIGNAL_DEATH_RE.test(m)) out.infra = true;
       limitSignals.push(m);
     }
   } finally {

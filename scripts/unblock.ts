@@ -160,7 +160,11 @@ function summarise(j: RunJournal, doomed: Set<PhaseRecord>): PhaseLine[] {
 
 function paintStatus(s: PhaseRecord['status']): string {
   if (s === 'ok') return `${G}ok${X}`;
-  if (s === 'warned' || s === 'skipped') return `${Y}${s}${X}`;
+  // 'infra' is amber, not red: the phase died of the machinery and never
+  // reached a verdict, so it is not evidence that anything is wrong with the
+  // work. It is still pruned like a failure, because a re-entered phase wants
+  // a clean slate either way.
+  if (s === 'warned' || s === 'skipped' || s === 'infra') return `${Y}${s}${X}`;
   return `${R}${s}${X}`;
 }
 
