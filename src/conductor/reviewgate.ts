@@ -64,6 +64,7 @@ import {
 } from '../lib/artifacts.js';
 import { addIssueNote, issueNotes } from '../lib/gitlab.js';
 import { slackEnabled, thread } from '../lib/slack.js';
+import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
 import type { TestCase } from '../phases/types.js';
 
@@ -317,6 +318,11 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
     // GitLab's own notes (label swaps, assignments) are board noise, and
     // Oneshot's audit records are its own voice; neither is a human verdict.
     .filter((n) => n.system !== true)
+    // A claim note is an ordinary comment, so `system` does not catch it. On a
+    // desk whose token belongs to a listed reviewer it therefore read as that
+    // reviewer speaking — which is how run 29 approved-and-revised against its
+    // own fleet. Anything carrying an oneshot marker is this pipeline talking.
+    .filter((n) => !isMachineNote(n.body))
     .map((n) => ({ id: n.id, text: n.body ?? '', user: n.author?.username ?? null }));
 
   for (const r of replies) {

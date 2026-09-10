@@ -15,6 +15,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, userInfo } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
+import { deskUsername } from './identity.js';
 
 export const ROOT: string = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -323,7 +324,18 @@ export function narratorModel(): string {
 
 export const DRY_RUN = envFlag('DRY_RUN');
 export const SKIP_DEPLOY = envFlag('ONESHOT_SKIP_DEPLOY');
-export const GITLAB_USERNAME = envOr('ONESHOT_GITLAB_USERNAME');
+/**
+ * The GitLab username this desk claims ASSIGNED tickets as.
+ *
+ * Not configuration. It is whoever this desk's GitLab token belongs to, resolved
+ * once at boot by asking GitLab (src/lib/identity.ts), so the account that claims
+ * a ticket is always the account that will comment, push and merge on it.
+ *
+ * Use gitlabUsername() rather than the const: the const is captured at module
+ * load, which is before boot has asked.
+ */
+export const GITLAB_USERNAME = deskUsername();
+export function gitlabUsername(): string { return deskUsername(); }
 
 /**
  * The conductor's own tick cadence — how often `src/index.ts` scans for

@@ -13,7 +13,7 @@
  * run is skipped, and a ticket whose run died mid-phase is picked up from its
  * journal rather than restarted.
  */
-import { GITLAB_USERNAME, projectConfig } from '../lib/config.js';
+import { gitlabUsername, projectConfig } from '../lib/config.js';
 import { foreignOwner } from '../lib/claims.js';
 import { isClaimed, logEvent, seeTicket } from '../lib/db.js';
 import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
@@ -74,11 +74,14 @@ export async function scan(): Promise<WatchResult> {
       continue;
     }
     if (issue.assignees.length > 0) {
-      if (!GITLAB_USERNAME) {
-        skipped.push({ iid: issue.iid, why: 'assigned ticket, but ONESHOT_GITLAB_USERNAME is unset' });
+      // Resolved at boot from this desk's own token, so the account that claims
+      // the ticket is the same account that will comment, push and merge on it.
+      const me = gitlabUsername();
+      if (!me) {
+        skipped.push({ iid: issue.iid, why: 'assigned ticket, but this desk has no GitLab identity (npm run token:set)' });
         continue;
       }
-      if (!issue.assignees.some((a) => a.username === GITLAB_USERNAME)) {
+      if (!issue.assignees.some((a) => a.username === me)) {
         skipped.push({ iid: issue.iid, why: `assigned to ${issue.assignees.map((a) => a.username).join(', ')}` });
         continue;
       }

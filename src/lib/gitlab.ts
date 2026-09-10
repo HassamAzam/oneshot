@@ -8,6 +8,7 @@
  * responses, and a caller that blurs them retries forever against a dead link.
  */
 import { envOr, projectConfig, DRY_RUN } from './config.js';
+import { resolveToken, SETUP_HINT } from './token.js';
 import { log } from './log.js';
 
 export type FailKind = 'ok' | 'network' | 'auth' | 'notfound' | 'server' | 'client';
@@ -20,16 +21,32 @@ export interface GitlabResult<T> {
   error?: string;
 }
 
+/**
+ * Every call this module makes is made as THIS DESK.
+ *
+ * The token comes from src/lib/token.ts, which prefers the operator's own
+ * credential (~/.config/oneshot/gitlab-token, the keychain, or glab) over the
+ * shared GITLAB_TOKEN in .env. That is what makes the conductor act as the person
+ * whose machine it runs on rather than as whoever's token was pasted into the
+ * repo — and it is why the assignee gate and the acting identity can no longer
+ * disagree: they are now the same credential.
+ *
+ * GITLAB_READ_TOKEN still wins for reads when set, because a read-only PAT is a
+ * sensible thing to scope down and it changes no identity: the writes that
+ * attribute work are what matter.
+ */
 function token(): string {
-  const t = envOr('GITLAB_READ_TOKEN') || envOr('GITLAB_TOKEN');
-  if (!t) throw new Error('Neither GITLAB_READ_TOKEN nor GITLAB_TOKEN is set — put one in .env');
-  return t;
+  const read = envOr('GITLAB_READ_TOKEN');
+  if (read) return read;
+  const t = resolveToken();
+  if (!t.token) throw new Error(`No GitLab token for this desk. ${SETUP_HINT}`);
+  return t.token;
 }
 
 function writeToken(): string {
-  const t = envOr('GITLAB_TOKEN');
-  if (!t) throw new Error('GITLAB_TOKEN is not set — put it in .env');
-  return t;
+  const t = resolveToken();
+  if (!t.token) throw new Error(`No GitLab token for this desk. ${SETUP_HINT}`);
+  return t.token;
 }
 
 function base(): string { return projectConfig().gitlab.apiUrl; }

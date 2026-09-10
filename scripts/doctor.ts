@@ -13,6 +13,7 @@ import {
   projectConfig, slackConfig,
 } from '../src/lib/config.js';
 import { ping, listBranches } from '../src/lib/gitlab.js';
+import { checkIdentity } from '../src/lib/identity.js';
 import { otelStatus, promptTextExported } from '../src/lib/otel.js';
 
 let fails = 0;
@@ -150,6 +151,24 @@ async function main(): Promise<void> {
     const p = await ping();
     if (p.ok) {
       pass('reachable + authenticated', `project id ${p.data?.id}`);
+
+      // Who is this desk? The token answers, and the token also does the work,
+      // so there is no second fact that can disagree with it.
+      const idc = await checkIdentity();
+      if (!idc.token) {
+        fail('this desk has no usable GitLab token', 'every ASSIGNED ticket is skipped — run `npm run token:set`');
+      } else if (idc.token.source.shared && idc.claudeUsername !== idc.token.username && !idc.token.bot) {
+        fail(`acting as ${idc.token.username}, but this desk is signed in as ${idc.claudeUsername ?? 'nobody'}`,
+          'that is somebody else\'s credential doing your work — run `npm run token:set`');
+      } else if (idc.token.source.shared) {
+        pass('acts as itself', `${idc.token.username}, token from .env`);
+        warn('token lives in .env', '.env has leaked into a run transcript before — `npm run token:set` moves it outside the repo');
+      } else if (idc.token.bot) {
+        pass('acts as a bot', `${idc.token.username} — cannot be mistaken for a reviewer`);
+      } else {
+        pass('acts as itself', `${idc.token.username}, token from ${idc.token.source.source}`);
+      }
+      if (idc.warning && !idc.token?.source.shared) warn('identity', idc.warning.split('\n')[0] ?? '');
       const br = await listBranches();
       if (br.ok && br.data) {
         const names = new Set(br.data.map((x) => x.name));

@@ -42,6 +42,7 @@ import {
 import { renewPromotion } from './lib/promotion.js';
 import { getIssue, projectUrl } from './lib/gitlab.js';
 import { alert } from './lib/slack.js';
+import { checkIdentity, describeIdentity } from './lib/identity.js';
 import { log } from './lib/log.js';
 import { refuseIfAnotherConductor } from './lib/singleton.js';
 
@@ -232,7 +233,7 @@ function handleFollowOutcome(outcome: RunOutcome): void {
   }
 }
 
-function banner(): void {
+async function banner(): Promise<void> {
   const cfg = projectConfig();
   log.banner('Oneshot');
   log.info(`project    ${cfg.gitlab.project} (${projectUrl()})`);
@@ -240,10 +241,15 @@ function banner(): void {
   log.info(`base       ${cfg.branches.base}   protected: ${cfg.branches.protected.join(', ')}`);
   log.info(`phases     ${phases().length} (${phases().filter((p) => p.kind === 'code').length} deterministic)`);
   log.info(`concurrency ${cfg.concurrency} here · ${portPool().length} pool ports across the fleet`);
-  if (GITLAB_USERNAME) {
-    log.info(`operator   ${GITLAB_USERNAME} (only tickets assigned to this user)`);
-  } else {
-    log.warn('operator   unset — assigned tickets will be skipped (set ONESHOT_GITLAB_USERNAME)');
+  // Resolve and REPORT the desk's identity next to the token's. A conductor that
+  // selects tickets as one person and acts as another has to say so at boot,
+  // rather than leave it to be discovered from a confused reviewer three phases
+  // later. The check costs one API call, once, at startup.
+  const idc = await checkIdentity();
+  log.info(describeIdentity(idc));
+  if (idc.warning) log.warn(idc.warning);
+  if (idc.username) {
+    log.info(`selects    only tickets assigned to ${idc.username}, plus unassigned ones`);
   }
   if (solo) log.info('mode       --solo, a second conductor is refused');
   if (followArg) log.info(`mode       --follow #${ticketArg}, re-checked every ${FOLLOW_TICK_MS / 1000}s until done/blocked`);
@@ -553,7 +559,7 @@ async function main(): Promise<void> {
   // all — the worktree seed is the only other place `.claude` gets built.
   if (ensureClaudeDir(ROOT).length) log.ok('.claude    composed in the conductor repo');
 
-  banner();
+  await banner();
   if (!preflight()) process.exit(1);
   ensureCollector();
 
