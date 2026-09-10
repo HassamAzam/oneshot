@@ -26,7 +26,9 @@
     "board:dry": "node scripts/board/index.mjs --once --dry-run",
     "board:stats": "node scripts/board/index.mjs --stats",
     "board:doctor": "node scripts/board/doctor.mjs",
-    "fleet:verify": "tsx scripts/verify-fleet.ts"
+    "fleet:verify": "tsx scripts/verify-fleet.ts",
+    "token:set": "tsx scripts/token.ts",
+    "token:show": "tsx scripts/token.ts --show"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.77",

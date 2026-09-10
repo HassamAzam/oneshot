@@ -43,7 +43,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, GITLAB_USERNAME, MERGE_POLL_MS, PAUSE, SKIP_DEPLOY, WORK_REPO, deployConfig, modelFor,
+  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, SKIP_DEPLOY, WORK_REPO, deployConfig, modelFor,
   phases, portPool, projectConfig,
   operatorName,
   type PhaseConfig,
@@ -376,13 +376,14 @@ export async function runTicket(
   const owner = opts.conductor;
 
   if (issue.assignees.length > 0) {
-    if (!GITLAB_USERNAME) {
-      log.info(`#${iid} — assigned ticket, but ONESHOT_GITLAB_USERNAME is unset`);
-      return { runId: '', iid, status: 'refused', reason: 'assigned ticket, but ONESHOT_GITLAB_USERNAME is unset' };
+    const me = gitlabUsername();
+    if (!me) {
+      log.info(`#${iid} — assigned ticket, but this desk has no GitLab identity`);
+      return { runId: '', iid, status: 'refused', reason: 'assigned ticket, but this desk has no GitLab identity (npm run token:set)' };
     }
-    if (!issue.assignees.some((a) => a.username === GITLAB_USERNAME)) {
+    if (!issue.assignees.some((a) => a.username === me)) {
       const owners = issue.assignees.map((a) => a.username).join(', ');
-      log.info(`#${iid} — assigned to ${owners}, not to ${GITLAB_USERNAME}`);
+      log.info(`#${iid} — assigned to ${owners}, not to ${me}`);
       return { runId: '', iid, status: 'refused', reason: `assigned to ${owners}` };
     }
   }

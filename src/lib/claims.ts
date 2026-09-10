@@ -48,6 +48,24 @@ export function claimMarker(runId: string): string {
   return `<!-- oneshot:claim:${runId} -->`;
 }
 
+/**
+ * Any note this pipeline wrote, by its hidden marker.
+ *
+ * The review gates read a ticket's comments looking for a human verdict, and
+ * their only machine filter was GitLab's `system` flag — which a claim note does
+ * not carry, because it is an ordinary comment posted through the API. On a desk
+ * whose token belongs to somebody on config/reviewers.json, that made the
+ * pipeline's own claim indistinguishable from a reviewer speaking: run 29's plan
+ * gate read another conductor's claim note as feedback and re-planned three times
+ * into a quota wall.
+ *
+ * Matching the marker rather than the prose keeps this true for any future note
+ * type, and keeps it independent of who the token happens to be.
+ */
+export function isMachineNote(body: string | null | undefined): boolean {
+  return /<!--\s*oneshot:/i.test(body ?? '');
+}
+
 export function claimNoteBody(runId: string, operator: string): string {
   return `Oneshot claimed this ticket — run \`${runId}\` (${operator}).\n\n${claimMarker(runId)}`;
 }
