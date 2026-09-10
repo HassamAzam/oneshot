@@ -307,6 +307,35 @@ function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] 
 }
 
 /**
+ * A phase that executed its case list and recorded failures did NOT succeed.
+ *
+ * `verify` and `qa` return ok for *running* the list, whatever the verdicts —
+ * the schema's `ok` means "the session finished and produced its artifact", not
+ * "the work is right". Until now the only thing that read the verdicts back was
+ * `qualityGate()` inside the merge phase, which is three phases too late: a run
+ * whose own cases fail still spends `ui-evidence`, still opens an MR, and only
+ * then refuses to merge. The reviewer gets an MR nobody can merge, and the lap
+ * that would have fixed the code is spent proving it is broken.
+ *
+ * Both phases are already configured `onFail: cycle → implement`. This makes
+ * that policy fire on the thing it was written for, so the failure returns to
+ * `implement` while it is still cheap — before an MR exists. `qualityGate()`
+ * stays where it is as a backstop: it re-derives the same fact deterministically
+ * at the merge, and a check that only runs early is a check a resumed run skips.
+ */
+function failedCases(name: string, data: Record<string, unknown> | null | undefined): string | null {
+  if (name !== 'verify' && name !== 'qa') return null;
+  const results = (data as { results?: Array<{ id?: string; result?: string }> } | null)?.results;
+  if (!Array.isArray(results) || results.length === 0) return null;
+  const failed = results.filter((r) => r.result === 'fail');
+  if (failed.length === 0) return null;
+  const ids = failed.map((r) => r.id ?? '?').join(', ');
+  const other = results.filter((r) => r.result === 'blocked' || r.result === 'skipped').length;
+  const tail = other ? ` (${other} further case(s) blocked or never run)` : '';
+  return `${name} recorded ${failed.length} failing case(s) of ${results.length}: ${ids}${tail}`;
+}
+
+/**
  * The one-screen account of a run that did not finish.
  *
  * A stopped run previously said only what went wrong, on a single line that
@@ -945,17 +974,23 @@ export async function runTicket(
     };
 
     for (const r of results) {
+      // Verdicts the phase itself reported are read BEFORE its record is
+      // written, so a case list that failed is a failed phase rather than a
+      // successful one whose artifact happens to say otherwise.
+      const caseFail = r.out.ok ? failedCases(r.cfg.name, r.out.data) : null;
+      const phaseOk = r.out.ok && caseFail === null;
+
       recordPhase(iid, {
         phase: r.cfg.name,
         lap: r.lap,
-        status: r.out.ok ? 'ok' : statusForFailure(r.cfg, r.out.infra),
+        status: phaseOk ? 'ok' : statusForFailure(r.cfg, r.out.infra),
         startedAt: r.startedAt,
         endedAt: r.endedAt,
         model: modelFor(r.cfg),
         turns: r.out.turns,
         weighted: r.out.weighted,
         sessionId: r.out.sessionId,
-        error: r.out.error ?? r.out.blocked ?? undefined,
+        error: r.out.error ?? r.out.blocked ?? caseFail ?? undefined,
       });
       j = readJournal(iid) ?? j;
 
@@ -969,7 +1004,7 @@ export async function runTicket(
         continue;
       }
 
-      if (!r.out.ok) {
+      if (!phaseOk) {
         prior[r.cfg.name] = null;
         if (r.hardStop) {
           claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.hardStop}` }, r.cfg.name);
@@ -983,7 +1018,11 @@ export async function runTicket(
         } else {
           claim(
             afterFailure(
-              r.cfg, r.index, r.out.blocked ?? r.out.error ?? 'phase failed', r.out.infra,
+              r.cfg, r.index,
+              caseFail ?? r.out.blocked ?? r.out.error ?? 'phase failed',
+              // A recorded case failure is a verdict about the work, never an
+              // infra death: the session ran to completion and said so.
+              caseFail ? false : r.out.infra,
             ),
             r.cfg.name,
           );
