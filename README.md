@@ -3,10 +3,13 @@
 One orchestrator. One label. Zero human gates.
 
 Oneshot takes a GitLab issue in [`arbisoft/workstreamai`](https://gitlab.arbisoft.com/arbisoft/workstreamai)
-carrying the label **`Loop`** and drives it — unattended — to **`Ready For Deployment`**:
-recall prior art, research, plan, implement, brainstorm test cases, review, verify in a real
-browser, open and merge the MR, deploy to the demo server, QA the deployed build, record a demo,
-write a memory card so the next similar ticket starts warm, and document the ticket and the MR.
+carrying the label **`Loop`** and drives it — unattended — to **`merged`**: recall prior art,
+research, plan, implement, brainstorm test cases, review, verify in a real browser, screenshot
+the result, open the MR, and merge it.
+
+**The pipeline ends at the merge.** Nothing is deployed, nothing is QA'd on a running build,
+and no demo is recorded — deploying is a person's job, and the ticket says so when it hands
+back.
 
 It is the successor to [`one-loop`](https://github.com/HassamAzam/one-loop), and it is a
 different shape on purpose.
@@ -24,7 +27,7 @@ owner.
 
 | One Loop | Oneshot |
 |---|---|
-| 9-label state machine, 11 transitions | `Loop` in → `Ready For Deployment` out. Nothing between. |
+| 9-label state machine, 11 transitions | `Loop` in → `merged` out. Nothing between. |
 | `label-guard.js` + `config/labels.json` | deleted |
 | claim → post note → re-fetch → verify → roll back | one SQLite row |
 | `HANDOFF:` markers + route table | a phase returns a value to its caller |
@@ -45,8 +48,8 @@ Three things fall out of that:
 1. **"Clear the context between tickets" is free.** The conductor has no context. Every phase is
    a fresh `query()` that is never resumed; when a run ends there is nothing to clear but files,
    and those get reaped.
-2. **Runs are replayable.** A run is a journal of phase artifacts, so re-entering at phase 11
-   costs nothing for phases 0–10.
+2. **Runs are replayable.** A run is a journal of phase artifacts, so re-entering at phase 8
+   costs nothing for phases 0–7.
 3. **Spend goes to the work**, not to an orchestrator re-reading its own state every minute.
 
 ## Pipeline
@@ -64,15 +67,8 @@ Three things fall out of that:
    7  ui-evidence  ∥  Sonnet 5  screenshots
    8  mr           ∥  Sonnet 5  MR + description
    9  merge           code      merge into dev — dev is final, nothing promotes on
-  10  deploy          Sonnet 5  guarded agent: runs the deploy script,
-                                diagnoses failures, bounded retries
-  11  qa              Opus 5    THE list again, on the deployed build
-                                fail ──► back to 3 (max 2 laps), and the lap
-                                re-runs 8 → 9 → 10 so the fix actually reships
-  12  demo         ∥  Sonnet 5  recorded walkthrough
-  13  memorize     ∥  Haiku     memory card for future recall
-  14  document        Haiku     ticket note (links the card) + MR note + uploads
-  15  close           code      label → Ready For Deployment, teardown
+                                the run's record: ticket note, MR note, Slack,
+                                label → `merged`, teardown
 
   ∥  runs concurrently with the phase above it
 
@@ -81,20 +77,22 @@ Three things fall out of that:
       added, removed or reordered. See "Optional human review gates".
 ```
 
-`merge` and `close` are **code, not sessions**. No model holds a merge tool, which is why One
-Loop's approval-label guard has nothing left to guard.
+**Merge is the last phase.** A merged change is where this pipeline's warrant runs out: the
+diff was reviewed and the case list was executed against a real browser on the branch, and
+both of those are claims about the code. Anything past the merge — is it on the box, does it
+work there — is a claim about a running system nobody here is watching, and a machine that
+files that claim on a ticket is worth less than one that says plainly where it stopped.
 
-`deploy` used to be code too, and stopped being. The script is still the only sanctioned path to
-the box, but a failed deploy needs a diagnostician — read the remote build log, check supervisor
-state, pick `--npm`/`--pip` from the actual diff, retry within a cap — and none of that is
-expressible as a return code. Safety moved from "no model holds the tool" to
-`hooks/deploy-guard.cjs` (allowlisted hosts, allowlisted remote verbs, **fails closed**) plus a
-deterministic conductor check afterwards: the deployed SHA must contain this run's merge SHA and
-the site must answer 200, or the agent's verdict is overruled.
+`merge` is **code, not a session**. No model holds a merge tool, which is why One Loop's
+approval-label guard has nothing left to guard — and being code is also what lets the last
+phase re-derive, from the artifacts rather than from the phases' exit codes, whether `verify`
+and `review` actually passed before it accepts anything.
 
-**Phase 4 exists so `verify` and `qa` execute the same list.** Without it each invents its own
-scenarios, and a green local run and a green demo run cover different ground — you cannot
-compare them, so the QA pass means less than it looks.
+**Phase 4 exists so the case list is written once and reviewed as a list.** A verifying session
+that invents its own scenarios as it drives the browser produces a pass nobody can re-run:
+there is no artifact to disagree with, and the cases quietly become whatever the session
+thought of. Separating them makes "the change passes its own cases" a claim about a document a
+person can read.
 
 **It runs after `implement`, not before.** Writing the cases against real code buys concrete
 steps — actual component names, routes, ids and error strings — instead of the approximations
@@ -103,12 +101,7 @@ list quietly ratifies a bug rather than catching it, so the prompt makes the acc
 criteria the oracle and the diff merely the vocabulary: where the two disagree, the case is
 written to the criteria and is expected to fail. `implement` therefore works from the plan
 alone; on a cycle lap the cases already exist and are handed back to it. They are never
-re-authored — one list, three executions, or the runs cannot be compared.
-
-**A `qa` failure is not the same shape as a `review` failure.** It happens after the merge and
-the deploy, so a lap back to `implement` is worth nothing unless `mr → merge → deploy` run again
-on the way forward. They do: a cycle marks every phase in the window as owing a re-run, which is
-also why a lap costs so much more from phase 11 than from phase 5.
+re-authored — one list, and a lap through `implement` hands the same list back.
 
 **A death is not a verdict.** A phase that is cancelled by the conductor, killed by a signal, or
 run out of wall clock never reached an opinion about the work, so it is recorded `infra` rather
@@ -126,9 +119,9 @@ identical from outside. A run that stops prints where it stopped, the trail of t
 phases, and the recovery command, so the question "why did it stop" is answered on the console
 rather than by reading the journal by hand.
 
-**Full auto.** There are no human gates. The only thing that stops a run is `BLOCKED` — a deploy
-the agent itself gave up on, a cycle cap exhausted, an unresolvable MR conflict, GitLab
-unreachable past the breaker, or a quota park. That posts an @mention and applies `Needs Human`.
+**Full auto.** There are no human gates. The only thing that stops a run is `BLOCKED` — a cycle
+cap exhausted, a verify that passed nothing, an unresolvable MR conflict, GitLab unreachable
+past the breaker, or a quota park. That posts an @mention and applies `Needs Human`.
 
 ## Optional human review gates
 
@@ -159,7 +152,7 @@ rather than a second inbox to poll.
 
 ```
  … plan ──▶[ R1 approve the plan ]──▶ implement ──▶ testcases ──▶[ R2 approve the case list ]──▶ review …
- … mr ──▶[ R3 a human merges the MR ]──▶ deploy ──▶ qa ──▶ demo ──▶ close
+ … mr ──▶[ R3 a human merges the MR ]──▶ the run's record, and done
 
  R1, R2   a Slack reply of `approved` releases the pause; anything else is feedback
  R3       no keyword — the MR's own state turning `merged` is the signal
@@ -169,20 +162,19 @@ rather than a second inbox to poll.
    plan itself into the ticket's Slack thread and the run **parks**.
 2. **Test-case approval** — after phase 4 (`testcases`), before phase 5 (`review`). The list of
    cases this run intends to verify is posted into the same thread, and the run **parks**. It
-   sits here, and not after `qa`, because this is the last point at which approving still
-   changes anything: an edge case added here is carried into `review`, into the MR, and into
-   the `qa` run that follows. The same reply taken after `qa` would land on code that had
-   already been reviewed and merged, where it could only become a follow-up ticket — a gate
-   that cannot change what it guards is decoration. It carries no verdict, deliberately: `qa`
-   has not run yet, and there is no result to summarise.
+   sits here, and not after `verify`, because this is the last point at which approving still
+   changes anything: an edge case added here is carried into `review`, into `verify` and into
+   the MR. The same reply taken after the run had merged could only become a follow-up ticket
+   — a gate that cannot change what it guards is decoration. It carries no verdict,
+   deliberately: nothing has executed the list yet, and there is no result to summarise.
 3. **The merge itself** — inside phase 9 (`merge`), still pure code, still no model. On a
    Review ticket Oneshot **never accepts the MR**, however green the pipeline or complete the
-   approvals: it opens the MR and from there only watches. Merging — and therefore deploying —
-   is a person's decision end to end, because it is the last irreversible step and that is
-   precisely the step this label exists to reserve for a human. The phase parks until the MR's
-   own state reads `merged`, whoever merged it and whenever, then the run carries on into
-   `deploy → qa` by itself. Because that decision is measured in hours, the question is put to
-   GitLab every 30 minutes (`MERGE_POLL_MS`); ticks in between park without a network round trip.
+   approvals: it opens the MR and from there only watches. Merging is a person's decision,
+   because it is the last irreversible step and that is precisely the step this label exists to
+   reserve for a human. The phase parks until the MR's own state reads `merged`, whoever merged
+   it and whenever, then writes the run's record and finishes. Because that decision is measured
+   in hours, the question is put to GitLab every 30 minutes (`MERGE_POLL_MS`); ticks in between
+   park without a network round trip.
 **The label is not the only trigger.** A person applies it, so it is forgettable — and the
 tickets most worth pausing on are exactly the ones nobody remembers to label. So the gates also
 arm themselves when a run *touches* anything in `highScrutinyPaths` (config/project.json):
@@ -257,20 +249,18 @@ weakens an invariant.
 the same inputs and write disjoint artifacts. The runner starts them together and then processes
 their outcomes *in phase order*, so the first failure still owns control flow and a group is
 never a way for a later phase to overrule an earlier one. Three today: `testcases ∥ review`
-(both consume only `implement`, neither reads the other), `ui-evidence ∥ mr` (a browser pass and
-a git push — disjoint tools, disjoint writes), `demo ∥ memorize` (nothing in common at all).
+(both consume only `implement`, neither reads the other) and `ui-evidence ∥ mr` (a browser pass
+and a git push — disjoint tools, disjoint writes).
 
 **Parallel subagents inside a phase.** `review` dispatches `backend-reviewer-agent`,
 `frontend-reviewer-agent` and `util-reuse-agent` in a single message, so a full-stack diff gets
 three specialists at once instead of three specialists in a row.
 
 **Pipelined tickets.** `concurrency` is 2, and the tick loop keeps scanning while runs are in
-flight. What used to force this to 1 was real: the deploy script ships the TIP of `dev`, so two
-runs merging inside the `merge → deploy → qa` window put both changes on the demo box and QA's
-verdict stops being attributable to either. That is now stated precisely rather than
-approximated by a global serialisation — `src/lib/promotion.ts` is an in-process FIFO mutex held
-from `merge` until `qa` passes or the run ends. Only the window where attribution lives is
-serialized; everything else pipelines.
+flight. Two runs must still not be inside the merge window at once — that is stated precisely
+rather than approximated by a global serialisation: `src/lib/promotion.ts` is an in-process FIFO
+mutex held across `merge` and released when the run ends. Only that window is serialized;
+everything else pipelines.
 
 **The port pool is the real ceiling.** `verify` and `ui-evidence` run a dev server, and
 `PORT_POOL` (3 by default) bounds how many can at once. A run leases its port when it first
@@ -288,9 +278,9 @@ npm start                                  # no .env? an interactive wizard runs
 `npm start` with no `.env` hands off to a setup wizard that reuses the GitLab token already in
 `~/.claude.json`, detects your repo clones, and warns before configuring a remote telemetry
 endpoint. Then `npm run verify` (deps → hooks → doctor) is the gate. It checks auth, config coherence, paths, GitLab reachability and
-branch protection, that every guard script is present and its test suite passes, and that the
-deploy target is configured. It exits non-zero on anything that would only surface as a confusing
-failure three phases into a real ticket.
+branch protection, and that every guard script is present and its test suite passes. It exits
+non-zero on anything that would only surface as a confusing failure three phases into a real
+ticket.
 
 - **Auth:** the Agent SDK uses the same credential as Claude Code — if `claude login` works here,
   phases run with no API key. **Never set `ANTHROPIC_API_KEY`.** See below.
@@ -408,20 +398,14 @@ The guards (`npm run hooks:verify` — offline assertions, no network, no sessio
   `--no-verify` is deliberately allowed — the husky pre-commit hook is broken locally.
 - **`budget-gate`** — refuses a phase whose per-phase, per-ticket, per-window or per-day weighted
   token ceiling is already spent.
-- **`deploy-guard`** — the only remote-execution guard, and the reason phase 10 can be an agent.
-  Outside `deploy`, `ssh`/`scp`/`rsync`/`sftp` are denied outright — no other phase has any
-  business on another machine. Inside `deploy` it permits the vendored `scripts/deploy-wsai.sh`
-  and permits remote verbs only when the parsed `user@host` is in `config/deploy.json`'s
-  `allowedHosts`; an unparseable target is denied, and `git push`/`gh`/`glab` are denied in this
-  phase regardless. Local commands pass through untouched, so reading a log is never blocked.
-
-**`deploy-guard` fails closed; the other four fail open, and that asymmetry is deliberate.** A
-guard that crashes must not wedge a 90-minute phase, so a spawn error, a timeout or non-JSON
-output from `pause-check`, `write-scope`, `git-guard` or `budget-gate` is logged loudly and
-treated as allow — they are policy on operations the pipeline is otherwise structured to
-survive. `deploy-guard` is not: it is the last thing between a confused phase and a live demo
-server, with no human in the path, so `src/conductor/hooks.ts` keeps a `FAIL_CLOSED` set and
-turns any failure of that script into a deny.
+**Every guard fails open, and the exception is kept for the next one that must not.** A guard
+that crashes must not wedge a 90-minute phase, so a spawn error, a timeout or non-JSON output
+from `pause-check`, `write-scope`, `git-guard` or `budget-gate` is logged loudly and treated as
+allow — they are policy on operations the pipeline is otherwise structured to survive. The one
+guard that failed CLOSED was `deploy-guard`, which stood between a confused phase and a live
+demo server; it went with the deploy phase. `src/conductor/hooks.ts` still keeps the
+`FAIL_CLOSED` set, empty, because the asymmetry is the load-bearing idea: a guard standing in
+front of an irreversible action must deny when it cannot run.
 
 **Guards are passed to the SDK in-process, not installed into `~/.claude/settings.json`.** They
 travel with the repo, so a fresh clone is protected with no install step, and your own
@@ -473,7 +457,7 @@ allowance remains, and that *is* a real charge.
 
 ## Surviving a VPN drop
 
-GitLab and the demo box both sit behind FortiClient. Without a breaker, a dropped tunnel is the
+GitLab sits behind FortiClient. Without a breaker, a dropped tunnel is the
 most expensive thing this system can do — every phase burns its full timeout on calls that cannot
 succeed. `src/lib/reachability.ts` runs three states: `ok` → `degraded` after 2 consecutive
 failures → `recovering` on the first success → `ok` only after 2 more. `recovering` is what stops
@@ -488,18 +472,18 @@ problem, and letting it trip the breaker would make a wrong `GITLAB_TOKEN` look 
 | Path | What it is |
 |---|---|
 | `src/index.ts` | the conductor — boot, preflight, watch loop, dispatch, drain |
-| `src/conductor/` | watcher, queue, phase runner, the `merge`/`close` code phases, schemas, hook wiring, teardown |
+| `src/conductor/` | watcher, queue, phase runner, the `merge` code phase, schemas, hook wiring, teardown |
 | `src/phases/` | one module per phase: prompt, schema, tool policy |
 | `src/lib/` | config + session env, SQLite, GitLab, worktrees, promotion mutex, quota, reachability, memory |
-| `config/` | project + labels, per-phase model/tools/skills/groups, budgets, deploy, Slack |
+| `config/` | project + labels, per-phase model/tools/skills/groups, budgets, reviewers, Slack |
 | `hooks/` | guardrails — passed to the SDK in-process, never installed globally |
-| `scripts/` | hook verify, `doctor`, dependency probe, the vendored deploy script |
+| `scripts/` | hook verify, `doctor`, preflight, dependency probe, unblock, report |
 | `docs/` | [PLAN.md](docs/PLAN.md) · [HOOKS.md](docs/HOOKS.md) |
 | `state/` | gitignored — runs, artifacts, memory, SQLite |
 
 ## Status
 
-All sixteen phases are **built**. Everything past M1 is code-complete and **unproven live** —
+All eleven phases are **built**. Everything past M1 is code-complete and **unproven live** —
 that distinction is the whole point of this section, and this repo has already learned six times
 over that reading code is not running it.
 
@@ -522,14 +506,14 @@ then-current order of recall → research → plan → testcases:
 | M1 | phase runner, schema-enforced handoffs, run journal, teardown, `recall`/`research`/`plan`/`testcases`, Slack card | **done, verified live** |
 | M2 | `implement`, `review` and the review cycle | built, unproven |
 | M3 | `verify`, `ui-evidence` — dev server on a leased port, Playwright, screenshots | built, unproven |
-| M4 | `mr`, `merge`, `document` — MR, merge, promote, documentation, uploads | built, unproven |
-| M5 | `deploy`, `qa`, `demo` — guarded deploy agent, demo-server QA, demo recording | built, unproven |
-| M6 | phases 0 + 13 — memory card, index and recall | built, unproven |
-| M7 | dashboard, replay, hardening hooks | partial — `deploy-guard` shipped with M5; dashboard and replay not started |
+| M4 | `mr`, `merge` — MR, merge, promote, and the run's record on the ticket and the MR | built, unproven |
+| M5 | ~~`deploy`, `qa`, `demo`~~ — **removed**: the pipeline ends at the merge | withdrawn |
+| M6 | `recall` — memory index and recall | built, unproven; nothing writes new cards since `memorize` was removed |
+| M7 | dashboard, replay, hardening hooks | not started |
 
 `runner.ts` stops with an explicit `BLOCKED: not built yet: phase '<name>'` rather than skipping
-ahead — including for the `merge`/`close` code phases, so a run can never reach
-`Ready For Deployment` without having actually merged and deployed.
+ahead — including for the `merge` code phase, so a run can never reach `merged` without having
+actually merged.
 
 ## What six live failures taught this design
 

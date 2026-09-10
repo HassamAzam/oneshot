@@ -9,8 +9,9 @@ parts that go stale.
 ---
 
 You are picking up Oneshot, an unattended pipeline that drives a GitLab ticket
-from a `Loop` label to `Ready For Deployment`. Read this whole brief before you
-touch anything.
+from a `Loop` label to `merged`. It ENDS AT THE MERGE — there is no deploy, no
+QA against a running build and no demo; those phases were removed. Read this
+whole brief before you touch anything.
 
 ## The shape of it
 

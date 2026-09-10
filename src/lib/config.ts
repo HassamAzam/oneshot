@@ -90,7 +90,10 @@ export interface ProjectConfig {
   contextRepo: { path: string; gitlabProject: string; skillsRoot: string };
   labels: {
     entry: string; entryId: number;
-    exit: string; exitId: number;
+    // Null while a label's id has not been verified against the live project.
+    // Nothing reads these ids — every check is by name — so an unverified
+    // label costs nothing except the reminder that it must already exist.
+    exit: string; exitId: number | null;
     blocked: string; blockedId: number;
     /**
      * Optional, off-by-default. A ticket carrying this label ALONGSIDE `entry`
@@ -179,22 +182,6 @@ export interface BudgetConfig {
   pause_defaults: { session_minutes: number; weekly_minutes: number };
 }
 
-export interface DeployConfig {
-  script: string;
-  args: string[];
-  server: string;
-  allowedHosts: string[];
-  vpnGated: boolean;
-  allowedRefs: string[];
-  defaultRef: string;
-  healthUrl: string;
-  healthHostHeader: string;
-  expectStatus: number;
-  depFlags: Record<string, string>;
-  timeoutMin: number;
-  demoUrl: string;
-}
-
 export interface SlackConfig {
   channel: string;
   card: { editInPlace: boolean; showTokens: boolean; showElapsed: boolean; showModel: boolean };
@@ -251,17 +238,6 @@ export function budgetConfig(): BudgetConfig {
     _budgets = c;
   }
   return _budgets;
-}
-
-let _deploy: DeployConfig | null = null;
-export function deployConfig(): DeployConfig {
-  if (!_deploy) {
-    const c = loadJson<DeployConfig>('deploy.json');
-    c.server = envOr('ONESHOT_DEPLOY_SERVER', c.server);
-    c.demoUrl = envOr('ONESHOT_DEMO_URL', c.demoUrl);
-    _deploy = c;
-  }
-  return _deploy;
 }
 
 let _slack: SlackConfig | null = null;
@@ -323,7 +299,6 @@ export function narratorModel(): string {
 // ------------------------------------------------------------------ paths
 
 export const DRY_RUN = envFlag('DRY_RUN');
-export const SKIP_DEPLOY = envFlag('ONESHOT_SKIP_DEPLOY');
 /**
  * The GitLab username this desk claims ASSIGNED tickets as.
  *
@@ -409,7 +384,6 @@ export const MEMORY = join(STATE, 'memory');
 export const PAUSE = join(STATE, 'PAUSE');
 export const PAUSE_QUOTA = join(STATE, 'PAUSE-QUOTA');
 export const PAUSE_NETWORK = join(STATE, 'PAUSE-NETWORK');
-export const PAUSE_DEPLOY = join(STATE, 'PAUSE-DEPLOY');
 export const DB_PATH = join(STATE, 'oneshot.db');
 
 export const WORK_REPO = expandPath(envOr('WORK_REPO', '~/Documents/workstreamai'));

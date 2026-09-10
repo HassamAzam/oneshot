@@ -454,10 +454,9 @@ async function tick(): Promise<void> {
   // Dispatch and DO NOT await. Awaiting here made `concurrency` decorative —
   // the loop could not scan again until the ticket it started had finished, so
   // the second slot was never filled no matter what the config said. The
-  // correctness constraint that used to justify serialising (the deploy script
-  // ships a branch TIP, so two runs in the merge→deploy→qa window put both
-  // changes on the demo box and QA's verdict stops being attributable) is now
-  // carried exactly where it belongs, by the promotion lease.
+  // correctness constraint that used to justify serialising — two runs must not
+  // be inside the merge window at once — is now carried exactly where it
+  // belongs, by the promotion lease.
   const { slots, mine, fleet, pool } = freeSlots();
   if (slots <= 0) {
     say.info(mine > 0
@@ -554,7 +553,7 @@ async function main(): Promise<void> {
       'their tickets are claimable again and resume from their journals');
   }
 
-  // Conductor-cwd phases (recall, deploy, qa, demo, memorize, document) run
+  // Conductor-cwd phases (recall, remediate) run
   // here rather than in a worktree, so without this they resolve no skills at
   // all — the worktree seed is the only other place `.claude` gets built.
   if (ensureClaudeDir(ROOT).length) log.ok('.claude    composed in the conductor repo');

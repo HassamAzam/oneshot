@@ -46,7 +46,7 @@ const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', D = '\x1b[2m', B = '\x1b[1
  * Statuses a record may carry and still be worth keeping.
  *
  * 'skipped' is in here with the successes on purpose: it is what the conductor
- * writes for a phase that was deliberately not run (ONESHOT_SKIP_DEPLOY, an
+ * writes for a phase that was deliberately not run (ONESHOT_SKIP_PHASES, an
  * onFail:'skip' failure it chose to walk past). Dropping those would make a
  * retry re-enter phases the run had already decided against.
  */
@@ -194,7 +194,7 @@ function printJournal(title: string, j: RunJournal, doomed = new Set<PhaseRecord
  *
  * Both shapes the pipeline writes: the phase's own artifact (whose name comes
  * from phases.json, not from the phase name — `review` writes findings.json)
- * and the `<phase>-partial.json` that verify and qa rewrite after every test
+ * and the `verify-partial.json` that verify rewrites after every test
  * case. The partial exists so a session that dies at its turn cap can still be
  * salvaged; carried into a fresh lap it would salvage results the new lap never
  * produced.

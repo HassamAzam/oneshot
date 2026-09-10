@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
   CONTEXT_REPO, SKILLS_ROOT, WORK_REPO, WT_ROOT,
-  auditAuth, budgetConfig, deployConfig, envOr, expandPath, phases, portPool,
+  auditAuth, budgetConfig, envOr, expandPath, phases, portPool,
   projectConfig, slackConfig,
 } from '../src/lib/config.js';
 import { ping, listBranches } from '../src/lib/gitlab.js';
@@ -57,16 +57,16 @@ async function main(): Promise<void> {
   pass('labels', `"${cfg.labels.entry}" -> "${cfg.labels.exit}", blocked "${cfg.labels.blocked}", ` +
     `optional review gate "${cfg.labels.review}" (off unless a ticket carries it too)`);
 
-  // The branch-TIP deploy still means only ONE run may hold the merge→deploy→qa
-  // window, but that is now enforced by the in-process promotion mutex rather
-  // than by pinning the whole pipeline to a single ticket. A sane upper bound
-  // is the port pool — every server-holding phase needs its own port.
+  // Only ONE run may hold the promotion window at a time, enforced by the
+  // in-process mutex rather than by pinning the whole pipeline to a single
+  // ticket. A sane upper bound is the port pool — every server-holding phase
+  // needs its own port.
   if (cfg.concurrency < 1 || cfg.concurrency > portPool().length) {
     fail('concurrency out of range',
       `must be 1..${portPool().length} (the port pool); the promotion mutex, not this number, ` +
-      'keeps QA verdicts attributable');
+      'keeps concurrent merges off each other');
   } else {
-    pass('concurrency', `${cfg.concurrency} — merge→qa serialized by the promotion mutex, ` +
+    pass('concurrency', `${cfg.concurrency} — merges serialized by the promotion mutex, ` +
       `capped at the ${portPool().length}-port pool`);
   }
 
@@ -196,7 +196,7 @@ async function main(): Promise<void> {
   // Guards are passed to the SDK in-process (src/conductor/hooks.ts), so there
   // is nothing to install and nothing in settings.json to check. What matters
   // is that the .cjs files exist and still enforce what they claim to.
-  const guards = ['pause-check', 'write-scope', 'git-guard', 'deploy-guard', 'budget-gate', 'log-event', '_common'];
+  const guards = ['pause-check', 'write-scope', 'git-guard', 'budget-gate', 'log-event', '_common'];
   const missing = guards.filter((g) => !existsSync(join(process.cwd(), 'hooks', `${g}.cjs`)));
   missing.length
     ? fail('guard scripts missing', missing.join(', '))
@@ -211,14 +211,6 @@ async function main(): Promise<void> {
       'run: npm run hooks:verify — note an absent SKILLS_ROOT fails its symlink test on its '
       + 'own, so this and the path check above are usually one cause, not two');
   }
-
-  // --------------------------------------------------------------- deploy
-  section('Deploy (phase 10)');
-  const d = deployConfig();
-  if (existsSync(join(process.cwd(), d.script))) pass('deploy script vendored', d.script);
-  else warn('deploy script missing', `${d.script} — phase 10 will report BLOCKED`);
-  pass('demo target', d.demoUrl);
-  if (d.vpnGated) warn('demo host is VPN-gated', `${d.server} — phase 10 probes it before deploying`);
 
   // ------------------------------------------------------------ telemetry
   section('Session tracking (Langfuse)');

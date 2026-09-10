@@ -1,12 +1,12 @@
 /**
  * Publish a run's artifacts to GitLab AS THEY LAND, not at the end.
  *
- * The `document` phase already writes the durable record, but it runs second
- * from last — so for most of a run's life the ticket says nothing and whoever
- * is watching has to read a Slack card to learn anything. That is backwards for
- * the two artifacts people actually want early: the PLAN, which is the last
- * cheap moment to say "not like that", and the TEST CASES, which QA wants in
- * their own format long before the code is deployed.
+ * `merge` writes the run's durable record, but it is the last phase — so for
+ * most of a run's life the ticket would say nothing and whoever is watching
+ * would have to read a Slack card to learn anything. That is backwards for the
+ * two artifacts people actually want early: the PLAN, which is the last cheap
+ * moment to say "not like that", and the TEST CASES, which QA wants in their
+ * own format while the change is still being written.
  *
  * Two decisions shape this file:
  *
@@ -212,7 +212,7 @@ const SPECS: Spec[] = [
       return {
         body: `**Test cases** — ${cases.length} case(s), ${high} high blast radius. ` +
           'CSV attached in the team format (Test Scenario · Pre Condition · Steps). ' +
-          'This one list is executed locally, for screenshots, and again against the deployed build.',
+          'This one list is executed against a real browser on the branch, and is the same list the screenshots come from.',
         attachments: [{
           name: `testcases-${ctx.iid}.csv`,
           content: renderTestcasesCsv(cases),
@@ -310,80 +310,11 @@ const SPECS: Spec[] = [
           + (ctx.journal.reviewMode
             ? 'This ticket carries `Review`, so Oneshot will not merge it itself — the run is '
               + 'parked at the merge step until one of you does, and picks up from there.'
-            : 'If nobody gets to it first, Oneshot merges it once its own quality gate passes and '
-              + 'carries on to deploy and QA — so this is a review request, not a merge block.')
+            : 'If nobody gets to it first, Oneshot merges it once its own quality gate passes — '
+              + 'so this is a review request, not a merge block.')
+          + '\n\nEither way the pipeline ends at the merge: nothing here deploys it.'
           + `\n\nVerification evidence is posted on the MR itself.`,
         attachments: [],
-      };
-    },
-  },
-  {
-    key: 'qa',
-    artifact: 'qa.json',
-    target: 'mr',
-    build: (data, ctx) => {
-      const results = (data.results as CaseResult[]) ?? [];
-      const verdict = String(data.verdict ?? 'unknown');
-      // Surfaced rather than filed: a change made to a SHARED server to get a
-      // case running is exactly the thing a reviewer needs to see, and the
-      // thing whoever hits it next week needs in order to undo it.
-      const changes = (data.dataChanges as string[]) ?? [];
-      return {
-        body: `**QA on the demo server** — verdict **${verdict}** (${tally(results)}).\n\n` +
-          `Deployed SHA \`${String(data.deployedSha ?? '?').slice(0, 12)}\`\n\n${resultTable(results)}\n\n` +
-          (changes.length
-            ? `**Demo-server data changed to arrange preconditions** — undo these when the ` +
-              `ticket is done:\n${changes.map((c) => `- ${c}`).join('\n')}\n\n`
-            : '') +
-          `_Run ${ctx.runId} · the same case list, executed against the deployed build._`,
-        attachments: screenshotsFrom(ctx.iid, results, 10),
-      };
-    },
-  },
-  {
-    // Ticket, not MR: a follow-up outlives the merge request that happened to
-    // surface it, and the ticket is where someone decides whether to act.
-    key: 'qa-followups',
-    artifact: 'qa.json',
-    target: 'ticket',
-    build: (data, ctx) => {
-      const items = (data.followUps as string[]) ?? [];
-      if (!items.length) return null;
-      const failed = ((data.results as CaseResult[]) ?? []).filter((r) => r.result === 'fail');
-      return {
-        body: `**QA follow-ups** — real defects QA found on the deployed build and judged too ` +
-          `narrow to send this ticket back for. Verdict was **${String(data.verdict ?? '?')}**; ` +
-          `these are recorded so they are not lost, not because they blocked anything.\n\n` +
-          `${items.map((f) => `- ${f}`).join('\n')}\n\n` +
-          (failed.length
-            ? `_Failing cases: ${failed.map((f) => f.id).join(', ')} — full evidence on the MR._\n\n`
-            : '') +
-          `_Run ${ctx.runId}._`,
-        attachments: [],
-      };
-    },
-  },
-  {
-    key: 'demo',
-    artifact: 'demo.json',
-    target: 'mr',
-    build: (data, ctx) => {
-      const files = (data.files as string[]) ?? [];
-      const dir = artifactDir(ctx.iid);
-      const attachments: Attachment[] = [];
-      const skipped: string[] = [];
-      for (const f of files) {
-        const p = join(dir, f);
-        if (!existsSync(p)) continue;
-        const content = readFileSync(p);
-        if (content.length > MAX_UPLOAD_BYTES) { skipped.push(f); continue; }
-        attachments.push({ name: f, content, mime: mimeFor(f) });
-      }
-      if (!attachments.length && !skipped.length) return null;
-      return {
-        body: `**Demo** — recorded walkthrough of the change on the demo server.` +
-          (skipped.length ? `\n\nToo large to attach: ${skipped.join(', ')} (left in the run's artifacts).` : ''),
-        attachments,
       };
     },
   },
@@ -431,8 +362,8 @@ async function post(spec: Spec, pub: Publication, ctx: PublishCtx): Promise<bool
  * Publish everything that is ready and not yet published.
  *
  * Never throws and never fails a phase: publishing is reporting, and a run that
- * merged and deployed correctly must not be marked blocked because GitLab
- * refused an attachment.
+ * merged correctly must not be marked blocked because GitLab refused an
+ * attachment.
  */
 export async function publishPending(ctx: PublishCtx): Promise<void> {
   try {

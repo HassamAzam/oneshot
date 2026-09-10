@@ -11,7 +11,7 @@
  * Every function no-ops without a token or channel, so the conductor runs
  * exactly the same with Slack unconfigured — status just stays on the console.
  */
-import { envOr, slackConfig } from './config.js';
+import { envOr, projectConfig, slackConfig } from './config.js';
 import { log } from './log.js';
 
 const API = 'https://slack.com/api';
@@ -133,8 +133,10 @@ function renderCard(s: CardState): string {
   if (s.status === 'parked') {
     footer += `\n:pause_button: *awaiting review* — ${s.blockedWhy ?? 'Review label pause'}`;
   }
-  const reachedClose = s.lines.some((l) => l.phase === 'close' && l.state === 'done');
-  if (s.status === 'done' && reachedClose) footer += '\n:tada: *Ready For Deployment*';
+  // `merge` is the last phase, so a done run that reached it is the whole
+  // success condition — and the label the ticket carries is the one named here.
+  const merged = s.lines.some((l) => l.phase === 'merge' && l.state === 'done');
+  if (s.status === 'done' && merged) footer += `\n:tada: *${projectConfig().labels.exit}*`;
 
   return `${head}\n${body}${footer}`;
 }

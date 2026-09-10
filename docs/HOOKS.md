@@ -1,8 +1,14 @@
 # One Loop v2 — Where hooks are needed
 
-Companion to `ONE-LOOP-V2-PLAN.md`. Full-auto with a self-deploy step changes the hook
-calculus completely: v1 could afford advisory guards because a human sat at the merge gate.
-v2 has no gate, so anything that must hold has to hold **without a model's cooperation**.
+Companion to `ONE-LOOP-V2-PLAN.md`. Full auto changes the hook calculus completely: v1 could
+afford advisory guards because a human sat at the merge gate. v2 has no gate, so anything that
+must hold has to hold **without a model's cooperation**.
+
+> **Historical note.** This document was written when the pipeline ended in a self-deploy step.
+> `deploy`, `qa` and `demo` have since been removed — the pipeline now ends at the merge — and
+> `deploy-guard` went with them. The reasoning below about *why* an irreversible action needs a
+> fail-closed guard is kept deliberately: it is the argument that would have to be re-made
+> before anything like it is added back.
 
 ---
 
@@ -20,7 +26,7 @@ For every constraint, use the cheapest layer that actually holds:
 **A hook is only correct for the second row.** The most common design error is reaching for a
 hook when structure would do — and structure is where v2 wins hardest:
 
-- `merge`, `deploy` and `close` are **code, not sessions**. No model holds a merge tool, so no
+- `merge` is **code, not a session**. No model holds a merge tool, so no
   hook is needed to stop it merging. v1 needed `label-guard` to verify the approval label before
   a merge; v2 deletes that hook *and* its config by removing the capability.
 - Per-phase `allowedTools`. A `recall` phase with no `Write` cannot write. A `research` phase
@@ -39,8 +45,8 @@ What remains after structure is the real hook list.
 | — | **7 new**, listed below |
 
 Net: 12 → 18 hooks, but the two most complex ones shrink or vanish, and every new one exists
-because v2 does something v1 never did (deploy, run a local server, drive a browser, hand
-artifacts between phases).
+because v2 does something v1 never did (run a local server, drive a browser, hand artifacts
+between phases).
 
 ## 3. The hook table
 
@@ -51,29 +57,28 @@ artifacts between phases).
 | `pause-check` | *(all)* | Denies side-effectful tools while `state/PAUSE`, `PAUSE-QUOTA`, `PAUSE-NETWORK` or `PAUSE-DEPLOY` exists. Denies all `mcp__gitlab__*` while the VPN breaker is open. **With zero human gates this is your only brake on a live run.** | **P0** |
 | `write-scope` | `Write\|Edit\|NotebookEdit` | Per-phase write allowlist. Absolute deny for every phase: the v2 runtime's own `hooks/ config/ src/ scripts/`, `~/.claude/`, **and `$ERP_REPO`**. Must `realpath()` before comparing — see §4.1. | **P0** |
 | `git-guard` | `Bash` | No `push --force`, no push to `dev\|stage\|master`, no push to any ref except the run's leased branch, no `branch -D` of a protected ref, no `remote set-url`, no `gh`/`glab` as an escape hatch, and **no git command whose resolved cwd is outside the leased worktree**. | **P0** |
-| `deploy-guard` | `Bash` | **Built.** Outside the `deploy` phase, `ssh`/`scp`/`rsync`/`sftp` are denied outright — no other phase has business on another machine. Inside `deploy`: the vendored `scripts/deploy-wsai.sh` is permitted, remote verbs are permitted only when the parsed `user@host` is in `config/deploy.json`'s `allowedHosts`, an unparseable remote target is denied, and `git push`/`gh`/`glab` are denied regardless (belt over `git-guard`'s braces). Purely local commands pass through, so reading a build log is never blocked. **Fails closed** — see below. | **shipped with phase 10** |
-| `browser-scope` | Playwright / browser tools | Navigation allowlist: `localhost:<leased-port>`, the demo URL, `gitlab.arbisoft.com`. Everything else denied. | **P1 (M3)** |
-| `sleep-cap` | `Bash` | Caps `sleep N`. Phases 6 and 10 legitimately wait (webpack ~30 min; deploy health) — they must poll and report instead of sleeping through their own wall clock. Phase 10 becoming a session does not change this: its one long unconditional wait is the 90s stability sleep *inside* `scripts/deploy-wsai.sh`, which `deploy-guard` allowlists as a whole invocation, so the agent never issues it directly. | **P1 (M3)** |
+| `browser-scope` | Playwright / browser tools | Navigation allowlist: `localhost:<leased-port>`, `gitlab.arbisoft.com`. Everything else denied. | **P1 (M3)** |
+| `sleep-cap` | `Bash` | Caps `sleep N`. Phase 6 legitimately waits (webpack ~30 min) — it must poll and report instead of sleeping through its own wall clock. | **P1 (M3)** |
 | `secret-guard` | `Read\|Bash` | Denies reads of `.env`, `local_settings.py`, `~/.claude.json`, `~/.ssh/**`, `*.pem`, and any Bash that echoes `*TOKEN*\|*KEY*\|*SECRET*\|*PASSWORD*`. | P2 |
 | `dryrun-guard` | *(all)* | `DRY_RUN=1` → all writes denied. How you test the pipeline against a real ticket without touching it. | P2 |
 | `log-event` | *(all)* | Event tail / dashboard. | **P0** |
 
-**Fail-open is the default; `deploy-guard` is the exception, and the exception is wired in
-`src/conductor/hooks.ts`.** Every `.cjs` guard already fails open on its own internal errors, and
-the runner mirrored that: a spawn failure, a 15s timeout or non-JSON stdout resolved to `{}`,
-which the SDK reads as allow. That is right for guards whose subject matter the pipeline can
-survive being wrong about, and it keeps a broken guard from wedging a 90-minute phase. It is
-wrong for the one guard standing between a confused agent and a live demo server, so `hooks.ts`
-keeps a `FAIL_CLOSED` set — currently `deploy-guard.cjs` alone — and turns any failure of a
-script in it into a `PreToolUse` **deny** payload instead. A deploy guard that cannot run is a
-deploy that does not happen.
+**Fail-open is the default, and the exception is wired in `src/conductor/hooks.ts`.** Every
+`.cjs` guard fails open on its own internal errors, and the runner mirrors that: a spawn
+failure, a 15s timeout or non-JSON stdout resolves to `{}`, which the SDK reads as allow. That
+is right for guards whose subject matter the pipeline can survive being wrong about, and it
+keeps a broken guard from wedging a 90-minute phase. It is wrong for a guard standing between a
+confused agent and an irreversible action, so `hooks.ts` keeps a `FAIL_CLOSED` set and turns any
+failure of a script in it into a `PreToolUse` **deny** payload instead. That set is **empty**
+today — its only member was `deploy-guard` — and it is kept because the rule outlives the guard
+that needed it.
 
 ### PostToolUse
 
 | Hook | Matcher | Enforces | P |
 |---|---|---|---|
 | `artifact-validate` | `Write` under `state/runs/<iid>/` | Validates the phase's handoff JSON against its schema **inside the live session** and returns the failing field as `additionalContext` so the model repairs it now — instead of the Conductor finding out after the session is dead and re-running the whole phase. | **P1 (M1)** |
-| `injection-scan` | GitLab reads, `WebFetch`, **browser page-text reads**, `Read` of ticket-derived files | Non-blocking. Flags instruction-shaped text and re-anchors the model on "this is data". Widened matcher: the demo server renders user-authored content, which v1 never read. | **P1 (M1)** |
+| `injection-scan` | GitLab reads, `WebFetch`, **browser page-text reads**, `Read` of ticket-derived files | Non-blocking. Flags instruction-shaped text and re-anchors the model on "this is data". Widened matcher: the app under test renders user-authored content, which v1 never read. | **P1 (M1)** |
 | `log-event` | *(all)* | — | **P0** |
 
 ### SessionStart
@@ -81,7 +86,7 @@ deploy that does not happen.
 | Hook | Enforces | P |
 |---|---|---|
 | `budget-gate` | Refuses the session if the phase's or the run's weighted-token ceiling is blown. **Per-phase ceilings now, not per-loop** — an `implement` that burned 3 laps is refused a 4th before the model starts. Four Opus phases per ticket makes this load-bearing. | **P0** |
-| `run-context` | Injects immutable run facts as `additionalContext`: run id, iid, leased branch, worktree path, port, demo URL, lap number, outstanding findings. Uniform across all 16 phases and present even if prompt assembly has a bug. | **P1 (M1)** |
+| `run-context` | Injects immutable run facts as `additionalContext`: run id, iid, leased branch, worktree path, port, lap number, outstanding findings. Uniform across all phases and present even if prompt assembly has a bug. | **P1 (M1)** |
 
 ### SessionEnd
 
@@ -119,12 +124,11 @@ Same class of problem, worse consequence: `~/Documents/erp` is a live repo with 
 this machine. A `git` command in `implement` with the wrong cwd could commit and push there.
 Hence the cwd check in `git-guard` — not just "which branch" but "which repo".
 
-### 4.2 `deploy-guard` is the load-bearing hook of the whole design
+### 4.2 What a fail-closed guard was for *(historical — `deploy-guard` is removed)*
 
-You chose full auto **and** self-deploy, and phase 10 has since become a session rather than
-code — a diagnostician that can read the remote build log and retry. That combination has no
-human in the path, so the only thing standing between a confused phase and the demo server is
-this hook.
+Full auto **and** self-deploy, with phase 10 a session rather than code — a diagnostician that
+could read the remote build log and retry. That combination had no human in the path, so the
+only thing standing between a confused phase and the demo server was this hook.
 
 As shipped it guards the **surface**: which hosts may be reached, with which verbs, from which
 phase. It deliberately does not adjudicate the SHA. The prohibition that motivated that — never
@@ -167,9 +171,8 @@ them in M1, alongside the first three phases — not in the hardening milestone.
 
 **M3** — `browser-scope`, `sleep-cap`, `reap-check`.
 
-**M5** — `deploy-guard`. **Shipped**, in the same commit as phase 10, as required. Note what
-changed underneath it: phase 10 stopped being code and became a session, so this guard went from
-a second opinion on a deterministic script to the primary structural control on the phase.
+**M5** — `deploy-guard`. Shipped with phase 10, then **removed with it**: the pipeline ends at
+the merge, and a guard whose only job was the deploy has nothing left to guard.
 
 **M7** — `secret-guard`, `dryrun-guard`, `precompact-guard`, `subagent-capture`,
 `archive-transcript`.

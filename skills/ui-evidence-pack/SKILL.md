@@ -1,6 +1,6 @@
 ---
 name: ui-evidence-pack
-description: Assemble the screenshot pack a reviewer looks at instead of checking out the branch — before/after pairs, the states tests do not reach, captions written for someone who has not read the ticket — and attach it to GitLab correctly. Use when asked for "screenshots for the MR", "show me what this looks like", "evidence for the reviewer", "attach these to the ticket", or when Oneshot's phase 7 or 14 runs.
+description: Assemble the screenshot pack a reviewer looks at instead of checking out the branch — before/after pairs, the states tests do not reach, captions written for someone who has not read the ticket — and attach it to GitLab correctly. Use when asked for "screenshots for the MR", "show me what this looks like", "evidence for the reviewer", "attach these to the ticket", or when Oneshot's phase 7 runs.
 ---
 
 # UI Evidence Pack

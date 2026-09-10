@@ -4,7 +4,7 @@
  * This is the handoff medium between phases and the reason runs are replayable.
  * A phase receives the ARTIFACTS of earlier phases — never their transcripts —
  * so context grows in kilobytes rather than conversation turns, and re-entering
- * a run at phase 11 costs nothing for phases 0-10.
+ * a run at phase 8 costs nothing for phases 0-7.
  *
  * Layout:
  *   state/runs/<iid>/run.json         the journal (phases, laps, outcomes)
@@ -143,7 +143,6 @@ export interface RunJournal {
   mrIid?: number;
   mrUrl?: string;
   mergedSha?: string;
-  deployedSha?: string;
   blockedWhy?: string;
   /**
    * The phase the run stopped at, recorded for EVERY terminal status rather
@@ -165,8 +164,6 @@ export interface RunJournal {
    * conductor honours a cooldown against this stamp before it re-claims.
    */
   blockedAt?: number;
-  /** The closing note on the ticket, so a re-run of `close` edits instead of repeating. */
-  closeNoteId?: number;
   /**
    * This run's claim note on the ticket — the cross-machine claim (lib/
    * claims.ts). Kept so a losing claim can be taken back off the ticket, and

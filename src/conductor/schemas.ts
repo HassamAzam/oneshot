@@ -243,82 +243,6 @@ export const MR_SCHEMA = phaseSchema({
 }, ['mrIid', 'mrUrl', 'title', 'targetBranch']);
 
 /**
- * Deploy is the one phase whose own account of itself is never the source of
- * truth: the conductor re-derives the SHA and the health status from the box
- * afterwards. These fields exist so a disagreement between the two is loud
- * rather than silently overwritten — and so an in-session retry leaves a trace,
- * since the runner records one row per phase and would otherwise show a deploy
- * that took three builds as a clean single pass.
- */
-export const DEPLOY_SCHEMA = phaseSchema({
-  deployedSha: str(
-    'The 40-hex SHA the demo box HEAD is on now. Read it from a command you ran — the script ' +
-    'output or a fresh rev-parse — never from recollection. The conductor re-derives this ' +
-    'independently and blocks the run if the two disagree.',
-  ),
-  healthOk: {
-    type: 'boolean',
-    description:
-      'The site returned the expected status through the Host header on your final check. ' +
-      'A bare-IP request returns 400 from ALLOWED_HOSTS and looks exactly like a broken app.',
-  },
-  attempts: {
-    type: 'number',
-    minimum: 1,
-    maximum: 3,
-    description:
-      'How many times you launched the deploy script, INCLUDING the ones that failed. Three is ' +
-      'the cap and the guard enforces it.',
-  },
-  flagsUsed: strArr("Dependency flags passed on the successful attempt: '--npm', '--pip', or neither."),
-  flagsRationale: str(
-    'Why those flags and not others, in one sentence, naming the files in THIS run\'s diff that ' +
-    'justified them (package.json -> --npm, requirements/ -> --pip). If you passed none and the ' +
-    'script reported a dependency change, say why that was right.',
-  ),
-  serviceState: str(
-    'What supervisorctl showed at the end: which demo_erp units are running, and whether they ' +
-    'held the same PIDs across the stability window. A crash-loop reads as RUNNING if you only ' +
-    'look once.',
-  ),
-}, ['deployedSha', 'healthOk', 'attempts', 'flagsUsed', 'flagsRationale', 'serviceState']);
-
-export const QA_SCHEMA = phaseSchema({
-  deployedSha: str('SHA actually live on the demo server when you tested.'),
-  results: CASE_RESULT,
-  verdict: { type: 'string', enum: ['pass', 'fail'] },
-  dataChanges: strArr(
-    'EVERY change you made to the demo server to arrange a precondition, one per entry, each ' +
-    'specific enough to undo without you: what you changed, on which record, from what to what. ' +
-    'Empty array if you changed nothing. This is a shared server other people use, so an ' +
-    'unrecorded change is indistinguishable from someone else breaking their own environment.',
-  ),
-  followUps: strArr(
-    'Real defects that are NOT worth sending this ticket back — a low-blast edge case, or ' +
-    'behaviour this ticket never touched. One line each, written so someone can act on it ' +
-    'without you: what fails, under what conditions, and the case id. These are posted to the ' +
-    'ticket as a comment rather than blocking the run. A failing HIGH-blast case is never a ' +
-    'follow-up, and neither is anything you could not reproduce well enough to describe.',
-  ),
-}, ['deployedSha', 'results', 'verdict', 'dataChanges', 'followUps']);
-
-export const DEMO_SCHEMA = phaseSchema({
-  files: strArr('Demo artefacts produced, under artifacts/.'),
-}, ['files']);
-
-export const DOCUMENT_SCHEMA = phaseSchema({
-  ticketNoteId: { type: ['number', 'null'], description: 'Id of the note posted on the ticket.' },
-  mrNoteId: { type: ['number', 'null'], description: 'Id of the note posted on the MR.' },
-  uploaded: strArr('Files attached to GitLab.'),
-}, ['ticketNoteId', 'mrNoteId', 'uploaded']);
-
-export const MEMORIZE_SCHEMA = phaseSchema({
-  card: str('Path to the memory card written under state/memory/tickets/.'),
-  tags: strArr('Search tags for future recall.'),
-  filesTouched: strArr('For file-overlap scoring on the next similar ticket.'),
-}, ['card', 'tags', 'filesTouched']);
-
-/**
  * The remediation contract — the one schema whose most valuable answer is a
  * negative one.
  *
@@ -389,11 +313,6 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   verify: VERIFY_SCHEMA,
   'ui-evidence': UI_EVIDENCE_SCHEMA,
   mr: MR_SCHEMA,
-  deploy: DEPLOY_SCHEMA,
-  qa: QA_SCHEMA,
-  demo: DEMO_SCHEMA,
-  document: DOCUMENT_SCHEMA,
-  memorize: MEMORIZE_SCHEMA,
   remediate: REMEDIATE_SCHEMA,
 };
 

@@ -68,7 +68,7 @@ function checkPush(t, cfg) {
   if (process.env.ONESHOT_DRY_RUN === '1') {
     C.event('denied_push_dryrun', { cmd: t.join(' ') });
     C.deny(
-      'Denied: this is a DRY RUN. Nothing leaves this machine — no push, no MR, no deploy. ' +
+      'Denied: this is a DRY RUN. Nothing leaves this machine — no push, no MR, no merge. ' +
       'Do the work locally and report what you would have pushed; the run is being exercised ' +
       'end to end precisely because nothing it does is meant to land.',
     );
@@ -134,7 +134,7 @@ const CONDUCTOR_WRITES = new Set([
  * A phase whose cwd is the conductor holds no leased worktree, so there is no
  * repository it has any claim on — the Oneshot root, the context repo and
  * every other checkout on this laptop are all somebody else's. Reads stay
- * open: recall, deploy and qa all legitimately inspect history. Writes have
+ * open: recall and review both legitimately inspect history. Writes have
  * nowhere legitimate to land, which makes this cheap to refuse and expensive
  * to allow.
  */
