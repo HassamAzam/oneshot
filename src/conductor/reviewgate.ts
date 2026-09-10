@@ -415,6 +415,23 @@ function planRisks(plan: Record<string, unknown> | null): string[] {
 }
 
 /**
+ * Neutralise a model-authored free-text run so it renders as literal prose in a
+ * GitLab comment.
+ *
+ * Plan `approach`/`what`/`risks` routinely contain bare tags — `<title>`,
+ * `<head>`, `<h1>` — as part of the sentence. GitLab's CommonMark renderer
+ * treats a line holding such a tag as the start of an HTML block and stops
+ * converting Markdown from that point on; its sanitiser then drops the
+ * unsafelisted tag, so the reader gets a gap followed by exposed list markup
+ * for the rest of the comment. Escaping the three HTML-significant characters
+ * is enough to stop the block from ever opening, and `&lt;title&gt;` renders
+ * back as `<title>`. Emphasis and backtick spans in the text are left intact.
+ */
+function mdText(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
  * GitLab Markdown, not Slack mrkdwn.
  *
  * The two are close enough to look interchangeable and are not: Slack's
@@ -425,10 +442,11 @@ function planRisks(plan: Record<string, unknown> | null): string[] {
 function renderPlanForTicket(plan: Record<string, unknown> | null): string {
   if (!plan) return '_(no plan recorded)_';
   const steps = planSteps(plan)
-    .map((s) => `${s.n}. **[${s.layer}]** ${s.what}${s.files?.length ? ` — \`${s.files.join('`, `')}\`` : ''}`)
+    .map((s) => `${s.n}. **[${mdText(s.layer)}]** ${mdText(s.what)}${s.files?.length ? ` — \`${s.files.join('`, `')}\`` : ''}`)
     .join('\n');
-  const risks = planRisks(plan).map((r) => `- ${r}`).join('\n');
-  return `**Approach**\n${planStr(plan, 'approach') ?? '(not recorded)'}\n\n` +
+  const risks = planRisks(plan).map((r) => `- ${mdText(r)}`).join('\n');
+  const approach = planStr(plan, 'approach');
+  return `**Approach**\n${approach ? mdText(approach) : '(not recorded)'}\n\n` +
     `**Steps**\n${steps || '(none recorded)'}\n\n` +
     `**Risks**\n${risks || '(none identified)'}` +
     `${plan?.migrations === true ? '\n\n⚠️ includes a database migration' : ''}`;
@@ -465,7 +483,12 @@ export function planApprovedRecordBody(): string {
 
 function renderCasesForTicket(cases: TestCase[]): string {
   if (!cases.length) return '_(no test cases)_';
-  return cases.map((c) => `- **${c.id}** [${c.blast}] ${c.scenario}\n  - _expects:_ ${c.expected}`).join('\n');
+  // `scenario`/`expected` are model-authored prose and routinely carry bare
+  // tags or error strings in angle brackets — same GitLab HTML-block hazard as
+  // the plan fields, so run them through mdText too. `blast` is a fixed enum.
+  return cases
+    .map((c) => `- **${mdText(c.id)}** [${c.blast}] ${mdText(c.scenario)}\n  - _expects:_ ${mdText(c.expected)}`)
+    .join('\n');
 }
 
 /**
@@ -490,7 +513,7 @@ export function testcasesApprovalRequestBody(cases: TestCase[], why: string): st
 
 /** The ticket's record of the final, approved test-case list — audit only. */
 export function testcasesApprovedRecordBody(cases: TestCase[]): string {
-  const lines = cases.map((c) => `- **${c.id}** [${c.blast}] ${c.scenario} — _expects:_ ${c.expected}`);
+  const lines = cases.map((c) => `- **${mdText(c.id)}** [${c.blast}] ${mdText(c.scenario)} — _expects:_ ${mdText(c.expected)}`);
   return 'Oneshot record: the test-case list below was approved on this ticket — ' +
     'proceeding to `review`.\n\n' +
     `**Approved test cases** (${cases.length}):\n${lines.join('\n') || '_(none recorded)_'}`;
