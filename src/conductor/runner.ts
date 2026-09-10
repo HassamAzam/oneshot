@@ -891,6 +891,45 @@ export async function runTicket(
           log.warn(`${r.cfg.name} salvaged from partial results — ${recorded.length} recorded, ${skipped.length} skipped`);
         }
       }
+
+      // The same bargain for the phase that WRITES the list rather than executing
+      // it. testcases is onFail 'abort', so a session that dies at its cap does
+      // not cost a lap — it costs the whole run, and every turn it spent reading
+      // is thrown away because reading leaves no artifact. Its prompt therefore
+      // rewrites testcases-partial.json every few cases, and a list that got far
+      // enough to be worth reviewing is better than a blocked run: in review mode
+      // the QA gate shows this list to a person who can reject it or append the
+      // cases it is missing, and the summary says outright that it is partial.
+      // Below the floor there is nothing to review and blocking is the honest
+      // answer, which is why this salvages a short list rather than any list.
+      if (r.cfg.name === 'testcases' && !r.out.ok && !r.out.blocked) {
+        const MIN_SALVAGEABLE_CASES = 5;
+        const partial = readArtifact<{
+          module?: string; lv?: string; cases?: Array<Record<string, unknown>>;
+        }>(iid, 'testcases-partial.json');
+        const cases = partial?.cases ?? [];
+        if (cases.length >= MIN_SALVAGEABLE_CASES) {
+          const module = String(
+            partial?.module || readArtifact<{ module?: string }>(iid, 'research.json')?.module || '',
+          );
+          const summary = `Salvaged from testcases-partial.json: ${cases.length} case(s) written `
+            + `before the session died (${r.out.error ?? 'no error text'}). The list is PARTIAL — `
+            + 'the brainstorm passes were not all run, so treat a gap as unwritten, not as clean.';
+          r.out.data = {
+            summary,
+            blocked: null,
+            module,
+            lv: String(partial?.lv || 'LV_TBD'),
+            cases,
+            // Deliberately empty: passesEmpty means "this pass ran and found
+            // nothing", and a dead session cannot assert that about any pass.
+            passesEmpty: [],
+          };
+          r.out.ok = true;
+          writeArtifact(iid, r.cfg.artifact ?? 'testcases.json', r.out.data);
+          log.warn(`testcases salvaged from partial results — ${cases.length} case(s) recorded`);
+        }
+      }
     }
 
     // Reconciled strictly in phase order, whatever order they finished in:
