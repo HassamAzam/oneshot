@@ -24,9 +24,11 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
-import { artifactDir } from './config.js';
+import { artifactDir, reviewersConfig } from './config.js';
 import { readArtifact, updateJournal, type RunJournal } from './artifacts.js';
-import { addIssueNote, addMergeRequestNote, uploadFile, type Upload } from './gitlab.js';
+import {
+  addIssueNote, addMergeRequestNote, mergeRequestUrl, uploadFile, type Upload,
+} from './gitlab.js';
 import { log } from './log.js';
 
 /** GitLab rejects very large attachments; skip them with a note rather than failing. */
@@ -154,6 +156,14 @@ interface Spec {
   key: string;
   artifact: string;
   target: 'ticket' | 'mr';
+  /**
+   * A ticket note that TALKS ABOUT the MR. `target: 'mr'` already implies the
+   * MR must exist, but a note posted on the ticket has no such guarantee, and
+   * `build` cannot express "not ready yet" — returning null retires the key
+   * permanently. So the wait belongs in the loop's guard, where a spec whose
+   * MR has not been opened is simply skipped and reconsidered next pass.
+   */
+  needsMr?: boolean;
   build: (data: Record<string, unknown>, ctx: PublishCtx) => Publication | null;
 }
 
@@ -254,6 +264,60 @@ const SPECS: Spec[] = [
     },
   },
   {
+    /*
+     * The one note in this file that asks for something rather than reporting
+     * something, and the only one that @mentions a person.
+     *
+     * WHO is `config/reviewers.json`'s `dev` list — the same list, read the same
+     * way, that the plan gate names in "Only DEV may sign this off". Code review
+     * and plan sign-off are the same group's job, and a second list would drift
+     * from the first the first time somebody joins or leaves.
+     *
+     * It mentions them for real, where `reviewgate.ts:approverLine` deliberately
+     * renders the same names in code spans. That is not an inconsistency: the
+     * gate re-arms after every feedback round, so a live mention there would
+     * notify each reviewer once per round; this note is published once per MR
+     * (the `published` key is the lock), and a request nobody is told about is
+     * how an MR sits open for a day.
+     *
+     * On the TICKET rather than the MR, because that is where this pipeline
+     * already asks these people things and where they already answer.
+     */
+    key: 'mr-review-request',
+    artifact: 'mr.json',
+    target: 'ticket',
+    needsMr: true,
+    build: (data, ctx) => {
+      const mrIid = Number(data.mrIid ?? ctx.journal.mrIid);
+      const url = String(data.mrUrl ?? ctx.journal.mrUrl ?? mergeRequestUrl(mrIid));
+      const title = String(data.title ?? ctx.journal.title ?? '').trim();
+      const target = String(data.targetBranch ?? '').trim();
+
+      // An empty list is a configuration mistake (config/reviewers.json says so
+      // itself), but it is not a reason to swallow the MR link: the note still
+      // posts, unaddressed, and the warning names the file to fix.
+      const devs = reviewersConfig().dev;
+      if (!devs.length) log.warn('publish: no dev reviewers in config/reviewers.json — MR review request goes unaddressed');
+      const who = devs.map((u) => `@${u}`).join(' ');
+
+      const subtitle = title
+        ? `\n\n\`${title}\`${target ? ` → \`${target}\`` : ''}`
+        : '';
+
+      return {
+        body: `**Merge request open** — [!${mrIid}](${url})${subtitle}\n\n`
+          + `${who ? `${who} — please ` : 'Please '}review and merge this at your earliest convenience.\n\n`
+          + (ctx.journal.reviewMode
+            ? 'This ticket carries `Review`, so Oneshot will not merge it itself — the run is '
+              + 'parked at the merge step until one of you does, and picks up from there.'
+            : 'If nobody gets to it first, Oneshot merges it once its own quality gate passes and '
+              + 'carries on to deploy and QA — so this is a review request, not a merge block.')
+          + `\n\nVerification evidence is posted on the MR itself.`,
+        attachments: [],
+      };
+    },
+  },
+  {
     key: 'qa',
     artifact: 'qa.json',
     target: 'mr',
@@ -344,7 +408,13 @@ async function post(spec: Spec, pub: Publication, ctx: PublishCtx): Promise<bool
     links.push((up.data as Upload).markdown);
   }
 
-  const body = `${pub.body}${links.length ? `\n\n${links.join('\n\n')}` : ''}`;
+  // Every note this pipeline writes carries the marker `isMachineNote` matches.
+  // Without it the review gates cannot tell their own pipeline's notes from a
+  // reviewer speaking — the run-29 failure recorded in claims.ts — and this file
+  // posts to the ticket the gates poll, from a token that is often a person on
+  // config/reviewers.json.
+  const body = `${pub.body}${links.length ? `\n\n${links.join('\n\n')}` : ''}`
+    + `\n\n<!-- oneshot:publish:${spec.key} -->`;
   const res = spec.target === 'ticket'
     ? await addIssueNote(ctx.iid, body)
     : await addMergeRequestNote(ctx.journal.mrIid!, body);
@@ -369,7 +439,7 @@ export async function publishPending(ctx: PublishCtx): Promise<void> {
     const done = new Set(ctx.journal.published ?? []);
     for (const spec of SPECS) {
       if (done.has(spec.key)) continue;
-      if (spec.target === 'mr' && !ctx.journal.mrIid) continue;
+      if ((spec.target === 'mr' || spec.needsMr) && !ctx.journal.mrIid) continue;
 
       const data = readArtifact<Record<string, unknown>>(ctx.iid, spec.artifact);
       if (!data) continue;
