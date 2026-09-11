@@ -285,6 +285,11 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   let turnsSoFar = 0;
   const phaseStartedAt = Date.now();
   let lastProgressAt = phaseStartedAt;
+  // Running sum of usage actually seen on the wire, turn by turn. The final
+  // `result` frame carries the authoritative total for a phase that finishes
+  // cleanly, but a phase cancelled mid-flight never reaches one — see the
+  // accounting note right after the try/catch/finally below.
+  const seenUsage = { input: 0, output: 0, cache_creation: 0, cache_read: 0 };
 
   try {
     const schema = schemaFor(cfg.name);
@@ -333,7 +338,19 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       if (step.done === true) break;
       const msg = step.value;
       sawActivity += 1;
-      if (msg.type === 'assistant') turnsSoFar += 1;
+      if (msg.type === 'assistant') {
+        turnsSoFar += 1;
+        // Each assistant frame is one real, already-billed API call — this is
+        // the only place that usage is observable if the phase never reaches
+        // a final `result` frame (killed mid-flight, wedged, timed out).
+        const turnUsage = msg.message.usage as Record<string, number> | undefined;
+        if (turnUsage) {
+          seenUsage.input += turnUsage.input_tokens ?? 0;
+          seenUsage.output += turnUsage.output_tokens ?? 0;
+          seenUsage.cache_creation += turnUsage.cache_creation_input_tokens ?? 0;
+          seenUsage.cache_read += turnUsage.cache_read_input_tokens ?? 0;
+        }
+      }
       try {
         appendFileSync(tee, `${JSON.stringify(msg)}\n`);
       } catch { /* the tee is best-effort; never fail a phase over logging */ }
@@ -441,6 +458,23 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     clearTimeout(killer);
     if (forceTimer) clearTimeout(forceTimer);
     input.signal?.removeEventListener('abort', cancel);
+  }
+
+  // A phase that never reached a settling `result` frame (cancelled, timed
+  // out, wedged) leaves `out.weighted` at its 0 default even though Anthropic
+  // had already billed every turn it completed before that point — input and
+  // cache tokens are spent the moment a turn is sent, not when the response
+  // finishes. Record what was actually seen so quota_usage reflects real
+  // spend instead of silently zeroing out every cancelled attempt.
+  //
+  // Accounting only: this does not touch out.ok/out.error/out.infra/
+  // out.blocked, so it decides nothing by itself here. checkQuota() only
+  // consults these numbers when budgets.enabled is true, which it is not
+  // today — see config/budgets.json.
+  if (!settled) {
+    const hadUsage = seenUsage.input || seenUsage.output
+      || seenUsage.cache_creation || seenUsage.cache_read;
+    if (hadUsage) out.weighted = recordUsage(seenUsage, { runId, phase: cfg.name, model });
   }
 
   const signalText = limitSignals.join('\n');
