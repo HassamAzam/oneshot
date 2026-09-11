@@ -10,9 +10,10 @@ import { join } from 'node:path';
 import {
   CONTEXT_REPO, SKILLS_ROOT, WORK_REPO, WT_ROOT,
   auditAuth, budgetConfig, envOr, expandPath, phases, portPool,
-  projectConfig, slackConfig,
+  projectConfig, reviewersConfig, slackConfig,
 } from '../src/lib/config.js';
 import { ping, listBranches } from '../src/lib/gitlab.js';
+import { slackEnabled, userIdForEmail, userIdForHandle } from '../src/lib/slack.js';
 import { checkIdentity } from '../src/lib/identity.js';
 import { otelStatus, promptTextExported } from '../src/lib/otel.js';
 
@@ -241,17 +242,60 @@ async function main(): Promise<void> {
   // Only where the gates could actually run: an install with no Slack, or no
   // Review label configured, cannot hit this and does not need a standing
   // warning telling it so on every doctor run.
+  //
+  // There is deliberately NO check here for channels:history/groups:history.
+  // An earlier version of the gates read their verdict out of the ticket's
+  // Slack thread and this block FAILED without that scope; they read GitLab
+  // now (src/conductor/reviewgate.ts), so the scope is dead and demanding it
+  // sent people to the Slack console to fix a non-problem. See
+  // config/slack.json's _comment_history.
   const allRuns = cfg.reviewAllRuns === true;
-  if (slackConfig().channel && (cfg.labels.review || allRuns)) {
-    const why = 'chat:write (posting) does not cover reading a reply back — see config/slack.json\'s '
-      + '_comment_history and README\'s "Optional human review gates"';
-    // With reviewAllRuns on this is not a degraded label: EVERY run parks at `plan`
-    // and never resumes. That is an outage, and a warning is the wrong volume for it.
-    if (allRuns) {
-      fail('gates are on for EVERY run and need channels:history/groups:history on the bot token',
-        `${why}. Without it every run parks at plan and never resumes — set reviewAllRuns:false `
-        + 'in config/project.json to go back to label-and-path gating.');
-    } else warn('Review-label gates need channels:history/groups:history on the bot token', why);
+  if (slackEnabled() && (cfg.labels.review || allRuns)) {
+    // The gates @mention the owning group when they arm. Resolve every name
+    // for real rather than checking that config looks plausible: an
+    // unresolvable reviewer fails silently — the ask posts unaddressed and
+    // they never learn they are being waited on.
+    const { dev, qa, emailDomain, slackIds } = reviewersConfig();
+    const names = [...new Set([...dev, ...qa])];
+    if (names.length) {
+      // A pinned id is trusted at runtime without a lookup, so this is the
+      // only place it is ever checked. Verify it against the live workspace
+      // rather than merely that it is present: a stale or mistyped id does
+      // not fail loudly, it @mentions somebody else, and the run still waits
+      // on a person who was never asked.
+      const wrong: string[] = [];
+      for (const [u, id] of Object.entries(slackIds)) {
+        const live = await userIdForHandle(u);
+        if (live && live !== id) wrong.push(`${u} pinned ${id} but @${u} is ${live}`);
+      }
+      if (wrong.length) {
+        fail('a pinned Slack id does not match that person',
+          `${wrong.join('; ')} — config/reviewers.json would @mention the wrong person`);
+      } else if (Object.keys(slackIds).length) {
+        pass('pinned Slack ids agree with the workspace', `${Object.keys(slackIds).length} checked`);
+      }
+
+      const resolved = await Promise.all(names.map(async (u) => {
+        if (slackIds[u]) return [u, 'pinned'] as const;
+        if (await userIdForHandle(u)) return [u, 'handle'] as const;
+        if (emailDomain && await userIdForEmail(`${u}@${emailDomain}`)) return [u, 'email'] as const;
+        return [u, null] as const;
+      }));
+      const missing = resolved.filter(([, via]) => !via).map(([u]) => u);
+      const viaPinned = resolved.filter(([, via]) => via === 'pinned').length;
+      if (!missing.length) {
+        pass('reviewer Slack mentions', `${names.length} resolved (${viaPinned} pinned)`);
+      } else if (missing.length === names.length) {
+        warn('no reviewer resolves to a Slack id',
+          'the bot token needs users:read (handle lookup) or users:read.email. Approval '
+          + 'requests still post to the channel, unaddressed.');
+      } else {
+        warn(`reviewers not reachable on Slack: ${missing.join(', ')}`,
+          'no workspace account whose handle matches the GitLab username'
+          + (emailDomain ? `, and no <name>@${emailDomain}` : '')
+          + ' — they will not be @mentioned when a gate waits on them');
+      }
+    }
   }
 
   // -------------------------------------------------------------- verdict

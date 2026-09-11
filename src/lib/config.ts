@@ -265,7 +265,43 @@ export function slackConfig(): SlackConfig {
  * already treats empty as `unavailable` and blocks the run, which surfaces the
  * mistake to the person who can fix it instead of killing the conductor.
  */
-export interface ReviewersConfig { dev: string[]; qa: string[] }
+export interface ReviewersConfig {
+  dev: string[];
+  qa: string[];
+  /**
+   * The work-email domain a GitLab username is completed with to find that
+   * person's SLACK id (`<username>@<emailDomain>` → `users.lookupByEmail` →
+   * `<@U…>`), so a gate's approval request can @mention the people it is
+   * waiting on. See `mentionsFor` in src/conductor/reviewgate.ts.
+   *
+   * Derived rather than stored as a second list of ids on purpose: a mapping
+   * table is a third place a roster can drift out of date, and it drifts
+   * silently — the failure is a reviewer who stops being mentioned, which
+   * looks exactly like a reviewer who has not replied yet. The cost of
+   * deriving is that it assumes the convention holds; where it does not, that
+   * one person resolves to nothing and `doctor` names them.
+   *
+   * Empty switches mentioning off without switching notification off: the
+   * request still posts to the channel, unaddressed.
+   */
+  emailDomain: string;
+  /**
+   * GitLab username → pinned Slack member id, checked BEFORE any lookup.
+   *
+   * A gate's ask is posted exactly once, at the moment it arms. If the lookup
+   * behind that one message is rate-limited the ask goes out unaddressed and
+   * the reviewer never learns they are being waited on — so the mention that
+   * matters most is the one least able to tolerate a network dependency. A
+   * pinned id has none.
+   *
+   * Anyone absent here still resolves by handle, then by email, so adding a
+   * reviewer needs no id — it just makes their first mention depend on
+   * `users.list` answering. `doctor` cross-checks every pinned id against the
+   * live workspace, because a WRONG id mentions the wrong person, which is
+   * worse than mentioning nobody.
+   */
+  slackIds: Record<string, string>;
+}
 
 let _reviewers: ReviewersConfig | null = null;
 export function reviewersConfig(): ReviewersConfig {
@@ -274,6 +310,8 @@ export function reviewersConfig(): ReviewersConfig {
     _reviewers = {
       dev: Array.isArray(c.dev) ? c.dev : [],
       qa: Array.isArray(c.qa) ? c.qa : [],
+      emailDomain: envOr('ONESHOT_REVIEWER_EMAIL_DOMAIN', typeof c.emailDomain === 'string' ? c.emailDomain : ''),
+      slackIds: (c.slackIds && typeof c.slackIds === 'object') ? c.slackIds : {},
     };
   }
   return _reviewers;

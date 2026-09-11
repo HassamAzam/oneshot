@@ -5,6 +5,8 @@
 
   "_comment_history": "NO LONGER REQUIRED, and deliberately recorded rather than deleted. The review gates USED to read their verdict out of the ticket's Slack thread via conversations.replies, which needed channels:history (public channel) or groups:history (private channel) on the bot token in addition to chat:write. They now ask and read on the GitLab ticket instead (src/conductor/reviewgate.ts), because approval is restricted to named GitLab usernames in config/reviewers.json and a Slack reply carries only a Slack user id, which cannot be matched against one. chat:write alone is enough for everything Oneshot still posts here. If a history scope is already granted it is harmless; nothing reads it.",
 
+  "_comment_scopes": "chat:write covers the card, the thread, the milestones and the alerts. ONE further scope is needed and a human must grant it: users:read.email, so the review gates can turn a GitLab username into a Slack member id and actually @mention the dev/QA who must approve (Slack mentions resolve from member ids only). Without it the gate's ask still reaches this channel, just unaddressed \u2014 `npm run doctor` reports which reviewers resolve. No READ scope is needed by anything: the gates read their verdict from GitLab.",
+
   "_comment_card": "The root message per ticket is a live status card, EDITED IN PLACE as phases complete. Thread replies are milestones only. Without this, a 90-minute implement phase produces either silence or spam.",
   "card": {
     "editInPlace": true,
@@ -16,7 +18,7 @@
   "_comment_milestones": "Which phase completions get a thread reply. Everything else only moves the card. Keep this short — the card is the status, the thread is the record.",
   "milestones": ["plan", "testcases", "review", "verify", "mr", "merge"],
 
-  "_comment_mention": "The ONLY unprompted @mention. Full auto means nothing else should ever need your attention mid-run.",
+  "_comment_mention": "When Oneshot @mentions the OPERATOR, unbidden, because a run stopped. Full auto means nothing else should ever need your attention mid-run. Distinct from the review gates, which also @mention people (config/reviewers.json) but are an ask the dev/QA groups opted into answering rather than an alarm.",
   "mentionOn": ["blocked", "quota_park", "network_down"],
 
   "_comment_allowlist": "Slack user ids permitted to issue commands. A message becomes an action ONLY if the sender is listed here AND every token is consumed by the grammar below — 'run 8607 and delete all branches' is not a partial command, it is not a command at all. Raw message text is never stored and never reaches a prompt.",

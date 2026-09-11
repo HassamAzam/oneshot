@@ -141,32 +141,41 @@ change) should be able to, without every OTHER ticket paying for it and without 
 `label-guard.js`'s closed label-state machine that v2 deliberately deleted (README's "Why this is
 not One Loop v2", above).
 
-Put the `Review` label on a ticket **alongside** `Loop` and three pause points activate. **Slack is
-the primary approval channel for the two model-adjacent gates** — Oneshot posts the request as a
-reply in the ticket's existing Slack thread (the same thread the status card and every milestone
-already post into) and waits for a reply THERE; GitLab receives only an audit note once a round
-resolves, never the request itself. That is a deliberate change from an earlier version of this
-mode, which asked and read on the ticket instead — reviewing a plan or a test-case list is more
-natural where the run's own status already lives, and the ticket stays a record of what happened
-rather than a second inbox to poll.
+Put the `Review` label on a ticket **alongside** `Loop` and three pause points activate. **GitLab is
+the approval channel, and Slack is where the ask is heard.** Oneshot posts the request as a ticket
+comment and reads the verdict back out of that ticket's comments; the same ask is simultaneously
+posted into the run's Slack thread and **broadcast to the channel, @mentioning the group that owns
+the gate**. The two halves are not redundant. A ticket comment notifies whoever already subscribed
+to the ticket, which is nobody in particular — that is how a run ends up parked for a day on a
+reviewer who never learned they were being waited on. A Slack ping reaches the people, and reaches
+them where they already are.
+
+Approval is read on the ticket rather than in Slack for one reason: **authorisation**. Sign-off is
+restricted to two named groups (`config/reviewers.json`), and the only identity a Slack reply
+carries is a Slack user id, which cannot be matched against a GitLab username. Reading the verdict
+where the reviewer is signed in under their own GitLab account is what makes "only these people may
+approve" enforceable rather than advisory. So Slack here is strictly **write-only**: nothing is
+ever read back out of it, and a Slack that is down, unconfigured, or missing a scope costs a
+notification and never a verdict.
 
 ```
  … plan ──▶[ R1 approve the plan ]──▶ implement ──▶ testcases ──▶[ R2 approve the case list ]──▶ review …
  … mr ──▶[ R3 a human merges the MR ]──▶ the run's record, and done
 
- R1, R2   a Slack reply of `approved` releases the pause; anything else is feedback
+ R1, R2   a ticket comment of `approved` releases the pause; anything else is feedback.
+          Devs own R1, QA owns R2 (config/reviewers.json) — and are @mentioned in Slack
  R3       no keyword — the MR's own state turning `merged` is the signal
 ```
 
 1. **Plan approval** — after phase 2 (`plan`), before phase 3 (`implement`). Oneshot posts the
-   plan itself into the ticket's Slack thread and the run **parks**.
+   plan itself as a ticket comment, pings the **dev** group in Slack, and the run **parks**.
 2. **Test-case approval** — after phase 4 (`testcases`), before phase 5 (`review`). The list of
-   cases this run intends to verify is posted into the same thread, and the run **parks**. It
-   sits here, and not after `verify`, because this is the last point at which approving still
-   changes anything: an edge case added here is carried into `review`, into `verify` and into
-   the MR. The same reply taken after the run had merged could only become a follow-up ticket
-   — a gate that cannot change what it guards is decoration. It carries no verdict,
-   deliberately: nothing has executed the list yet, and there is no result to summarise.
+   cases this run intends to verify is posted the same way and pinged to **QA**, and the run
+   **parks**. It sits here, and not after `verify`, because this is the last point at which
+   approving still changes anything: an edge case added here is carried into `review`, into
+   `verify` and into the MR. The same reply taken after the run had merged could only become a
+   follow-up ticket — a gate that cannot change what it guards is decoration. It carries no
+   verdict, deliberately: nothing has executed the list yet, and there is no result to summarise.
 3. **The merge itself** — inside phase 9 (`merge`), still pure code, still no model. On a
    Review ticket Oneshot **never accepts the MR**, however green the pipeline or complete the
    approvals: it opens the MR and from there only watches. Merging is a person's decision,
@@ -189,35 +198,41 @@ the case worth catching, and only the second evaluation sees it. When paths arm 
 ever asked for, and the request says which path armed it rather than claiming a label that is not
 there. Empty the array to switch the behaviour off.
 
-**Reply `approved`** (that exact word, case-insensitive, trimmed — not a substring of a longer
-reply) in the thread to release a pause. **Any other reply is feedback, and the two gates treat it
-differently:**
+**Comment `approved`** (that exact word, case-insensitive, trimmed — not a substring of a longer
+reply) **on the ticket** to release a pause. It only counts from an account in that gate's own
+group: an `approved` from outside the list is logged and ignored, and so is any other comment, so
+ordinary ticket chatter cannot knock a run into a revision cycle. **Any other comment from a
+listed reviewer is feedback, and the two gates treat it differently:**
 
-- The **plan gate** re-runs `plan` with it appended, and posts the revised plan back into the
-  same thread for another round.
+- The **plan gate** re-runs `plan` with it appended, and posts the revised plan back to the
+  ticket for another round.
 - The **test-case gate** reads it as edge case(s) to add rather than a reason to redo any work:
-  each line of the reply becomes a new case, appended straight into `testcases.json` (see
-  `appendEdgeCases()` in `src/conductor/reviewgate.ts`), and the SAME gate asks again in the same
-  thread with the updated list — no phase re-runs, no cycle back to `implement`. Because this
-  happens before `review`, those cases are part of what this run actually verifies.
+  each line of the comment becomes a new case, appended straight into `testcases.json` (see
+  `appendEdgeCases()` in `src/conductor/reviewgate.ts`), and the SAME gate asks again with the
+  updated list — no phase re-runs, no cycle back to `implement`. Because this happens before
+  `review`, those cases are part of what this run actually verifies.
 
 Either way, a round's outcome reaches GitLab only as an `addIssueNote` audit record — "the plan was
 approved", "here is the approved test-case list" — posted once the gate actually resolves. There is no cap on how many rounds either gate can take.
 
-**New Slack scope, and it is a manual step.** Every OTHER Slack call this app makes only posts or
-edits a message (`chat.postMessage` / `chat.update`), which the existing `chat:write` scope covers.
-Reading a reply back — `conversations.replies`, added for these two gates — needs
-`channels:history` (a public channel) or `groups:history` (a private one) granted to the bot token
-as well. A Slack token cannot grant itself a new scope, so **a human has to add it in the Slack API
-console** (the app's OAuth & Permissions page → Bot Token Scopes → add the scope → reinstall the
-app to the workspace) before either gate can see a reply at all. Skip it and a gate is not
-broken so much as permanently `pending`: the request goes out, `conversations.replies` comes back
-`missing_scope`, and every following check reads that same empty answer until the scope is added —
-a visible stall, not a silent one, and reversible with no other change once granted. See the scope
-requirement documented again at `threadReplies()`'s own header in `src/lib/slack.ts`.
+**Mentioning the reviewers needs a Slack scope, and granting it is a manual step.** Slack renders
+an @mention from a member id (`<@U01ABC>`) and from nothing else — a username in the message text
+is inert, and silently so. `config/reviewers.json` holds GitLab usernames, so Oneshot bridges the
+two by completing each username to a work address (`emailDomain` in that same file) and resolving
+it through `users.lookupByEmail`. That needs **`users:read.email`** (which implies `users:read`)
+on the bot token; `chat:write` covers every other call this app makes but not that one. A token
+cannot grant itself a scope, so **a human has to add it in the Slack API console** — the app's
+OAuth & Permissions page → Bot Token Scopes → add the scope → reinstall the app to the workspace.
+
+Skipping it degrades one notch and no further: Slack answers `missing_scope`, the ask still posts
+to the channel, and it simply names the reviewers as plain text instead of pinging them. **Nothing
+about the verdict depends on it**, because the verdict is read from GitLab. `npm run doctor`
+resolves every name for real and tells you which ones do not — a reviewer whose email does not
+follow the convention fails exactly the same silent way as an ungranted scope, and both end in a
+person not learning they are being waited on.
 
 **Parked is not `Needs Human`.** A block swaps the ticket's label and needs a person to remove it;
-a park changes no label, sends no @mention, and is picked up by the next tick's ordinary scan
+a park changes no label and is picked up by the next tick's ordinary scan
 exactly like a `running`/`aborted` resumption — the *only* new mechanism here is the label check
 and the reply-polling, described in `src/conductor/reviewgate.ts`'s file header. It also holds no
 dispatch slot, no port and no promotion window between checks, so a Review-labelled ticket parked
