@@ -9,5 +9,20 @@
   "_comment_qa": "Test-case sign-off. The test-case gate pauses after `testcases` and before `review`, which is the last point where anything added is still tested by THIS run rather than becoming a follow-up ticket — so it is QA's list to approve or extend.",
   "qa": ["anosha.saeed", "arsal.tariq"],
 
+  "_comment_slack_mentions": "How a GitLab username becomes a SLACK @mention. Slack renders a mention from a member id and from nothing else \u2014 a username in the message text is inert, silently. PRIMARY ROUTE: the Slack handle, which at Arbisoft is character-identical to the GitLab username (arsal.tariq is @arsal.tariq in both), resolved through users.list. That needs users:read, which the bot token already has, so mentions work with no Slack console change. Display and real names are never matched: 22 accounts in this workspace answer to some form of 'usman' and haider.usman's display name is the bare word 'Haider', so a fuzzy match would mention the WRONG person, which is worse than mentioning nobody. FALLBACK: emailDomain below.",
+
+  "_comment_email_domain": "Second route, used only for a reviewer whose Slack handle does not match their GitLab username. The review gates notify the owning group in the Slack channel when they arm, and Slack renders a mention from a member id and from nothing else \u2014 a username in the message text is just text, silently. So the username here is completed to <username>@arbisoft.com and resolved through users.lookupByEmail. NEEDS A SCOPE A HUMAN MUST GRANT: users:read.email (which implies users:read) on the bot token, in the Slack API console, followed by a reinstall to the workspace \u2014 chat:write covers everything else Oneshot posts, but not this. Without it Slack answers missing_scope and the request still posts, just unaddressed: a visible degradation, not a wedge, and nothing about the VERDICT depends on it since that is still read off the GitLab ticket. Any account whose work email does not follow the convention resolves to nothing and is named by `npm run doctor`; empty this string to switch mentioning off entirely while leaving the channel notification in place.",
+  "emailDomain": "arbisoft.com",
+
+  "_comment_slack_ids": "PINNED Slack member ids, the FIRST place a mention is looked up (then the handle, then the email). Verified against the Arbisoft workspace on 2026-09-11. Pinning beats resolving live for the thing this is used for: an approval ask is posted once, at the moment a gate arms, and if the lookup behind it is rate-limited or slow that single message goes out unaddressed and the reviewer never learns they are being waited on. A pinned id cannot be rate-limited. It also removes the assumption that a Slack handle always equals the GitLab username \u2014 true for all six today, but it is a convention, not a guarantee, and the failure mode if it ever breaks is silent. The cost is that this map is now a thing that can go stale, so `npm run doctor` cross-checks every pinned id against the live workspace and fails if one disagrees with its handle: a WRONG id here would @mention the wrong person, which is worse than mentioning nobody.",
+  "slackIds": {
+    "hira.ijaz": "U03TMJW8926",
+    "usman.nasir": "U05JYAU5DSB",
+    "hassam.azam": "U07AGQRJF28",
+    "haider.usman": "U0768JWLM18",
+    "anosha.saeed": "U06GCTK2H6V",
+    "arsal.tariq": "U010YBEPD70"
+  },
+
   "_comment_empty": "An EMPTY list is treated as a configuration mistake, not as 'anyone may approve'. The gate reports `unavailable` and the run BLOCKS, because the alternative — falling open — would silently turn a named sign-off into no sign-off at all, and the whole reason this file exists is that somebody asked for the pipeline to stop and wait for a specific person."
 }
