@@ -775,7 +775,19 @@ async function smoke(keys) {
 
 /* ------------------------------------------------------------------ cli */
 
-const API = { up, down, status, open, login, goto, shot, runCase, smoke, registry, HarnessError };
+const API = {
+  up, down, status, open, login, goto, shot, runCase, smoke, registry, HarnessError,
+  /**
+   * Internals, exported for scripts/app.cjs and nothing else.
+   *
+   * app.cjs owns the machine-wide question ("is an app already up, and is it on my
+   * code?"); this file owns the repository facts ("how does this app actually start").
+   * Exporting rather than re-implementing keeps every hard-won fact above — the ASGI
+   * wedge, CI=true, the stats-file readiness, the two pinned files — in ONE place.
+   */
+  preflight, checkDb, applyPatches, startDjango, startWebpack, waitDjango, waitWebpack,
+  assertBundleReachable, describeEnv, listenerPid, pidCwd, alive, httpStatus,
+};
 module.exports = API;
 
 async function main() {
