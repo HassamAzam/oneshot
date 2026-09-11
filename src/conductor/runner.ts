@@ -674,6 +674,7 @@ export async function runTicket(
         iid,
         gate: 'plan',
         requestBody: planApprovalRequestBody(prior.plan ?? null, triggerLine(planGate)),
+        trigger: planGate,
         onApproved: async () => { await addIssueNote(iid, planApprovedRecordBody()); },
       });
       j = readJournal(iid) ?? j;
@@ -729,6 +730,7 @@ export async function runTicket(
         iid,
         gate: 'testcases',
         requestBody: testcasesApprovalRequestBody(cases, triggerLine(caseGate)),
+        trigger: caseGate,
         // Appending runs on EVERY round that carried replies, approved or
         // not, and always before onApproved — a reviewer who lists an edge
         // case and signs off in the same breath gets the case recorded and
