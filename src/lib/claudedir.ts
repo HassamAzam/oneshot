@@ -12,9 +12,9 @@
  * forty-two. Nothing errored. The phase did the work from the prompt alone and
  * the loss was invisible from outside.
  *
- * A whole-dir symlink cannot fix that, because the five pipeline skills
- * (local-browser-verify, ui-evidence-pack, demo-server-qa, mr-documentation,
- * ticket-memory-write) describe THIS system and live in THIS repo — a fresh
+ * A whole-dir symlink cannot fix that, because the pipeline skills
+ * (local-browser-verify, ui-evidence-pack, self-remediation) describe THIS
+ * system and live in THIS repo — a fresh
  * clone has to carry them, and writing them into the context repo would make
  * Oneshot's own method something you have to remember to install next to it. So
  * `.claude` is composed instead: a real directory whose `skills/` holds one

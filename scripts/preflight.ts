@@ -27,14 +27,13 @@ import { existsSync } from 'node:fs';
 import { connect } from 'node:net';
 import { basename } from 'node:path';
 import {
-  PAUSE, PAUSE_DEPLOY, ROOT,
-  budgetConfig, deployConfig, envOr, phaseByName, portPool, projectConfig,
+  PAUSE, ROOT,
+  budgetConfig, envOr, phaseByName, portPool, projectConfig,
 } from '../src/lib/config.js';
 import { db, reconcileForeignRuns } from '../src/lib/db.js';
 import { anyLive, liveConductors } from '../src/lib/fleet.js';
 import { ping } from '../src/lib/gitlab.js';
 import { accountWindowPct, checkQuota, dayUsage, windowUsage } from '../src/lib/quota.js';
-import { demoHostReachable } from '../src/lib/reachability.js';
 
 let fails = 0;
 let warns = 0;
@@ -127,15 +126,6 @@ async function checkNetwork(): Promise<void> {
     }
   }
 
-  const d = deployConfig();
-  if (await demoHostReachable()) {
-    pass('demo host reachable', d.server);
-  } else {
-    fail(`demo host ${d.server} unreachable`,
-      d.vpnGated
-        ? 'connect the VPN — deploy and qa would burn their whole wall clock against it'
-        : 'deploy and qa would burn their whole wall clock against it');
-  }
 }
 
 // ----------------------------------------------------------------- stale state
@@ -203,12 +193,11 @@ function repairStaleState(): void {
 }
 
 /**
- * The two switches that are reported and never repaired.
+ * The switch that is reported and never repaired.
  *
  * state/PAUSE is the human kill switch, and the rule the rest of the system
- * already keeps is that nothing automatic may create or clear it; PAUSE-DEPLOY
- * is a deliberate hold on the one irreversible phase. Clearing either here
- * would be this script overruling a decision somebody made on purpose.
+ * already keeps is that nothing automatic may create or clear it. Clearing it
+ * here would be this script overruling a decision somebody made on purpose.
  *
  * They still belong in a preflight, because from the outside a paused system is
  * indistinguishable from a working one with nothing to do: the conductor starts,
@@ -222,7 +211,6 @@ function repairStaleState(): void {
 function reportPauseSwitches(): void {
   for (const [file, what] of [
     [PAUSE, 'the human kill switch'],
-    [PAUSE_DEPLOY, 'the deploy hold'],
   ] as Array<[string, string]>) {
     if (existsSync(file)) {
       fail(`state/${basename(file)} is set`, `${what} — remove it by hand when you mean to resume`);
@@ -373,78 +361,8 @@ async function checkCredentials(): Promise<void> {
     }
   }
 
-  const demoUrl = deployConfig().demoUrl;
-  const demo = splitCredential(envOr('ONESHOT_DEMO_LOGIN'));
-  if (!demo) {
-    const qaRuns = phaseByName('qa') !== undefined;
-    const detail = 'the demo box carries its own snapshot, so local credentials do not exist there';
-    if (qaRuns) fail('ONESHOT_DEMO_LOGIN unset or malformed', `${detail} — qa will block`);
-    else warn('ONESHOT_DEMO_LOGIN unset or malformed', `${detail} (qa is not in the phase list)`);
-  } else {
-    const res = await postLogin(demoUrl, demo, DEMO_LOGIN_TIMEOUT_MS);
-    const where = `${demo.user} at ${demoUrl}`;
-    if (res.status === 0) {
-      fail(`${demoUrl} did not answer`, `${res.error} — VPN, or the box is down`);
-    } else {
-      switch (loginVerdict(res.status)) {
-        case 'ok':
-          pass('demo login accepted', `${where} (password ${demo.secretLen} chars)`);
-          break;
-        case 'rejected':
-          fail('demo login REJECTED', `${where} — re-provision it before qa runs`);
-          break;
-        case 'host':
-          fail('the demo box refused the request before the login view',
-            `${demoUrl} answered HTTP 400 — that host is outside its ALLOWED_HOSTS`);
-          break;
-        default:
-          fail('demo login answered oddly', `${where} returned HTTP ${res.status}`);
-      }
-    }
-  }
-
-  await checkDemoAdmin();
 }
 
-const ADMIN_TIMEOUT_MS = 20_000;
-
-/**
- * Django admin on the demo box — reachability only, never a login attempt.
- *
- * The admin login form is CSRF-protected, so a POST from here would have to
- * scrape a token and carry a cookie jar to prove anything, and a failure would
- * then be ambiguous between "the credential is wrong" and "this script got the
- * form handshake wrong". The question worth answering cheaply is the one that
- * actually bites: whether the panel is served at all on this deploy, because
- * when it is not, a phase that needs to arrange a precondition discovers it
- * mid-run and blocks the case.
- */
-async function checkDemoAdmin(): Promise<void> {
-  const url = envOr('ONESHOT_DEMO_ADMIN_URL');
-  const cred = splitCredential(envOr('ONESHOT_DEMO_ADMIN'));
-
-  if (!url && !cred) {
-    skip('demo admin not provisioned', 'phases will mark unmeetable preconditions blocked');
-    return;
-  }
-  if (!url || !cred) {
-    warn('demo admin is half-provisioned',
-      `${url ? 'ONESHOT_DEMO_ADMIN' : 'ONESHOT_DEMO_ADMIN_URL'} is missing — phases treat it as absent`);
-    return;
-  }
-
-  const controller = new AbortController();
-  const killer = setTimeout(() => controller.abort(), ADMIN_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (res.ok) pass('demo admin reachable', `${url} (user ${cred.user}, password ${cred.secretLen} chars)`);
-    else fail('demo admin did not serve a login page', `${url} answered HTTP ${res.status}`);
-  } catch (err) {
-    fail('demo admin unreachable', `${url} — ${(err as Error).message.slice(0, 120)}`);
-  } finally {
-    clearTimeout(killer);
-  }
-}
 
 // ---------------------------------------------------------------- dependencies
 

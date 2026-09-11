@@ -125,7 +125,6 @@ export async function exportRun(journal: RunJournal): Promise<void> {
         'oneshot.branch': journal.branch,
         'oneshot.mr_iid': journal.mrIid,
         'oneshot.merged_sha': journal.mergedSha,
-        'oneshot.deployed_sha': journal.deployedSha,
         'oneshot.weighted_tokens': weighted,
         'oneshot.phases': journal.phases.length,
         'oneshot.blocked_why': journal.blockedWhy?.slice(0, 300),

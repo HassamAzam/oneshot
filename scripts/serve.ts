@@ -170,7 +170,7 @@ const server = createServer((req, res) => {
       return send(out.code, out.body);
     }
 
-    // Artifacts — screenshots and the demo, so a report can link to them.
+    // Artifacts — screenshots, so a report can link to them.
     const a = url.pathname.match(/^\/artifacts\/(\d+)\/(.+)$/);
     if (a) {
       const file = join(RUNS, a[1]!, 'artifacts', a[2]!.replace(/\.\./g, ''));

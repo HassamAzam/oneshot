@@ -32,12 +32,7 @@
     "review": 700000,
     "verify": 2500000,
     "ui-evidence": 1500000,
-    "mr": 400000,
-    "deploy": 700000,
-    "qa": 2000000,
-    "demo": 600000,
-    "document": 400000,
-    "memorize": 200000
+    "mr": 400000
   },
   "_pause": "How long Oneshot stays parked after a subscription limit is hit when the reset time cannot be parsed from the error text. Session/Opus limits reset inside a 5h window so an hour then re-checking is cheap; a weekly limit resets at a fixed per-account time we cannot know, so re-check every 6h rather than sleeping for a week.",
   "pause_defaults": {

@@ -171,7 +171,6 @@ export interface ReportModel {
   mrIid: number | null;
   mrUrl: string;
   mergedSha: string;
-  deployedSha: string;
   blockedWhy: string;
   remediations: Array<{ phase: string; reason: string; fixed: boolean; changes: string[] }>;
   phases: PhaseReport[];
@@ -404,7 +403,6 @@ function header(iid: number, j: RunJournal | null): Omit<ReportModel, 'phases' |
     mrIid: j?.mrIid ?? null,
     mrUrl: clean(j?.mrUrl ?? '', 300),
     mergedSha: clean(j?.mergedSha ?? '', 60),
-    deployedSha: clean(j?.deployedSha ?? '', 60),
     blockedWhy: clean(j?.blockedWhy ?? '', RESULT_LIMIT),
     remediations: (j?.remediations ?? []).map((r) => ({
       phase: r.phase,
@@ -422,7 +420,7 @@ function header(iid: number, j: RunJournal | null): Omit<ReportModel, 'phases' |
  * The journal supplies the phase rows because it is the only thing that knows
  * ORDER, status and wall clock; the transcripts supply everything else. Neither
  * is required: a run directory holding only transcripts still reports, and a
- * journal whose phases never wrote a tee (merge, close) still lists them.
+ * journal whose phases never wrote a tee (merge) still lists them.
  */
 export function buildReportModel(iid: number): ReportModel | null {
   try {
@@ -646,7 +644,6 @@ function headerHtml(m: ReportModel): string {
   bits.push(`<span><b class="pill ${escapeHtml(m.status)}">${escapeHtml(m.status)}</b></span>`);
   if (m.url) bits.push(`<span><a href="${escapeHtml(m.url)}">ticket #${m.iid}</a></span>`);
   if (m.mrUrl) bits.push(`<span><a href="${escapeHtml(m.mrUrl)}">MR !${m.mrIid ?? ''}</a></span>`);
-  if (m.deployedSha) bits.push(`<span>deployed <b>${escapeHtml(m.deployedSha.slice(0, 10))}</b></span>`);
   bits.push(`<span><b>${m.phases.length}</b> phases</span>`);
   bits.push(`<span><b>${m.agentCount}</b> agents</span>`);
   if (m.runId) bits.push(`<span>${escapeHtml(m.runId)}</span>`);

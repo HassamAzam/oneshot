@@ -1,6 +1,6 @@
 ---
 name: self-remediation
-description: Diagnose a run that has stopped and repair the environment around it so the pipeline can resume without a person. Use when asked to "unblock this run", "figure out why it stopped and fix it", "can this heal itself", or when Oneshot invokes its on-demand `remediate` phase (16) on a blocked run. Repairs the environment only — never edits the ticket's own change, and hands back fast when a human is genuinely required.
+description: Diagnose a run that has stopped and repair the environment around it so the pipeline can resume without a person. Use when asked to "unblock this run", "figure out why it stopped and fix it", "can this heal itself", or when Oneshot invokes its on-demand `remediate` phase (10) on a blocked run. Repairs the environment only — never edits the ticket's own change, and hands back fast when a human is genuinely required.
 ---
 
 # Self-Remediation
@@ -10,16 +10,16 @@ continue by repairing what is around it — the environment, the data, the
 credentials, the caps. Not the work it was doing.
 
 Most stops are not defects. On the run this phase was built for, nearly every
-one was a missing demo credential, an account outside a group the feature is
-gated behind, a wedged MCP spawn, a turn cap, or a budget an earlier lap had
-already eaten. All of those are diagnosable and repairable without a person.
+one was a wedged MCP spawn, a drained port pool, a stale worktree, a turn cap,
+or a budget an earlier lap had already eaten. All of those are diagnosable and
+repairable without a person.
 
 ## Start from the block reason
 
 - **Read it first and trust it.** The phase that stopped wrote it while it still
   had the failure in front of it, and those reasons are usually precise —
-  "cannot log in as X", "the deployed SHA does not contain the merge", "phase
-  ceiling reached". Treat it as the leading hypothesis, not as a rumour to
+  "no port free", "the branch has a conflict with dev", "phase ceiling
+  reached". Treat it as the leading hypothesis, not as a rumour to
   re-derive from scratch.
 - **Confirm it once, at the thing it names** — the endpoint, the login, the
   lock file, the quota row. One cheap observation separates a real cause from a
@@ -45,9 +45,9 @@ is how a code defect gets "repaired" in the environment.
 
 This is the line, and crossing it ships broken work.
 
-Everything this pipeline produces is trustworthy because the diff was reviewed,
-verified in a browser, and QA'd against a deployed build. A change made from
-here meets none of those — it lands after the checks have already run, and the
+Everything this pipeline produces is trustworthy because the diff was reviewed
+and verified in a real browser before it merged. A change made from here meets
+neither — it lands after the checks have already run, and the
 run then finishes green over code nobody looked at. If the block really is a
 defect, the remedy is `retryFrom: implement`, where the change goes back through
 review and verify like any other.
@@ -101,10 +101,8 @@ diff, never another run's state, never a shared secret store.
 ## Where to resume
 
 `retryFrom` names the earliest phase whose failure your fix invalidates —
-usually the phase that blocked. If the repair touched the deployed box, resume
-from the phase that puts code there rather than the one that tests it: re-QA
-against unchanged bytes is not a QA result. `''` means retry nothing, which is
-the right answer whenever you fixed nothing or the fix still needs a person.
+usually the phase that blocked. `''` means retry nothing, which is the right
+answer whenever you fixed nothing or the fix still needs a person.
 
 ## Know when to stop
 
@@ -114,7 +112,7 @@ the right answer whenever you fixed nothing or the fix still needs a person.
   both "a human decides", and saying so in five minutes is worth more than an
   hour that ends in a repair nobody asked for.
 - `humanNeeded` is an instruction, not a lament: the action, where to perform
-  it, and what it releases. "Investigate the deploy" helps nobody.
+  it, and what it releases. "Investigate the merge" helps nobody.
 - Never provision a credential nobody has, restart infrastructure you do not
   own, rewrite published history, delete data, or spend outside the configured
   budgets. Those stop the run on purpose.

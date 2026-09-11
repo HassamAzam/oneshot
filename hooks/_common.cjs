@@ -15,8 +15,10 @@
  *     state/hook-errors.log. A guard that crashes closed would wedge every
  *     session on this machine, including Hassam's own.
  *
- * The one deliberate exception to fail-open is deploy-guard, which fails
- * CLOSED — see docs/HOOKS.md 4.2.
+ * Every guard here is fail-open. The exception that used to live here —
+ * deploy-guard, which failed CLOSED — went with the deploy phase; the runner
+ * keeps the mechanism for whatever guard next needs it (FAIL_CLOSED in
+ * src/conductor/hooks.ts).
  */
 
 const fs = require('node:fs');
@@ -30,7 +32,6 @@ const STATE = path.join(ONESHOT, 'state');
 const PAUSE = path.join(STATE, 'PAUSE');
 const PAUSE_QUOTA = path.join(STATE, 'PAUSE-QUOTA');
 const PAUSE_NETWORK = path.join(STATE, 'PAUSE-NETWORK');
-const PAUSE_DEPLOY = path.join(STATE, 'PAUSE-DEPLOY');
 const EVENTS_LOG = path.join(STATE, 'hook-events.jsonl');
 const ERROR_LOG = path.join(STATE, 'hook-errors.log');
 
@@ -108,7 +109,6 @@ function isSideEffect(tool) {
 function pauseFile() {
   if (fs.existsSync(PAUSE)) return { file: 'PAUSE', human: true };
   if (fs.existsSync(PAUSE_QUOTA)) return { file: 'PAUSE-QUOTA', human: false };
-  if (fs.existsSync(PAUSE_DEPLOY)) return { file: 'PAUSE-DEPLOY', human: false };
   return null;
 }
 
@@ -211,7 +211,7 @@ function envFile(key) {
 }
 
 module.exports = {
-  HOME, ONESHOT, STATE, PAUSE, PAUSE_QUOTA, PAUSE_NETWORK, PAUSE_DEPLOY,
+  HOME, ONESHOT, STATE, PAUSE, PAUSE_QUOTA, PAUSE_NETWORK,
   phase, runId, ticket, bailIfNotOneshot,
   readInput, emit, deny, allow, logFailure, event,
   isSideEffect, pauseFile, networkPaused,

@@ -47,7 +47,6 @@ export function journalToRun(j, operatorId, archived) {
     branch: j.branch ?? null,
     mr_iid: j.mrIid ?? null,
     merged_sha: j.mergedSha ?? null,
-    deployed_sha: j.deployedSha ?? null,
     blocked_why: j.blockedWhy ? String(j.blockedWhy).slice(0, 2000) : null,
     operator_id: operatorId,
     archived: !!archived,

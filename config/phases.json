@@ -1,5 +1,5 @@
 {
-  "_comment": "Per-phase execution policy. 'kind' is the important field: 'code' phases are plain TypeScript in the conductor and never spawn a model — that is WHY no hook is needed to stop a model merging or deploying (docs/HOOKS.md §1). 'session' phases get one fresh Agent SDK query() that is never resumed.",
+  "_comment": "Per-phase execution policy. 'kind' is the important field: 'code' phases are plain TypeScript in the conductor and never spawn a model — that is WHY no hook is needed to stop a model merging (docs/HOOKS.md §1). 'session' phases get one fresh Agent SDK query() that is never resumed.",
 
   "_comment_cwd": "'worktree' = the leased git worktree for this ticket. 'conductor' = the Oneshot repo root, used by phases that must not see repo files at all.",
 
@@ -42,8 +42,8 @@
       "writes": ["run"], "onFail": "abort", "group": "check",
       "skills": [],
       "artifact": "testcases.json",
-      "_why": "Opus, and its own phase: verify and qa must execute the SAME list or a green local run and a green demo run cover different ground and cannot be compared. It runs AFTER implement so the cases can name the real symbols and routes the change actually produced — the cost of that is a list authored with the implementation in view, so the prompt makes the acceptance criteria, not the diff, the source of truth.",
-      "_why_turns": "40 was never sized for this job — it is the number this phase was born with in 37f3978, when testcases was n:3 and ran BEFORE implement, authoring from the ticket and the plan with nothing to read. 0d64e2d moved the block to n:4 verbatim while the prompt gained implement's artifact, 'read git diff before you start' and 'read whatever you need to'. The job doubled; the budget did not move, and unlike verify (200->300->450), research (60->120) and document (40->70) it never got a measured raise. Run 237 (r-mtvacbt9-7a23b5) is where that came due: 40 turns spent entirely on context-gathering, 11,719 output tokens, not one case written, and onFail abort blocked the run. The driver is NOT diff size — that diff was 9 files and 211 insertions. It is whether the diff carries the UI vocabulary the cases need: run 8 changed loginTestIds.js and displayText.js and finished in 26 turns, run 19 was backend-only and finished in 18, and run 237 was a date-math fix behind a browser modal, so the routes, the permission gate and the PL_* labels all had to be excavated from files the diff never touched. research.uiPath now supplies that vocabulary, which is what makes 110 a real ceiling rather than a bigger number in front of an unbounded search. 30 minutes because the 15 was equally inherited, and this phase has already died on the CLOCK once (r-mtfu7ph1-e56363, 119 stream messages, no result)."
+      "_why": "Opus, and its own phase: the list is written once, reviewed as a list, and executed by verify against a real browser — which is what makes 'the change passes its own cases' a claim about something a person could re-run rather than about whatever the verifying session happened to think of. It runs AFTER implement so the cases can name the real symbols and routes the change actually produced — the cost of that is a list authored with the implementation in view, so the prompt makes the acceptance criteria, not the diff, the source of truth.",
+      "_why_turns": "40 was never sized for this job — it is the number this phase was born with in 37f3978, when testcases was n:3 and ran BEFORE implement, authoring from the ticket and the plan with nothing to read. 0d64e2d moved the block to n:4 verbatim while the prompt gained implement's artifact, 'read git diff before you start' and 'read whatever you need to'. The job doubled; the budget did not move, and unlike verify (200->300->450) and research (60->120) it never got a measured raise. Run 237 (r-mtvacbt9-7a23b5) is where that came due: 40 turns spent entirely on context-gathering, 11,719 output tokens, not one case written, and onFail abort blocked the run. The driver is NOT diff size — that diff was 9 files and 211 insertions. It is whether the diff carries the UI vocabulary the cases need: run 8 changed loginTestIds.js and displayText.js and finished in 26 turns, run 19 was backend-only and finished in 18, and run 237 was a date-math fix behind a browser modal, so the routes, the permission gate and the PL_* labels all had to be excavated from files the diff never touched. research.uiPath now supplies that vocabulary, which is what makes 110 a real ceiling rather than a bigger number in front of an unbounded search. 30 minutes because the 15 was equally inherited, and this phase has already died on the CLOCK once (r-mtfu7ph1-e56363, 119 stream messages, no result)."
     },
     {
       "name": "review", "n": 5, "kind": "session", "tier": "heavy",
@@ -81,51 +81,10 @@
     {
       "name": "merge", "n": 9, "kind": "code",
       "timeoutMin": 10, "onFail": "blocked",
-      "_why": "Code, not a session. No model holds a merge tool, so v1's label-guard approval check has nothing to guard."
+      "_why": "Code, not a session, and now the LAST phase. No model holds a merge tool, so v1's label-guard approval check has nothing to guard — and with deploy, qa, demo, memorize and document removed, the pipeline's definition of done is 'merged into the base branch'. The success notes this phase posts to the ticket and the MR are therefore the run's only durable record besides the MR itself; the exit label swap still happens in finish(), which is where every terminal status has always been decided."
     },
     {
-      "name": "deploy", "n": 10, "kind": "session", "tier": "standard",
-      "cwd": "conductor", "maxTurns": 80, "timeoutMin": 75,
-      "writes": ["run", "artifacts"], "onFail": "abort",
-      "skills": [],
-      "artifact": "deploy.json",
-      "_why": "A SESSION, deliberately — the one deterministic step this pipeline had, made adaptive on purpose. The script is still the only sanctioned path to the box (scripts/deploy-wsai.sh via scripts/deploy-watch.sh, detached, polled in slices because the Bash tool caps near 10 minutes), but a deploy that fails now gets a diagnostician: read the remote build log, check supervisor state, decide --npm/--pip from the actual diff, retry within the attempt cap. Safety moved from 'no model holds the tool' to hooks/deploy-guard.cjs — allowlisted hosts, allowlisted remote verbs, fail-CLOSED — plus a deterministic conductor check after the phase: the deployed SHA must contain this run's merge SHA and the site must answer 200, or the phase result is overruled. Retries live inside the session (schema `attempts`); onFail abort because a deploy the agent itself gave up on needs a human, not a redo."
-    },
-    {
-      "name": "qa", "n": 11, "kind": "session", "tier": "heavy",
-      "cwd": "conductor", "maxTurns": 140, "timeoutMin": 60,
-      "writes": ["run", "artifacts"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 2,
-      "skills": ["demo-server-qa"],
-      "artifact": "qa.json"
-    },
-    {
-      "name": "demo", "n": 12, "kind": "session", "tier": "standard",
-      "cwd": "conductor", "maxTurns": 60, "timeoutMin": 30,
-      "writes": ["run", "artifacts"], "onFail": "warn", "group": "wrap",
-      "skills": [],
-      "artifact": "demo.json"
-    },
-    {
-      "name": "memorize", "n": 13, "kind": "session", "tier": "light",
-      "cwd": "conductor", "maxTurns": 25, "timeoutMin": 10,
-      "writes": ["run", "memory"], "onFail": "warn", "group": "wrap",
-      "_why_order": "Before document, not after — the ticket note wants to link the memory card, and the card needs nothing from the note. demo and memorize share nothing at all, so they run as a group.",
-      "skills": ["ticket-memory-write"],
-      "artifact": "memorize.json"
-    },
-    {
-      "name": "document", "n": 14, "kind": "session", "tier": "light",
-      "cwd": "conductor", "maxTurns": 70, "timeoutMin": 25,
-      "_why_turns": "Measured live: this phase composes two long-form notes (the ticket and the MR) and uploads the evidence attachments behind them, on the light tier, which spends turns where a heavier model would spend tokens. 40 never fit the job — it died at max_turns with the notes half-written, and because onFail is warn that loss is silent: the run finishes green having published nothing.",
-      "skills": ["mr-documentation", "ui-evidence-pack"],
-      "artifact": "document.json"
-    },
-    {
-      "name": "close", "n": 15, "kind": "code",
-      "timeoutMin": 5, "onFail": "warn"
-    },
-    {
-      "name": "remediate", "n": 16, "kind": "session", "tier": "heavy",
+      "name": "remediate", "n": 10, "kind": "session", "tier": "heavy",
       "cwd": "conductor", "maxTurns": 60, "timeoutMin": 30,
       "writes": ["run"], "onFail": "warn", "onDemand": true,
       "artifact": "remediate.json",

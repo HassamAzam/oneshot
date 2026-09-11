@@ -37,10 +37,6 @@
  * its QA passes, and admitting another ticket into that window would destroy the
  * attribution the lock exists to protect.
  */
-import { existsSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { PAUSE_DEPLOY, STATE } from './config.js';
-import { readJournal } from './artifacts.js';
 import { db, logEvent } from './db.js';
 import { liveConductorIds } from './fleet.js';
 import { log } from './log.js';
@@ -88,7 +84,6 @@ const LEASE_TTL_MS = 5 * 60_000;
 /** How often a waiter asks. Fast enough not to add latency, idle enough to ignore. */
 const POLL_MS = 3_000;
 
-const DEPLOY_LOCK = join(STATE, 'DEPLOY-LOCK');
 
 export interface PromotionClaim {
   runId: string;
@@ -110,52 +105,6 @@ function readLease(): LeaseRow | undefined {
 
 export function promotionHolder(): string | null {
   return readLease()?.run_id ?? null;
-}
-
-// ------------------------------------------------------------- the projection
-
-/**
- * state/DEPLOY-LOCK, as hooks/deploy-guard.cjs reads it.
- *
- * A PROJECTION of the lease and never a second source of truth: written when
- * the window is granted, refreshed by the same heartbeat that renews the row,
- * removed when it is released. The guard — not this module — is what a session's
- * `Bash` call actually meets, so without the file the whole cross-process
- * guarantee stops at the conductor's own front door.
- *
- * `since` carries the RENEWAL rather than the grant, because the guard treats a
- * lock older than the deploy deadline as stale. Stamping it once at grant time
- * would make a legitimately long window look abandoned halfway through; stamping
- * it every heartbeat makes staleness mean the only thing worth meaning — that
- * whoever holds this has stopped breathing.
- *
- * Being a projection is also what makes it safe for db.ts to delete a lease row
- * without saying so: nothing renews the file after that, so it ages past the
- * deploy deadline on its own, and the next conductor granted the window
- * overwrites it outright. Every intermediate state denies rather than permits.
- */
-function project(lease: LeaseRow): void {
-  try {
-    writeFileSync(DEPLOY_LOCK, `${JSON.stringify({
-      runId: lease.run_id,
-      iid: lease.iid,
-      conductor: lease.owner,
-      pid: process.pid,
-      grantedAt: lease.acquired_at,
-      since: lease.renewed_at,
-    })}\n`);
-  } catch (err) {
-    log.warn('could not write state/DEPLOY-LOCK', { error: (err as Error).message });
-  }
-}
-
-function unproject(runId: string): void {
-  try {
-    if (!existsSync(DEPLOY_LOCK)) return;
-    rmSync(DEPLOY_LOCK, { force: true });
-  } catch (err) {
-    log.warn('could not remove state/DEPLOY-LOCK', { runId, error: (err as Error).message });
-  }
 }
 
 // ------------------------------------------------------------------ acquiring
@@ -216,52 +165,13 @@ const attempt = db.transaction((claim: PromotionClaim, live: string[]): 'granted
  * Whether a run that is not answering may have its window taken.
  *
  * Both conditions, never either. A TTL alone would break the lease of a healthy
- * holder whose QA legitimately outran it; liveness alone would break the lease
+ * holder whose merge legitimately outran it; liveness alone would break the lease
  * of a conductor that died one second ago, before anything had a chance to
  * notice and before its own restart could resume the run.
  */
 function breakable(lease: LeaseRow, live: string[]): boolean {
   if (Date.now() - lease.renewed_at < LEASE_TTL_MS) return false;
   return lease.owner === null || !live.includes(lease.owner);
-}
-
-/**
- * What an abandoned window may have left on the demo box.
- *
- * A holder that got as far as a merge but never as far as a QA pass has put a
- * change on the base branch that nothing has attributed to anything — and the
- * deploy script ships a branch tip, so the next deploy carries it whether or not
- * that ticket is involved. Handing the window on without saying so is how a
- * later run's QA verdict quietly becomes a verdict on two tickets.
- *
- * PAUSE-DEPLOY rather than a log line, because this is exactly the situation the
- * deploy hold exists for: everything else continues, and the one irreversible
- * phase waits for a person who can look at what is on the box.
- */
-function holdIfUnattributed(lease: LeaseRow): void {
-  const journal = readJournal(lease.iid);
-  if (!journal?.mergedSha) return;
-  const qaPassed = journal.phases.some(
-    (rec) => rec.phase === 'qa' && (rec.status === 'ok' || rec.status === 'warned'),
-  );
-  if (qaPassed) return;
-
-  try {
-    writeFileSync(PAUSE_DEPLOY, `${JSON.stringify({
-      why: `#${lease.iid} merged ${journal.mergedSha} and its promotion window was abandoned ` +
-        'before QA passed — the demo box may be carrying an unattributed change',
-      runId: lease.run_id,
-      iid: lease.iid,
-      conductor: lease.owner,
-      checked_at: Date.now(),
-    }, null, 2)}\n`);
-  } catch (err) {
-    log.warn('could not write state/PAUSE-DEPLOY', { error: (err as Error).message });
-  }
-  log.error(`#${lease.iid} left the promotion window merged but un-QA'd — deploys are held`, {
-    mergedSha: journal.mergedSha.slice(0, 8),
-  });
-  logEvent('promotion_orphan_hold', { iid: lease.iid, runId: lease.run_id }, { runId: lease.run_id });
 }
 
 /**
@@ -272,13 +182,11 @@ function holdIfUnattributed(lease: LeaseRow): void {
  * DELETE simply matches nothing and the caller polls again.
  */
 function reclaim(lease: LeaseRow): void {
-  holdIfUnattributed(lease);
   const taken = db.prepare(
     'DELETE FROM promotion_lock WHERE id = 1 AND run_id = ? AND renewed_at = ?',
   ).run(lease.run_id, lease.renewed_at).changes > 0;
   if (!taken) return;
 
-  unproject(lease.run_id);
   log.warn('broke an abandoned promotion lease', {
     holder: lease.run_id, conductor: (lease.owner ?? 'unowned').slice(0, 6),
     idleMin: Math.round((Date.now() - lease.renewed_at) / 60_000),
@@ -322,7 +230,6 @@ export async function acquirePromotion(
 
     if (attempt.immediate(claim, live) === 'granted') {
       const lease = readLease();
-      if (lease) project(lease);
       if (announced) log.ok(`#${claim.iid} has the promotion window`);
       return true;
     }
@@ -362,7 +269,6 @@ export function renewPromotion(conductor: string): void {
     .run(Date.now(), conductor).changes > 0;
   if (!renewed) return;
   const lease = readLease();
-  if (lease) project(lease);
 }
 
 /**
@@ -379,6 +285,5 @@ export function releasePromotion(runId: string): void {
   const released = db.prepare('DELETE FROM promotion_lock WHERE run_id = ?').run(runId).changes > 0;
   dequeue(runId);
   if (!released) return;
-  unproject(runId);
   logEvent('promotion_released', { runId }, { runId });
 }

@@ -22,14 +22,13 @@
  * suite (scripts/verify-hooks.sh), no chance of the two drifting apart — which
  * for a security guard is the failure that matters.
  *
- * One asymmetry is deliberate and load-bearing. Every guard here used to fail
- * OPEN on every failure path — timeout, spawn error, non-JSON — because a
- * broken guard must never wedge a phase. That is right for all of them except
- * deploy-guard, whose own header and docs/HOOKS.md 4.2 both promise it fails
- * CLOSED. The promise was not true: a deploy-guard that was missing, crashed or
- * slow resolved `{}` here and the deploy proceeded unguarded, which is exactly
- * the "bypassed by a bug in my runner" failure that made a script-side guard a
- * requirement in the first place. FAIL_CLOSED makes the promise real.
+ * Every guard here fails OPEN — timeout, spawn error, non-JSON — because a
+ * broken guard must never wedge a phase. FAIL_CLOSED is the escape hatch for a
+ * guard whose promise is the opposite, and it is EMPTY: its only member was
+ * deploy-guard, which went with the deploy phase. It is kept because the
+ * asymmetry is the load-bearing part — a guard standing between a session and
+ * an irreversible action must deny when it cannot run, and that belongs in one
+ * place rather than being rediscovered by whoever adds the next one.
  */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -43,7 +42,7 @@ const NODE = envOr('ONESHOT_NODE', process.execPath);
 const HOOK_TIMEOUT_MS = 15_000;
 
 /** Guards that must DENY rather than allow when they cannot run. */
-const FAIL_CLOSED = new Set(['deploy-guard.cjs']);
+const FAIL_CLOSED = new Set<string>();
 
 /** The .cjs deny shape, mirrored exactly so a model reads one contract. */
 function denyPayload(reason: string): HookOutput {
@@ -143,7 +142,6 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
       { hooks: [guard('pause-check.cjs')], timeout: 15 },
       { matcher: WRITE_TOOLS, hooks: [guard('write-scope.cjs')], timeout: 15 },
       { matcher: BASH, hooks: [guard('git-guard.cjs')], timeout: 20 },
-      { matcher: BASH, hooks: [guard('deploy-guard.cjs')], timeout: 20 },
       // log-event stays last so a denied call is still recorded.
       { hooks: [guard('log-event.cjs')], timeout: 10 },
     ],

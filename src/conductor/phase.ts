@@ -14,7 +14,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { appendFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  BASE_ENV, DRY_RUN, ROOT, artifactDir, deployConfig, envOr, modelFor, runDir,
+  BASE_ENV, DRY_RUN, ROOT, artifactDir, envOr, modelFor, runDir,
   type PhaseConfig,
 } from '../lib/config.js';
 import { MEMORY } from '../lib/config.js';
@@ -229,18 +229,6 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     // the path. NODE_PATH is Node's documented fallback for exactly this.
     NODE_PATH: join(ROOT, 'node_modules'),
   };
-
-  // scripts/deploy-wsai.sh refuses any ref outside this list BEFORE touching
-  // the box (exit 3, RESULT=refused_ref) — a script-side guard independent of
-  // hooks/deploy-guard.cjs, per docs/HOOKS.md §4.2. The '<ticket-branch>'
-  // placeholder in config/deploy.json is expanded against THIS run's leased
-  // branch, never against anything the session says.
-  if (cfg.name === 'deploy') {
-    env.ONESHOT_ALLOWED_REFS = deployConfig().allowedRefs
-      .map((r) => (r === '<ticket-branch>' ? input.branch ?? '' : r))
-      .filter(Boolean)
-      .join(',');
-  }
 
   // Two ways a phase ends early, and they are not the same failure. The timer
   // is this phase overrunning its own budget; the caller's signal is the

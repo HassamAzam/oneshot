@@ -56,7 +56,7 @@ clock bug.
 entire fleet while making the board look merely quiet.
 
 ```bash
-cd ~/Documents/oneshot && for f in PAUSE PAUSE-QUOTA PAUSE-NETWORK PAUSE-DEPLOY DEPLOY-LOCK; do
+cd ~/Documents/oneshot && for f in PAUSE PAUSE-QUOTA PAUSE-NETWORK; do
   if [ -f "state/$f" ]; then printf 'ENGAGED  %-14s %s\n' "$f" "$(cat state/$f | tr -d '\n' | cut -c1-120)";
   else printf '-        %s\n' "$f"; fi; done
 ```
@@ -65,22 +65,15 @@ cd ~/Documents/oneshot && for f in PAUSE PAUSE-QUOTA PAUSE-NETWORK PAUSE-DEPLOY 
 |---|---|---|
 | `PAUSE` | **Denies every side-effectful tool in every phase of every run.** | No — a human set it |
 | `PAUSE-QUOTA` | Same total halt. | Yes, on expiry |
-| `PAUSE-DEPLOY` | **Same total halt** — see the trap below | Yes, when the hold resolves |
 | `PAUSE-NETWORK` | Blocks `mcp__gitlab*` only, and **only if `checked_at` is under 15 min old** | See §7 — it does *not* |
-| `DEPLOY-LOCK` | Denies deploys owned by another run; ignored once 50 min past last renewal | Yes |
 
-> **The single most dangerous misreading in this system.** `PAUSE-DEPLOY` sounds like "deploys are
-> held, everything else continues". It is not. `hooks/_common.cjs:108` `pauseFile()` returns it
-> alongside `PAUSE`, and `hooks/pause-check.cjs:24` then denies `Write`, `Edit`, `NotebookEdit`,
-> `Bash` and every `mcp__*` call in **every phase of every run**. `hooks/budget-gate.cjs:66`
-> refuses new sessions with the text `BLOCKED: quota — Oneshot is paused`. So a stray
-> `PAUSE-DEPLOY` converts the whole fleet into read-only sessions that report themselves as a
-> *quota* problem. If you see "quota" anywhere, check the pause files first — token ceilings are
-> switched **off** (`config/budgets.json` `"enabled": false`), so it is almost never quota.
->
-> And do not simply delete it. Its `why` field names a merged-but-un-QA'd SHA sitting on the demo
-> box. Removing it ships an unattributed change and makes the next QA verdict cover two tickets.
-> **Surface it to the operator with the SHA and iid. Both deleting it and leaving it are wrong.**
+> **Removed with the deploy phase.** `state/PAUSE-DEPLOY` and `state/DEPLOY-LOCK` no longer
+> exist: the pipeline ends at the merge, nothing here reaches another machine, and both files
+> were about a deploy. If you find one on a machine that has been running a while, it is a
+> leftover from before that change and **deleting it is now the right answer** — nothing reads
+> it. Note what the old trap was, because the shape recurs: `PAUSE-DEPLOY` was returned by
+> `pauseFile()` alongside `PAUSE`, so a file that sounded like "deploys are held" actually
+> denied every side-effectful tool in every run and reported itself as a *quota* problem.
 
 **c. What is in flight.**
 
@@ -229,17 +222,16 @@ Work top to bottom. The first row that matches is your answer.
 
 | Symptom | Check | Meaning → action |
 |---|---|---|
-| Nothing running, board has `Loop` tickets | §1b pause files | `PAUSE`/`PAUSE-QUOTA`/`PAUSE-DEPLOY` halts everything. See the trap in §1b |
+| Nothing running, board has `Loop` tickets | §1b pause files | `PAUSE`/`PAUSE-QUOTA` halts everything. See §1b |
 | A phase reports "quota" | `config/budgets.json` `enabled` | It is `false`. The message is a **pause file**, not quota |
 | Run `running`, no transcript growth > `timeoutMin` | §1d + ppid check | Genuinely wedged. Report; do not kill without asking |
 | Phase ended with `turns=0`, `weighted=0`, long duration | journal | **Session never started** — wedged MCP spawn, not a model failure |
 | `error_max_turns` in the journal | `config/phases.json` `maxTurns` | Turn cap too small for the work. **A human must edit it** (§5) |
 | Phase `warned` with `timed out after Nm while still working` | journal | `timeoutMin` too small. Same fix, same restart requirement |
 | Run `blocked`, `blockedWhy` set | journal + §6 | Read the vocabulary table in §6 |
-| Ticket labelled `Loop` never claimed | watcher skip ladder | Carries `Ready For Deployment` or `Needs Human`; or already claimed; or no free slot; or in block cooldown |
+| Ticket labelled `Loop` never claimed | watcher skip ladder | Carries `merged` or `Needs Human`; or already claimed; or no free slot; or in block cooldown |
 | `at capacity — N run(s) in flight here` every tick | §7 | **Normal.** Not a fault |
 | Run owned by a conductor not in your live set | §1a | Orphan. Reclaimable — a live conductor picks it up, or `npm run unblock` |
-| Deploy denied | `state/hook-errors.log` | A guard that cannot load its config **throws, and fail-closed denies**. Check `config/deploy.json` exists |
 
 ---
 
@@ -315,10 +307,11 @@ count `failed` records for that phase and compare against `maxLaps`/`maxRetries`
    zeroes the heartbeat on purpose.
 4. **A `done` run still carrying an `owner`.** Normal — the owner is not cleared on completion.
 5. **Phases with status `warned`.** A deliberate outcome for `onFail: warn` phases
-   (`ui-evidence`, `demo`, `memorize`, `document`). The run is healthy.
+   (`ui-evidence`, `remediate`). The run is healthy.
 6. **`runs.phase` reading `testcases + review`.** A parallel group, not corruption.
-7. **A long-held promotion lease.** Re-entrant by design, held across a `qa → implement` cycle
-   lap. Only breakable when `renewed_at` is over 300s old **and** the owner is not live.
+7. **A long-held promotion lease.** Re-entrant by design, and on a `Review` ticket it is held
+   for as long as the merge waits on a person. Only breakable when `renewed_at` is over 300s
+   old **and** the owner is not live.
 8. **`state/hook-events.jsonl` showing thousands of denials.** 2627 of them are ticket `0` — the
    hook self-test, re-run by every `npm run doctor`. Real-ticket denials here total 18.
 
@@ -430,4 +423,5 @@ Left here so you can check your reading against a known-good one.
   uncommitted** (`git diff config/phases.json`).
 - **Historic, resolved:** `state/hook-errors.log` holds 37 stack traces from `deploy-guard.cjs`
   failing to load a then-missing `config/deploy.json`. Fail-closed means the guard's own crash
-  denied the deploy. The file exists now; the traces are from 2026-08-29.
+  denied the deploy. Both files are gone now — the deploy phase was removed — and the traces
+  are from 2026-08-29.

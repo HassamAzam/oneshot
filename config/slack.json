@@ -16,7 +16,7 @@
   },
 
   "_comment_milestones": "Which phase completions get a thread reply. Everything else only moves the card. Keep this short — the card is the status, the thread is the record.",
-  "milestones": ["plan", "testcases", "review", "verify", "mr", "merge", "deploy", "qa", "demo"],
+  "milestones": ["plan", "testcases", "review", "verify", "mr", "merge"],
 
   "_comment_mention": "When Oneshot @mentions the OPERATOR, unbidden, because a run stopped. Full auto means nothing else should ever need your attention mid-run. Distinct from the review gates, which also @mention people (config/reviewers.json) but are an ask the dev/QA groups opted into answering rather than an alarm.",
   "mentionOn": ["blocked", "quota_park", "network_down"],

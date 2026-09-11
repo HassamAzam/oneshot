@@ -13,7 +13,7 @@
  */
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
-import { PAUSE_NETWORK, STATE, deployConfig } from './config.js';
+import { PAUSE_NETWORK, STATE } from './config.js';
 import { logEvent } from './db.js';
 import { log } from './log.js';
 import { ping } from './gitlab.js';
@@ -122,20 +122,3 @@ export async function probe(): Promise<ProbeOutcome> {
 
 /** True when work may proceed. `recovering` deliberately does NOT dispatch. */
 export function isReachable(): boolean { return state === 'ok'; }
-
-/**
- * The demo box is on the same VPN-gated subnet as GitLab but is a separate
- * host, so a GitLab-only probe can report `ok` while a deploy would hang for
- * its full 50-minute budget. Phase 10 calls this before invoking the script.
- */
-export async function demoHostReachable(): Promise<boolean> {
-  const cfg = deployConfig();
-  const host = cfg.server.includes('@') ? cfg.server.split('@')[1] : cfg.server;
-  if (!host) return false;
-  const { spawnSync } = await import('node:child_process');
-  const res = spawnSync('ssh', [
-    '-n', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
-    cfg.server, 'echo ok',
-  ], { encoding: 'utf8', timeout: 25_000 });
-  return res.status === 0 && res.stdout.trim() === 'ok';
-}

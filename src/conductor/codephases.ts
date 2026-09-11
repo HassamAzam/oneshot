@@ -24,7 +24,7 @@
 import { execFileSync } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 import {
-  DRY_RUN, MERGE_POLL_MS, WORK_REPO, deployConfig, phaseByName, projectConfig,
+  DRY_RUN, MERGE_POLL_MS, WORK_REPO, phaseByName, projectConfig,
 } from '../lib/config.js';
 import {
   artifactsDirFor, readArtifact, readJournal, updateJournal, writeArtifact, type RunJournal,
@@ -96,11 +96,12 @@ type MergeArtifact = {
   targetBranch: string | null;
   mergedSha: string | null;
   /**
-   * The tip of the base branch once the merge landed. `mergedSha` says what was
-   * merged; this says what `deploy` will actually ship, since the deploy script
-   * takes the TIP of a branch rather than a sha. They diverge exactly when a
-   * second run merged into the same base inside this run's window, which makes
-   * the pair a permanent, one-line audit of the promotion mutex.
+   * The tip of the base branch once the merge landed. `mergedSha` says what
+   * this run merged; this says what whoever deploys the branch will actually
+   * ship. They diverge exactly when a second run merged into the same base
+   * inside this run's window, which makes the pair a permanent, one-line audit
+   * of the promotion mutex — and the first thing to read when a deployed build
+   * carries more than the ticket that triggered it.
    */
   baseTipAfterMerge: string | null;
   mergeMethod: string | null;
@@ -116,20 +117,15 @@ type MergeArtifact = {
   promotion: PromotionRecord | null;
   promotionsSkipped: Array<{ from: string; to: string; detail: string }>;
   threadPosted: boolean;
+  /** The completion record, once posted. Carried across a re-run so it is posted once. */
+  successNoteId: number | null;
+  successNotePosted: boolean;
+  mrNotePosted: boolean;
+  /** Record-keeping that failed. Never fails the phase — the merge already happened. */
+  recordFailures: string[];
   dryRun: boolean;
   wouldAccept: { mrIid: number; sha: string | null; squash: boolean; targetBranch: string } | null;
   blockedWhy: string | null;
-  summary: string;
-};
-
-type CloseArtifact = {
-  ticketNoteId: number | null;
-  ticketNotePosted: boolean;
-  slackThreadPosted: boolean;
-  portReleased: boolean;
-  memoryCardWritten: boolean;
-  mrNoteAdded: boolean;
-  failures: string[];
   summary: string;
 };
 
@@ -141,7 +137,9 @@ function blankMerge(): MergeArtifact {
     rebaseCount: 0, rebasedFrom: null, rebasedTo: null,
     waitedForCiMs: 0, pipeline: null,
     promotion: null, promotionsSkipped: [],
-    threadPosted: false, dryRun: false, wouldAccept: null,
+    threadPosted: false,
+    successNoteId: null, successNotePosted: false, mrNotePosted: false, recordFailures: [],
+    dryRun: false, wouldAccept: null,
     blockedWhy: null, summary: '',
   };
 }
@@ -744,8 +742,13 @@ function promotionLine(rec: MergeArtifact): string {
  */
 async function announceMerge(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<void> {
   if (rec.threadPosted) return;
-  const ts = (readJournal(ctx.iid) ?? ctx.journal).slackTs ?? null;
-  await thread(ts, `*#${ctx.iid} merge* — ${rec.summary}`);
+  const journal = readJournal(ctx.iid) ?? ctx.journal;
+  const ts = journal.slackTs ?? null;
+  await thread(ts,
+    `*#${ctx.iid} merged — run complete* — ${rec.summary}\n`
+    + `${phasesLine(journal)}\n`
+    + `Artifacts: ${artifactsDirFor(ctx.iid)} (${artifactCount(ctx.iid)} files)\n`
+    + `Merged, not deployed — deploying is a person's call from here.`);
   if (rec.promotion?.status === 'conflict') {
     await alert(
       `#${ctx.iid} — ${rec.promotion.from} → ${rec.promotion.to} promotion is CONFLICTED. ` +
@@ -864,6 +867,9 @@ export async function mergePhase(
   const rec = blankMerge();
   rec.rebaseCount = carried?.rebaseCount ?? 0;
   rec.threadPosted = carried?.threadPosted === true;
+  rec.successNoteId = carried?.successNoteId ?? null;
+  rec.successNotePosted = carried?.successNotePosted === true;
+  rec.mrNotePosted = carried?.mrNotePosted === true;
   rec.promotion = carried?.promotion ?? null;
 
   const gate = qualityGate(ctx.iid);
@@ -960,25 +966,28 @@ export async function mergePhase(
   await runPromotions(ctx, rec, deadlines.promotion);
   rec.summary = mergeSummary(rec);
   await announceMerge(ctx, rec);
+  // Last phase in the pipeline, so the run's record is written here. After the
+  // announce, because a record that throws must not cost the Slack line, and
+  // before persistMerge so the posted flags land on the artifact a resume reads.
+  await recordSuccess(ctx, rec);
   persistMerge(ctx, rec);
   log.ok(`merge: ${rec.summary}`);
+  if (rec.recordFailures.length) {
+    log.warn(`merge: ${rec.recordFailures.length} record-keeping step(s) failed`, {
+      steps: rec.recordFailures.join('; ').slice(0, 200),
+    });
+  }
   return { ok: true };
 }
 
-// ----------------------------------------------------------------- phase 15
-// close
+// ------------------------------------------------------- phase 9, completion
+// The run's last act. `merge` is the final phase, so what used to be `close`
+// lives here: the durable record on the ticket and the MR, the Slack line, and
+// the ledger row. The label swap and the lease teardown are NOT here — they
+// belong to finish(), which owns every terminal status and has always done
+// this part for blocked and aborted runs too.
 
 const ABSENT = '_not produced (phase warned)_';
-
-async function step(rec: CloseArtifact, what: string, fn: () => Promise<void>): Promise<void> {
-  try {
-    await fn();
-  } catch (err) {
-    const why = (err as Error).message;
-    rec.failures.push(`${what}: ${why}`);
-    log.warn(`close: ${what} failed`, { error: why.slice(0, 160) });
-  }
-}
 
 function artifactCount(iid: number): number {
   try {
@@ -988,25 +997,16 @@ function artifactCount(iid: number): number {
   }
 }
 
-function qaLine(qa: Record<string, unknown> | null): string {
-  if (!qa) return ABSENT;
-  const results = aField(qa, 'results') as Array<{ result?: unknown }>;
+function verifyLine(verify: Record<string, unknown> | null): string {
+  if (!verify) return ABSENT;
+  const results = aField(verify, 'results') as Array<{ result?: unknown }>;
   const tally = (name: string): number => results.filter((r) => r?.result === name).length;
   const parts = [`${tally('pass')}/${results.length} pass`];
   if (tally('fail')) parts.push(`${tally('fail')} failed`);
   if (tally('blocked')) parts.push(`${tally('blocked')} blocked`);
   if (tally('skipped')) parts.push(`${tally('skipped')} skipped`);
-  return `${parts.join(', ')} — verdict: ${sField(qa, 'verdict') ?? 'unknown'}`;
-}
-
-function evidenceLine(
-  ui: Record<string, unknown> | null, demo: Record<string, unknown> | null,
-): string {
-  if (!ui && !demo) return ABSENT;
-  const shots = aField(ui, 'screenshots').length;
-  const files = (aField(demo, 'files') as unknown[]).filter((f) => typeof f === 'string');
-  return `${shots} screenshot${shots === 1 ? '' : 's'}` +
-    `${files.length ? `, ${files.join(', ')}` : ''}`;
+  const regressions = aField(verify, 'regressions').length;
+  return `${parts.join(', ')}${regressions ? ` · ${regressions} regression(s)` : ''}`;
 }
 
 function phasesLine(journal: RunJournal): string {
@@ -1020,150 +1020,118 @@ function phasesLine(journal: RunJournal): string {
 /**
  * The run's one durable, human-readable record on the ticket.
  *
- * Absent sections are stated rather than omitted. `demo`, `document` and
- * `memorize` are all allowed to warn, so their artifacts are legitimately
- * missing sometimes — and a blank line reads as "nobody looked", while a stated
- * absence is information.
+ * Absent sections are stated rather than omitted: `ui-evidence` is allowed to
+ * warn, so its artifact is legitimately missing sometimes, and a blank line
+ * reads as "nobody looked" where a stated absence is information.
+ *
+ * It claims the merge and nothing beyond it. Saying anything about a deployed
+ * build would be the one lie this pipeline is now structurally incapable of
+ * checking — there is no deploy phase and no QA phase to be overruled by.
  */
-function renderCloseNote(ctx: CodePhaseCtx, journal: RunJournal): string {
-  const merge = artifactOf(ctx, 'merge');
-  const qa = artifactOf(ctx, 'qa');
+function renderSuccessNote(ctx: CodePhaseCtx, journal: RunJournal, rec: MergeArtifact): string {
   const testcases = artifactOf(ctx, 'testcases');
   const review = artifactOf(ctx, 'review', 'findings.json');
+  const verify = artifactOf(ctx, 'verify');
   const ui = artifactOf(ctx, 'ui-evidence');
-  const demo = artifactOf(ctx, 'demo');
-  const memorize = artifactOf(ctx, 'memorize');
 
-  const mergedSha = journal.mergedSha ?? sField(merge, 'mergedSha');
-  const mrLine = journal.mrIid
-    ? `!${journal.mrIid} — merged into \`${sField(merge, 'targetBranch') ?? projectConfig().branches.base}\`` +
-      ` as \`${short(mergedSha)}\`${journal.mrUrl ? ` · ${journal.mrUrl}` : ''}`
+  const mergedSha = journal.mergedSha ?? rec.mergedSha;
+  const target = rec.targetBranch ?? projectConfig().branches.base;
+  const mrLine = rec.mrIid
+    ? `!${rec.mrIid} — merged into \`${target}\` as \`${short(mergedSha)}\`` +
+      `${rec.mrUrl ? ` · ${rec.mrUrl}` : ''}`
     : ABSENT;
 
-  const promotion = (merge?.promotion ?? null) as PromotionRecord | null;
+  const promotion = rec.promotion;
   const promotionLineText = promotion
     ? `${promotion.from} → ${promotion.to}: ${promotion.status}` +
       `${promotion.detail ? ` — ${promotion.detail}` : ''}`
     : ABSENT;
 
-  const deployedSha = journal.deployedSha ?? sField(artifactOf(ctx, 'deploy'), 'deployedSha');
   const cases = aField(testcases, 'cases') as Array<{ blast?: unknown }>;
   const highBlast = cases.filter((c) => c?.blast === 'high').length;
   const findings = aField(review, 'findings');
-  const card = sField(memorize, 'card');
+  const shots = aField(ui, 'screenshots').length;
 
-  return `## Oneshot run \`${ctx.runId}\` — complete
+  return `## Oneshot run \`${ctx.runId}\` — merged ✅
 
 **MR** ${mrLine}
 **Promotion** ${promotionLineText}
-**Demo** ${deployConfig().demoUrl} on \`${short(deployedSha)}\`
-**QA** ${qaLine(qa)}
 **Test cases** ${testcases ? `${cases.length} authored (${highBlast} high blast)` : ABSENT}
+**Verify** ${verifyLine(verify)}
 **Review** ${review ? `${sField(review, 'verdict') ?? 'unknown'}, ${findings.length} findings` : ABSENT}
-**Evidence** ${evidenceLine(ui, demo)} in \`${artifactsDirFor(ctx.iid)}\`
-**Memory card** ${card ?? ABSENT}
+**Evidence** ${ui ? `${shots} screenshot${shots === 1 ? '' : 's'}` : ABSENT} in \`${artifactsDirFor(ctx.iid)}\`
 **Phases** ${phasesLine(journal)}
-<!-- oneshot:close:${ctx.runId} -->`;
+
+The pipeline ends at the merge: nothing here was deployed and nothing was
+QA'd on a running build. Deployment is a person's job from here.
+${successMarker(ctx.runId)}`;
+}
+
+function successMarker(runId: string): string {
+  return `<!-- oneshot:merged:${runId} -->`;
 }
 
 /**
- * Phase 15. Records the run and lets go of what it holds.
+ * Post the record, and never fail the phase over it.
  *
- * This phase NEVER returns ok:false. A false here would block a ticket whose
- * code is merged, deployed and QA-passed, swap it to Needs Human and make the
- * watcher skip it for ever — the worst outcome available on the last phase of a
- * successful run, and far worse than an inaccurate exit code. Failures are
- * collected into `failures[]` and said out loud instead.
- *
- * What it deliberately does NOT do: swap the label, re-render the Slack card,
- * delete the branch, close the issue, or touch the run's artifacts. The label
- * swap and the teardown belong to `finish()`, the branch is pushed work, and
- * the exit label — not a closed issue — is the run's contract.
+ * A false return here would block a ticket whose code is already in the base
+ * branch, swap it to Needs Human and make the watcher skip it for ever — the
+ * worst outcome available after an irreversible step succeeded, and far worse
+ * than a missing note. Every failure is logged and collected onto the artifact
+ * instead.
  */
-export async function closePhase(ctx: CodePhaseCtx): Promise<{ ok: boolean; error?: string }> {
+async function recordSuccess(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<void> {
   const journal = readJournal(ctx.iid) ?? ctx.journal;
-  const carried = readArtifact<CloseArtifact>(ctx.iid, 'close.json');
-  const memorize = artifactOf(ctx, 'memorize');
-  const document = artifactOf(ctx, 'document');
 
-  const rec: CloseArtifact = {
-    ticketNoteId: journal.closeNoteId ?? carried?.ticketNoteId ?? null,
-    ticketNotePosted:
-      typeof journal.closeNoteId === 'number' || carried?.ticketNotePosted === true,
-    slackThreadPosted: carried?.slackThreadPosted === true,
-    portReleased: false,
-    memoryCardWritten: sField(memorize, 'card') !== null,
-    mrNoteAdded: carried?.mrNoteAdded === true,
-    failures: [],
-    summary: '',
+  const step = async (what: string, fn: () => Promise<void>): Promise<void> => {
+    try {
+      await fn();
+    } catch (err) {
+      const why = (err as Error).message;
+      rec.recordFailures.push(`${what}: ${why}`);
+      log.warn(`merge: ${what} failed`, { error: why.slice(0, 160) });
+    }
   };
 
-  await step(rec, 'final ticket note', async () => {
-    if (rec.ticketNotePosted) return;
+  await step('ticket note', async () => {
+    if (rec.successNotePosted) return;
     // The journal flag is checked first because this scan is bounded to the
     // most recent 100 comments — on a long-lived ticket the marker can fall off
     // the end, and a second copy of this note would be the result.
-    const marker = `<!-- oneshot:close:${ctx.runId} -->`;
+    const marker = successMarker(ctx.runId);
     const notes = await issueNotes(ctx.iid);
     if (notes.ok && notes.data?.some((n) => n.body.includes(marker))) {
-      rec.ticketNotePosted = true;
+      rec.successNotePosted = true;
       return;
     }
-    const res = await addIssueNote(ctx.iid, renderCloseNote(ctx, journal));
+    const res = await addIssueNote(ctx.iid, renderSuccessNote(ctx, journal, rec));
     if (!res.ok) throw new Error(res.error ?? res.kind);
-    rec.ticketNoteId = res.data?.id ?? DRY_RUN_NOTE_ID;
-    rec.ticketNotePosted = true;
-    updateJournal(ctx.iid, { closeNoteId: rec.ticketNoteId });
+    rec.successNoteId = res.data?.id ?? DRY_RUN_NOTE_ID;
+    rec.successNotePosted = true;
   });
 
-  await step(rec, 'slack thread', async () => {
-    if (rec.slackThreadPosted) return;
-    const qa = artifactOf(ctx, 'qa');
-    await thread(journal.slackTs ?? null,
-      `*#${ctx.iid} complete* — ${sField(artifactOf(ctx, 'merge'), 'summary') ?? 'merged'}\n` +
-      `QA: ${qaLine(qa)}\n` +
-      `Demo: ${deployConfig().demoUrl}\n` +
-      `Artifacts: ${artifactsDirFor(ctx.iid)} (${artifactCount(ctx.iid)} files)`);
-    rec.slackThreadPosted = true;
+  await step('merge request note', async () => {
+    if (rec.mrNotePosted || typeof rec.mrIid !== 'number') return;
+    const verify = artifactOf(ctx, 'verify');
+    const review = artifactOf(ctx, 'review', 'findings.json');
+    const res = await addMergeRequestNote(rec.mrIid,
+      `Oneshot run \`${ctx.runId}\` — merged into \`${rec.targetBranch ?? '?'}\` ` +
+      `as \`${short(journal.mergedSha ?? rec.mergedSha)}\`.\n\n` +
+      `**Verify** ${verifyLine(verify)}\n` +
+      `**Review** ${review ? sField(review, 'verdict') ?? 'unknown' : ABSENT}\n` +
+      `**Ticket** ${journal.url}\n\n` +
+      `This is the end of the pipeline — the change is merged, not deployed.\n` +
+      successMarker(ctx.runId));
+    rec.mrNotePosted = res.ok;
   });
 
-  await step(rec, 'port release', async () => {
-    // Unconditional, and not redundant with finish(): finish() reaps the port
-    // only through reapWorktree, which it skips when the worktree directory is
-    // already gone. That leaks one port per incident out of a pool of three,
-    // and a drained pool kills every future run at its first worktree phase.
-    releasePort(ctx.runId);
-    rec.portReleased = true;
-  });
-
-  await step(rec, 'ledger backfill', async () => {
-    if (typeof journal.mrIid === 'number') updateRun(ctx.runId, { mr_iid: journal.mrIid });
+  await step('ledger', async () => {
+    if (typeof rec.mrIid === 'number') updateRun(ctx.runId, { mr_iid: rec.mrIid });
     // Appended, not deduped: a resume writing a second completion row is honest
     // history in a ledger, and hiding it would be the actual lie.
     logEvent('run_complete', {
-      mrIid: journal.mrIid ?? null,
-      mergedSha: journal.mergedSha ?? null,
-      deployedSha: journal.deployedSha ?? null,
-      qaVerdict: sField(artifactOf(ctx, 'qa'), 'verdict'),
-      memoryCardWritten: rec.memoryCardWritten,
+      mrIid: rec.mrIid ?? null,
+      mergedSha: journal.mergedSha ?? rec.mergedSha ?? null,
     }, { runId: ctx.runId });
   });
-
-  await step(rec, 'merge request note', async () => {
-    // The document phase owns the MR note. This fills in only when it warned.
-    if (document || rec.mrNoteAdded || typeof journal.mrIid !== 'number') return;
-    const res = await addMergeRequestNote(journal.mrIid,
-      `Oneshot run \`${ctx.runId}\` — QA ${qaLine(artifactOf(ctx, 'qa'))}\n\n` +
-      `Demo: ${deployConfig().demoUrl}\nTicket: ${journal.url}`);
-    rec.mrNoteAdded = res.ok;
-  });
-
-  rec.summary = `Run complete: ${sField(artifactOf(ctx, 'merge'), 'summary') ?? 'merge not recorded'}` +
-    `${rec.memoryCardWritten ? '' : ' No memory card was written.'}` +
-    `${rec.failures.length ? ` ${rec.failures.length} close step(s) failed.` : ''}`;
-
-  writeArtifact(ctx.iid, 'close.json', rec);
-  ctx.prior.close = rec;
-  log.ok(`close: ${rec.summary}`);
-  return { ok: true };
 }

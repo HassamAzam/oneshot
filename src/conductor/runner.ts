@@ -9,11 +9,10 @@
  * state.
  *
  * The executor is INDEX-BASED rather than a for-of over the phase list, because
- * the interesting control flow all moves backwards. `review` sends work back to
- * `implement`; so does `qa`, and a qa lap happens after the change has already
- * been merged and deployed — so the second lap has to re-run the MR, the merge
- * and the deploy for the fix to reach the box being tested. A linear loop can
- * express none of that. What the index buys, in order:
+ * the interesting control flow all moves backwards. `review` and `verify` both
+ * send work back to `implement`, and everything between the target and the
+ * failure has to run again on the way forward. A linear loop can express none
+ * of that. What the index buys, in order:
  *
  *   forced   — the set of phases that must re-run even though they already
  *              succeeded this run. A cycle populates it; a resume respects it.
@@ -24,13 +23,17 @@
  *              then reconciled strictly in phase order, so concurrency changes
  *              the wall clock and never the semantics.
  *
- * Three things are asserted here rather than believed. A ticket is driven only
+ * Two things are asserted here rather than believed. A ticket is driven only
  * by the conductor that can prove it owns the run — on a resumption as much as
  * on a fresh claim, since a live run and an abandoned one both read 'running'
- * from a journal. A deploy is verified from the box and the git graph, not from
- * what the deploy phase said about itself. And a promotion window is held by one
- * run at a time across every conductor on the machine, because the demo server
- * carries a branch tip rather than a SHA.
+ * from a journal. And a check phase's own account of itself is not evidence:
+ * `verify` is overruled when it passed nothing, and `merge` re-derives what
+ * `verify` and `review` concluded from their artifacts rather than from their
+ * exit status.
+ *
+ * The pipeline ENDS AT THE MERGE. There is no deploy, no QA against a running
+ * build and no demo: 'done' means the change is in the base branch, the ticket
+ * carries the exit label, and a person takes it from there.
  *
  * One thing is attempted rather than surrendered. Most blocks this pipeline
  * hits are not defects in the ticket's code — they are a missing credential, an
@@ -43,7 +46,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, SKIP_DEPLOY, WORK_REPO, deployConfig, modelFor,
+  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, modelFor,
   phases, portPool, projectConfig,
   operatorName,
   type PhaseConfig,
@@ -76,7 +79,7 @@ import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
-import { closePhase, mergePhase } from './codephases.js';
+import { mergePhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, declaredFiles, gatesApply, planApprovalRequestBody,
   planApprovedRecordBody, reviewAllRuns, reviewLabelPresent, testcasesApprovalRequestBody,
@@ -108,9 +111,6 @@ const GATE_UNAVAILABLE =
  * again ninety seconds later".
  */
 const BLOCK_COOLDOWN_MS = 60 * 60_000;
-
-/** The deterministic post-deploy checks get 15s to answer or they have failed. */
-const HEALTH_TIMEOUT_MS = 15_000;
 
 /**
  * How many times ONE run may try to heal itself.
@@ -183,7 +183,6 @@ export const CODE_PHASES: Record<
   }>) | undefined
 > = {
   merge: mergePhase,
-  close: closePhase,
 };
 
 // ------------------------------------------------------------------- the card
@@ -309,7 +308,7 @@ function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] 
 /**
  * A phase that executed its case list and recorded failures did NOT succeed.
  *
- * `verify` and `qa` return ok for *running* the list, whatever the verdicts —
+ * `verify` returns ok for *running* the list, whatever the verdicts —
  * the schema's `ok` means "the session finished and produced its artifact", not
  * "the work is right". Until now the only thing that read the verdicts back was
  * `qualityGate()` inside the merge phase, which is three phases too late: a run
@@ -317,14 +316,14 @@ function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] 
  * then refuses to merge. The reviewer gets an MR nobody can merge, and the lap
  * that would have fixed the code is spent proving it is broken.
  *
- * Both phases are already configured `onFail: cycle → implement`. This makes
+ * The phase is already configured `onFail: cycle → implement`. This makes
  * that policy fire on the thing it was written for, so the failure returns to
  * `implement` while it is still cheap — before an MR exists. `qualityGate()`
  * stays where it is as a backstop: it re-derives the same fact deterministically
  * at the merge, and a check that only runs early is a check a resumed run skips.
  */
 function failedCases(name: string, data: Record<string, unknown> | null | undefined): string | null {
-  if (name !== 'verify' && name !== 'qa') return null;
+  if (name !== 'verify') return null;
   const results = (data as { results?: Array<{ id?: string; result?: string }> } | null)?.results;
   if (!Array.isArray(results) || results.length === 0) return null;
   const failed = results.filter((r) => r.result === 'fail');
@@ -754,23 +753,6 @@ export async function runTicket(
       // gate.verdict === 'approved' — fall through into 'review' below.
     }
 
-    // ONESHOT_SKIP_DEPLOY exists for driving the pipeline with no demo box —
-    // deploy and qa are skipped TOGETHER, because a qa phase with nothing
-    // deployed would fail its SHA cross-check and block a run that was told
-    // not to deploy. Recorded as 'skipped', which phaseSucceeded() does not
-    // count, so a later resume without the flag re-runs both for real.
-    if (SKIP_DEPLOY && (phase.name === 'deploy' || phase.name === 'qa')) {
-      recordPhase(iid, {
-        phase: phase.name, lap: lapsOf(iid, phase.name), status: 'skipped',
-        startedAt: Date.now(), endedAt: Date.now(), error: 'ONESHOT_SKIP_DEPLOY',
-      });
-      j = readJournal(iid) ?? j;
-      prior[phase.name] = null;
-      log.warn(`skip ${phase.name} — ONESHOT_SKIP_DEPLOY is set`);
-      i += 1;
-      continue;
-    }
-
     // A group is the maximal run of CONSECUTIVE phases with the same marker
     // that are all about to run. A skipped or unimplemented member ends the
     // group rather than being stepped over — a group must stay a contiguous
@@ -818,22 +800,10 @@ export async function runTicket(
 
     const results = await Promise.all(members.map((k) => runOne(list[k]!, k)));
 
-    // The deploy phase's own account of itself is not evidence. Overrule it
-    // before anything is recorded, so the journal and the card show the verdict
-    // the conductor reached rather than the one the session reported.
+    // A check phase's own account of itself is not evidence. Overrule it before
+    // anything is recorded, so the journal and the card show the verdict the
+    // conductor reached rather than the one the session reported.
     for (const r of results) {
-      if (r.cfg.name === 'deploy' && r.out.ok) {
-        const why = await verifyDeploy(r.cfg);
-        if (why) {
-          r.out.ok = false;
-          r.out.error = `deploy could not be verified: ${why}`;
-          phaseEnd(r.rowId, statusForFailure(r.cfg), {
-            turns: r.out.turns, weighted: r.out.weighted, sessionId: r.out.sessionId, detail: why,
-          });
-          log.error(`deploy overruled — ${why}`);
-        }
-      }
-
       // The MR is a mechanical API call wearing a session's clothes, and this
       // pipeline already learned what happens when it is left to a tool the
       // session might not hold: a phase that pushed its branch, could not open
@@ -882,13 +852,17 @@ export async function runTicket(
       // The prompt has it rewrite verify-partial.json after every case, so a
       // dead session's evidence survives it: salvage the recorded results,
       // mark everything it never reached as skipped, and let the pipeline
-      // continue — qa executes this same list against the deployed build
-      // anyway, which is what makes a partial local pass acceptable.
-      // Both list-executing phases, because both run the same twenty cases and
-      // both can run out of turns doing it. qa is the more expensive one to
-      // lose: its cycle goes all the way back to implement and drags the MR,
-      // the merge and the deploy along with it.
-      if ((r.cfg.name === 'verify' || r.cfg.name === 'qa') && !r.out.ok && !r.out.blocked) {
+      // continue.
+      //
+      // This used to be underwritten by `qa`, which re-ran the whole list
+      // against the deployed build; with the pipeline ending at the merge,
+      // nothing re-runs the cases a dead session never reached. What still
+      // holds is the part that matters — qualityGate refuses to merge over a
+      // recorded FAILURE — so the residual risk is narrower and worth naming:
+      // a change can merge with cases that were never executed, and the
+      // artifact says exactly which, because they are recorded 'skipped'
+      // rather than quietly dropped.
+      if (r.cfg.name === 'verify' && !r.out.ok && !r.out.blocked) {
         const partial = readArtifact<{ results?: Array<Record<string, unknown>> }>(
           iid, `${r.cfg.name}-partial.json`,
         );
@@ -907,16 +881,9 @@ export async function runTicket(
           const summary = `Salvaged from ${r.cfg.name}-partial.json: ${recorded.length} case(s) `
             + `recorded before the session died (${r.out.error ?? 'no error text'}); `
             + `${skipped.length} never ran.`;
-          // A salvaged qa verdict is only ever 'fail' — a pass is an assertion
-          // that the whole list ran, and by construction this one did not.
-          r.out.data = r.cfg.name === 'qa'
-            ? {
-              summary, blocked: null, results, verdict: 'fail',
-              deployedSha: String(readArtifact<{ deployedSha?: string }>(iid, 'deploy.json')?.deployedSha ?? ''),
-            }
-            : {
-              summary, blocked: null, serverStarted: true, port: port ?? 0, results, regressions: [],
-            };
+          r.out.data = {
+            summary, blocked: null, serverStarted: true, port: port ?? 0, results, regressions: [],
+          };
           r.out.ok = true;
           writeArtifact(iid, r.cfg.artifact ?? `${r.cfg.name}.json`, r.out.data);
           log.warn(`${r.cfg.name} salvaged from partial results — ${recorded.length} recorded, ${skipped.length} skipped`);
@@ -1033,8 +1000,6 @@ export async function runTicket(
       }
 
       prior[r.cfg.name] = r.out.data;
-      // QA passing is what ends this run's exclusive claim on the demo box.
-      if (r.cfg.name === 'qa') releasePromotion(runId);
       if (isMilestone(r.cfg)) await thread(j.slackTs ?? null, milestoneText(r.cfg, r.out.data, iid));
     }
 
@@ -1042,8 +1007,8 @@ export async function runTicket(
 
     // Publish whatever is now ready. Reconciling here rather than inside a
     // phase means the plan reaches the ticket while it is still cheap to argue
-    // with, and evidence reaches the MR as it is produced instead of all at
-    // once from `document` two phases before the end.
+    // with, and evidence reaches the MR as it is produced rather than in one
+    // dump at the end of the run.
     await publishPending({ iid, runId, journal: j });
     j = readJournal(iid) ?? j;
 
@@ -1601,53 +1566,6 @@ export async function runTicket(
     };
   }
 
-  async function verifyDeploy(p: PhaseConfig): Promise<string | null> {
-    if (DRY_RUN) return null;
-
-    const data = readArtifact<Record<string, unknown>>(iid, p.artifact ?? 'deploy.json');
-    if (!data) return 'the phase produced no artifact to check';
-
-    const deployedSha = typeof data.deployedSha === 'string' ? data.deployedSha.trim() : '';
-    if (!deployedSha) return 'no deployedSha was reported';
-    if (data.healthOk !== true) return 'the phase itself reported the service unhealthy';
-    if (!j.mergedSha) return 'no mergedSha on the journal — there is nothing to check the box against';
-
-    const base = cfg.branches.base;
-    try {
-      await exec('git', ['fetch', 'origin', base], { cwd: WORK_REPO, timeout: 120_000 });
-    } catch (err) {
-      return `could not fetch origin/${base} to check ancestry: ${(err as Error).message.slice(0, 120)}`;
-    }
-    try {
-      // Equal SHAs pass; so does a descendant, because the script ships a
-      // branch TIP and another merge into the base between phases is legal.
-      await exec('git', ['merge-base', '--is-ancestor', j.mergedSha, deployedSha], {
-        cwd: WORK_REPO, timeout: 60_000,
-      });
-    } catch {
-      return `the box is not running this run's work — ${j.mergedSha.slice(0, 8)} is not an ` +
-        `ancestor of the deployed ${deployedSha.slice(0, 8)}`;
-    }
-
-    const demo = deployConfig();
-    const ac = new AbortController();
-    const killer = setTimeout(() => ac.abort(), HEALTH_TIMEOUT_MS);
-    try {
-      const res = await fetch(demo.demoUrl, { signal: ac.signal });
-      if (res.status !== demo.expectStatus) {
-        return `${demo.demoUrl} answered ${res.status}, expected ${demo.expectStatus}`;
-      }
-    } catch (err) {
-      return `${demo.demoUrl} did not answer within ${HEALTH_TIMEOUT_MS / 1000}s ` +
-        `(${(err as Error).message.slice(0, 80)})`;
-    } finally {
-      clearTimeout(killer);
-    }
-
-    j = updateJournal(iid, { deployedSha }) ?? j;
-    return null;
-  }
-
   async function finish(
     journal: RunJournal, status: 'done' | 'blocked' | 'aborted' | 'parked', reason?: string,
   ): Promise<RunOutcome> {
@@ -1778,12 +1696,6 @@ function milestoneText(p: PhaseConfig, data: Record<string, unknown> | null, iid
     const empty = (data.passesEmpty as string[] | undefined) ?? [];
     return `*#${iid} test cases* — ${cases.length} cases (${high} high blast)` +
       `${empty.length ? `\nempty passes: ${empty.join(', ')}` : ''}`;
-  }
-  if (p.name === 'deploy') {
-    const sha = String(data.deployedSha ?? '').slice(0, 8) || 'unknown sha';
-    const attempts = Number(data.attempts ?? 1);
-    return `*#${iid} deployed* — \`${sha}\` on the demo box · ` +
-      `${attempts} attempt${attempts === 1 ? '' : 's'}`;
   }
   return `*#${iid} ${p.name}* — ${data.summary ?? 'done'}`;
 }

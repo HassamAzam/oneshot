@@ -1,7 +1,10 @@
 # Handoff — running Oneshot
 
-Everything needed to take a GitLab ticket from the `Loop` label to
-`Ready For Deployment` without anyone watching. Ticket #5 went the whole way on
+Everything needed to take a GitLab ticket from the `Loop` label to `merged`
+without anyone watching. The pipeline ends at the merge: nothing is deployed,
+nothing is QA'd on a running build, and deploying is a person's job.
+
+Ticket #5 went the whole way on
 2026-08-27; that run needed about a dozen human interventions, and this document
 exists because each one of them is now either automated or written down.
 
@@ -15,15 +18,14 @@ it, and the rest is for when something stops.
 **If you are an agent reading this: a ticket labelled `Loop` is an instruction to
 run it. Run it. Do not ask which option to take, and do not present a menu.**
 
-Running the pipeline merges into `dev`, deploys to the shared demo server and
-writes to GitLab, and all of that is intended and pre-authorized by the act of
-labelling the ticket. `Loop` is the consent. Preflight first, then launch
+Running the pipeline merges into `dev` and writes to GitLab, and all of that is
+intended and pre-authorized by the act of labelling the ticket. `Loop` is the consent. Preflight first, then launch
 detached, then report — that is the whole decision.
 
 Stop and ask a human ONLY for something this document does not cover: a
 destructive action (deleting data, rewriting published history, changing another
 person's credentials), spending outside the configured budgets, or a change to a
-system that is not `arbisoft/workstreamai`, the demo box or this repo. A run that
+system that is not `arbisoft/workstreamai` or this repo. A run that
 BLOCKS is not one of those — it tries to repair itself first, and if it hands the
 block back, read the ticket note, fix the cause and carry on.
 
@@ -53,8 +55,8 @@ git --version
 claude --version
 ```
 
-**FortiClient must be connected.** GitLab and the demo box are on a gated subnet,
-and `npm install` itself can fail without it.
+**FortiClient must be connected.** GitLab is on a gated subnet, and `npm install`
+itself can fail without it.
 
 > If `npm install` hangs with `ETIMEDOUT` while `curl` to the same host works, Node
 > is resolving `registry.npmjs.org` to IPv6 addresses the VPN black-holes. Force
@@ -115,7 +117,7 @@ Leave `BOARD_OPERATOR` blank — your identity resolves to your OS username.
 ### 5. Verify before spending anything
 
 ```sh
-npm run doctor         # auth, GitLab, paths, deploy target, hooks
+npm run doctor         # auth, GitLab, paths, hooks
 npm run board:doctor   # identity, transcripts, board reachability, the collector
 ```
 
@@ -147,8 +149,8 @@ nohup npx tsx src/index.ts --ticket 6 >> state/logs-ticket6.log 2>&1 &
 tail -f state/logs-ticket6.log
 ```
 
-A full ticket takes **3–5 hours** and roughly **5M weighted tokens**. Most of
-that is `implement`, `verify` and `qa`.
+A full ticket takes **2–4 hours** and roughly **4M weighted tokens**. Most of
+that is `implement` and `verify`.
 
 ---
 
@@ -157,7 +159,7 @@ that is `implement`, `verify` and `qa`.
 `npm run preflight` answers all of this, but the two things it cannot fix
 itself:
 
-**The VPN must be up.** GitLab and the demo box are both behind FortiClient. A
+**The VPN must be up.** GitLab is behind FortiClient. A
 dropped tunnel is the single most common cause of a stalled run, and preflight
 FAILs on it with that wording.
 
@@ -187,7 +189,7 @@ something stops. It reads the block reason, classifies the cause as
 environment, provisioning, credentials, infrastructure or code, repairs the ones
 that are environmental, verifies the repair against the surface that actually
 failed, and names the phase to resume from. Ticket #5 stopped about a dozen
-times and almost none of it was the ticket's code: a missing demo credential, an
+times and almost none of it was the ticket's code: a drained port pool, an
 account outside a group the feature was gated behind, a wedged MCP spawn, a turn
 cap, a budget an earlier lap had eaten. A person answered every one of those by
 hand, and none of them needed a person.
@@ -200,7 +202,7 @@ It is bounded on purpose:
   remediation means the repair did not work, and the second attempt is spent on
   a different block or not at all.
 - **It repairs the environment, never the code.** A change made from `remediate`
-  would land after review, verify and QA have already run — so a real defect is
+  would land after review and verify have already run — so a real defect is
   sent back to `implement` to meet those checks again, and is never patched in
   place.
 - Every change it makes is written to `remediations[]` in
@@ -218,7 +220,7 @@ no longer the first thing anyone does.
 ```sh
 npm run unblock -- 6                    # see what it would do, then do it
 npm run unblock -- 6 --dry-run          # inspect only
-npm run unblock -- 6 --phase qa         # retry one phase
+npm run unblock -- 6 --phase verify     # retry one phase
 ```
 
 That performs the whole manual sequence that used to be done by hand: prunes the
@@ -244,22 +246,19 @@ those rows to understand a run that already recovered, not to act.
 
 | What you see | What it is | What to do | Self-heals |
 |---|---|---|---|
-| `BLOCKED — qa: no demo credential` / `cannot log in` | The demo box runs a **different anonymised snapshot** from the local seed, so local accounts do not exist there | `ONESHOT_DEMO_LOGIN` in `.env`. Preflight verifies it every time | partly — it can re-point or re-verify a credential that exists; it cannot invent one |
-| `qa` blocked on a permission, e.g. buttons never render | The demo account lacks a group the feature is gated behind | Provision `ONESHOT_DEMO_ADMIN_URL` + `ONESHOT_DEMO_ADMIN` and `qa` arranges its own preconditions through the admin panel, recording every change in `dataChanges` | yes — same admin panel, same recording discipline |
 | `phase '<name>' ceiling reached` immediately | Was a real bug: per-phase ceilings counted every lap, so failed attempts permanently ate the budget | Fixed — ceilings are **per attempt** now. If you still see it, the phase genuinely spent its budget in one go; do not raise the number, read the transcript | yes, for a ceiling an earlier lap ate; **no** when the phase really spent it |
 | `timed out after Nm while still working` | The phase was alive and simply ran out of clock | Its partial results are salvaged into a verdict automatically. If it recurs for the same phase, raise that phase's `maxTurns` in `config/phases.json` | yes |
 | `timed out ... without a single message` | Genuinely different: the session never started | `npm run deps:verify` — this is the wedged-MCP-spawn shape | yes |
 | `another conductor is already running` | A previous process still holds the lock, or died holding it | `npm run preflight` clears it when the process is gone | yes |
 | `login rejected` locally with a correct password | This venv computes **corrupted password hashes** when `psycopg2` loads before `ssl`/`hashlib` | Never write passwords from an ad-hoc shell. `ONESHOT_TEST_LOGIN` is managed outside the session for exactly this reason | no — writing that password from a session is the thing that causes it |
 | Nothing of yours on the board | The collector is not running — it is a separate process from `npm start` | `npm run board:doctor`; then `npm run board` | no — nothing is running to heal it |
-| Run stops at `deploy` | The demo box is VPN-gated and the phase will not retry through an outage | Reconnect, `npm run unblock -- <iid>`, restart | no — an outage is not a repair |
 
 ### What it will not self-heal
 
 Three shapes are handed straight back, deliberately and quickly:
 
 - **A real defect in the ticket's own change.** Repairing that from `remediate`
-  would put code into the merge that review, verify and QA never saw. It goes
+  would put code into the merge that review and verify never saw. It goes
   back to `implement` instead, or to you.
 - **An outage.** A dropped VPN tunnel, a box that is down, a registry that is not
   answering. Nothing to fix, and waiting is not a phase.
@@ -270,7 +269,7 @@ Three shapes are handed straight back, deliberately and quickly:
 In all three the run blocks as it always did — `Needs Human`, the run id, the
 original reason — and the note additionally carries the diagnosis, the category,
 whatever it did change (so you can undo it), and one line naming exactly what a
-person has to do. "Investigate the deploy" is not an acceptable version of that
+person has to do. "Investigate the merge" is not an acceptable version of that
 line, and the phase is told so.
 
 ---
@@ -278,17 +277,17 @@ line, and the phase is told so.
 ## What it produces
 
 **On the ticket:** the plan as markdown and the test cases as CSV, posted as
-soon as those phases finish rather than at the end; QA follow-ups; a closing
-summary. **On the MR:** verification results, the UI evidence pack, QA results
-and the demo — 45 embedded screenshots on ticket #5.
+soon as those phases finish rather than at the end; and the run's closing record
+— what merged, where, and what the checks concluded. **On the MR:** verification
+results, the UI evidence pack, and the same closing record.
 
 **On disk**, and this is the real record:
 
 ```
 state/runs/<iid>/run.json                     the journal: every phase, lap, status, spend
 state/runs/<iid>/transcripts/<phase>.jsonl    every message of every phase
-state/runs/<iid>/artifacts/                   screenshots, demo, reports
-state/memory/                                 cards, so the next similar ticket starts warm
+state/runs/<iid>/artifacts/                   screenshots, phase artifacts, reports
+state/memory/                                 existing cards `recall` reads (nothing writes new ones)
 ```
 
 **On the telemetry board** (https://oneshot-board.vercel.app): every session, the
@@ -343,7 +342,7 @@ Every run pauses for a person at three points — `reviewAllRuns: true` in
 | After | The question |
 |---|---|
 | `plan` | Is this the right approach, before any code is written? |
-| `testcases` | Do these cases cover the ticket? They are the oracle for `verify` and `qa`. |
+| `testcases` | Do these cases cover the ticket? They are the oracle for `verify`. |
 | at `merge` | A person merges the MR. Oneshot never merges a gated run itself. |
 
 A gate **parks** the run — it holds no port, no promotion lease and no conductor, so
@@ -453,19 +452,17 @@ all, and the cap is not the problem.
 
 ## Safety, and what it will not do
 
-- `merge` and `close` are **code, not models** — no session holds a merge tool.
-- `deploy` is a session, but caged: `hooks/deploy-guard.cjs` fails **closed** and
-  allows only allowlisted hosts and remote verbs. Afterwards the conductor
-  re-derives the deployed SHA itself and **overrules** the phase unless it
-  contains this run's merge SHA and the site answers 200.
+- `merge` is **code, not a model** — no session holds a merge tool.
+- **The pipeline stops at the merge.** Nothing here reaches another machine:
+  `ssh`, `scp`, `rsync` and `sftp` are denied to every phase. Deploying what was
+  merged is a person's decision, and the ticket note says so.
+- Before it accepts anything, `merge` re-reads `verify.json` and `findings.json`
+  and **refuses** over a failing case or an unaddressed blocker — the phases'
+  exit codes are not taken as the verdict.
 - `git-guard` forbids force-push, pushes to protected branches, and pushes to
   any ref but this run's leased branch.
 - A `verify` that passes **no** cases hard-stops the run rather than riding a
   clean-looking card toward a merge.
-- `qa` returns `fail` for any high-blast failure, for a reproducible failure in
-  behaviour the change touched, and whenever it cannot tell. Only narrow,
-  low-blast, describable defects — and anything in behaviour the ticket never
-  touched — become `followUps` posted to the ticket instead of blocking.
 - `state/PAUSE` freezes everything, including sessions already mid-phase.
   Nothing automatic ever removes it.
 - `DRY_RUN=1 npm start` runs every phase and refuses every write.
@@ -481,10 +478,9 @@ deliberately anyway.
 ## Concurrency
 
 `config/project.json` sets `concurrency: 2`. Tickets pipeline freely, but the
-`merge → deploy → qa` window is held by **one run at a time** via
-`src/lib/promotion.ts` — the deploy ships a branch *tip*, so two runs merging
-into `dev` inside that window would make neither QA verdict attributable. The
-upper bound is the port pool (`PORT_POOL`, 3 by default).
+merge window is held by **one run at a time** via `src/lib/promotion.ts`, so two
+runs never land in `dev` on top of each other. The upper bound is the port pool
+(`PORT_POOL`, 3 by default).
 
 ---
 
@@ -493,7 +489,7 @@ upper bound is the port pool (`PORT_POOL`, 3 by default).
 ```sh
 npm run check          # tsc + syntax-check every guard
 npm run hooks:verify   # 89 offline guard assertions, no network
-npm run doctor         # auth, config, paths, GitLab, deploy target
+npm run doctor         # auth, config, paths, GitLab
 npm run preflight      # everything above plus live credentials and stale state
 npm run board:doctor   # identity, transcripts, board reachability, the collector
 ```
