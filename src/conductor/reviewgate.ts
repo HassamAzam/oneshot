@@ -14,12 +14,19 @@
  * become a follow-up ticket. A gate that cannot change the thing it guards is
  * decoration.
  *
- * GITLAB IS THE APPROVAL CHANNEL, and Slack is only told about it. A gate
+ * GITLAB IS THE APPROVAL CHANNEL, and Slack is where the ask is HEARD. A gate
  * posts its request as a ticket comment (`addIssueNote`) and polls that
- * ticket's comments for a reply from a named reviewer. If Slack is configured
- * the gate also drops a heads-up in the run's thread, but that post is
- * best-effort decoration: nothing is ever read back out of Slack, and a Slack
- * that is down, unconfigured or missing `channels:history` cannot stop a run.
+ * ticket's comments for a reply from a named reviewer. It also posts the ask
+ * into the run's Slack thread AND broadcasts it to the channel, @mentioning
+ * the group that owns the gate — because a ticket comment notifies only
+ * whoever already subscribed to the ticket, which is how a run ends up parked
+ * for a day on a reviewer who never knew they were being waited on.
+ *
+ * That split is deliberate and is not a second approval channel. Slack is
+ * write-only here: nothing is ever read back out of it, so a Slack that is
+ * down, unconfigured, or missing `users:read.email` costs a notification and
+ * never a verdict. The run parks either way and resolves the moment the
+ * ticket answers.
  *
  * That reverses the previous version, which asked and read in Slack. The
  * reason is authorisation, not preference: approval is now restricted to two
@@ -62,8 +69,8 @@ import {
   readArtifact, readJournal, updateJournal, writeArtifact,
   type ReviewGateState, type RunJournal,
 } from '../lib/artifacts.js';
-import { addIssueNote, issueNotes } from '../lib/gitlab.js';
-import { slackEnabled, thread } from '../lib/slack.js';
+import { addIssueNote, issueNotes, issueUrl } from '../lib/gitlab.js';
+import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/slack.js';
 import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
 import type { TestCase } from '../phases/types.js';
@@ -253,6 +260,14 @@ export interface CheckGateOpts {
    * record of what was approved is built from that same artifact.
    */
   onFeedback?: (feedback: string) => Promise<void>;
+  /**
+   * Why the gates armed, for the Slack ask only — the ticket comment already
+   * carries `triggerLine(trigger)` inside `requestBody`. Passed as the struct
+   * rather than the rendered line because the two renderings differ: that one
+   * is GitLab Markdown and a full sentence, this one is Slack mrkdwn and a
+   * clause.
+   */
+  trigger?: GateTrigger;
 }
 
 /**
@@ -299,8 +314,16 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
     }
     state = { ...state, requestNoteId: posted.data.id };
     persist(iid, gate, state);
-    await notifySlack(journal, `*#${iid}* — Oneshot is waiting on \`${gate}\` approval on the ticket.`);
-    log.phase(`${gate} approval requested on #${iid}`, { note: posted.data.id });
+    // Broadcast: the dev or QA who has to act on this is not the person
+    // watching this run's thread, and a thread reply is invisible to them.
+    // Once per round, on the transition into 'armed' — every following tick
+    // takes the read path below and posts nothing, which is what keeps a
+    // gate that sits pending for a day from being a ping every minute.
+    const mentions = await mentionsFor(gate);
+    await notifySlack(journal, gateAskText(journal, gate, posted.data.id, mentions, opts.trigger), true);
+    log.phase(`${gate} approval requested on #${iid}`, {
+      note: posted.data.id, mentioned: mentions ? mentions.split(' ').length : 0,
+    });
     return { verdict: 'pending' };
   }
 
@@ -358,7 +381,9 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
     };
     persist(iid, gate, state);
     if (onApproved) await onApproved();
-    await notifySlack(journal, `*#${iid} — ${gate} approved by ${approver}.*`);
+    await notifySlack(
+      journal, gateApprovedText(journal, gate, await mentionOrName(approver)), true,
+    );
     log.ok(`${gate} approved on #${iid}`, { by: approver });
     return { verdict: 'approved', feedback: feedback || undefined };
   }
@@ -386,12 +411,152 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
  * verdict was already decided on the ticket before this is called. That is the
  * entire reason the channel moved — a notification that cannot block is worth
  * having, and the previous version's read-side dependency was not.
+ *
+ * `broadcast` puts the message in the CHANNEL as well as the thread. Both of
+ * a gate's two moments take it: the ask, because the people who must act are
+ * by definition not the person watching this run's thread; and the
+ * resolution, because a broadcast ask that is never visibly closed leaves the
+ * channel showing a standing request long after it was answered. Nothing else
+ * this file posts broadcasts.
  */
-async function notifySlack(journal: RunJournal, text: string): Promise<void> {
+async function notifySlack(
+  journal: RunJournal, text: string, broadcast = false,
+): Promise<void> {
   if (!slackEnabled()) return;
   const ts = journal.slackTs ?? null;
   if (ts === null) return;
-  try { await thread(ts, text); } catch { /* a missed heads-up is not a gate failure */ }
+  try { await thread(ts, text, { broadcast }); } catch { /* a missed heads-up is not a gate failure */ }
+}
+
+/**
+ * `<@U…>` for every reviewer who owns this gate, space-separated.
+ *
+ * Slack renders an @mention from a member id and from nothing else, so a
+ * GitLab username in the text would be inert — and inertly so, which is the
+ * failure worth designing against here: an approval request that LOOKS
+ * addressed but notifies nobody is why a run sits parked for a day. The
+ * usernames are completed to work addresses (`reviewersConfig().emailDomain`)
+ * and resolved through Slack.
+ *
+ * Two routes, tried in order, because they need different scopes:
+ *
+ * 1. The SLACK HANDLE, which at Arbisoft is character-identical to the GitLab
+ *    username — `arsal.tariq` is `@arsal.tariq` in both. Exact, and needs only
+ *    `users:read`, which the bot token already carries. This is what actually
+ *    resolves today.
+ * 2. The work email (`emailDomain`), via `users.lookupByEmail`. Needs
+ *    `users:read.email`, a scope a human must grant in the Slack console.
+ *    Kept as a fallback for anyone whose handle does not match the convention;
+ *    it costs one call per unresolved name and none at all when route 1 hits.
+ *
+ * Returns an empty string when nothing resolves. The caller then posts an
+ * unaddressed request rather than none: the channel still learns the run is
+ * waiting, and `doctor` is where the unresolvable name gets reported, not a
+ * run that quietly stops notifying.
+ *
+ * Both routes cache per process, so a gate that asks again after a feedback
+ * round costs no further lookups.
+ */
+/**
+ * A reviewer's Slack member id, by the cheapest route that works.
+ *
+ * 1. PINNED (`slackIds` in config/reviewers.json) — no network at all, so the
+ *    one message that must carry a mention cannot lose it to a rate limit.
+ * 2. HANDLE — at Arbisoft the Slack handle equals the GitLab username, so a
+ *    reviewer added without a pinned id still gets mentioned.
+ * 3. EMAIL — only if `users:read.email` was ever granted; dormant otherwise.
+ */
+async function slackIdFor(username: string): Promise<string | null> {
+  const { emailDomain, slackIds } = reviewersConfig();
+  const pinned = slackIds[username];
+  if (pinned) return pinned;
+  return (await userIdForHandle(username))
+    ?? (emailDomain ? await userIdForEmail(`${username}@${emailDomain}`) : null);
+}
+
+async function mentionsFor(gate: Gate): Promise<string> {
+  const ids = await Promise.all(approversFor(gate).map(slackIdFor));
+  return ids.filter((id): id is string => Boolean(id)).map((id) => `<@${id}>`).join(' ');
+}
+
+/**
+ * One person, named in a way Slack will light up — the approver on the
+ * resolution message.
+ *
+ * Falls back to the bare username in a code span, which is what this used to
+ * render unconditionally. That fallback is the ONLY reason this is not just
+ * `slackIdFor`: an ask that cannot mention anyone still has to say who it is
+ * waiting on, and a record of a decision still has to say who made it.
+ */
+async function mentionOrName(username: string): Promise<string> {
+  const id = await slackIdFor(username);
+  return id ? `<@${id}>` : `\`${username}\``;
+}
+
+/**
+ * SLACK mrkdwn, not GitLab Markdown — the mirror of the warning on
+ * `renderPlanForTicket`, and just as easy to get backwards. `**bold**` shows
+ * its asterisks here, and a bare URL is written `<url|text>`.
+ *
+ * Deliberately short. The plan or the case list is already on the ticket in
+ * full, and this message's whole job is to get the right person to open it —
+ * duplicating the content into Slack would mean two renderings of the same
+ * thing that can disagree, and the one people would act on is the one that is
+ * not authoritative.
+ */
+/**
+ * A ticket title, made safe to use as the LABEL half of Slack's `<url|label>`
+ * link syntax.
+ *
+ * Slack reserves `&`, `<` and `>` in message text, and `|` additionally
+ * terminates the label inside a link — so a ticket called
+ * "Payroll | increments not applied" would render as a link reading
+ * "#42 Payroll" with the rest spilled out, and one containing `<` can break
+ * the link outright. Titles are written by whoever opened the issue, so this
+ * is data, not a constant, and the gate ask is the one message that puts a
+ * title inside a link label rather than beside one.
+ */
+function linkLabel(title: string): string {
+  return title
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\|/g, '\u2758');
+}
+
+export function gateAskText(
+  journal: RunJournal, gate: Gate, noteId: number, mentions: string, trigger?: GateTrigger,
+): string {
+  const role = GATE_ROLE[gate].toUpperCase();
+  const what = gate === 'plan' ? 'the plan' : 'the test-case list';
+  const next = gate === 'plan' ? '`implement`' : '`review`';
+  const link = `<${issueUrl(journal.iid)}#note_${noteId}|#${journal.iid} ${linkLabel(journal.title)}>`;
+  const why = trigger?.hits.length
+    ? ` — armed by guarded paths (${trigger.hits.join(', ')})`
+    : '';
+  const who = mentions || `_${role} reviewers (${approversFor(gate).join(', ') || 'nobody configured'})_`;
+
+  return `:pause_button: *${role} approval needed* on ${link}${why}\n` +
+    `${who} — ${what} is posted on the ticket. Comment *\`approved\`* there to release the run ` +
+    `into ${next}, or comment ${gate === 'plan' ? 'feedback to have the plan revised' : 'edge case(s) to add to the list'}.\n` +
+    '_Reply on the ticket, not here — this run reads its verdict from GitLab._';
+}
+
+/**
+ * The other half of the pair: the ask's resolution.
+ *
+ * Broadcast like the ask, and for the ask's sake rather than its own — the
+ * channel was shown a request to act, so it has to be shown that the request
+ * is closed, or it keeps displaying a standing ask that was answered hours
+ * ago. Named rather than inlined at the call site so both messages a gate can
+ * put in the channel render through one reviewable pair.
+ *
+ * `approver` arrives already rendered — `<@U…>` where the person resolved, a
+ * code-spanned username where they did not (`mentionOrName`). Same division
+ * as `gateAskText`'s `mentions`: this stays a pure string builder, and every
+ * Slack lookup happens before it is called.
+ */
+export function gateApprovedText(journal: RunJournal, gate: Gate, approver: string): string {
+  return `:white_check_mark: *${gate} approved* by ${approver} on `
+    + `<${issueUrl(journal.iid)}|#${journal.iid} ${linkLabel(journal.title)}> — the run continues.`;
 }
 
 // -------------------------------------------------------------- plan gate
@@ -415,6 +580,23 @@ function planRisks(plan: Record<string, unknown> | null): string[] {
 }
 
 /**
+ * Neutralise a model-authored free-text run so it renders as literal prose in a
+ * GitLab comment.
+ *
+ * Plan `approach`/`what`/`risks` routinely contain bare tags — `<title>`,
+ * `<head>`, `<h1>` — as part of the sentence. GitLab's CommonMark renderer
+ * treats a line holding such a tag as the start of an HTML block and stops
+ * converting Markdown from that point on; its sanitiser then drops the
+ * unsafelisted tag, so the reader gets a gap followed by exposed list markup
+ * for the rest of the comment. Escaping the three HTML-significant characters
+ * is enough to stop the block from ever opening, and `&lt;title&gt;` renders
+ * back as `<title>`. Emphasis and backtick spans in the text are left intact.
+ */
+function mdText(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
  * GitLab Markdown, not Slack mrkdwn.
  *
  * The two are close enough to look interchangeable and are not: Slack's
@@ -425,10 +607,11 @@ function planRisks(plan: Record<string, unknown> | null): string[] {
 function renderPlanForTicket(plan: Record<string, unknown> | null): string {
   if (!plan) return '_(no plan recorded)_';
   const steps = planSteps(plan)
-    .map((s) => `${s.n}. **[${s.layer}]** ${s.what}${s.files?.length ? ` — \`${s.files.join('`, `')}\`` : ''}`)
+    .map((s) => `${s.n}. **[${mdText(s.layer)}]** ${mdText(s.what)}${s.files?.length ? ` — \`${s.files.join('`, `')}\`` : ''}`)
     .join('\n');
-  const risks = planRisks(plan).map((r) => `- ${r}`).join('\n');
-  return `**Approach**\n${planStr(plan, 'approach') ?? '(not recorded)'}\n\n` +
+  const risks = planRisks(plan).map((r) => `- ${mdText(r)}`).join('\n');
+  const approach = planStr(plan, 'approach');
+  return `**Approach**\n${approach ? mdText(approach) : '(not recorded)'}\n\n` +
     `**Steps**\n${steps || '(none recorded)'}\n\n` +
     `**Risks**\n${risks || '(none identified)'}` +
     `${plan?.migrations === true ? '\n\n⚠️ includes a database migration' : ''}`;
@@ -465,7 +648,12 @@ export function planApprovedRecordBody(): string {
 
 function renderCasesForTicket(cases: TestCase[]): string {
   if (!cases.length) return '_(no test cases)_';
-  return cases.map((c) => `- **${c.id}** [${c.blast}] ${c.scenario}\n  - _expects:_ ${c.expected}`).join('\n');
+  // `scenario`/`expected` are model-authored prose and routinely carry bare
+  // tags or error strings in angle brackets — same GitLab HTML-block hazard as
+  // the plan fields, so run them through mdText too. `blast` is a fixed enum.
+  return cases
+    .map((c) => `- **${mdText(c.id)}** [${c.blast}] ${mdText(c.scenario)}\n  - _expects:_ ${mdText(c.expected)}`)
+    .join('\n');
 }
 
 /**
@@ -490,7 +678,7 @@ export function testcasesApprovalRequestBody(cases: TestCase[], why: string): st
 
 /** The ticket's record of the final, approved test-case list — audit only. */
 export function testcasesApprovedRecordBody(cases: TestCase[]): string {
-  const lines = cases.map((c) => `- **${c.id}** [${c.blast}] ${c.scenario} — _expects:_ ${c.expected}`);
+  const lines = cases.map((c) => `- **${mdText(c.id)}** [${c.blast}] ${mdText(c.scenario)} — _expects:_ ${mdText(c.expected)}`);
   return 'Oneshot record: the test-case list below was approved on this ticket — ' +
     'proceeding to `review`.\n\n' +
     `**Approved test cases** (${cases.length}):\n${lines.join('\n') || '_(none recorded)_'}`;

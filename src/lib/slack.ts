@@ -153,12 +153,30 @@ export async function updateCard(ts: string, s: CardState): Promise<void> {
   await call('chat.update', { channel: channel(), ts, text: renderCard(s) });
 }
 
+export interface ThreadOpts {
+  /**
+   * Also surface this reply in the CHANNEL, not only inside the thread.
+   *
+   * Slack's own `reply_broadcast` rather than a second `chat.postMessage`:
+   * one post, so the thread stays the single record of the run and the
+   * channel copy Slack renders points back at it. Posting twice would put
+   * the same text in two places that then have to be kept in step, and would
+   * double the notification for anyone already following the thread.
+   *
+   * Reserved for messages that need somebody who is NOT watching this run to
+   * act — today that is the review gates' approval requests and nothing else.
+   * A milestone belongs in the thread, which is why this defaults off.
+   */
+  broadcast?: boolean;
+}
+
 /**
  * A reply in the ticket's thread. Milestones only, ordinarily — the card is
- * the status — but the opt-in Review label's gates (src/conductor/
- * reviewgate.ts) also use this to post their approval requests, since Slack
- * is their primary channel and a gate's request is just another threaded
- * reply that happens to want an answer.
+ * the status — but the review gates (src/conductor/reviewgate.ts) also post
+ * their approval requests through here, with `broadcast` set so the ask also
+ * lands in the channel where the reviewers who are not following this run
+ * will see it. The gates read their verdict off the GitLab ticket, never out
+ * of Slack, so a request posted here is a notification and not an inbox.
  *
  * Returns the posted message's own `ts`, so a caller that needs a "since"
  * marker for polling replies (`threadReplies` below) does not have to make a
@@ -167,15 +185,146 @@ export async function updateCard(ts: string, s: CardState): Promise<void> {
  * that cares (the review gate) treats null as "try again next tick", exactly
  * like every other Slack failure in this file degrades to the console.
  */
-export async function thread(ts: string | null, text: string): Promise<string | null> {
+export async function thread(
+  ts: string | null, text: string, opts: ThreadOpts = {},
+): Promise<string | null> {
   if (!slackEnabled()) { log.info(`[slack] ${text.slice(0, 160)}`); return null; }
   const res = await call('chat.postMessage', {
     channel: channel(),
     thread_ts: ts ?? undefined,
     text,
+    // Slack ignores this without a thread_ts, but sending it anyway on a
+    // root post is a request that means nothing; keep it to the case it
+    // describes.
+    reply_broadcast: ts && opts.broadcast ? 'true' : undefined,
     unfurl_links: false,
   });
   return typeof res.ts === 'string' ? res.ts : null;
+}
+
+/**
+ * A Slack member id for a work email, or null.
+ *
+ * Slack renders an @mention from a member id (`<@U01ABC>`) and from nothing
+ * else — a username, a display name or an email in the message text is just
+ * text, and silently so. The review gates hold GitLab usernames, so something
+ * has to bridge the two; this is that bridge, via `users.lookupByEmail` on
+ * the address derived from the username (see `mentionsFor` in
+ * src/conductor/reviewgate.ts).
+ *
+ * NEW SCOPE, AND A MANUAL ONE. `chat:write` covers every other call in this
+ * file. Looking a user up by email needs `users:read.email` (which implies
+ * `users:read`) granted to the bot token in the Slack API console, followed
+ * by a reinstall to the workspace — a token cannot grant itself a scope. Skip
+ * it and Slack answers `missing_scope`: `call()` logs the code, this returns
+ * null, and the gate's request still posts, just without naming anyone. That
+ * is the deliberate failure shape — an approval request that reaches the
+ * channel unaddressed is recoverable by a human reading it, whereas one that
+ * is not posted at all is not.
+ *
+ * Cached per process, INCLUDING the misses. A miss is either a scope that has
+ * not been granted or an address that does not exist in the workspace, and
+ * neither changes while the conductor is up; re-asking on every gate round
+ * would spend a network round trip per reviewer per round to be told the same
+ * thing. A restart re-reads both, which is also how a newly granted scope
+ * takes effect.
+ */
+const emailIds = new Map<string, string | null>();
+
+export async function userIdForEmail(email: string): Promise<string | null> {
+  if (!slackEnabled() || !email) return null;
+  const key = email.toLowerCase();
+  const cached = emailIds.get(key);
+  if (cached !== undefined) return cached;
+  const res = await call('users.lookupByEmail', { email: key });
+  const user = res.user as Record<string, unknown> | undefined;
+  const id = res.ok === true && user && typeof user.id === 'string' ? user.id : null;
+  // Do not cache a miss caused by the network being down — that one DOES
+  // change, and caching it would keep a run unaddressed for the rest of the
+  // process's life over a blip that lasted a second.
+  if (id !== null || res.error !== 'unreachable') emailIds.set(key, id);
+  return id;
+}
+
+/**
+ * Slack handle (`@name`) → member id, for the whole workspace, built once.
+ *
+ * The PRIMARY way a reviewer gets mentioned, because at Arbisoft a person's
+ * Slack handle is character-identical to their GitLab username — `arsal.tariq`
+ * is `@arsal.tariq` in both systems — which makes it an exact key needing no
+ * scope beyond `users:read`, and no second list for anyone to maintain.
+ *
+ * Handles ONLY. Display and real names are deliberately never matched: this
+ * workspace has 790 people, 22 of whom answer to some form of "usman", and
+ * `haider.usman`'s display name is the bare word "Haider". A fuzzy match
+ * across those does not fail loudly, it mentions the wrong person — which is
+ * worse than mentioning nobody, since the run still waits and now someone
+ * else has been asked to approve work that is not theirs.
+ *
+ * One `users.list` walk per process (a few hundred per page), cached whole
+ * rather than per lookup: a gate mentions two to four people at once, so
+ * paying for the roster once beats a call each. Not cached on failure, so a
+ * blip does not poison the rest of the run.
+ */
+/**
+ * The in-flight walk, not just its result — every caller of `userIdForHandle`
+ * shares ONE `users.list` pass.
+ *
+ * Caching only the finished map is not enough here, and the difference is not
+ * theoretical: a gate resolves its whole reviewer group through
+ * `Promise.all`, so four lookups start in the same tick, all miss an
+ * unpopulated cache, and all four begin their own multi-page walk. Against a
+ * 790-person workspace that is ~16 requests where 4 would do, on a method
+ * Slack rate-limits at tier 2 — the later pages then come back 429, each
+ * walker keeps whatever partial roster it had, and reviewers go unmentioned
+ * essentially at random. Observed exactly that way: `hira.ijaz` and
+ * `anosha.saeed` silently dropped out of an otherwise correct list.
+ *
+ * Cleared on failure so a later gate retries rather than inheriting a partial
+ * answer for the life of the process.
+ *
+ * A 429 is NOT retried inline, deliberately. Slack's tier-2 window is a
+ * minute, so honouring a Retry-After here would park a phase mid-check for
+ * that long to add decoration to a message that is about to post anyway. The
+ * ask goes out unaddressed instead and the next tick — a gate re-checks on
+ * every scan while parked — rebuilds the roster and mentions properly from
+ * then on. One walk per process makes hitting the limit unlikely in the
+ * first place; it is reachable mainly by restarting the conductor repeatedly.
+ */
+let rosterWalk: Promise<Map<string, string>> | null = null;
+
+async function walkRoster(): Promise<Map<string, string>> {
+  const built = new Map<string, string>();
+  let cursor = '';
+  do {
+    const res = await call('users.list', { limit: 200, cursor: cursor || undefined });
+    if (res.ok !== true) throw new Error(`users.list: ${String(res.error)}`);
+    for (const m of (res.members as Array<Record<string, unknown>>) ?? []) {
+      if (m.deleted === true || m.is_bot === true) continue;
+      if (typeof m.name === 'string' && typeof m.id === 'string') built.set(m.name.toLowerCase(), m.id);
+    }
+    const meta = res.response_metadata as Record<string, unknown> | undefined;
+    cursor = typeof meta?.next_cursor === 'string' ? meta.next_cursor : '';
+  } while (cursor);
+  return built;
+}
+
+function handleRoster(): Promise<Map<string, string>> {
+  if (!rosterWalk) {
+    rosterWalk = walkRoster().catch((err) => {
+      rosterWalk = null; // a partial or failed walk must not become the answer
+      log.warn('could not read the Slack member list — reviewers will not be @mentioned', {
+        error: (err as Error).message,
+      });
+      return new Map<string, string>();
+    });
+  }
+  return rosterWalk;
+}
+
+export async function userIdForHandle(handle: string): Promise<string | null> {
+  if (!slackEnabled() || !handle) return null;
+  return (await handleRoster()).get(handle.toLowerCase()) ?? null;
 }
 
 let cachedBotUserId: string | null = null;
@@ -252,7 +401,13 @@ export async function threadReplies(threadTs: string, sinceTs: string | null): P
     .sort((a, b) => Number(a.ts) - Number(b.ts));
 }
 
-/** The only unprompted @mention. Full auto means nothing else should need attention. */
+/**
+ * The @mention for something that has gone WRONG. Full auto means nothing
+ * else should need attention — the review gates also mention people
+ * (`mentionsFor` in src/conductor/reviewgate.ts), but that is an ask that was
+ * asked for, addressed to the group that opted into answering it. This one
+ * goes to the operator, unbidden, because a run stopped.
+ */
 export async function alert(text: string): Promise<void> {
   if (!slackEnabled()) { log.error(`[slack-alert] ${text}`); return; }
   const owner = envOr('ONESHOT_OWNER_SLACK_ID');

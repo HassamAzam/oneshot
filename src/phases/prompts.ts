@@ -57,15 +57,99 @@ export interface PromptCtx {
  * depends on where that phase runs — and a phase that hard-fails on a name it
  * cannot resolve turns a missing file into a dead run. Hence the closing
  * sentence: the prompt body always carries enough method to proceed without it.
+ *
+ * `lazy` is for a phase whose skill list spans layers a single ticket rarely
+ * all touches. It trades "load everything up front" for "load what you touch",
+ * which is only safe because of the addendum: the gate is the edit, not the
+ * forecast. See skillsFor() for the half of this that runs in code.
  */
-const SKILL_LINE = (skills: string[]): string =>
-  skills.length
-    ? `\n## Skills\nInvoke these with the Skill tool BEFORE you start — they are the method, ` +
-      `and they are the current version of it:\n${skills.map((s) => `  - ${s}`).join('\n')}\n` +
-      'If the Skill tool cannot resolve one, it is simply not available at this working ' +
-      'directory. Note that in `summary` and follow the steps your prompt gives you instead. ' +
-      'Do not hunt for the skill file, and do not install anything.\n'
+const SKILL_LINE = (skills: string[], lazy = false): string => {
+  if (!skills.length) return '';
+  const head = lazy
+    ? `\n## Skills\nThese are the method, and they are the current version of it. Read the plan ` +
+      `first, then invoke the ones your change actually touches:\n`
+    : `\n## Skills\nInvoke these with the Skill tool BEFORE you start — they are the method, ` +
+      `and they are the current version of it:\n`;
+  const lazyRule = lazy
+    ? 'Skipping one this ticket does not touch is correct and saves budget for the code. But the ' +
+      'gate is what you EDIT, not what you planned: if you end up writing in a layer whose skill ' +
+      'you skipped, invoke it BEFORE you write that layer, not after. `review` dispatches its ' +
+      'agents from the real diff, so a layer written without its standard comes back as findings ' +
+      'and costs a whole lap — far more than the skill would have cost you here.\n'
     : '';
+  return head + `${skills.map((s) => `  - ${s}`).join('\n')}\n` + lazyRule +
+    'If the Skill tool cannot resolve one, it is simply not available at this working ' +
+    'directory. Note that in `summary` and follow the steps your prompt gives you instead. ' +
+    'Do not hunt for the skill file, and do not install anything.\n';
+};
+
+/**
+ * Skills whose precondition the PLAN states outright, and the field that states it.
+ *
+ * Only two earn a place here, and the test for the list is not "is it often
+ * unused" but "can the plan be WRONG about it without the phase silently
+ * shipping substandard code". A migration and a standalone script are both
+ * things a session cannot write by accident: it has to decide to add a
+ * `migrations/` file or a `scripts/` entrypoint, and the prompt already tells
+ * it to generate migrations when the plan sets the flag. The layer skills fail
+ * that test — a backend ticket picks up a two-line frontend edit constantly —
+ * so they are handled by the lazy SKILL_LINE instead, where being wrong costs
+ * one extra Skill call rather than an unstandardised layer.
+ *
+ * These two are also 25KB of the 47KB the phase loads, which is why gating the
+ * recoverable half is worth doing at all.
+ */
+const CONDITIONAL_SKILLS: Record<string, (p: PlanForecast) => boolean> = {
+  'django-migration-standards': (p) => p.migration,
+  'script-writing-standards': (p) => p.script,
+};
+
+interface PlanForecast {
+  migration: boolean; script: boolean; backend: boolean; frontend: boolean;
+}
+
+/**
+ * What the plan says this ticket will touch.
+ *
+ * `review` gates its agents on `implement.filesChanged` — the diff that exists.
+ * This phase runs before any diff exists, so the plan's forecast is the only
+ * signal there is, and it is a forecast: `migrations` is a required schema
+ * field the planner fills from a model change it can see, while `steps[].files`
+ * is a list of files it INTENDS to touch. Both are read here, and either one
+ * alone is enough to keep a skill.
+ */
+function planForecast(ctx: PromptCtx): PlanForecast {
+  const p = artifact<{
+    migrations: boolean;
+    steps: Array<{ files: string[]; layer: string }>;
+  }>(ctx, 'plan');
+  const steps = p.steps ?? [];
+  const files = steps.flatMap((s) => s.files ?? []);
+  const layers = layersOf(files);
+  return {
+    migration: p.migrations === true || steps.some((s) => s.layer === 'migration')
+      || files.some((f) => /(^|\/)migrations\//.test(f)),
+    script: files.some((f) => /^scripts\//.test(f)),
+    backend: layers.backend || steps.some((s) => s.layer === 'backend'),
+    frontend: layers.frontend || steps.some((s) => s.layer === 'frontend'),
+  };
+}
+
+/**
+ * The configured list minus what this ticket demonstrably does not need.
+ *
+ * No plan artifact means no forecast, and no forecast means no grounds to drop
+ * anything — a remediate lap or a run with `plan` skipped gets the full list.
+ * Absence of evidence is not evidence of absence, and the asymmetry here is
+ * brutal: an unnecessary skill costs a few thousand cached tokens, a missing
+ * one costs a review lap.
+ */
+function skillsFor(cfg: PhaseConfig, ctx: PromptCtx): string[] {
+  const skills = cfg.skills ?? [];
+  if (!skills.length || !ctx.prior.plan) return skills;
+  const forecast = planForecast(ctx);
+  return skills.filter((s) => CONDITIONAL_SKILLS[s]?.(forecast) ?? true);
+}
 
 /**
  * The one boundary that is not the same for every phase.
@@ -115,7 +199,7 @@ budget, or stop and say plainly what was still running.
 
 Set \`blocked\` to a non-null reason ONLY when no retry would help — a missing input, an
 environment that is down, a decision only a human can make. Say what would unblock it.
-${SKILL_LINE(cfg.skills ?? [])}`;
+${SKILL_LINE(skillsFor(cfg, ctx), cfg.name === 'implement')}`;
 }
 
 function ticketBlock(t: Ticket): string {
@@ -673,6 +757,26 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
     const cases = testCases(ctx);
     const findings = findingsOf(ctx);
 
+    // Named from the plan's forecast, phrased as a default rather than a
+    // permission. The conductor cannot enforce this — `agents` in phases.json
+    // is documentation, nothing reads it — and the forecast is wrong often
+    // enough that a hard "backend only" would strand the two-line frontend
+    // edit a backend ticket picks up. So the unplanned layer keeps its agent
+    // and simply stops being advertised.
+    const planned = ctx.prior.plan ? planForecast(ctx) : null;
+    const wanted = planned && (planned.backend || planned.frontend)
+      ? [planned.backend ? '`backend-agent`' : '', planned.frontend ? '`frontend-agent`' : '']
+        .filter(Boolean)
+      : ['`backend-agent`', '`frontend-agent`'];
+    const unplanned = wanted.length === 1
+      ? ` The plan forecasts no ${planned?.backend ? 'frontend' : 'backend'} work, so the other
+agent is not listed — but the forecast is not a rule. If the change turns out to need that layer,
+dispatch its agent for it rather than writing that layer yourself.`
+      : '';
+    const agentBlock = `Delegate implementation work to ${wanted.join(' and ')} for changes in `
+      + `${wanted.length > 1 ? 'their layer' : 'that layer'}; they carry the standards this repo is
+reviewed against.${unplanned}`;
+
     // A review lap and a retry lap are different jobs and must not read the
     // same: one has a defect list to close, the other has an unknown amount of
     // its own half-finished work already committed on the branch.
@@ -743,8 +847,7 @@ Write the code.
 - \`commits\` and \`filesChanged\` are read by later phases and by the MR description. Take them
   from \`git log\` and \`git diff --name-only\`, never from memory.
 
-Delegate implementation work to the \`backend-agent\` and \`frontend-agent\` subagents for changes
-in their layer; they carry the standards this repo is reviewed against.
+${agentBlock}
 
 Do not push, open an MR, merge or deploy — later phases own those and you have no tools for
 them. Do not edit anything outside your worktree.`;
