@@ -345,6 +345,14 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       // assistant turns and the phase burns its full `maxTurns` cap (120 empty
       // turns observed live on run r-mtvd5fsj-9af5f4) before settling as
       // `error_max_turns` — hiding the real cause and wasting the budget.
+      //
+      // `settled` is deliberately NOT flipped here. Leaving it false lets the
+      // post-loop "phase never reached a result frame" fallback introduced in
+      // #20 record the real turns this session already spent before the cap
+      // hit — otherwise a rate-limited phase would land in `quota_usage` as
+      // weighted: 0 for the very tokens that got us rate-limited in the first
+      // place. Later result frames can't clobber anything because we break out
+      // of the iterator immediately below.
       if (msg.type === 'assistant' && !settled) {
         const rec = msg as unknown as Record<string, unknown>;
         const errTag = typeof rec.error === 'string' ? rec.error : '';
@@ -353,7 +361,6 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
         if (errTag === 'rate_limit' || looksLikeUsageLimit(texts)) {
           limitSignals.push(errTag, texts);
           out.error = `rate_limit: ${texts.slice(0, 200) || errTag}`;
-          settled = true;
           ac.abort();
           armForce();
           break;
