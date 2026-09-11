@@ -77,6 +77,7 @@ import { log } from '../lib/log.js';
 import { exportRun } from '../lib/langfuse.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
+import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import { mergePhase } from './codephases.js';
@@ -588,6 +589,8 @@ export async function runTicket(
     log.warn('recorded worktree is gone — re-leasing', { was: j.worktree });
   }
   let port: number | undefined = j.port;
+  /** One background bring-up per run, whether the worktree was leased now or resumed. */
+  let appStarting = false;
   const branch = j.branch ?? branchFor(cfg.branches.prefix, iid, issue.title);
 
   const prior: Record<string, Record<string, unknown> | null> = {};
@@ -1036,13 +1039,47 @@ export async function runTicket(
   }
 
   /**
-   * Leases, taken at the last possible moment.
+   * The app for this run, started in the background as soon as there is a
+   * worktree to start it in.
    *
-   * The worktree comes with the first phase that needs a checkout; the PORT is
-   * separate and comes with the first phase that actually runs a server. They
-   * used to be one lease, which held one of three ports across research, plan
-   * and implement — hours of a scarce resource for phases that never bound a
-   * socket.
+   * Called once per run — including on a resume, where the worktree arrives from
+   * the journal and is never re-leased, which is why the guard is a flag and not
+   * `!worktree`. Nothing waits on it: `scripts/app.cjs` holds a per-worktree lock,
+   * so the first phase that calls `ensure` itself is handed the finished instance
+   * or joins the bring-up already in flight.
+   *
+   * A port that cannot be leased is NOT a failure here. It only means this run
+   * does not get its head start; the later `needsPort` lease reports the empty
+   * pool exactly as it always did, and that message is the one worth keeping.
+   */
+  function bringUpApp(): void {
+    if (appStarting || !worktree) return;
+    const leased = port ?? leasePortFor(runId);
+    if (leased === null) {
+      log.info(`#${iid} — no free port to warm the app on; verify will lease one when it runs`);
+      return;
+    }
+    if (port !== leased) {
+      port = leased;
+      j = updateJournal(iid, { port }) ?? j;
+      updateRun(runId, { port });
+    }
+    appStarting = true;
+    startRunApp({ iid, runId, worktree, port: leased });
+  }
+
+  /**
+   * Leases, taken at the last possible moment — with one deliberate exception.
+   *
+   * The worktree comes with the first phase that needs a checkout. The PORT used
+   * to come with the first phase that actually runs a server, because holding one
+   * of three across research, plan and implement was hours of a scarce resource
+   * for phases that never bound a socket. It is now taken WITH the worktree, and
+   * the resource it buys is worth more than the one it spends: the dev server
+   * compiles through those same hours instead of inside `verify`'s clock, where a
+   * model was paying for it out of a turn budget. The pool is still the fleet's
+   * real concurrency limit — this just means one run holds one port for its whole
+   * life, which is what "one app per run" costs.
    */
   function ensureLeases(p: PhaseConfig): string | null {
     if (p.cwd === 'worktree' && !worktree) {
@@ -1055,6 +1092,7 @@ export async function runTicket(
         return `worktree: ${(err as Error).message}`;
       }
     }
+    if (p.cwd === 'worktree') bringUpApp();
     if (p.needsPort && !port) {
       const leased = leasePortFor(runId);
       if (leased === null) {

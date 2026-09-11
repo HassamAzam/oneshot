@@ -10,6 +10,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "watch": "tsx src/index.ts --watch-only",
+    "app": "node scripts/app.cjs",
     "doctor": "tsx scripts/doctor.ts",
     "preflight": "tsx scripts/preflight.ts",
     "setup": "tsx scripts/setup.ts",

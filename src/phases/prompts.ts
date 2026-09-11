@@ -869,9 +869,23 @@ Worktree: ${ctx.worktree ?? '(none leased)'}
 Port:     ${ctx.port ?? '(none leased)'}   (also in $ONESHOT_PORT)
 Branch:   ${ctx.branch ?? '(unleased)'}
 
-One process on that port serves BOTH the Django backend and the webpack frontend —
-\`http://localhost:${ctx.port ?? '<port>'}/\` is the whole app, and there is no second port to
-open. Start it with \`npm start\` from the worktree with PORT set to ${ctx.port ?? '<port>'}.
+The conductor started it in the BACKGROUND the moment this run leased its worktree, so by
+now it is usually already serving. Confirm it with ONE command, and do not improvise around
+it:
+
+\`\`\`
+node $ONESHOT_HOME/scripts/app.cjs ensure
+\`\`\`
+
+No arguments: it reads \`$ONESHOT_WORKTREE\` and \`$ONESHOT_PORT\` and brings up the app for
+THIS checkout, never moving its ref — your uncommitted work is safe from it. If the
+conductor's bring-up already finished you get it back in about a second; if it is still
+compiling you join that one rather than starting a second; if it never started, this starts
+it. It prints the same \`app-env.json\` in all three cases. \`baseUrl\` in that file is the
+whole app; navigate THERE and nowhere else. If it returns a named code
+(\`E_NO_PORTS\`, \`E_DJANGO_DEAD\`, \`E_WEBPACK_DEAD\`, \`E_NO_REBUILD\`, …) report the code and
+its hint rather than starting a bring-up of your own — every session that improvised one
+spent between a third and four fifths of its budget on it.
 
 This worktree was SEEDED, not installed: \`node_modules\` and \`venv\` are symlinks into a
 working checkout, and \`hrdb/local_settings.py\` and \`frontend/src/constants/config.js\` are
@@ -881,17 +895,13 @@ into a shared symlinked \`node_modules\` corrupts every other worktree on this m
 copied from a checkout that runs elsewhere, and the frontend will otherwise call an API that is
 not yours. That file is in \`.git/info/exclude\`, so editing it cannot reach a commit.
 
-The app is TWO processes — the webpack dev server (frontend assets) and Django (HTML + API on
-your leased port) — and the expensive one is webpack: its FIRST compile takes minutes, and
-silence during it is not failure. So before building anything, CHECK what is already alive: a
-previous lap's servers can outlive their session, and a warm webpack is minutes of your budget
-handed back. \`lsof\` the listener's cwd and require it to be THIS worktree — a server from any
-other worktree path is stale evidence and must be killed, never reused. Django restarts in
-seconds, so a missing backend is cheap; a missing webpack is the thing worth checking for
-first. Start whatever is missing DETACHED with \`setsid\` so it survives this session — the
-next phase reuses it instead of re-paying the compile. POLL until ready with a bounded wait;
-never a blind worst-case \`sleep\`. Your whole budget is ${mins} minutes; start servers FIRST
-and do your reading while webpack compiles.
+The app is TWO processes — webpack (assets only, never navigated to) and Django (HTML + API,
+and the origin you use) — and \`ensure\` owns both. It already does what earlier prompts asked
+you to do by hand: it checks what is alive machine-wide, proves a listener belongs to THIS
+worktree before reusing it, starts what is missing detached so the next phase inherits it,
+and polls readiness off the file Django actually reads rather than sleeping. Do not re-derive
+any of that. Your whole budget is ${mins} minutes; run \`ensure\` FIRST and do your reading
+while it works.
 
 Previous laps may also have left your own artifacts in the worktree — a Playwright suite, login
 helpers. REUSE them; re-authoring a script that already exists is pure turn burn.
@@ -999,11 +1009,18 @@ Worktree: ${ctx.worktree ?? '(none leased)'}
 Port:     ${ctx.port ?? '(none leased)'}   (also in $ONESHOT_PORT)
 
 \`verify\` ran immediately before you, on this same worktree and port, and reported
-serverStarted=${v.serverStarted === true}. Check whether it is STILL LISTENING before you start
-anything: a live server is a large part of your ${mins}-minute budget already paid for. Only if
-the port is dead do you start it yourself — \`PORT=${ctx.port ?? '<port>'} npm start\` from the
-worktree, config.js pointed at that port first, and the first webpack compile is slow, so poll
-the port rather than sleeping through it. Never \`npm ci\`: node_modules is a shared symlink.
+serverStarted=${v.serverStarted === true}. Do not check, and do not start anything by hand —
+run the same one command it ran:
+
+\`\`\`
+node $ONESHOT_HOME/scripts/app.cjs ensure
+\`\`\`
+
+If verify's servers are still up on your commit this returns them in about three seconds; if
+they died it rebuilds. Either way you get an \`app-env.json\` with the \`baseUrl\` to navigate
+to. This phase used to spend between a third and four fifths of its budget re-establishing a
+server the previous phase had just killed, and three of six sessions died at the turn cap
+before taking a single screenshot. Never \`npm ci\`: node_modules is a shared symlink.
 
 Drive the browser with Playwright, from Bash, with \`node\`, exactly as \`verify\` did — there is
 no browser tool in this session.

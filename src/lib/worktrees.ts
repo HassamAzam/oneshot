@@ -211,6 +211,22 @@ function seed(worktree: string): void {
   const copies = envOr('ONESHOT_SEED_COPIES', '').split(',').map((s) => s.trim()).filter(Boolean);
   const excluded: string[] = [];
 
+  /**
+   * A missing seed SOURCE is announced, not swallowed.
+   *
+   * This loop used to `continue` on both conditions together, so a seed entry whose
+   * source did not exist produced no symlink and no message. That is exactly how
+   * `staticfiles` was absent from every worktree for weeks: each fresh checkout then
+   * 500'd on every {% static %} template and the bring-up died as E_DJANGO_DEAD, with
+   * nothing anywhere naming the cause. An existing DESTINATION is still silent — that
+   * one is the ordinary idempotent case.
+   */
+  for (const rel of [...links, ...copies]) {
+    if (!existsSync(join(from, rel))) {
+      log.warn(`seed source ${join(from, rel)} does not exist — ${rel} will be missing from ${worktree}`);
+    }
+  }
+
   for (const rel of links) {
     const src = join(from, rel);
     const dst = join(worktree, rel);
