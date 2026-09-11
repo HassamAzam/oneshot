@@ -1,12 +1,5 @@
 # One Loop v2 — "Conductor"
 
-> **Historical note.** This plan describes a 16-phase pipeline ending in a
-> deploy, a demo-server QA pass and a demo recording. Phases 10–15 (`deploy`,
-> `qa`, `demo`, `memorize`, `document`, `close`) have since been removed: the
-> pipeline ends at `merge`, which also writes the run's record and hands the
-> ticket back with the `merged` label. Everything below phase 9 still describes
-> the system as built.
-
 A single-orchestrator, per-ticket pipeline. One label in, `Ready For Deployment` out, fully
 autonomous, one Slack voice.
 
