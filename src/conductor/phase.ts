@@ -338,6 +338,28 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
         appendFileSync(tee, `${JSON.stringify(msg)}\n`);
       } catch { /* the tee is best-effort; never fail a phase over logging */ }
 
+      // Short-circuit on a mid-stream usage-limit frame. The SDK reports a
+      // subscription cap by returning synthetic assistant frames tagged
+      // `error: "rate_limit"` with body text like "You've hit your limit ·
+      // resets 4:30pm". Without this check the frames read as ordinary
+      // assistant turns and the phase burns its full `maxTurns` cap (120 empty
+      // turns observed live on run r-mtvd5fsj-9af5f4) before settling as
+      // `error_max_turns` — hiding the real cause and wasting the budget.
+      if (msg.type === 'assistant' && !settled) {
+        const rec = msg as unknown as Record<string, unknown>;
+        const errTag = typeof rec.error === 'string' ? rec.error : '';
+        const content = (msg.message as { content?: Array<{ text?: string }> } | undefined)?.content ?? [];
+        const texts = content.map((c) => c.text ?? '').join(' ');
+        if (errTag === 'rate_limit' || looksLikeUsageLimit(texts)) {
+          limitSignals.push(errTag, texts);
+          out.error = `rate_limit: ${texts.slice(0, 200) || errTag}`;
+          settled = true;
+          ac.abort();
+          armForce();
+          break;
+        }
+      }
+
       // Heartbeat. `turns` arrives only in the result frame, so a session that
       // is still working reports nothing about itself until it finishes —
       // counting assistant frames is the only turn number available while it
