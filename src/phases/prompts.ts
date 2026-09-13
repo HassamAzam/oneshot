@@ -23,7 +23,7 @@ import {
   STATE, artifactDir, envOr, phaseByName, phases, projectConfig, runDir,
   type PhaseConfig,
 } from '../lib/config.js';
-import type { Remediation, RunJournal } from '../lib/artifacts.js';
+import { readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
 import {
   GITLAB_PROJECT_URL,
   type CaseResult, type Finding, type Screenshot, type TestCase, type Ticket,
@@ -342,6 +342,21 @@ function findingsOf(ctx: PromptCtx): Finding[] {
   return artifact<{ findings: Finding[] }>(ctx, 'review').findings ?? [];
 }
 
+/**
+ * Cases `verify`/`qa` reported failing, read straight off disk rather than
+ * through `ctx.prior` — a phase that fails has its `prior[name]` entry hard-
+ * nulled by the runner (correctly: other readers should not trust a failed
+ * phase's data as fact), but that also erases the one thing `implement` needs
+ * most on the lap it cycles back for: which cases actually broke. The
+ * artifact itself is real — the phase ran to completion and reported it — so
+ * reading it directly here does not revisit that null-out, it just gives
+ * `implement` the one narrow fact it cannot do its job without.
+ */
+function verifyFailuresOf(ctx: PromptCtx): CaseResult[] {
+  const a = readArtifact<{ results?: CaseResult[] }>(ctx.ticket.iid, 'verify.json');
+  return (a?.results ?? []).filter((r) => r.result === 'fail');
+}
+
 
 /** Which review agents are worth dispatching, from what actually changed. */
 function layersOf(files: string[]): { backend: boolean; frontend: boolean } {
@@ -629,6 +644,7 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
     };
     const cases = testCases(ctx);
     const findings = findingsOf(ctx);
+    const verifyFailures = findings.length ? [] : verifyFailuresOf(ctx);
 
     // Named from the plan's forecast, phrased as a default rather than a
     // permission. The conductor cannot enforce this — `agents` in phases.json
@@ -662,13 +678,22 @@ worse than one you admit you skipped, because the next review trusts this field.
 
 ${findings.map((f) => `- ${f.id} [${f.severity}] ${f.file}:${f.line}\n    ${f.what}\n    fix: ${f.fix}`).join('\n')}
 `
-      : ctx.lap > 0
-        ? `## This is lap ${ctx.lap}
+      : verifyFailures.length
+        ? `## Verify failed these cases — fix them (lap ${ctx.lap})
+\`verify\` ran the case list against a real build of the previous lap and reported these as
+failing. These are observed defects, not a hypothesis: fix the code so each one passes, do not
+argue with the verdict. Commits from the lap verify tested may already be on the branch — run
+\`git log --oneline origin/${baseBranch()}..HEAD\` and read the diff before writing anything.
+
+${verifyFailures.map((c) => `- ${c.id}: ${c.evidence}`).join('\n')}
+`
+        : ctx.lap > 0
+          ? `## This is lap ${ctx.lap}
 A previous attempt at this phase did not finish. Its commits may already be on the branch.
 Run \`git log --oneline origin/${baseBranch()}..HEAD\` and read the diff
 BEFORE writing anything, and continue from there rather than redoing work that landed.
 `
-        : '';
+          : '';
 
     // Empty on lap 0 — testcases runs AFTER this phase. On a review or verify
     // cycle lap it exists, and then it is the sharpest statement of what the
