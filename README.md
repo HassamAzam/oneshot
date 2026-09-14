@@ -281,6 +281,9 @@ on-demand `mr-feedback` phase, and the run takes one **review round**:
   Review run parks for its human merge and a full-auto run blocks.
 - **Replies are marked** `<!-- oneshot:mr-feedback -->`, because the desk posts as its operator,
   who may also be a reviewer. A reviewer replying on an answered thread starts a new round for it.
+- **Open threads can still block.** On a project that requires all discussions resolved, a
+  full-auto run with `resolve: never` — or with question/decline threads under `fixed` — blocks
+  after Oneshot answers, because its replies leave those threads open for a person to resolve.
 - `npm run mr-feedback:probe -- <mrIid> [ticketIid]` prints exactly which threads would be acted
   on right now. The feature is off under `DRY_RUN`.
 

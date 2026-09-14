@@ -41,6 +41,7 @@ import {
 } from '../lib/gitlab.js';
 import type { CodePhaseCtx } from './runner.js';
 import { mergeHooksFor, mrFeedbackActive } from '../mrfeedback/wire.js';
+import type { MergeHooks } from '../mrfeedback/mergehooks.js';
 import type { MrFeedbackSignal } from '../mrfeedback/types.js';
 
 const POLL_MS = 8_000;
@@ -383,7 +384,8 @@ async function driveToMerged(
   base: string,
   policy: ProjectSettings | null,
   deadlines: { ci: number; merge: number },
-): Promise<{ ok: true; mr: MergeRequest } | { ok: false; error: string }> {
+  feedback: MergeHooks | null,
+): Promise<{ ok: true; mr: MergeRequest } | { ok: false; error: string; feedback?: MrFeedbackSignal }> {
   let squash = policy?.squash_option === 'always';
   let accepted = false;
   let awaitingRebase = false;
@@ -545,8 +547,19 @@ async function driveToMerged(
       case 'conflict':
         return { ok: false, error: conflictMessage(mr, base) };
 
-      case 'discussions':
+      case 'discussions': {
+        // A reviewer who commented while CI ran is feedback, not a block: the
+        // check before this loop has already passed, so look again here.
+        const threads = feedback ? await feedback.newFeedbackThreads(mrIid) : [];
+        if (threads.length) {
+          return {
+            ok: false,
+            error: `${threads.length} new review thread(s) on !${mrIid} — handing them to mr-feedback`,
+            feedback: { mrIid, threads },
+          };
+        }
         return { ok: false, error: await discussionsMessage(mr) };
+      }
 
       case 'wait':
         await sleep(POLL_MS);
@@ -982,8 +995,13 @@ export async function mergePhase(
     };
   } else {
     const drive = await driveToMerged(
-      ctx, journal.title, mrIid, rec, base, policy, deadlines,
+      ctx, journal.title, mrIid, rec, base, policy, deadlines, feedback,
     );
+    if (!drive.ok && drive.feedback) {
+      rec.summary = drive.error;
+      persistMerge(ctx, rec);
+      return { ok: false, error: drive.error, feedback: drive.feedback };
+    }
     if (!drive.ok) return failMerge(ctx, rec, drive.error);
 
     // Which field holds the merged commit depends on the merge method: a merge
