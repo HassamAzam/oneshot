@@ -23,18 +23,38 @@ const COMMON = {
   blocked: {
     type: ['string', 'null'],
     description:
-      'Non-null ONLY when you could not finish and no retry would help: a missing input, ' +
+      'Set ONLY when you could not finish and no retry would help: a missing input, ' +
       'an environment that is down, a decision only a human can make. State what would ' +
-      'unblock it. Null otherwise.',
+      'unblock it. Omit it, or send null, when nothing is blocking you.',
   },
 } as const;
 
+/**
+ * `blocked` is deliberately NOT required.
+ *
+ * Every other field here describes work the phase did, so demanding it costs
+ * nothing. `blocked` is the opposite: the overwhelmingly common value is "no",
+ * and making it required turns the happy path into a sentence the model has to
+ * serialise correctly in order to say nothing at all. That is not hypothetical
+ * — an implement phase once emitted `</parameter><parameter name="blocked">`
+ * as literal text inside `summary`, so the field never materialised, and five
+ * identical retries later a 28-minute lap whose commits were already on the
+ * branch was recorded as a failure.
+ *
+ * Omission is safe because nothing downstream distinguishes it from null:
+ * runSession() reads `typeof b === 'string' && b.trim() ? b : null`, so absent,
+ * null and empty all mean the same thing at the only place that reads it. The
+ * guarantee this drops — "a phase cannot forget to mention it is blocked" — was
+ * never real either, since a phase could always have sent null anyway. A phase
+ * that IS blocked has every incentive to say so; one that is not should not
+ * have to.
+ */
 function phaseSchema(props: Record<string, unknown>, required: string[]): JsonSchema {
   return {
     type: 'object',
     additionalProperties: false,
     properties: { ...COMMON, ...props },
-    required: ['summary', 'blocked', ...required],
+    required: ['summary', ...required],
   };
 }
 
