@@ -135,6 +135,27 @@ function resultTable(results: CaseResult[]): string {
   ].join('\n');
 }
 
+interface Observation { what: string; before: string; after: string; how: string; caseId: string }
+
+/**
+ * A measured value, verbatim. Values go in code spans and prose is entity-escaped,
+ * so `<title>` and `<script>` survive GitLab's sanitizer as text. An empty value
+ * is shown as empty rather than as a dash: for #189 the empty base-branch title
+ * WAS the bug, and a dash reads as "not recorded".
+ */
+function observationTable(rows: Observation[]): string {
+  const code = (v: string): string => {
+    const s = String(v ?? '').replace(/\n/g, ' ').slice(0, 160);
+    return s ? `\`${s.replace(/`/g, "'").replace(/\|/g, '\\|')}\`` : '_(empty)_';
+  };
+  const text = (v: string): string => String(v ?? '').replace(/\n/g, ' ').slice(0, 160)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\|/g, '\\|');
+  return ['| What | Before (base) | After (this branch) | Measured by | Case |', '|---|---|---|---|---|',
+    ...rows.slice(0, 30).map((o) =>
+      `| ${text(o.what)} | ${code(o.before)} | ${code(o.after)} | ${text(o.how)} | ${o.caseId || ''} |`),
+  ].join('\n');
+}
+
 function tally(results: CaseResult[]): string {
   const counts = results.reduce<Record<string, number>>((a, r) => {
     a[r.result] = (a[r.result] ?? 0) + 1;
@@ -245,7 +266,7 @@ const SPECS: Spec[] = [
     target: 'mr',
     build: (data, ctx) => {
       const shots = (data.screenshots as Array<{ file: string; caption: string; caseId: string }>) ?? [];
-      if (!shots.length) return null;
+      const observations = (data.observations as Observation[] | undefined) ?? [];
       const dir = artifactDir(ctx.iid);
       const attachments: Attachment[] = [];
       for (const s of shots.slice(0, 12)) {
@@ -255,12 +276,20 @@ const SPECS: Spec[] = [
         if (content.length > MAX_UPLOAD_BYTES) continue;
         attachments.push({ name: s.file, content, mime: mimeFor(s.file) });
       }
-      if (!attachments.length) return null;
-      return {
-        body: `**UI evidence** — ${attachments.length} screenshot(s).\n\n` +
-          shots.slice(0, 12).map((s) => `- \`${s.file}\`${s.caseId ? ` (${s.caseId})` : ''} — ${s.caption}`).join('\n'),
-        attachments,
-      };
+      if (!attachments.length && !observations.length) return null;
+      const parts = [`**UI evidence** — ${[
+        attachments.length ? `${attachments.length} screenshot(s)` : '',
+        observations.length ? `${observations.length} measured value(s)` : '',
+      ].filter(Boolean).join(' · ')}.`];
+      // Measured values first: for a change a screenshot cannot show, the table
+      // IS the evidence, and a reviewer should not have to scroll past pictures
+      // of an unchanged page to reach it.
+      if (observations.length) parts.push(observationTable(observations));
+      if (attachments.length) {
+        parts.push(shots.slice(0, 12)
+          .map((s) => `- \`${s.file}\`${s.caseId ? ` (${s.caseId})` : ''} — ${s.caption}`).join('\n'));
+      }
+      return { body: parts.join('\n\n'), attachments };
     },
   },
   {

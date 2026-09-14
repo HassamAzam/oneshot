@@ -117,6 +117,31 @@ expect_allow "log from a conductor phase" \
                                        git-guard.cjs "$(bash_payload 'git log --oneline -5')"
 export ONESHOT_WORKTREE="$SAVED_WORKTREE"
 
+# A phase that stands in the worktree without write access to it (ui-evidence,
+# review, mr, …) may read it and push, never change it. Ticket #189's ui-evidence
+# reverted the fix on disk with `git checkout <parent> -- <paths>` for a screenshot.
+SAVED_PHASE="$ONESHOT_PHASE"; SAVED_SCOPES="$ONESHOT_WRITE_SCOPES"
+export ONESHOT_PHASE="ui-evidence"
+export ONESHOT_WRITE_SCOPES="$ROOT/state/runs/0:$ROOT/state/runs/0/artifacts"
+expect_deny  "checkout <ref> -- <paths> from a read-only worktree phase" \
+                                       git-guard.cjs "$(bash_payload 'git checkout e843ab8 -- templates/registration/base.html')"
+expect_deny  "stash from a read-only worktree phase" \
+                                       git-guard.cjs "$(bash_payload 'git stash')"
+expect_deny  "restore from a read-only worktree phase" \
+                                       git-guard.cjs "$(bash_payload 'git restore --source=origin/dev templates/')"
+expect_deny  "commit from a read-only worktree phase" \
+                                       git-guard.cjs "$(bash_payload 'git commit -am wip')"
+expect_allow "show a base-branch file from a read-only worktree phase" \
+                                       git-guard.cjs "$(bash_payload 'git show origin/dev:templates/registration/base.html')"
+expect_allow "diff against base from a read-only worktree phase" \
+                                       git-guard.cjs "$(bash_payload 'git diff origin/dev...HEAD --stat')"
+export ONESHOT_PHASE="mr"
+expect_allow "push the leased branch from mr (read-only worktree)" \
+                                       git-guard.cjs "$(bash_payload 'git push -u origin oneshot/ticket-0-verify')"
+export ONESHOT_PHASE="$SAVED_PHASE"; export ONESHOT_WRITE_SCOPES="$SAVED_SCOPES"
+expect_allow "checkout from implement, which may write the worktree" \
+                                       git-guard.cjs "$(bash_payload 'git checkout -- frontend/src/x.js')"
+
 echo
 echo "write-scope"
 expect_deny  "hooks/ (its own guards)" write-scope.cjs "$(write_payload "$ROOT/hooks/git-guard.cjs")"

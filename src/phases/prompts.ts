@@ -994,7 +994,16 @@ full implement+review lap for what was only your own budgeting. A partial result
 
 ${ORACLE}
 
-Screenshot every fail and every high-blast pass, named \`<case-id>-<pass|fail>.png\`.
+Screenshot every fail and every high-blast pass, named \`<case-id>-<pass|fail>.png\` — when what
+the case asserts is VISIBLE in the viewport. A screenshot is published as proof of the case, so
+one that cannot show the asserted value proves nothing and reads as if it did: for a \`<title>\`,
+an \`aria-*\`/\`alt\` value, a header or a redirect, leave \`screenshot\` empty and put the measured
+value verbatim in \`evidence\`. Never add anything to the page before capturing it — no overlay,
+label, style or script; \`page.evaluate\` reads, it does not write.
+
+A case passes only if its precondition was really in place. If you could not establish it — the
+dark theme did not apply, the role could not be granted, the data could not be made — the case
+is 'skipped' or 'blocked' with that reason, never a 'pass' measured against the default state.
 
 ${artifactsBlock(ctx)}
 
@@ -1045,9 +1054,9 @@ ${taken.map((s) => `  - ${s.screenshot} (${s.id}, ${s.result})`).join('\n') || '
 Produce the screenshot pack a reviewer will look at INSTEAD of checking out the branch. Your
 pack is what verify's shots do not show:
 
-  - a BEFORE/AFTER pair for each changed screen. The 'before' is the base branch's behaviour;
-    if you cannot produce one without a second checkout, say so in the caption rather than
-    passing off an unchanged region as a before.
+  - a BEFORE/AFTER pair for each changed screen whose change you can SEE. The 'before' is the
+    base branch's behaviour; if you cannot produce one without a second checkout, say so in the
+    caption rather than passing off an unchanged region as a before.
   - the states a passing test never reaches: empty, loading, error, and the permission-denied
     view if the change touches a gated screen.
   - one shot per high-blast case that PASSED${highPassed.length ? ` (${highPassed.map((x) => x.id).join(', ')})` : ''}, so the pack shows the feature
@@ -1061,6 +1070,29 @@ because \`document\` links it.
 Filenames are \`<NN>-<slug>.png\`, zero-padded, in the order a reviewer should see them. The
 order IS the argument. Never reuse a filename from an earlier lap: a shot that silently
 overwrites its own 'before' destroys the pair.
+
+## A change a screenshot cannot show goes in \`observations\`, not in a picture
+
+Decide this FIRST. A \`<title>\`, an \`aria-*\`/\`alt\`/\`lang\` value, a meta tag, focus order, a
+response header — none of these is in the viewport, so a before/after screenshot of them is two
+identical pictures. For each such value, add one \`observations\` row: what was measured and on
+which URL, the base-branch value, this branch's value, both verbatim, and how you read it. That
+table is published as the evidence. Take no screenshot for a value the table already carries; a
+pack with zero screenshots and a full table is a complete pack for a non-visual change.
+
+The base-branch value comes from the base branch, read without touching this checkout:
+\`git show origin/${baseBranch()}:<path>\` for the template or component, stated as "from source" in
+\`how\`. If you cannot establish it, write "not measured" and why — never infer it.
+
+## Never alter what you are capturing
+
+- Do not inject anything into the page before a screenshot: no overlay, banner, label, style or
+  script. \`page.evaluate\` may READ the DOM, never write it. A caption painted onto the page is
+  text you wrote, presented as something the app rendered — and on #189 it covered the very
+  header a reviewer would check. Say it in \`caption\` instead.
+- Do not change the worktree to produce a 'before'. You have no write access to it, and the git
+  guard refuses \`checkout\`/\`restore\`/\`stash\`/\`reset\` from this phase: the files on disk are the
+  change under review, and anything left altered there is what \`mr\` pushes.
 
 ${artifactsBlock(ctx)}
 
