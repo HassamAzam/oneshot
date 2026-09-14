@@ -65,11 +65,36 @@ test('executeResponses skips threads already replied to and never resolves after
   const r = activeRound(markReplied({ rounds: [r0], handled: {} }, 'd1'))!;
   const calls: string[] = [];
   const out = await executeResponses(r, planResponses(r, { headSha: 'abcdef12', policy: 'all' }), {
-    reply: async (id) => { calls.push(`reply ${id}`); return id !== 'd2'; },
-    resolve: async (id) => { calls.push(`resolve ${id}`); return true; },
+    reply: async (id) => { calls.push(`reply ${id}`); return id === 'd2' ? 'failed' : 'ok'; },
+    resolve: async (id) => { calls.push(`resolve ${id}`); return 'ok'; },
   });
   assert.deepEqual(calls, ['resolve d1', 'reply d2', 'reply d3']);
-  assert.deepEqual(out, { replied: ['d3'], resolved: ['d1'], failures: ['reply to d2'] });
+  assert.deepEqual(out, { replied: ['d3'], resolved: ['d1'], gone: [], failures: ['reply to d2'] });
+});
+
+test('a thread deleted on GitLab is done, not a failure, and is never resolved', async () => {
+  const r = round();
+  const calls: string[] = [];
+  const out = await executeResponses(r, planResponses(r, { headSha: 'abcdef12', policy: 'all' }), {
+    reply: async (id) => { calls.push(`reply ${id}`); return id === 'd1' ? 'gone' : 'ok'; },
+    resolve: async (id) => { calls.push(`resolve ${id}`); return id === 'd2' ? 'gone' : 'ok'; },
+  });
+  assert.deepEqual(calls, ['reply d1', 'reply d2', 'resolve d2', 'reply d3']);
+  assert.deepEqual(out, { replied: ['d2', 'd3'], resolved: [], gone: ['d1', 'd2'], failures: [] });
+});
+
+test('executeResponses reports each landed write the moment it lands', async () => {
+  const r = round();
+  const events: string[] = [];
+  await executeResponses(r, planResponses(r, { headSha: 'abcdef12', policy: 'all' }), {
+    reply: async (id) => { events.push(`reply ${id}`); return id === 'd3' ? 'failed' : 'ok'; },
+    resolve: async (id) => { events.push(`resolve ${id}`); return 'ok'; },
+    onReplied: (id) => events.push(`replied ${id}`),
+    onResolved: (id) => events.push(`resolved ${id}`),
+  });
+  assert.deepEqual(events, [
+    'reply d1', 'replied d1', 'resolve d1', 'resolved d1', 'reply d2', 'replied d2', 'resolve d2', 'resolved d2', 'reply d3',
+  ]);
 });
 
 /** One thread, one non-fix item of the given disposition, for disposition-shaped checks. */

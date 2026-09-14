@@ -1,5 +1,5 @@
-import { activeRound, completeRound, markReplied, markResolved } from './ledger.js';
-import { executeResponses, planResponses } from './respond.js';
+import { activeRound, completeRound, markReplied, markResolved, noteRespondFailure } from './ledger.js';
+import { executeResponses, planResponses, type ThreadWriteResult } from './respond.js';
 import { actionableThreads } from './threads.js';
 import type { FeedbackThread, MrDiscussion, MrFeedbackConfig, MrFeedbackLedger } from './types.js';
 
@@ -11,14 +11,22 @@ export interface MergeHookDeps {
   /** null when GitLab could not be read. */
   discussions(mrIid: number): Promise<MrDiscussion[] | null>;
   headSha(mrIid: number): Promise<string | null>;
-  reply(mrIid: number, discussionId: string, body: string): Promise<boolean>;
-  resolve(mrIid: number, discussionId: string): Promise<boolean>;
+  reply(mrIid: number, discussionId: string, body: string): Promise<ThreadWriteResult>;
+  resolve(mrIid: number, discussionId: string): Promise<ThreadWriteResult>;
 }
+
+/**
+ * Failed answering passes a round gets before merge stops parking and blocks.
+ * A refused or locked thread fails the same way every pass; without a cap the
+ * run would park on it forever, never merging and never telling anyone.
+ */
+export const MAX_RESPOND_ATTEMPTS = 3;
 
 export type RespondOutcome =
   | { kind: 'none' }
   | { kind: 'done'; replied: number; resolved: number }
-  | { kind: 'retry-later'; why: string };
+  | { kind: 'retry-later'; why: string }
+  | { kind: 'give-up'; why: string };
 
 export interface MergeHooks {
   respondToActiveRound(mrIid: number): Promise<RespondOutcome>;
@@ -42,24 +50,31 @@ export function createMergeHooks(deps: MergeHookDeps): MergeHooks {
         return { kind: 'none' };
       }
 
+      let next: MrFeedbackLedger = ledger;
+      const failedPass = (why: string): RespondOutcome => {
+        next = noteRespondFailure(next);
+        deps.writeLedger(next);
+        const spent = activeRound(next)?.respondAttempts ?? 0;
+        return spent >= MAX_RESPOND_ATTEMPTS
+          ? { kind: 'give-up', why: `${why} — gave up after ${spent} attempts` }
+          : { kind: 'retry-later', why };
+      };
+
       const sha = await deps.headSha(mrIid);
-      if (!sha) return { kind: 'retry-later', why: `cannot read the head of !${mrIid} to cite in review replies` };
+      if (!sha) return failedPass(`cannot read the head of !${mrIid} to cite in review replies`);
 
       const actions = planResponses(round, { headSha: sha, policy: deps.config.resolve });
+      // Each landed write is journaled before the next is attempted: a crash
+      // mid-answer must not re-post a reply the reviewer has already seen.
       const result = await executeResponses(round, actions, {
         reply: (id, body) => deps.reply(mrIid, id, body),
         resolve: (id) => deps.resolve(mrIid, id),
+        onReplied: (id) => { next = markReplied(next, id); deps.writeLedger(next); },
+        onResolved: (id) => { next = markResolved(next, id); deps.writeLedger(next); },
       });
 
-      let next: MrFeedbackLedger = ledger;
-      for (const id of result.replied) next = markReplied(next, id);
-      for (const id of result.resolved) next = markResolved(next, id);
       if (result.failures.length) {
-        deps.writeLedger(next);
-        return {
-          kind: 'retry-later',
-          why: `could not finish answering review threads on !${mrIid}: ${result.failures.join('; ')}`,
-        };
+        return failedPass(`could not finish answering review threads on !${mrIid}: ${result.failures.join('; ')}`);
       }
 
       const lastNote = new Map(round.threads.map((t) => [t.discussionId, t.lastNoteId]));

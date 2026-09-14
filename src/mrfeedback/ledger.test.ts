@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   activeRound, addressedFeedbackOf, completeRound, emptyLedger, markReplied, markResolved,
-  normaliseItems, phasesOwedByRound, recordAddressed, roundsUsed, startRound,
+  normaliseItems, noteRespondFailure, phasesOwedByRound, recordAddressed, roundsUsed, startRound,
 } from './ledger.js';
 import type { FeedbackThread } from './types.js';
 
@@ -95,4 +95,11 @@ test('a warned record since the round started counts as done; a failed one does 
     { phase: 'verify', status: 'failed', startedAt: 700 },
   ];
   assert.deepEqual(phasesOwedByRound(l, records, FIX_WINDOW), ['verify', 'ui-evidence', 'mr']);
+});
+
+test('a new round has spent no answering attempts; each noted failure adds one', () => {
+  const l = startRound(emptyLedger(), { mrIid: 4, threads: [t1], items: normaliseItems(triage, [t1]), now: 1 });
+  assert.equal(activeRound(l)?.respondAttempts, 0);
+  assert.equal(activeRound(noteRespondFailure(noteRespondFailure(l)))?.respondAttempts, 2);
+  assert.equal(noteRespondFailure(emptyLedger()).rounds.length, 0);
 });

@@ -90,6 +90,8 @@ export interface FeedbackRound {
   /** Discussion ids already replied to — what makes answering safe to retry. */
   replied: string[];
   resolved: string[];
+  /** Merge passes whose answering ended in a failure. Absent on rounds journaled before it existed: read as 0. */
+  respondAttempts: number;
 }
 
 export interface MrFeedbackLedger {

@@ -897,6 +897,9 @@ export async function mergePhase(
   const feedback = mrFeedbackActive() ? mergeHooksFor(ctx.iid) : null;
   if (feedback) {
     const answered = await feedback.respondToActiveRound(mrIid);
+    // Parking again cannot fix a thread GitLab keeps refusing: past the attempt
+    // cap the run blocks, so a person hears about it instead of it never merging.
+    if (answered.kind === 'give-up') return failMerge(ctx, rec, answered.why);
     if (answered.kind === 'retry-later') {
       rec.summary = `answering review threads on !${mrIid} did not complete`;
       persistMerge(ctx, rec);

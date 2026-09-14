@@ -65,33 +65,55 @@ export function planResponses(
   });
 }
 
+/** How a write to a thread ended. 'gone': the thread no longer exists, so there is nothing left to answer. */
+export type ThreadWriteResult = 'ok' | 'gone' | 'failed';
+
 export interface ResponseApi {
-  reply(discussionId: string, body: string): Promise<boolean>;
-  resolve(discussionId: string): Promise<boolean>;
+  reply(discussionId: string, body: string): Promise<ThreadWriteResult>;
+  resolve(discussionId: string): Promise<ThreadWriteResult>;
+  /** Called as each reply lands, before the next write is attempted. */
+  onReplied?(discussionId: string): void;
+  /** Called as each resolve lands, before the next write is attempted. */
+  onResolved?(discussionId: string): void;
 }
 
 /**
- * Post the plan, skipping what the round already records as done, so a merge
- * pass that dies halfway never double-posts on retry.
+ * Post the plan, skipping what the round already records as done. Each write
+ * that lands is reported through `onReplied`/`onResolved` the moment it lands,
+ * so a caller that persists there never double-posts after a crash mid-answer.
+ *
+ * A thread that is gone counts as answered, not failed: retrying a deleted
+ * thread can never succeed, and must not hold the round open.
  */
 export async function executeResponses(
   round: FeedbackRound, actions: ResponseAction[], api: ResponseApi,
-): Promise<{ replied: string[]; resolved: string[]; failures: string[] }> {
+): Promise<{ replied: string[]; resolved: string[]; gone: string[]; failures: string[] }> {
   const replied: string[] = [];
   const resolved: string[] = [];
+  const gone: string[] = [];
   const failures: string[] = [];
   for (const a of actions) {
     if (!round.replied.includes(a.discussionId)) {
-      if (!await api.reply(a.discussionId, a.body)) {
-        failures.push(`reply to ${a.discussionId}`);
+      const r = await api.reply(a.discussionId, a.body);
+      if (r !== 'ok') {
+        if (r === 'gone') gone.push(a.discussionId);
+        else failures.push(`reply to ${a.discussionId}`);
         continue;
       }
       replied.push(a.discussionId);
+      api.onReplied?.(a.discussionId);
     }
     if (a.resolve && !round.resolved.includes(a.discussionId)) {
-      if (await api.resolve(a.discussionId)) resolved.push(a.discussionId);
-      else failures.push(`resolve ${a.discussionId}`);
+      const r = await api.resolve(a.discussionId);
+      if (r === 'ok') {
+        resolved.push(a.discussionId);
+        api.onResolved?.(a.discussionId);
+      } else if (r === 'gone') {
+        gone.push(a.discussionId);
+      } else {
+        failures.push(`resolve ${a.discussionId}`);
+      }
     }
   }
-  return { replied, resolved, failures };
+  return { replied, resolved, gone, failures };
 }

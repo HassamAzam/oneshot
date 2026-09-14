@@ -20,8 +20,8 @@ function harness(over: Partial<MergeHookDeps> = {}, initial?: MrFeedbackLedger) 
     writeLedger: (l) => { state.ledger = l; },
     discussions: async () => [],
     headSha: async () => 'abcdef1234567890',
-    reply: async (_mr, id) => { state.calls.push(`reply ${id}`); return true; },
-    resolve: async (_mr, id) => { state.calls.push(`resolve ${id}`); return true; },
+    reply: async (_mr, id) => { state.calls.push(`reply ${id}`); return 'ok'; },
+    resolve: async (_mr, id) => { state.calls.push(`resolve ${id}`); return 'ok'; },
     ...over,
   };
   return { hooks: createMergeHooks(deps), state };
@@ -43,7 +43,7 @@ test('a fixed round is answered, resolved, closed and watermarked', async () => 
 
 test('a failed resolve keeps the round open, and the retry does not double-post the reply', async () => {
   let resolveWorks = false;
-  const { hooks, state } = harness({ resolve: async () => resolveWorks }, fixingLedger());
+  const { hooks, state } = harness({ resolve: async () => (resolveWorks ? 'ok' : 'failed') }, fixingLedger());
   const first = await hooks.respondToActiveRound(7);
   assert.equal(first.kind, 'retry-later');
   assert.deepEqual(activeRound(state.ledger)?.replied, ['d1']);
@@ -52,6 +52,43 @@ test('a failed resolve keeps the round open, and the retry does not double-post 
   assert.equal((await hooks.respondToActiveRound(7)).kind, 'done');
   assert.deepEqual(state.calls, ['reply d1']);
   assert.deepEqual(state.ledger?.rounds[0]?.resolved, ['d1']);
+});
+
+test('a reply is on the ledger before a later write fails, so a crash there cannot double-post it', async () => {
+  let repliedWhenResolving: string[] | undefined;
+  const h = harness({
+    resolve: async () => { repliedWhenResolving = activeRound(h.state.ledger)?.replied; return 'failed'; },
+  }, fixingLedger());
+  await h.hooks.respondToActiveRound(7);
+  assert.deepEqual(repliedWhenResolving, ['d1']);
+});
+
+test('a thread deleted on GitLab completes the round without failure', async () => {
+  const { hooks, state } = harness({ reply: async () => 'gone' }, fixingLedger());
+  assert.equal((await hooks.respondToActiveRound(7)).kind, 'done');
+  assert.equal(activeRound(state.ledger), null);
+});
+
+test('answering gives up on the third failed pass, counting passes on the ledger', async () => {
+  const { hooks, state } = harness({ reply: async () => 'failed' }, fixingLedger());
+  assert.equal((await hooks.respondToActiveRound(7)).kind, 'retry-later');
+  assert.equal(activeRound(state.ledger)?.respondAttempts, 1);
+
+  // A fresh hooks object over the same journal: the count lives in the ledger, not in memory.
+  const again = harness({ reply: async () => 'failed' }, state.ledger);
+  assert.equal((await again.hooks.respondToActiveRound(7)).kind, 'retry-later');
+  const third = await again.hooks.respondToActiveRound(7);
+  assert.equal(third.kind, 'give-up');
+  assert.match(third.kind === 'give-up' ? third.why : '', /reply to d1/);
+  assert.equal(activeRound(again.state.ledger)?.respondAttempts, 3);
+});
+
+test('a round journaled before attempts were counted starts from zero', async () => {
+  const l = fixingLedger();
+  delete (l.rounds[0] as { respondAttempts?: number }).respondAttempts;
+  const { hooks, state } = harness({ reply: async () => 'failed' }, l);
+  assert.equal((await hooks.respondToActiveRound(7)).kind, 'retry-later');
+  assert.equal(activeRound(state.ledger)?.respondAttempts, 1);
 });
 
 test('an unreadable head sha defers the answer', async () => {

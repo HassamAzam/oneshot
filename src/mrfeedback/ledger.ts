@@ -62,6 +62,7 @@ export function startRound(
     addressed: [],
     replied: [],
     resolved: [],
+    respondAttempts: 0,
   };
   return { ...l, rounds: [...l.rounds, round] };
 }
@@ -102,6 +103,11 @@ export function markReplied(l: MrFeedbackLedger, discussionId: string): MrFeedba
 
 export function markResolved(l: MrFeedbackLedger, discussionId: string): MrFeedbackLedger {
   return withActive(l, (r) => (r.resolved.includes(discussionId) ? r : { ...r, resolved: [...r.resolved, discussionId] }));
+}
+
+/** Count one merge pass that could not finish answering — what bounds retrying a thread GitLab refuses. */
+export function noteRespondFailure(l: MrFeedbackLedger): MrFeedbackLedger {
+  return withActive(l, (r) => ({ ...r, respondAttempts: (r.respondAttempts ?? 0) + 1 }));
 }
 
 /** Close the round. Only threads passed in `handled` stop being actionable. */
