@@ -9,6 +9,24 @@ export interface ResponseAction {
   handled: boolean;
 }
 
+const ZWSP = '\u200B';
+
+/**
+ * Model-written text made inert before it is posted as a note.
+ *
+ * GitLab runs quick actions (`/merge`, `/approve`, `/label` …) found at the
+ * start of a line in any note created through the API, under the operator's
+ * token — so a triage reply could merge past qualityGate, the promotion window
+ * and a Review ticket's human merge. A zero-width space directly before the
+ * slash keeps the text reading the same while no line starts with a command;
+ * the same character after `@` stops `@all` / `@user` from pinging anyone.
+ */
+function inertNoteText(text: string): string {
+  return text
+    .replace(/^([^\S\r\n]*)\//gm, `$1${ZWSP}/`)
+    .replace(/@(?=\S)/g, `@${ZWSP}`);
+}
+
 /**
  * One reply per thread in the round, and whether the policy closes it.
  *
@@ -34,11 +52,11 @@ export function planResponses(
 
     let unaddressed = false;
     const lines = items.map((i) => {
-      if (i.disposition !== 'fix') return i.reply.trim() || 'Read — no change made.';
+      if (i.disposition !== 'fix') return inertNoteText(i.reply.trim()) || 'Read — no change made.';
       const done = addressed.get(i.id);
-      if (done) return `Addressed: ${done.note.trim()}`;
+      if (done) return `Addressed: ${inertNoteText(done.note.trim())}`;
       unaddressed = true;
-      return `Not addressed yet: ${i.request.trim()}`;
+      return `Not addressed yet: ${inertNoteText(i.request.trim())}`;
     });
 
     const onlyFixes = items.every((i) => i.disposition === 'fix');

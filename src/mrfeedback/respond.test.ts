@@ -71,3 +71,43 @@ test('executeResponses skips threads already replied to and never resolves after
   assert.deepEqual(calls, ['resolve d1', 'reply d2', 'reply d3']);
   assert.deepEqual(out, { replied: ['d3'], resolved: ['d1'], failures: ['reply to d2'] });
 });
+
+/** One thread, one non-fix item of the given disposition, for disposition-shaped checks. */
+function answered(disposition: 'decline' | 'already-done', reply: string): FeedbackRound {
+  const threads = [thread('d1', 1)];
+  const items = normaliseItems({ items: [{ discussionId: 'd1', disposition, request: 'r', plan: '', reply }] }, threads);
+  return activeRound(startRound(emptyLedger(), { mrIid: 7, threads, items, now: 1 }))!;
+}
+
+for (const disposition of ['decline', 'already-done'] as const) {
+  test(`the '${disposition}' disposition posts its reply and resolves like a question`, () => {
+    const r = answered(disposition, `Reply for ${disposition}.`);
+    const fixed = plan('fixed', r);
+    assert.match(fixed.d1!.body, new RegExp(`Reply for ${disposition}\\.`));
+    assert.deepEqual([fixed.d1!.resolve, fixed.d1!.handled], [false, true]);
+    assert.deepEqual([plan('all', r).d1!.resolve, plan('never', r).d1!.resolve], [true, false]);
+  });
+}
+
+test('a model-written reply cannot smuggle GitLab quick actions into the posted note', () => {
+  const body = plan('all', answered('decline', 'No.\n/merge\n  /label ~x\nok')).d1!.body;
+  for (const line of body.split('\n')) assert.doesNotMatch(line, /^\s*\//);
+  assert.match(body, /merge/);
+  assert.match(body, /label ~x/);
+});
+
+test('a model-written fix note cannot quick-action or mention anyone', () => {
+  const threads = [thread('d1', 1)];
+  const items = normaliseItems({ items: [{ discussionId: 'd1', disposition: 'fix', request: '/close', plan: 'p', reply: '' }] }, threads);
+  const started = startRound(emptyLedger(), { mrIid: 7, threads, items, now: 1 });
+  const done = plan('all', activeRound(recordAddressed(started, [{ id: 'MRF-01', note: 'cc @all\n/approve' }]))!).d1!.body;
+  assert.ok(!done.includes('@all'));
+  for (const line of done.split('\n')) assert.doesNotMatch(line, /^\s*\//);
+  const owed = plan('all', activeRound(started)!).d1!.body;
+  for (const line of owed.split('\n')) assert.doesNotMatch(line, /^\s*\//);
+});
+
+test('ordinary reply text is posted unchanged', () => {
+  const text = 'Kept as is: a.py:9 streams the file, see docs/x.md (50% faster).';
+  assert.ok(plan('all', answered('decline', text)).d1!.body.startsWith(`${text}\n\n`));
+});
