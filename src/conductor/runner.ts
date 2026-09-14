@@ -1239,7 +1239,12 @@ export async function runTicket(
       return { kind: 'advance' };
     }
 
-    const failed = failedLapsOf(iid, p.name);
+    // Inside an MR review round's fix lap the retry and cycle budgets start
+    // over: a review that failed twice before the MR opened has not spent the
+    // budget for revising a reviewer's requested change.
+    const round = activeRound(j.mrFeedback);
+    const since = round?.status === 'fixing' ? round.startedAt : 0;
+    const failed = failedLapsOf(iid, p.name, since);
 
     if (p.onFail === 'retry') {
       const budget = p.maxRetries ?? 1;
