@@ -24,6 +24,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { STATE, artifactDir, runDir } from './config.js';
+import type { MrFeedbackLedger } from '../mrfeedback/types.js';
 
 const RUNS_ARCHIVE = join(STATE, 'runs-archive');
 
@@ -177,6 +178,8 @@ export interface RunJournal {
   phases: PhaseRecord[];
   /** Blocks this run diagnosed and tried to clear by itself, oldest first. */
   remediations?: Remediation[];
+  /** MR review-feedback rounds and per-thread watermarks — see src/mrfeedback. */
+  mrFeedback?: MrFeedbackLedger;
 }
 
 function journalPath(iid: number): string {

@@ -14,6 +14,7 @@
     "preflight": "tsx scripts/preflight.ts",
     "setup": "tsx scripts/setup.ts",
     "unblock": "tsx scripts/unblock.ts",
+    "mr-feedback:probe": "tsx scripts/mr-feedback-probe.ts",
     "report": "tsx scripts/report.ts",
     "hooks:verify": "bash scripts/verify-hooks.sh",
     "verify": "npm run deps:verify && npm run hooks:verify && npm run doctor",
