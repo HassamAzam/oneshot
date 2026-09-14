@@ -11,6 +11,7 @@
  * is a model that misunderstood the contract, and silently accepting it means
  * the next phase reads a field that will not be there next time.
  */
+import { ADDRESSED_FEEDBACK_PROP, MR_FEEDBACK_PROPS } from '../mrfeedback/schema.js';
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -194,7 +195,8 @@ export const IMPLEMENT_SCHEMA = phaseSchema({
   lintClean: { type: 'boolean', description: 'flake8 + pylint + eslint all pass.' },
   testsRun: str('What was run and the outcome. Empty string if none were run.'),
   addressedFindings: strArr('Finding ids from a previous review lap that this lap fixed.'),
-}, ['commits', 'filesChanged', 'migrationsAdded', 'lintClean', 'testsRun', 'addressedFindings']);
+  addressedFeedback: ADDRESSED_FEEDBACK_PROP,
+}, ['commits', 'filesChanged', 'migrationsAdded', 'lintClean', 'testsRun', 'addressedFindings', 'addressedFeedback']);
 
 export const FINDINGS_SCHEMA = phaseSchema({
   verdict: { type: 'string', enum: ['approve', 'changes-requested'] },
@@ -323,6 +325,9 @@ export const REMEDIATE_SCHEMA = phaseSchema({
   ),
 }, ['diagnosis', 'category', 'fixed', 'changes', 'retryFrom', 'humanNeeded']);
 
+/** Triage of MR review threads — the on-demand `mr-feedback` phase. See src/mrfeedback. */
+export const MR_FEEDBACK_SCHEMA = phaseSchema(MR_FEEDBACK_PROPS, ['items']);
+
 export const SCHEMAS: Record<string, JsonSchema> = {
   recall: RECALL_SCHEMA,
   research: RESEARCH_SCHEMA,
@@ -334,6 +339,7 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   'ui-evidence': UI_EVIDENCE_SCHEMA,
   mr: MR_SCHEMA,
   remediate: REMEDIATE_SCHEMA,
+  'mr-feedback': MR_FEEDBACK_SCHEMA,
 };
 
 export function schemaFor(phase: string): JsonSchema | undefined {

@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 import { homedir, userInfo } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
 import { deskUsername } from './identity.js';
+import { parseMrFeedbackConfig } from '../mrfeedback/config.js';
+import type { MrFeedbackConfig } from '../mrfeedback/types.js';
 
 export const ROOT: string = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -322,6 +324,16 @@ export function reviewersConfig(): ReviewersConfig {
     };
   }
   return _reviewers;
+}
+
+let _mrFeedback: MrFeedbackConfig | null = null;
+/** config/mr-feedback.json, validated. A missing file is the feature switched off. */
+export function mrFeedbackConfig(): MrFeedbackConfig {
+  if (!_mrFeedback) {
+    const present = existsSync(join(ROOT, 'config', 'mr-feedback.json'));
+    _mrFeedback = parseMrFeedbackConfig(present ? loadJson<unknown>('mr-feedback.json') : {}, reviewersConfig());
+  }
+  return _mrFeedback;
 }
 
 export function modelFor(phase: PhaseConfig): string {

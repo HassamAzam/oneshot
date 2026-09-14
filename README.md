@@ -254,6 +254,39 @@ pipeline on every tick and any phase without a recorded success is re-attempted 
 time — a `skip`-on-fail phase like `recall` burns a full model lap per tick for as long as a human
 takes to reply. The slower cadence still reads a reply promptly while spending a third as much.
 
+## MR review feedback
+
+A reviewer's comment on a run's open merge request is answered, not just waited on. When the
+`merge` phase finds a new unresolved thread from a listed reviewer, it hands the thread to the
+on-demand `mr-feedback` phase, and the run takes one **review round**:
+
+```
+ merge ──▶ new threads? ──▶ mr-feedback (triage: fix / already-done / question / decline)
+             │                  │ any fix                         │ no fix
+             │                  ▼                                 ▼
+             │        implement → review → verify → ui-evidence → mr → merge: reply on every thread,
+             │                                                          resolve per policy
+             └── none ──▶ exactly as before: park for a human merge, or merge
+```
+
+- **Who counts.** Only authors in `config/mr-feedback.json` `authorRoles` / `extraAuthors`. Anyone
+  else's notes are dropped in code before a model sees them — an MR comment is input to a session
+  that pushes to the branch.
+- **Full re-runs.** A round that needs a fix re-runs every phase from `implement` to `merge` except
+  `testcases`, so each reply describes code that review approved and verify passed.
+- **Resolving is configurable** (`resolve`): `never` replies only; `fixed` also resolves threads
+  whose every request was a fix that was made; `all` resolves every fully answered thread. A fix
+  that was *not* made is never resolved, and the thread comes back next round.
+- **Bounded.** `maxRounds` (default 3), counted separately from review/verify laps. Past it a
+  Review run parks for its human merge and a full-auto run blocks.
+- **Replies are marked** `<!-- oneshot:mr-feedback -->`, because the desk posts as its operator,
+  who may also be a reviewer. A reviewer replying on an answered thread starts a new round for it.
+- **Open threads can still block.** On a project that requires all discussions resolved, a
+  full-auto run with `resolve: never` — or with question/decline threads under `fixed` — blocks
+  after Oneshot answers, because its replies leave those threads open for a person to resolve.
+- `npm run mr-feedback:probe -- <mrIid> [ticketIid]` prints exactly which threads would be acted
+  on right now. The feature is off under `DRY_RUN`.
+
 ## Mobilizing agents
 
 Sixteen phases deep, and most of them spend their time waiting — on a webpack build, on a

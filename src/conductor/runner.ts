@@ -47,6 +47,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { promisify } from 'node:util';
 import {
   DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, modelFor,
+  mrFeedbackConfig,
   phases, portPool, projectConfig,
   operatorName,
   type PhaseConfig,
@@ -87,6 +88,11 @@ import {
 } from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { Ticket, TestCase } from '../phases/types.js';
+import {
+  activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
+  roundsUsed, startRound,
+} from '../mrfeedback/ledger.js';
+import type { MrFeedbackSignal } from '../mrfeedback/types.js';
 
 const exec = promisify(execFile);
 
@@ -180,6 +186,8 @@ export const CODE_PHASES: Record<
      * or a still-running pipeline is not.
      */
     park?: boolean;
+    /** Set only by `merge`: new MR review threads for the runner to triage. */
+    feedback?: MrFeedbackSignal;
   }>) | undefined
 > = {
   merge: mergePhase,
@@ -294,7 +302,11 @@ type Control =
   | { kind: 'advance' }
   | { kind: 'retry'; at: number }
   | { kind: 'cycle'; jumpTo: number; windowEnd: number }
-  | { kind: 'stop'; status: 'blocked' | 'aborted' | 'parked'; reason: string };
+  | {
+    kind: 'stop'; status: 'blocked' | 'aborted' | 'parked'; reason: string;
+    /** The block is a verdict for a person, not an environment fault — do not spend a remediation on it. */
+    noRemediation?: boolean;
+  };
 
 function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] {
   if (p.onFail === 'skip') return 'skipped';
@@ -606,6 +618,21 @@ export async function runTicket(
    * "and here is what the machine already ruled out" wastes the attempt.
    */
   let remediationNote = '';
+
+  // A review-feedback round that lost the process anywhere in its fix lap —
+  // before implement succeeded, or after implement but before review, verify
+  // or mr re-ran. `forced` above is in memory only, so without this a resume
+  // would skip straight past whichever of those phases still holds a
+  // pre-round record, and merge would answer reviewers about code nobody
+  // re-reviewed, re-verified, or even re-pushed.
+  {
+    const from = list.findIndex((p) => p.name === 'implement');
+    const to = list.findIndex((p) => p.name === 'merge');
+    const window = from !== -1 && to !== -1
+      ? list.slice(from, to).filter((p) => p.name !== 'testcases' && !p.onDemand).map((p) => p.name)
+      : [];
+    for (const name of phasesOwedByRound(j.mrFeedback, j.phases, window)) forced.add(name);
+  }
 
   let i = 0;
   while (i < list.length) {
@@ -1000,6 +1027,12 @@ export async function runTicket(
       }
 
       prior[r.cfg.name] = r.out.data;
+      if (r.cfg.name === 'implement' && activeRound(j.mrFeedback)?.status === 'fixing') {
+        const addressed = addressedFeedbackOf(r.out.data);
+        if (addressed.length) {
+          j = updateJournal(iid, { mrFeedback: recordAddressed(j.mrFeedback!, addressed) }) ?? j;
+        }
+      }
       if (isMilestone(r.cfg)) await thread(j.slackTs ?? null, milestoneText(r.cfg, r.out.data, iid));
     }
 
@@ -1153,6 +1186,14 @@ export async function runTicket(
       if (isMilestone(p)) await thread(j.slackTs ?? null, milestoneText(p, prior[p.name] ?? null, iid));
       return { kind: 'advance' };
     }
+    if (done.feedback) {
+      // Nothing of this run has landed on the base branch — the MR is still
+      // opened — so holding the promotion window through triage and a possibly
+      // hours-long implement→verify→mr lap only starves every other run on the
+      // machine for no reason. The next merge entry re-acquires in queue order.
+      releasePromotion(runId);
+      return feedbackRound(index, done.feedback);
+    }
     // A parked code phase (currently only the Review label's merge-readiness
     // check) bypasses the phase's own onFail policy entirely — 'merge' is
     // configured 'blocked', which is right for a genuine merge failure and
@@ -1198,7 +1239,12 @@ export async function runTicket(
       return { kind: 'advance' };
     }
 
-    const failed = failedLapsOf(iid, p.name);
+    // Inside an MR review round's fix lap the retry and cycle budgets start
+    // over: a review that failed twice before the MR opened has not spent the
+    // budget for revising a reviewer's requested change.
+    const round = activeRound(j.mrFeedback);
+    const since = round?.status === 'fixing' ? round.startedAt : 0;
+    const failed = failedLapsOf(iid, p.name, since);
 
     if (p.onFail === 'retry') {
       const budget = p.maxRetries ?? 1;
@@ -1230,6 +1276,97 @@ export async function runTicket(
     }
 
     return { kind: 'stop', status: 'blocked', reason: `${p.name}: ${why}` };
+  }
+
+  /**
+   * One round of MR review feedback: triage the new threads, then either cycle
+   * back to `implement` (something needs a code change — every phase up to
+   * merge re-runs) or re-enter `merge` at once so it posts the replies (nothing
+   * does). Rounds are counted on their own, not as failures, so review and
+   * verify keep their full lap budgets inside a round.
+   */
+  async function feedbackRound(mergeIndex: number, signal: MrFeedbackSignal): Promise<Control> {
+    // A stop or pause asked for during merge must not be spent on a triage session.
+    if (opts.signal?.aborted) {
+      return { kind: 'stop', status: 'aborted', reason: 'the conductor asked this run to stop' };
+    }
+    if (existsSync(PAUSE)) {
+      return { kind: 'stop', status: 'aborted', reason: 'paused mid-phase — resumes when unpaused' };
+    }
+
+    const fcfg = mrFeedbackConfig();
+    const ledger = j.mrFeedback ?? emptyLedger();
+
+    if (roundsUsed(ledger) >= fcfg.maxRounds) {
+      const reason = `mr-feedback: ${signal.threads.length} new review thread(s) on !${signal.mrIid} after `
+        + `${fcfg.maxRounds} round(s) — a person takes the review from here`;
+      if (j.reviewMode) {
+        // A human already owns the merge on a Review run; wait for them rather than alarm.
+        j = updateJournal(iid, { humanMergeCheckAt: Date.now() }) ?? j;
+        return { kind: 'stop', status: 'parked', reason: `${reason}; still awaiting a human merge` };
+      }
+      return { kind: 'stop', status: 'blocked', reason, noRemediation: true };
+    }
+
+    const cfgT = list.find((q) => q.name === 'mr-feedback');
+    if (!cfgT || !isImplemented(cfgT.name)) {
+      return { kind: 'stop', status: 'blocked', reason: 'mr-feedback: the phase is missing from config/phases.json', noRemediation: true };
+    }
+    const leaseError = ensureLeases(cfgT);
+    if (leaseError) return { kind: 'stop', status: 'blocked', reason: leaseError };
+    const lap = lapsOf(iid, cfgT.name);
+    const quota = checkQuota(runId, cfgT.name, lap);
+    if (!quota.allowed) return { kind: 'stop', status: 'blocked', reason: `quota: ${quota.reason}` };
+
+    const startedAt = Date.now();
+    await updateCard(j.slackTs ?? '', cardState(j, [cfgT.name]));
+    updateRun(runId, { phase: cfgT.name, status: 'running', owner_seen_at: Date.now() });
+
+    const ctx: PromptCtx = {
+      ticket, runId, lap, branch, worktree, port, prior, journal: j, mrThreads: signal,
+    };
+    const rowId = phaseStart(runId, cfgT.name, lap, modelFor(cfgT));
+    const out = await runPhase({
+      iid, runId, lap, cfg: cfgT,
+      prompt: promptFor(cfgT, ctx),
+      systemPrompt: systemPromptFor(cfgT, ctx),
+      worktree, port, branch,
+      signal: opts.signal,
+    });
+    phaseEnd(rowId, out.ok ? 'ok' : statusForFailure(cfgT, out.infra), {
+      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+      detail: out.error ?? out.blocked ?? undefined,
+    });
+    recordPhase(iid, {
+      phase: cfgT.name, lap,
+      status: out.ok ? 'ok' : statusForFailure(cfgT, out.infra),
+      startedAt, endedAt: Date.now(), model: modelFor(cfgT),
+      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+      error: out.error ?? out.blocked ?? undefined,
+    });
+    j = readJournal(iid) ?? j;
+    await updateCard(j.slackTs ?? '', cardState(j));
+
+    // Retrying at merge re-detects the same threads, so an infra death re-triages for free.
+    if (!out.ok) return afterFailure(cfgT, mergeIndex, out.blocked ?? out.error ?? 'triage failed', out.infra);
+
+    const items = normaliseItems(out.data, signal.threads);
+    const next = startRound(ledger, { mrIid: signal.mrIid, threads: signal.threads, items, now: startedAt });
+    j = updateJournal(iid, { mrFeedback: next }) ?? j;
+    const round = activeRound(next)!;
+    const fixes = items.filter((x) => x.disposition === 'fix').length;
+    await thread(j.slackTs ?? null,
+      `#${iid} — review round ${round.n} on !${signal.mrIid}: ${signal.threads.length} thread(s), `
+      + `${fixes} to fix, ${items.length - fixes} to answer`);
+
+    if (round.status === 'fixing') {
+      const jumpTo = list.findIndex((q) => q.name === 'implement');
+      if (jumpTo === -1) {
+        return { kind: 'stop', status: 'blocked', reason: 'mr-feedback: implement is not in the phase list', noRemediation: true };
+      }
+      return { kind: 'cycle', jumpTo, windowEnd: mergeIndex };
+    }
+    return { kind: 'retry', at: mergeIndex };
   }
 
   /**
@@ -1291,7 +1428,7 @@ export async function runTicket(
   async function resumeAfterRemediation(
     control: Extract<Control, { kind: 'stop' }>, from: string,
   ): Promise<number | null> {
-    if (control.status !== 'blocked') return null;
+    if (control.status !== 'blocked' || control.noRemediation) return null;
 
     const resumeFrom = await attemptRemediation(from, control.reason);
     if (!resumeFrom) return null;

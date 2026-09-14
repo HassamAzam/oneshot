@@ -140,6 +140,17 @@ function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
       'mcp__gitlab__push_files',
       'mcp__gitlab__create_or_update_file',
       'mcp__gitlab__create_branch',
+      // Thread writes. The review-feedback loop posts and resolves from conductor
+      // code after verification; a session that could do either would answer a
+      // reviewer on the strength of work nobody has checked yet.
+      'mcp__gitlab__create_merge_request_thread',
+      'mcp__gitlab__create_note',
+      'mcp__gitlab__update_merge_request_note',
+      'mcp__gitlab__update_issue_note',
+      'mcp__gitlab__create_draft_note',
+      'mcp__gitlab__update_draft_note',
+      'mcp__gitlab__publish_draft_note',
+      'mcp__gitlab__bulk_publish_draft_notes',
     );
   }
 

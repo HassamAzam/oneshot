@@ -1,0 +1,14 @@
+{
+  "_comment": "MR review feedback (src/mrfeedback). When a listed reviewer comments on a run's open merge request, the merge phase hands the new threads to the on-demand `mr-feedback` phase, the run cycles back through implement → review → verify → ui-evidence → mr for anything that needs a code change, and the merge phase then replies on every thread. Ships OFF; see README 'MR review feedback'. Ignored entirely under DRY_RUN.",
+  "enabled": false,
+
+  "_comment_resolve": "never = reply only, the reviewer resolves their own thread. fixed = also resolve a thread when every request in it was a code fix and every fix was made and verified. all = resolve every thread Oneshot fully answered, including questions and declines. A fix that was NOT made is never resolved under any policy.",
+  "resolve": "fixed",
+
+  "_comment_maxRounds": "Review rounds per run. Rounds are counted separately from review/verify failure laps. Past the cap a Review-mode run parks for a human, and a full-auto run blocks.",
+  "maxRounds": 3,
+
+  "_comment_authors": "Whose comments are acted on: roles from config/reviewers.json, plus extra GitLab usernames. Comments from anyone else never reach a model — an MR comment is untrusted input to a session that can push code.",
+  "authorRoles": ["dev", "qa"],
+  "extraAuthors": []
+}

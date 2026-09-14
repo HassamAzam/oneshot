@@ -24,6 +24,8 @@ import {
   type PhaseConfig,
 } from '../lib/config.js';
 import { readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
+import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
+import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import {
   GITLAB_PROJECT_URL,
   type CaseResult, type Finding, type Screenshot, type TestCase, type Ticket,
@@ -48,6 +50,8 @@ export interface PromptCtx {
    * nothing.
    */
   block?: { phase: string; reason: string };
+  /** New MR review threads. Set only when the on-demand `mr-feedback` phase is invoked. */
+  mrThreads?: MrFeedbackSignal;
 }
 
 /**
@@ -322,6 +326,7 @@ interface ImplementArtifact {
   lintClean: boolean;
   testsRun: string;
   addressedFindings: string[];
+  addressedFeedback: AddressedFeedback[];
 }
 
 function implementOf(ctx: PromptCtx): Partial<ImplementArtifact> {
@@ -708,6 +713,7 @@ ${cases.map((c) => `  - ${c.id} [${c.blast}] ${c.scenario}\n      expects: ${c.e
 
     return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 ${lapBlock}
+${implementFeedbackBlock(ctx.journal.mrFeedback)}
 ${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'Test-case gate reviewer feedback')}
 ## Plan (phase 2) — this is your specification
 ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
@@ -806,6 +812,7 @@ ${prev.map((f) => `- ${f.id} [${f.severity}] ${f.file}:${f.line} — ${f.what}`)
 
     return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 ${lapBlock}
+${reviewFeedbackBlock(ctx.journal.mrFeedback, i.addressedFeedback ?? [])}
 ## Acceptance criteria (phase 1) — the conformance oracle
 ${criteria(ctx)}
 
@@ -1149,6 +1156,16 @@ A conflict with \`${baseBranch()}\` that you cannot resolve IS a block. A thin c
 
 Do not merge. You do not have the tool, and the conductor owns that step.`;
   },
+
+  'mr-feedback': (ctx) => triagePrompt({
+    ticketHead: ticketHead(ctx.ticket),
+    criteria: criteria(ctx),
+    changeSummary: changeSummary(ctx),
+    mrIid: ctx.mrThreads?.mrIid ?? ctx.journal.mrIid ?? 0,
+    branch: ctx.branch ?? '(unleased)',
+    base: baseBranch(),
+    threads: ctx.mrThreads?.threads ?? [],
+  }),
 
   remediate: (ctx) => {
     const b = blockOf(ctx);
