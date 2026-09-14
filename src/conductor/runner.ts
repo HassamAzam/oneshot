@@ -1611,7 +1611,13 @@ export async function runTicket(
     if (status === 'blocked') {
       await alert(`#${journal.iid} ${journal.title} — BLOCKED: ${reason}`);
       if (!DRY_RUN) {
-        await swapLabel(journal.iid, [cfg.labels.entry], [cfg.labels.blocked]);
+        // The testcases board label comes off too: a blocked ticket still
+        // reading 'TestCase Review' tells the board it is waiting on QA when it
+        // is waiting on a person to unblock it. Parked keeps it — parked at the
+        // gate is the state it marks — and done is only reached via approval.
+        await swapLabel(journal.iid,
+          [cfg.labels.entry, cfg.labels.testcaseReview].filter(Boolean),
+          [cfg.labels.blocked]);
         await addIssueNote(journal.iid, `Oneshot stopped: **${reason}**\n\nRun \`${journal.runId}\`.`);
       }
       log.error(`■ #${journal.iid} BLOCKED — ${reason}`);

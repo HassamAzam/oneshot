@@ -216,17 +216,18 @@ function boardLabel(gate: Gate): string | null {
 }
 
 /**
- * Swap the board label on or off. Best-effort, like the Slack notify below:
- * a label is a board convenience, never part of the verdict, so a failed
- * swap must not fail the gate check it rides along with.
+ * Swap the board label on or off. Best-effort: a label is a board convenience,
+ * never part of the verdict, so a failed swap must not fail the gate check it
+ * rides along with. Checked by result rather than caught — swapLabel reports
+ * every HTTP, timeout and network failure as `ok: false` and never throws, so
+ * a try/catch here would leave the failure silent.
  */
 async function setBoardLabel(iid: number, gate: Gate, on: boolean): Promise<void> {
   const label = boardLabel(gate);
   if (!label) return;
-  try {
-    await swapLabel(iid, on ? [] : [label], on ? [label] : []);
-  } catch (err) {
-    log.warn(`could not swap board label '${label}' on #${iid}`, { error: (err as Error).message });
+  const res = await swapLabel(iid, on ? [] : [label], on ? [label] : []);
+  if (!res.ok) {
+    log.warn(`could not swap board label '${label}' on #${iid}`, { status: res.status, error: res.error });
   }
 }
 
