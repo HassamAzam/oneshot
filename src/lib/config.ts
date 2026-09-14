@@ -108,10 +108,19 @@ export interface ProjectConfig {
    * Apply the review gates to EVERY run, not only to tickets carrying `labels.review`
    * or touching `highScrutinyPaths`. A change of posture rather than a tuning knob:
    * with it on, every run pauses after `plan` and after `testcases`, and never merges
-   * its own MR. The label and the path list are still honoured and still matter — they
-   * are what keeps the consequential tickets gated if this is switched back off.
+   * its own MR unless a person approves it (see `mergeOnApproval`). The label and the
+   * path list are still honoured and still matter — they are what keeps the
+   * consequential tickets gated if this is switched back off.
    */
   reviewAllRuns?: boolean;
+  /**
+   * On a Review run, a person's approval of the MR in GitLab is the go-ahead to merge.
+   * With it on, `merge` accepts the MR itself once GitLab reports its approval rules
+   * met by at least one human approver; with it off, a person must press merge.
+   * Bot accounts never count as approvers, and the verify/review quality gate still
+   * applies either way.
+   */
+  mergeOnApproval?: boolean;
   /**
    * Repo-relative path fragments whose modules are too consequential to ship
    * unwatched. A run whose plan or diff touches one gets the `Review` label's
@@ -381,6 +390,14 @@ export const FOLLOW_TICK_MS = 180_000;
  * so this is a slow, patient poll rather than the tick loop's cadence.
  */
 export const MERGE_POLL_MS = 1_800_000;
+
+/**
+ * The same poll when `mergeOnApproval` is on. An approval now moves the run
+ * on by itself, so the wait between a person approving and the merge landing
+ * is this interval — short enough not to feel stuck, and still two cheap GET
+ * calls per parked run per interval.
+ */
+export const APPROVAL_POLL_MS = 300_000;
 
 /**
  * A dry run's own home, so DRY_RUN=1 cannot disturb the conductors doing real

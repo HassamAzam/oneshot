@@ -377,6 +377,25 @@ export function getMergeRequest(
 }
 
 /**
+ * A merge request's approval state, as the project's approval rules see it.
+ *
+ * `approvals_required` / `approvals_left` exist only where the instance's tier
+ * has approval rules; gitlab.arbisoft.com omits both, so absent means no rule
+ * is owing an approval — `approved_by` is then the whole story.
+ */
+export interface MergeRequestApprovals {
+  approved: boolean;
+  approvals_required?: number;
+  approvals_left?: number;
+  approved_by: Array<{ user: { id: number; username: string; state?: string } }>;
+}
+
+/** Who has approved a merge request, and whether its approval rules are met. */
+export function getMergeRequestApprovals(mrIid: number): Promise<GitlabResult<MergeRequestApprovals>> {
+  return call<MergeRequestApprovals>('GET', `/projects/${projectId()}/merge_requests/${mrIid}/approvals`);
+}
+
+/**
  * Discover merge requests by branch, newest-updated first.
  *
  * The list endpoint omits merge_status, detailed_merge_status and diff_refs, so
