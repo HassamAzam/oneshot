@@ -124,6 +124,7 @@ expect_deny  "config/"                 write-scope.cjs "$(write_payload "$ROOT/c
 expect_deny  "src/"                    write-scope.cjs "$(write_payload "$ROOT/src/index.ts")"
 expect_deny  "~/.claude/settings.json" write-scope.cjs "$(write_payload "$HOME/.claude/settings.json")"
 expect_deny  "context repo directly"   write-scope.cjs "$(write_payload "$CONTEXT_REPO/apps/leaves/models.py")"
+expect_deny  "vendored context/ skills" write-scope.cjs "$(write_payload "$ROOT/context/skills/erp-code-review/SKILL.md")"
 expect_deny  "outside every scope"     write-scope.cjs "$(write_payload "/tmp/somewhere-else/x.py")"
 expect_allow "inside the worktree"     write-scope.cjs "$(write_payload "$ONESHOT_WORKTREE/apps/leaves/models.py")"
 expect_allow "inside the run dir"      write-scope.cjs "$(write_payload "$ROOT/state/runs/0/plan.json")"
@@ -149,6 +150,21 @@ if command -v ln >/dev/null 2>&1; then
         # A silent skip here is worse than a failure: this is the test for the
         # one escape that lets a phase rewrite its own governing skills.
         red "  FAIL  symlink test could not run — $CONTEXT_REPO/.claude not present"
+        FAIL=$((FAIL+1))
+    fi
+
+    # The real composition now links each skill into this repo's vendored
+    # context/, not the context repo. A per-skill symlink must not become a
+    # write path into context/ either — same escape, different source.
+    rm -rf "$ONESHOT_WORKTREE/.claude"
+    if [ -d "$ROOT/context/skills" ]; then
+        mkdir -p "$ONESHOT_WORKTREE/.claude/skills"
+        ln -s "$ROOT/context/skills/erp-code-review" \
+            "$ONESHOT_WORKTREE/.claude/skills/erp-code-review" 2>/dev/null
+        expect_deny "symlinked skill into vendored context/ (realpath escape)" \
+            write-scope.cjs "$(write_payload "$ONESHOT_WORKTREE/.claude/skills/erp-code-review/SKILL.md")"
+    else
+        red "  FAIL  vendored-context symlink test could not run — $ROOT/context/skills not present"
         FAIL=$((FAIL+1))
     fi
 fi

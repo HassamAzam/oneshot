@@ -6,7 +6,7 @@
     "project": "arbisoft/workstreamai",
     "projectId": 1491
   },
-  "_comment_context": "Read-only. Oneshot reads this repo for prior art, conventions and skills; it NEVER writes to it, and hooks/write-scope.js denies every write under contextRepo for every phase. See docs/HOOKS.md 4.1.",
+  "_comment_context": "Read-only. Oneshot reads this repo for prior art and conventions; it NEVER writes to it, and hooks/write-scope.js denies every write under contextRepo for every phase. See docs/HOOKS.md 4.1. Skills/agents/rules are no longer sourced live from here: they are vendored into this repo's context/ (a committed snapshot of erp/.claude that also stays in GitLab), and SKILLS_ROOT (ONESHOT_SKILLS_ROOT) defaults to that vendored copy. skillsRoot below is informational only — nothing reads it — and records where the upstream skills live for a human syncing the snapshot.",
   "contextRepo": {
     "path": "~/Documents/erp",
     "gitlabProject": "arbisoft/erp",
