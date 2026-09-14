@@ -221,11 +221,18 @@ function boardLabel(gate: Gate): string | null {
  * rides along with. Checked by result rather than caught — swapLabel reports
  * every HTTP, timeout and network failure as `ok: false` and never throws, so
  * a try/catch here would leave the failure silent.
+ *
+ * Turning it off puts the entry label back in the same write. A QA verdict —
+ * approval or feedback — hands the ticket back to the pipeline, and the board
+ * should say `Loop` whether or not someone took it off while the ticket sat
+ * with QA. swapLabel never duplicates a label, so this is a no-op when `Loop`
+ * is already there.
  */
 async function setBoardLabel(iid: number, gate: Gate, on: boolean): Promise<void> {
   const label = boardLabel(gate);
   if (!label) return;
-  const res = await swapLabel(iid, on ? [] : [label], on ? [label] : []);
+  const { entry } = projectConfig().labels;
+  const res = await swapLabel(iid, on ? [] : [label], on ? [label] : [entry]);
   if (!res.ok) {
     log.warn(`could not swap board label '${label}' on #${iid}`, { status: res.status, error: res.error });
   }
@@ -430,6 +437,10 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
       ...state, requestNoteId: null, approved: false, feedback: [...state.feedback, feedback],
     };
     persist(iid, gate, state);
+    // Feedback is a verdict too: QA has answered and the ticket is back with
+    // the pipeline. The label returns when the next check re-arms the gate
+    // with a fresh request for the revised list.
+    await setBoardLabel(iid, gate, false);
     log.phase(`${gate} feedback received on #${iid}`, { rounds: state.feedback.length });
     return { verdict: 'feedback', feedback };
   }
