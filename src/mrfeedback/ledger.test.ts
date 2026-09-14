@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   activeRound, addressedFeedbackOf, completeRound, emptyLedger, markReplied, markResolved,
-  needsFixLap, normaliseItems, recordAddressed, roundsUsed, startRound,
+  normaliseItems, phasesOwedByRound, recordAddressed, roundsUsed, startRound,
 } from './ledger.js';
 import type { FeedbackThread } from './types.js';
 
@@ -63,10 +63,36 @@ test('replied/resolved marks are idempotent and completing a round advances wate
   assert.deepEqual(done.handled, { d1: 7 });
 });
 
-test('needsFixLap is true only for a fixing round with no implement success since it started', () => {
+const FIX_WINDOW = ['implement', 'review', 'verify', 'ui-evidence', 'mr'];
+
+test('phasesOwedByRound is empty with no ledger, or a round that is not fixing', () => {
+  assert.deepEqual(phasesOwedByRound(undefined, [], FIX_WINDOW), []);
+  const replyOnly = startRound(emptyLedger(), { mrIid: 4, threads: [t2], items: normaliseItems(triage, [t2]), now: 500 });
+  assert.deepEqual(phasesOwedByRound(replyOnly, [], FIX_WINDOW), []);
+});
+
+test('a stale implement success (before the round started) owes the whole window', () => {
   const l = startRound(emptyLedger(), { mrIid: 4, threads: [t1], items: normaliseItems(triage, [t1]), now: 500 });
-  assert.equal(needsFixLap(l, [{ phase: 'implement', status: 'ok', startedAt: 100 }]), true);
-  assert.equal(needsFixLap(l, [{ phase: 'implement', status: 'failed', startedAt: 600 }]), true);
-  assert.equal(needsFixLap(l, [{ phase: 'implement', status: 'ok', startedAt: 600 }]), false);
-  assert.equal(needsFixLap(undefined, []), false);
+  assert.deepEqual(
+    phasesOwedByRound(l, [{ phase: 'implement', status: 'ok', startedAt: 100 }], FIX_WINDOW),
+    FIX_WINDOW,
+  );
+});
+
+test('an implement success since the round started still owes every later phase', () => {
+  const l = startRound(emptyLedger(), { mrIid: 4, threads: [t1], items: normaliseItems(triage, [t1]), now: 500 });
+  assert.deepEqual(
+    phasesOwedByRound(l, [{ phase: 'implement', status: 'ok', startedAt: 600 }], FIX_WINDOW),
+    ['review', 'verify', 'ui-evidence', 'mr'],
+  );
+});
+
+test('a warned record since the round started counts as done; a failed one does not', () => {
+  const l = startRound(emptyLedger(), { mrIid: 4, threads: [t1], items: normaliseItems(triage, [t1]), now: 500 });
+  const records = [
+    { phase: 'implement', status: 'ok', startedAt: 600 },
+    { phase: 'review', status: 'warned', startedAt: 700 },
+    { phase: 'verify', status: 'failed', startedAt: 700 },
+  ];
+  assert.deepEqual(phasesOwedByRound(l, records, FIX_WINDOW), ['verify', 'ui-evidence', 'mr']);
 });

@@ -89,7 +89,7 @@ import {
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { Ticket, TestCase } from '../phases/types.js';
 import {
-  activeRound, addressedFeedbackOf, emptyLedger, needsFixLap, normaliseItems, recordAddressed,
+  activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
   roundsUsed, startRound,
 } from '../mrfeedback/ledger.js';
 import type { MrFeedbackSignal } from '../mrfeedback/types.js';
@@ -619,17 +619,19 @@ export async function runTicket(
    */
   let remediationNote = '';
 
-  // A review-feedback round that cycled to `implement` and lost the process
-  // before implement succeeded. `forced` above is in memory only, so without
-  // this a resume walks straight to merge and answers every thread "not
-  // addressed" — spending a round on a crash.
-  if (needsFixLap(j.mrFeedback, j.phases)) {
+  // A review-feedback round that lost the process anywhere in its fix lap —
+  // before implement succeeded, or after implement but before review, verify
+  // or mr re-ran. `forced` above is in memory only, so without this a resume
+  // would skip straight past whichever of those phases still holds a
+  // pre-round record, and merge would answer reviewers about code nobody
+  // re-reviewed, re-verified, or even re-pushed.
+  {
     const from = list.findIndex((p) => p.name === 'implement');
     const to = list.findIndex((p) => p.name === 'merge');
-    for (let k = from; from !== -1 && k <= to; k += 1) {
-      const name = list[k]!.name;
-      if (name !== 'testcases' && !list[k]!.onDemand) forced.add(name);
-    }
+    const window = from !== -1 && to !== -1
+      ? list.slice(from, to).filter((p) => p.name !== 'testcases' && !p.onDemand).map((p) => p.name)
+      : [];
+    for (const name of phasesOwedByRound(j.mrFeedback, j.phases, window)) forced.add(name);
   }
 
   let i = 0;
@@ -1184,12 +1186,19 @@ export async function runTicket(
       if (isMilestone(p)) await thread(j.slackTs ?? null, milestoneText(p, prior[p.name] ?? null, iid));
       return { kind: 'advance' };
     }
+    if (done.feedback) {
+      // Nothing of this run has landed on the base branch — the MR is still
+      // opened — so holding the promotion window through triage and a possibly
+      // hours-long implement→verify→mr lap only starves every other run on the
+      // machine for no reason. The next merge entry re-acquires in queue order.
+      releasePromotion(runId);
+      return feedbackRound(index, done.feedback);
+    }
     // A parked code phase (currently only the Review label's merge-readiness
     // check) bypasses the phase's own onFail policy entirely — 'merge' is
     // configured 'blocked', which is right for a genuine merge failure and
     // wrong for "waiting on an approval/pipeline", which is neither an error
     // nor something remediation should touch.
-    if (done.feedback) return feedbackRound(index, done.feedback);
     if (done.park) {
       return { kind: 'stop', status: 'parked', reason: done.error ?? `${p.name}: parked` };
     }

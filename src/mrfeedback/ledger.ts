@@ -116,15 +116,20 @@ export function completeRound(
 }
 
 /**
- * A fixing round whose implement lap has not yet succeeded. The runner's
- * `forced` set lives in memory, so a process that dies between triage and
- * implement would otherwise resume straight into merge and answer every
- * thread "not addressed".
+ * The phases a fixing round still owes, in `window` order. The runner's
+ * `forced` set lives in memory, so a process that dies anywhere in the fix
+ * lap — before implement, or after implement but before review, verify, or mr
+ * re-run — must resume through every phase the round has not yet re-earned an
+ * ok/warned record for, or merge answers reviewers about code nobody
+ * reviewed, verified, or even pushed.
  */
-export function needsFixLap(
-  l: MrFeedbackLedger | undefined, phases: Array<{ phase: string; status: string; startedAt: number }>,
-): boolean {
+export function phasesOwedByRound(
+  l: MrFeedbackLedger | undefined,
+  records: Array<{ phase: string; status: string; startedAt: number }>,
+  window: string[],
+): string[] {
   const r = activeRound(l);
-  if (!r || r.status !== 'fixing') return false;
-  return !phases.some((p) => p.phase === 'implement' && p.status === 'ok' && p.startedAt >= r.startedAt);
+  if (!r || r.status !== 'fixing') return [];
+  return window.filter((name) => !records.some((p) => p.phase === name
+    && (p.status === 'ok' || p.status === 'warned') && p.startedAt >= r.startedAt));
 }
