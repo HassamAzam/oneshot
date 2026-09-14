@@ -1286,6 +1286,14 @@ export async function runTicket(
    * verify keep their full lap budgets inside a round.
    */
   async function feedbackRound(mergeIndex: number, signal: MrFeedbackSignal): Promise<Control> {
+    // A stop or pause asked for during merge must not be spent on a triage session.
+    if (opts.signal?.aborted) {
+      return { kind: 'stop', status: 'aborted', reason: 'the conductor asked this run to stop' };
+    }
+    if (existsSync(PAUSE)) {
+      return { kind: 'stop', status: 'aborted', reason: 'paused mid-phase — resumes when unpaused' };
+    }
+
     const fcfg = mrFeedbackConfig();
     const ledger = j.mrFeedback ?? emptyLedger();
 
