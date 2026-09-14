@@ -1760,7 +1760,13 @@ export async function runTicket(
       log.error(`■ #${journal.iid} BLOCKED — ${reason}`);
       logStopDetail(journal, 'BLOCKED');
     } else if (status === 'done') {
-      if (!DRY_RUN) await swapLabel(journal.iid, [cfg.labels.entry], [cfg.labels.exit]);
+      // The blocked label goes too. A run that was blocked and later resumed —
+      // past the cooldown, through --ticket, or after a person answered it —
+      // still carries it, and finishing with both "Needs Human" and "merged" on
+      // the ticket tells the board a person is wanted on work that is done.
+      if (!DRY_RUN) {
+        await swapLabel(journal.iid, [cfg.labels.entry, cfg.labels.blocked], [cfg.labels.exit]);
+      }
       // The claim note has done its job — with the exit label on, nothing
       // scans this ticket again — and a claim that outlives its run is exactly
       // the stale note lib/claims.ts otherwise has to age out. Only 'done'
