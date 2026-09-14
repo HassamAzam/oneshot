@@ -255,7 +255,26 @@ export const UI_EVIDENCE_SCHEMA = phaseSchema({
       required: ['file', 'caption', 'caseId'],
     },
   },
-}, ['screenshots']);
+  observations: {
+    type: 'array',
+    description:
+      'Evidence for what a screenshot cannot show — a <title>, an aria-* or alt value, lang, ' +
+      'a meta tag, focus order, a response header. One row per value, measured, never painted ' +
+      'onto the page. Empty array when every change is visible on screen.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        what: str('The value measured and where, e.g. "document.title on /accounts/password_reset/"'),
+        before: str('The value on the base branch, verbatim, or "not measured" with the reason'),
+        after: str('The value on this branch, verbatim'),
+        how: str('How it was read, e.g. "Playwright page.title()", "curl + grep <title>", "git show origin/dev:<path>"'),
+        caseId: str('Related case id, or empty string'),
+      },
+      required: ['what', 'before', 'after', 'how', 'caseId'],
+    },
+  },
+}, ['screenshots', 'observations']);
 
 export const MR_SCHEMA = phaseSchema({
   mrIid: { type: 'number' },

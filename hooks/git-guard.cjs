@@ -155,6 +155,39 @@ function checkConductorPhase(t) {
   );
 }
 
+const TREE_WRITES = new Set([
+  'commit', 'merge', 'rebase', 'reset', 'cherry-pick', 'am', 'revert', 'stash', 'apply',
+  'checkout', 'switch', 'restore', 'clean', 'rm', 'mv',
+]);
+
+/**
+ * A phase that stands in the worktree without the right to write to it —
+ * research, plan, testcases, review, ui-evidence, mr — must not reach the
+ * files through git either. write-scope.cjs refuses its Edit/Write, and until
+ * this check Bash was the way round that: ticket #189's ui-evidence ran
+ * `git checkout <parent> -- templates/...` in the ticket's own worktree to
+ * stage a "before" screenshot, with the fix reverted on disk until it thought
+ * to restore it. Had the session died in between, `mr` would have pushed the
+ * revert. Push is not in the set: `mr` exists to push commits that implement
+ * already made, and checkPush governs where they may go.
+ */
+function checkReadOnlyWorktreePhase(t) {
+  const wt = leasedWorktree();
+  if (!C.phase() || !wt) return;
+  const scopes = (process.env.ONESHOT_WRITE_SCOPES || '').split(':').filter(Boolean);
+  if (scopes.some((s) => C.isInside(wt, s))) return;
+  const sub = t.find((a, i) => i > 0 && !a.startsWith('-') && t[i - 1] !== '-C');
+  if (!TREE_WRITES.has(sub)) return;
+  C.event('denied_readonly_worktree_git', { sub, cmd: t.join(' ') });
+  C.deny(
+    `Denied: \`git ${sub}\` from the '${C.phase()}' phase. This phase may read the worktree but ` +
+    'not change it, and git is not a way around that: the files on disk are the change under ' +
+    'review, and anything left altered here can be pushed. If you need the base branch, read it ' +
+    'without touching the checkout — `git show origin/<base>:<path>`, `git diff origin/<base>` — ' +
+    'or say in your output that you could not produce it.',
+  );
+}
+
 function checkCwd(cmd) {
   const wt = leasedWorktree();
   if (!wt) return;
@@ -210,6 +243,7 @@ try {
       const sub = t.find((a, i) => i > 0 && !a.startsWith('-') && t[i - 1] !== '-C');
 
       checkConductorPhase(t);
+      checkReadOnlyWorktreePhase(t);
       if (sub === 'push') checkPush(t, cfg);
       if (sub === 'branch') checkBranchDelete(t, cfg);
 

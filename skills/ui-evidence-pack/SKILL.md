@@ -22,6 +22,15 @@ these make an argument.
 Nothing else. A pack of thirty screenshots is read as carefully as a pack of
 zero.
 
+## Changes a screenshot cannot show
+
+A page title, an `aria-*`, `alt` or `lang` value, a meta tag, focus order, a
+response header: none of these is in the viewport, so a before/after pair of
+them is two identical pictures. Measure the value instead and report it as
+text — what, where, base-branch value, this-branch value, how it was read. In
+Oneshot that is the `observations` field, published as a table. A pack of zero
+screenshots and a complete table is a complete pack for a non-visual change.
+
 ## Naming and order
 
 - `<caseId>-<slug>.png` when the shot belongs to a case — `TC-04-status-column.png`.
@@ -72,6 +81,14 @@ third attempt with a fourth shape of path.
 
 - Do not stage a screenshot of a state you produced by hand and present it as
   the feature working.
+- Do not add anything to the page before capturing it — no overlay, banner,
+  label, style or script. Text painted onto the page is your text dressed as the
+  app's, and it hides whatever it covers. Annotation belongs in the caption or
+  drawn on the image afterwards, never in the DOM.
+- Do not modify the checkout under review to produce a "before" — no
+  `git checkout <ref> -- <paths>`, no stash, no editing files and putting them
+  back. Take the before from a separate base-branch instance, or read the old
+  value with `git show <base>:<path>` and say so, or state that there is none.
 - Do not crop out an error banner that happened to be on screen. Caption it.
 - A pack with a gap in it, labelled, is worth more than a complete-looking pack
   that quietly omits the screen that looked wrong.
