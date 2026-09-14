@@ -335,6 +335,14 @@ function failedCases(name: string, data: Record<string, unknown> | null | undefi
 }
 
 /**
+ * `labels` plus the in-review label, when one is configured — the set a run
+ * takes off the ticket when it stops waiting on a reviewer.
+ */
+function withInReview(cfg: ReturnType<typeof projectConfig>, labels: string[]): string[] {
+  return cfg.labels.inReview ? [...labels, cfg.labels.inReview] : labels;
+}
+
+/**
  * Set a ticket's labels, retrying across a short network blip.
  *
  * Three attempts 10s apart: long enough to ride out a VPN reconnect, short
@@ -1633,7 +1641,7 @@ export async function runTicket(
     if (status === 'blocked') {
       await alert(`#${journal.iid} ${journal.title} — BLOCKED: ${reason}`);
       if (!DRY_RUN) {
-        await swapLabel(journal.iid, [cfg.labels.entry], [cfg.labels.blocked]);
+        await swapLabel(journal.iid, withInReview(cfg, [cfg.labels.entry]), [cfg.labels.blocked]);
         await addIssueNote(journal.iid, `Oneshot stopped: **${reason}**\n\nRun \`${journal.runId}\`.`);
       }
       log.error(`■ #${journal.iid} BLOCKED — ${reason}`);
@@ -1644,7 +1652,9 @@ export async function runTicket(
       // The swap is retried because it is the ticket's only record that the
       // work shipped: a flaky network here otherwise leaves it unlabelled for good.
       if (!DRY_RUN) {
-        await labelWithRetry(journal.iid, [cfg.labels.entry, cfg.labels.blocked], [cfg.labels.exit]);
+        await labelWithRetry(
+          journal.iid, withInReview(cfg, [cfg.labels.entry, cfg.labels.blocked]), [cfg.labels.exit],
+        );
       }
       // The claim note has done its job — with the exit label on, nothing
       // scans this ticket again — and a claim that outlives its run is exactly

@@ -103,6 +103,12 @@ export interface ProjectConfig {
      * nothing: every check that reads it is an additive `labels.includes(...)`.
      */
     review: string;
+    /**
+     * Put on the ticket while its MR waits for a person to approve or merge it,
+     * and taken off when the run finishes or blocks — so the board shows which
+     * tickets are waiting on a reviewer. Unset disables it.
+     */
+    inReview?: string;
   };
   /**
    * Apply the review gates to EVERY run, not only to tickets carrying `labels.review`

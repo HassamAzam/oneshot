@@ -20,7 +20,9 @@
     "exitId": null,
     "blocked": "Needs Human",
     "blockedId": 1310,
-    "review": "Review"
+    "review": "Review",
+    "_comment_inReview": "Added while a ticket's MR waits for a person to approve or merge it, removed when the run finishes (merged) or blocks. Not the same as `review`, which is what makes a ticket need human sign-off. Empty or absent disables it.",
+    "inReview": "In Review"
   },
   "_comment_reviewAllRuns": "TRUE = the review gates apply to EVERY run, not only tickets carrying the Review label or touching highScrutinyPaths. This is a deliberate change of posture: with it on, every run pauses after `plan` and after `testcases` for a human, and never merges its own MR unless a person approves it (see mergeOnApproval). The label and the path list still work and are still worth keeping \u2014 they are what makes a gate survive this being switched back off. Requires channels:history (or groups:history) on the Slack bot token; without it every gate sits 'pending' forever and every run parks, which is why doctor FAILS rather than warns while this is true.",
   "reviewAllRuns": true,
