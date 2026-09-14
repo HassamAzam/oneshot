@@ -19,7 +19,7 @@
     "hooks:verify": "bash scripts/verify-hooks.sh",
     "verify": "npm run deps:verify && npm run hooks:verify && npm run doctor",
     "check": "tsc --noEmit && for f in hooks/*.cjs; do node --check \"$f\" || exit 1; done && echo 'check clean'",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test 'src/**/*.test.ts'",
     "deps:verify": "tsx scripts/verify-deps.ts",
     "langfuse": "tsx scripts/langfuse-export.ts",
     "dashboard": "tsx scripts/serve.ts",
