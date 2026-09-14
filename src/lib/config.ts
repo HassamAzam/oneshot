@@ -103,6 +103,13 @@ export interface ProjectConfig {
      * nothing: every check that reads it is an additive `labels.includes(...)`.
      */
     review: string;
+    /**
+     * Optional, off-by-default board marker — never required, never gates
+     * anything. Swapped onto the ticket the moment the testcases gate first
+     * posts its request comment, and off again the moment that gate is
+     * approved. See src/conductor/reviewgate.ts.
+     */
+    testcaseReview: string;
   };
   /**
    * Apply the review gates to EVERY run, not only to tickets carrying `labels.review`
