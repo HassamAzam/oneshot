@@ -445,7 +445,14 @@ export const DB_PATH = join(STATE, 'oneshot.db');
 
 export const WORK_REPO = expandPath(envOr('WORK_REPO', '~/Documents/workstreamai'));
 export const CONTEXT_REPO = expandPath(envOr('CONTEXT_REPO', '~/Documents/erp'));
-export const SKILLS_ROOT = expandPath(envOr('ONESHOT_SKILLS_ROOT', '~/Documents/erp/.claude'));
+// Skills, agents and rules are vendored into this repo under `context/` (a
+// committed snapshot of the ERP context repo's `.claude`, which also stays in
+// GitLab), so the loop is self-contained: a fresh clone carries them and
+// claudedir composes `.claude` from links that resolve without a local ERP
+// checkout. Override with ONESHOT_SKILLS_ROOT to point at a live `.claude`
+// (e.g. `~/Documents/erp/.claude`) when a machine's interactive edits should
+// win over the vendored copy.
+export const SKILLS_ROOT = expandPath(envOr('ONESHOT_SKILLS_ROOT', join(ROOT, 'context')));
 export const WT_ROOT = expandPath(envOr('WT_ROOT', '~/Documents/oneshot-wt'));
 
 export function runDir(iid: number): string { return join(RUNS, String(iid)); }

@@ -8,17 +8,19 @@
  * Two absolute denials apply to EVERY phase, with no exceptions:
  *
  *   1. The Oneshot runtime itself (hooks/, config/, src/, scripts/,
- *      ~/.claude/). A phase must never be able to edit the constraints on it.
+ *      ~/.claude/, and context/ — the vendored skills/agents/rules). A phase
+ *      must never be able to edit the constraints on it. context/ matters as
+ *      much as the rest: each worktree has .claude/ composed from symlinks into
+ *      it, so a naive prefix check would accept <worktree>/.claude/skills/x/
+ *      SKILL.md as "inside the worktree" while the write lands in context/ —
+ *      letting an implement phase rewrite the skills that govern it,
+ *      permanently, for every future run and every interactive session.
+ *      C.isInside() realpath-resolves before comparing. See docs/HOOKS.md 4.1.
  *
- *   2. The context repo (~/Documents/erp). It is read-only reference AND the
- *      source of every skill. This one matters more than it looks: each
- *      worktree has .claude/ SYMLINKED into that repo so phases can use the
- *      real skills, which means a naive prefix check would accept
- *      <worktree>/.claude/skills/x/SKILL.md as "inside the worktree" while the
- *      write lands in erp — letting an implement phase rewrite the skills that
- *      govern it, permanently, for every future run and every interactive
- *      session. C.isInside() realpath-resolves before comparing. See
- *      docs/HOOKS.md 4.1.
+ *   2. The context repo (~/Documents/erp). It is read-only reference — Oneshot
+ *      reads it for prior art and conventions and never writes to it. (Skills
+ *      no longer live there for the loop's purposes: they are vendored into
+ *      context/ above. The ERP checkout remains the upstream humans maintain.)
  *
  * A phase that arrives with NO scopes is refused rather than waved through.
  * Empty means the conductor's scope expansion produced nothing — a
@@ -38,6 +40,7 @@ const RUNTIME_DENY = [
   path.join(C.ONESHOT, 'src'),
   path.join(C.ONESHOT, 'scripts'),
   path.join(C.ONESHOT, 'package.json'),
+  path.join(C.ONESHOT, 'context'),
   path.join(C.HOME, '.claude'),
 ];
 
