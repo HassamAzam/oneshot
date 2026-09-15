@@ -88,6 +88,22 @@ const readJson = (f, d = null) => { try { return JSON.parse(fs.readFileSync(f, '
 const writeJson = (f, o) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify(o, null, 2)); };
 const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
 
+/**
+ * Copy a seed file by CONTENT, never with copyFileSync.
+ *
+ * copyFileSync goes through copyfile(3), which replicates the source's extended
+ * attributes. On macOS a config the app has touched carries `com.apple.provenance`, a TCC
+ * xattr a process without the matching entitlement cannot reproduce, so the whole copy
+ * fails EPERM — src/lib/worktrees.ts documents a conductor stalled for exactly this on
+ * frontend/src/constants/config.js. read + write moves the bytes and lets the OS give the
+ * new file its own attributes; the mode is carried across in case a seed copy is ever a
+ * script.
+ */
+function copyContents(src, dst) {
+  fs.writeFileSync(dst, fs.readFileSync(src));
+  try { fs.chmodSync(dst, fs.statSync(src).mode & 0o777); } catch { /* mode is a nicety, content is not */ }
+}
+
 class AppError extends Error {
   constructor(code, message, hint) { super(message); this.code = code; this.hint = hint || null; }
   toJSON() { return { code: this.code, message: this.message, hint: this.hint }; }
@@ -100,9 +116,16 @@ function sh(cmd, args, opts = {}) {
   return { code: r.status, out: String(r.stdout || '').trim(), err: String(r.stderr || '').trim() };
 }
 
+/**
+ * A soft failure returns `null`, never `''`. An empty string is a real answer — `git
+ * diff` with no changes, `status --porcelain` on a clean tree — and conflating it with
+ * "the command failed" made a broken repo read as "nothing changed". Callers that treat
+ * the output as text guard with `|| ''`.
+ */
 function git(args, cwd, soft = false) {
   const r = sh('git', args, { cwd });
-  if (r.code !== 0 && !soft) {
+  if (r.code !== 0) {
+    if (soft) return null;
     throw new AppError('E_GIT', `git ${args.join(' ')} failed in ${cwd}`, r.err.split('\n').slice(-2).join(' '));
   }
   return r.out;
@@ -221,10 +244,11 @@ function scanProcesses() {
     if (pid === process.pid) continue;
     const cwd = H.pidCwd(pid);
     if (!cwd) continue;
-    // `runserver 127.0.0.1:8011` and `runserver 8000` are both real forms, and a naive
-    // "first number after runserver" reads the first octet of the address as the port.
+    // `runserver 127.0.0.1:8011`, `runserver [::1]:8011` and `runserver 8000` are all real
+    // forms, and a naive "first number after runserver" reads the first octet of an IPv4
+    // address (or a hextet of an IPv6 one) as the port.
     const portMatch = kind === 'django'
-      ? /runserver['"\s,]+(?:(?:\d{1,3}\.){3}\d{1,3}:)?(\d{2,5})/.exec(m[2])
+      ? /runserver['"\s,]+(?:\[[0-9a-fA-F:]+\]:|(?:\d{1,3}\.){3}\d{1,3}:)?(\d{2,5})/.exec(m[2])
       : null;
     found.push({ pid, kind, cwd: real(cwd), argvPort: portMatch ? Number(portMatch[1]) : null });
   }
@@ -237,10 +261,13 @@ function scanProcesses() {
  * `manage.py runserver` a human typed; webpack is always frontend/scripts/start.js.
  */
 function classify(cmd) {
-  // Anything that merely MENTIONS the pattern is not the pattern. A `ps | grep runserver`
+  // Anything that merely MENTIONS the pattern is not the pattern. A `grep runserver`
   // carries the word on its own command line and was duly reported as a Django server
   // running from the Oneshot repo, on port 8000, which is a fiction with a port number.
-  if (/(^|\/)(grep|rg|ps|lsof|tail)\s/.test(cmd) || /\bgrep\b/.test(cmd)) return null;
+  // The tool itself is always argv[0] (`ps -o command=` is per-process, not a pipeline),
+  // so anchoring to the start or a path prefix is enough — a bare `\bgrep\b` also matched
+  // a legitimate command that merely carried the word as an argument.
+  if (/(^|\/)(grep|rg|ps|lsof|tail)\s/.test(cmd)) return null;
   if (/runserver/.test(cmd) && /python/i.test(cmd)) return 'django';
   if (/frontend\/scripts\/start\.js/.test(cmd) && /node/.test(cmd)) return 'webpack';
   return null;
@@ -283,11 +310,13 @@ async function annotate(inst) {
   } : { head: null, branch: null };
 
   // The port patches live in tracked files and are marked --skip-worktree, so they do
-  // not show here — but filter by name anyway: a checkout that lost the mark must not
-  // read as "the developer has work in progress".
+  // not show here — but filter them by name anyway: a checkout that lost the mark must not
+  // read as "the developer has work in progress". Compare the porcelain PATH exactly (the
+  // rename form `old -> new` reduced to its new path), so a `localPaths.js.orig` left by a
+  // merge is not silently swallowed by a substring match on the pinned name.
   const dirtyLines = isRepo
-    ? git(['status', '--porcelain', '--untracked-files=no'], wt, true).split('\n')
-      .filter(Boolean).filter((l) => !PINNED.some((f) => l.includes(f)))
+    ? (git(['status', '--porcelain', '--untracked-files=no'], wt, true) || '').split('\n')
+      .filter(Boolean).filter((l) => !PINNED.includes(l.slice(3).split(' -> ').pop()))
     : [];
 
   const stats = readJson(path.join(wt, 'static/webpack-stats.dev.json'));
@@ -347,16 +376,26 @@ function resolveRef(ref) {
 
   if (mr || pr) {
     const remoteRef = mr ? `refs/merge-requests/${mr[1]}/head` : `refs/pull/${pr[1]}/head`;
-    const r = sh('git', ['fetch', remote, remoteRef], { cwd: SEED_FROM, timeout: 180000 });
+    // Fetch into a PRIVATE local ref and resolve THAT, never FETCH_HEAD. The seed repo is
+    // shared by every worktree, so a concurrent fetch there rewrites FETCH_HEAD between our
+    // fetch and our rev-parse — and we would return whatever ref that other caller wanted.
+    // A named destination is ours alone; `fetchRef` stays the remote ref so switchTo's own
+    // in-worktree fetch remains a valid `git fetch origin <remoteRef>`.
+    const localRef = `refs/oneshot/${mr ? 'mr' : 'pr'}-${(mr || pr)[1]}`;
+    const r = sh('git', ['fetch', '--force', remote, `${remoteRef}:${localRef}`], { cwd: SEED_FROM, timeout: 180000 });
     if (r.code !== 0) {
       throw new AppError('E_REF_UNRESOLVED', `could not fetch ${remoteRef} from ${remote}`,
         `${r.err.split('\n').slice(-1)[0]} — is ${mr ? 'this a GitLab MR' : 'this a GitHub PR'} on ${remote}?`);
     }
-    return { sha: git(['rev-parse', 'FETCH_HEAD'], SEED_FROM), label: ref, fetchRef: remoteRef };
+    const sha = git(['rev-parse', '--verify', '--quiet', `${localRef}^{commit}`], SEED_FROM, true);
+    if (!sha) throw new AppError('E_REF_UNRESOLVED', `fetched ${remoteRef} but it did not resolve to a commit`);
+    return { sha, label: ref, fetchRef: remoteRef };
   }
 
   sh('git', ['fetch', remote, ref], { cwd: SEED_FROM, timeout: 180000 });
-  for (const cand of ['FETCH_HEAD', `${remote}/${ref}`, ref]) {
+  // `origin/<ref>` and a local sha are both stable against a concurrent fetch of a
+  // DIFFERENT ref; FETCH_HEAD is not, so it is deliberately not consulted.
+  for (const cand of [`${remote}/${ref}`, ref]) {
     const sha = git(['rev-parse', '--verify', '--quiet', `${cand}^{commit}`], SEED_FROM, true);
     if (sha) return { sha, label: ref, fetchRef: ref };
   }
@@ -371,21 +410,28 @@ function resolveRef(ref) {
  * collectstatic is 5 seconds and is the difference between a working bring-up and
  * E_DJANGO_DEAD, so it is run here rather than left as a README step nobody performs.
  */
-function ensureSeed(notes) {
+async function ensureSeed(notes) {
   for (const rel of SEED_LINKS) {
     const src = path.join(SEED_FROM, rel);
     if (fs.existsSync(src)) continue;
     if (rel === 'staticfiles') {
-      log('seed staticfiles missing — running collectstatic (once, ~5s)');
-      const r = sh(path.join(SEED_FROM, 'venv/bin/python'), ['-c',
-        "import ssl, hashlib, sys\nsys.argv=['manage.py','collectstatic','--noinput']\n"
-        + "exec(compile(open('manage.py').read(),'manage.py','exec'))\n"],
-      { cwd: SEED_FROM, timeout: 600000, env: { ...process.env, DJANGO_SETTINGS_MODULE: 'hrdb.settings' } });
-      if (r.code !== 0 || !fs.existsSync(src)) {
-        throw new AppError('E_NO_STATICFILES', 'collectstatic did not produce a staticfiles/ tree in the seed repo',
-          r.err.split('\n').slice(-2).join(' '));
-      }
-      notes.push('ran collectstatic in the seed repo (staticfiles/ was missing)');
+      // Under a 'seed' lock: `ensure`/`warm`/`cold` serialise on 'pool', but the
+      // worktree-pinned `ensureIn` does not, so two bring-ups could run collectstatic in
+      // the one shared seed repo at once. A different key from 'pool', so a 'pool' holder
+      // taking it here cannot deadlock.
+      await withLock('seed', async () => {
+        if (fs.existsSync(src)) return; // a peer collected it while we waited on the lock
+        log('seed staticfiles missing — running collectstatic (once, ~5s)');
+        const r = sh(path.join(SEED_FROM, 'venv/bin/python'), ['-c',
+          "import ssl, hashlib, sys\nsys.argv=['manage.py','collectstatic','--noinput']\n"
+          + "exec(compile(open('manage.py').read(),'manage.py','exec'))\n"],
+        { cwd: SEED_FROM, timeout: 600000, env: { ...process.env, DJANGO_SETTINGS_MODULE: 'hrdb.settings' } });
+        if (r.code !== 0 || !fs.existsSync(src)) {
+          throw new AppError('E_NO_STATICFILES', 'collectstatic did not produce a staticfiles/ tree in the seed repo',
+            r.err.split('\n').slice(-2).join(' '));
+        }
+        notes.push('ran collectstatic in the seed repo (staticfiles/ was missing)');
+      });
       continue;
     }
     throw new AppError('E_SEED_MISSING', `${src} does not exist, so it cannot be seeded into a worktree`,
@@ -415,7 +461,7 @@ function seed(wt, notes) {
     if (!fs.existsSync(src)) throw new AppError('E_SEED_MISSING', `seed source ${src} is missing`);
     if (fs.existsSync(dst)) continue;
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.copyFileSync(src, dst);
+    copyContents(src, dst);
     linked.push(rel);
   }
   /**
@@ -454,13 +500,13 @@ function leasePorts(found) {
  */
 function frontendChanged(wt, from, to) {
   if (!from || from === to) return false;
-  return Boolean(git(['diff', '--name-only', from, to, '--', 'frontend/'], wt, true).trim());
+  return Boolean((git(['diff', '--name-only', from, to, '--', 'frontend/'], wt, true) || '').trim());
 }
 
 function migrationsBetween(wt, from, to) {
   if (!from || from === to) return true; // unknown provenance: migrate rather than guess
   const out = git(['diff', '--name-only', from, to, '--', '*/migrations/*.py'], wt, true);
-  return Boolean(out.trim());
+  return Boolean((out || '').trim());
 }
 
 function migrate(wt, notes) {
@@ -492,25 +538,29 @@ async function waitRebuild(wt, fePort, pid, since, notes, budgetMs = 10 * 60000,
   while (Date.now() < deadline) {
     if (!H.alive(pid)) throw new AppError('E_WEBPACK_DEAD', `webpack (pid ${pid}) exited during the rebuild`);
     const st = readJson(statsFile);
-    const mtime = fs.existsSync(statsFile) ? fs.statSync(statsFile).mtimeMs : 0;
     if (st && st.status === 'compiling') sawCompiling = true;
     if (st && st.status === 'error') {
       throw new AppError('E_WEBPACK_DEAD', 'webpack finished the rebuild with a build error',
         String(st.error || '').slice(0, 300));
     }
-    if (st && st.status === 'done' && (sawCompiling || mtime >= since)) {
-      notes.push('webpack rebuilt incrementally');
-      return true;
-    }
-    if (st && st.status === 'done' && Date.now() - since > quietMs) {
-      /**
-       * git changed a bundled file and webpack still has not reacted. Watchpack can miss
-       * a checkout that rewrites many files at once, and serving the previous bundle
-       * while reporting success is the one outcome that must never happen quietly.
-       */
-      throw new AppError('E_NO_REBUILD',
-        `bundled files changed but webpack did not start a rebuild within ${Math.round(quietMs / 1000)}s`,
-        'Touch a file under frontend/src to nudge the watcher, or restart the instance with `app.cjs down --worktree <wt>` then `ensure`.');
+    if (st && st.status === 'done') {
+      // stat only in the branch that needs it — the mtime only decides a 'done' bundle,
+      // and the common compiling loop should not pay a stat every second.
+      const mtime = fs.statSync(statsFile, { throwIfNoEntry: false })?.mtimeMs || 0;
+      if (sawCompiling || mtime >= since) {
+        notes.push('webpack rebuilt incrementally');
+        return true;
+      }
+      if (Date.now() - since > quietMs) {
+        /**
+         * git changed a bundled file and webpack still has not reacted. Watchpack can miss
+         * a checkout that rewrites many files at once, and serving the previous bundle
+         * while reporting success is the one outcome that must never happen quietly.
+         */
+        throw new AppError('E_NO_REBUILD',
+          `bundled files changed but webpack did not start a rebuild within ${Math.round(quietMs / 1000)}s`,
+          'Touch a file under frontend/src to nudge the watcher, or restart the instance with `app.cjs down --worktree <wt>` then `ensure`.');
+      }
     }
     await sleep(1000);
   }
@@ -622,20 +672,50 @@ async function ensureIn(wt, opts, notes) {
     await sleep(1500);
   }
 
-  ensureSeed(notes);
+  await ensureSeed(notes);
   seed(wt, notes);
-  const be = Number(opts.port || process.env.ONESHOT_PORT || 0) || leasePorts(await discover()).be;
-  const fe = Number(opts['fe-port'] || process.env.ONESHOT_FE_PORT || 0) || be + 1000;
-  const envOut = await H.up({ worktree: real(wt), bePort: be, fePort: fe });
+
+  const pinnedBe = Number(opts.port || process.env.ONESHOT_PORT || 0);
+  const pinnedFe = Number(opts['fe-port'] || process.env.ONESHOT_FE_PORT || 0) || (pinnedBe ? pinnedBe + 1000 : 0);
+
+  let be;
+  let fe;
+  let envOut;
+  if (pinnedBe) {
+    // A caller-supplied port is honoured but not blindly: if another INSTANCE already
+    // answers on it, a second Django here just races it for the socket. Refuse early with
+    // the same code leasing would, rather than surfacing an opaque bind error two minutes
+    // in. (A half-instance of THIS worktree was already cleared above, so a match here is
+    // genuinely someone else's.)
+    const conflict = (await discover()).find((i) => i.worktree !== real(wt)
+      && ((i.django && i.django.port === pinnedBe) || (i.webpack && i.webpack.port === pinnedFe)));
+    if (conflict) {
+      throw new AppError('E_NO_PORTS', `port ${pinnedBe}/${pinnedFe} already serves ${conflict.worktree}`,
+        'lease a different port, or stop that instance with `app.cjs down --worktree <wt>`.');
+    }
+    be = pinnedBe;
+    fe = pinnedFe;
+    envOut = await H.up({ worktree: real(wt), bePort: be, fePort: fe });
+  } else {
+    // Leasing a pool port and BINDING it must be one critical section against
+    // `ensure`/`warm`/`cold`, which all lease under 'pool'. This path holds only the
+    // worktree lock, so without taking 'pool' across the lease-through-bind window two
+    // callers could pick the same free port and collide.
+    ({ be, fe, envOut } = await withLock('pool', async () => {
+      const leased = leasePorts(await discover());
+      const out = await H.up({ worktree: real(wt), bePort: leased.be, fePort: leased.fe });
+      return { be: leased.be, fe: leased.fe, envOut: out };
+    }));
+  }
   notes.push(`cold-started the app for ${wt} on ${be}/${fe}`);
   const servers = readJson(path.join(process.env.ONESHOT_RUN_DIR || '', 'harness/servers.json'), {});
   return { worktree: real(wt), bePort: be, fePort: fe, bundleUrl: envOut.bundleUrl,
     djangoPid: servers.djangoPid || H.listenerPid(be), webpackPid: servers.webpackPid || H.listenerPid(fe) };
 }
 
-/** Path 3: nothing usable. Build one. */
+/** Path 3: nothing usable. Build one. Always called under the 'pool' lock. */
 async function cold(target, notes) {
-  ensureSeed(notes);
+  await ensureSeed(notes);
   const { be, fe } = leasePorts(await discover());
   const wt = path.join(WT_ROOT, `app-${be}`);
   const at = target ? target.sha : `origin/${BASE_BRANCH}`;
@@ -805,7 +885,12 @@ function record(app, owner) {
   // Ownership, once set, is sticky: an ad-hoc `ensure` that happens to reuse a loop's
   // warm instance must not quietly take it away from that loop.
   const prior = rows.find((r) => r.worktree === app.worktree);
-  const rest = rows.filter((r) => r.worktree !== app.worktree);
+  // Discovery is by process, so the registry is only advisory — but a file that only ever
+  // grows feeds `warm`'s ownership lookup stale rows and misleads anyone reading it. Drop
+  // rows whose worktree is gone or whose processes are both dead as we rewrite it.
+  const alivePid = (pid) => Boolean(pid) && H.alive(pid);
+  const rest = rows.filter((r) => r.worktree !== app.worktree)
+    .filter((r) => fs.existsSync(r.worktree) && (alivePid(r.djangoPid) || alivePid(r.webpackPid)));
   rest.push({ worktree: app.worktree, bePort: app.bePort, fePort: app.fePort,
     djangoPid: app.djangoPid, webpackPid: app.webpackPid, head: app.head,
     owner: owner || (prior && prior.owner) || null, seenAt: new Date().toISOString() });
@@ -864,12 +949,21 @@ async function down(opts) {
 
 /* ------------------------------------------------------------------ cli */
 
+/**
+ * `--k v` uniformly, so a new value flag needs no edit here: a `--flag` takes the next
+ * token as its value unless that token is itself a flag (or absent), in which case it is a
+ * boolean. This CLI has no positionals after a command, so nothing legitimately follows a
+ * boolean flag to be mis-eaten. A hardcoded value-flag list instead turned any unlisted
+ * `--x value` into `x:true` plus a stray positional.
+ */
 function parse(argv) {
   const o = { _: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (['--ref', '--worktree', '--port', '--fe-port', '--owner'].includes(a)) { o[a.slice(2)] = argv[i + 1]; i += 1; } else if (a.startsWith('--')) o[a.slice(2)] = true;
-    else o._.push(a);
+    if (a.startsWith('--')) {
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) { o[a.slice(2)] = next; i += 1; } else o[a.slice(2)] = true;
+    } else o._.push(a);
   }
   return o;
 }
