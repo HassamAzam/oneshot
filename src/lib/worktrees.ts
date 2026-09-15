@@ -28,6 +28,7 @@ import {
   CONTEXT_REPO, WORK_REPO, WT_ROOT, envOr, expandPath, portPool, projectConfig,
 } from './config.js';
 import { db } from './db.js';
+import { retryRefLockRace } from './gitfetch.js';
 import { log } from './log.js';
 
 function git(args: string[], cwd = WORK_REPO): string {
@@ -341,7 +342,9 @@ export function leaseWorktree(
   const worktree = join(WT_ROOT, name);
 
   if (!existsSync(worktree)) {
-    git(['fetch', 'origin', base]);
+    // Two runs starting together fetch the same base in the same shared repo;
+    // the loser of the ref lock is retried rather than blocked — see gitfetch.ts.
+    retryRefLockRace(() => git(['fetch', 'origin', base]));
     const branchExists = (() => {
       try { git(['rev-parse', '--verify', `refs/heads/${branch}`]); return true; } catch { return false; }
     })();
