@@ -75,7 +75,7 @@ import {
 import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/slack.js';
 import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
-import { mdText } from '../lib/gitlabmd.js';
+import { codeSpan, mdText } from '../lib/gitlabmd.js';
 import type { TestCase } from '../phases/types.js';
 
 export type Gate = 'plan' | 'testcases';
@@ -636,7 +636,7 @@ function planRisks(plan: Record<string, unknown> | null): string[] {
 function renderPlanForTicket(plan: Record<string, unknown> | null): string {
   if (!plan) return '_(no plan recorded)_';
   const steps = planSteps(plan)
-    .map((s) => `${s.n}. **[${mdText(s.layer)}]** ${mdText(s.what)}${s.files?.length ? ` — \`${s.files.join('`, `')}\`` : ''}`)
+    .map((s) => `${s.n}. **[${mdText(s.layer)}]** ${mdText(s.what)}${s.files?.length ? ` — ${s.files.map(codeSpan).join(', ')}` : ''}`)
     .join('\n');
   const risks = planRisks(plan).map((r) => `- ${mdText(r)}`).join('\n');
   const approach = planStr(plan, 'approach');

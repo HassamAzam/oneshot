@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mdText } from './gitlabmd.js';
+import { codeSpan, mdText } from './gitlabmd.js';
 
 test('bare tags outside code are escaped so no HTML block opens', () => {
   assert.equal(mdText('set the <title> & <h1>'), 'set the &lt;title&gt; &amp; &lt;h1&gt;');
@@ -21,8 +21,8 @@ test('an unclosed backtick is text, not a code span', () => {
 // GitLab draws a colour chip only for a code span holding nothing but the colour.
 test('bare hex colours become chip-rendering code spans', () => {
   assert.equal(
-    mdText('about #535353 in dark, #fafafa in light; alpha #FFAC03CC'),
-    'about `#535353` in dark, `#fafafa` in light; alpha `#FFAC03CC`',
+    mdText('about #1F1F1F in dark, #fafafa in light; alpha #FFAC03CC'),
+    'about `#1F1F1F` in dark, `#fafafa` in light; alpha `#FFAC03CC`',
   );
   assert.equal(mdText('(#B35400).'), '(`#B35400`).');
 });
@@ -37,4 +37,40 @@ test('hex inside words, URLs, anchors, entities and existing code is untouched',
   assert.equal(mdText('https://x.io/page#abcdef and foo#abcdef'), 'https://x.io/page#abcdef and foo#abcdef');
   assert.equal(mdText('#abcdefg is not a colour'), '#abcdefg is not a colour');
   assert.equal(mdText('already `#535353`'), 'already `#535353`');
+});
+
+// Adversarial cases from review on #51. Each was reproduced against the first version.
+
+test('a backtick pair across a blank line is not a code span, so what lies between is escaped', () => {
+  assert.equal(
+    mdText('x ` y\n\n<h1>INJECTED</h1>\n\nz ` w'),
+    'x ` y\n\n&lt;h1&gt;INJECTED&lt;/h1&gt;\n\nz ` w',
+  );
+  assert.equal(mdText('a ` b\n  \n<img src=x> ` c'), 'a ` b\n  \n&lt;img src=x&gt; ` c');
+  // A span may still wrap onto the next line, as CommonMark allows.
+  assert.equal(mdText('`a <b>\nc` <d>'), '`a <b>\nc` &lt;d&gt;');
+});
+
+test('all-digit refs of any length stay issue links; the cost is no chip for #000000', () => {
+  assert.equal(mdText('fixes #123456 and #161'), 'fixes #123456 and #161');
+  assert.equal(mdText('see #12345678'), 'see #12345678');
+  assert.equal(mdText('black #000000, grey #535353'), 'black #000000, grey #535353');
+});
+
+test('fenced blocks are copied verbatim, balanced or not, with or without an info string', () => {
+  assert.equal(mdText('a <x>\n```\n<script>evil</script>\n```\nb <y>'), 'a &lt;x&gt;\n```\n<script>evil</script>\n```\nb &lt;y&gt;');
+  assert.equal(mdText('a\n```js\nconst ok = a && <b/>;\n```'), 'a\n```js\nconst ok = a && <b/>;\n```');
+  assert.equal(mdText('a\n~~~\n<b> #fafafa\n~~~\n<c>'), 'a\n~~~\n<b> #fafafa\n~~~\n&lt;c&gt;');
+  // Unclosed: CommonMark runs the block to the end of the document.
+  assert.equal(mdText('a <x>\n```\n<script>evil</script>'), 'a &lt;x&gt;\n```\n<script>evil</script>');
+});
+
+test('mdText is not idempotent: apply it exactly once per field', () => {
+  assert.equal(mdText(mdText('a & b')), 'a &amp;amp; b');
+});
+
+test('codeSpan survives backticks in its content', () => {
+  assert.equal(codeSpan('src/a.js'), '`src/a.js`');
+  assert.equal(codeSpan('we`ird.js'), '``we`ird.js``');
+  assert.equal(codeSpan('`edge'), '`` `edge ``');
 });
