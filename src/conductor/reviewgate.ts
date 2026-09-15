@@ -635,6 +635,13 @@ function planCoverage(plan: Record<string, unknown> | null): AcCoverage[] {
 
 const COVERAGE_MARK: Record<string, string> = { covered: '✅', partial: '⚠️', 'not-satisfiable': '❌' };
 
+interface FeedbackResponse { point: string; response: string; where: string; note: string }
+
+function planFeedbackResponse(plan: Record<string, unknown> | null): FeedbackResponse[] {
+  const v = plan?.feedbackResponse;
+  return Array.isArray(v) ? (v as FeedbackResponse[]).filter((f) => f && typeof f.point === 'string') : [];
+}
+
 /**
  * GitLab Markdown, not Slack mrkdwn.
  *
@@ -659,8 +666,15 @@ function renderPlanForTicket(plan: Record<string, unknown> | null): string {
     .map((c) => `- ${COVERAGE_MARK[c.status] ?? '•'} ${mdText(c.criterion)} — ${mdText(c.coveredBy || '—')}` +
       `${c.note ? ` _(${mdText(c.note)})_` : ''}`)
     .join('\n');
+  // First on a revision: the approver's question is "did it take my points",
+  // and the answer has to be checkable against the plan below, not asserted.
+  const answered = planFeedbackResponse(plan)
+    .map((f) => `- **${mdText(f.response)}** — ${mdText(f.point)}${f.where ? ` → ${mdText(f.where)}` : ''}` +
+      `${f.note ? `: ${mdText(f.note)}` : ''}`)
+    .join('\n');
   const approach = planStr(plan, 'approach');
-  return `**Approach**\n${approach ? mdText(approach) : '(not recorded)'}\n\n` +
+  return `${answered ? `**Your feedback, point by point**\n${answered}\n\n` : ''}` +
+    `**Approach**\n${approach ? mdText(approach) : '(not recorded)'}\n\n` +
     `${questions ? `**Open questions** — answer these in a comment, or the stated default is used\n${questions}\n\n` : ''}` +
     `**Steps**\n${steps || '(none recorded)'}\n\n` +
     `${coverage ? `**Acceptance coverage**\n${coverage}\n\n` : ''}` +

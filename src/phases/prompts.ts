@@ -575,7 +575,10 @@ Produce an implementation plan an engineer could follow without re-deriving the 
   entry. Never decide one silently. A scope or product choice the ticket does not state is an
   open question, not a risk — the approver reads open questions first and can overrule them.
 - \`acceptanceCoverage\` has one entry per research acceptance criterion. Mark a criterion
-  \`not-satisfiable\` when no change can demonstrate it as written, and say what is done instead.
+  \`not-satisfiable\` when no change can demonstrate it as written, and say what is done instead.${
+  ctx.journal.planApproval?.feedback?.length ? `
+- \`feedbackResponse\` answers the LATEST feedback round point by point. \`where\` must name the part
+  of THIS plan that now carries the point — the approver sees the plan, not your reasoning.` : ''}
 
 Do not write or modify any code.`,
 

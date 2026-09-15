@@ -70,6 +70,7 @@ interface PlanArtifact {
   openQuestions?: string[];
   outOfScope?: string[];
   acceptanceCoverage?: Array<{ criterion: string; coveredBy: string; status: string; note: string }>;
+  feedbackResponse?: Array<{ point: string; response: string; where: string; note: string }>;
   summary?: string;
 }
 
@@ -79,12 +80,15 @@ export function renderPlanMd(iid: number, title: string, plan: PlanArtifact): st
     .join('\n');
   const questions = (plan.openQuestions ?? []).map((q) => `- ${q}`).join('\n');
   const outOfScope = (plan.outOfScope ?? []).map((o) => `- ${o}`).join('\n');
+  const answered = (plan.feedbackResponse ?? [])
+    .map((f) => `| ${f.point} | ${f.response} | ${f.where || '—'} | ${f.note || ''} |`)
+    .join('\n');
   const coverage = (plan.acceptanceCoverage ?? [])
     .map((c) => `| ${c.criterion} | ${c.status} | ${c.coveredBy || '—'} | ${c.note || ''} |`)
     .join('\n');
   return `# Implementation plan — #${iid} ${title}
 
-## Approach
+${answered ? `## Reviewer feedback, point by point\n| Point | Response | Where | Note |\n|---|---|---|---|\n${answered}\n\n` : ''}## Approach
 ${plan.approach ?? '(not recorded)'}
 ${questions ? `\n## Open questions\n${questions}\n` : ''}
 ## Steps
