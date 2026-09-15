@@ -1864,6 +1864,17 @@ export async function runTicket(
           [cfg.labels.entry, cfg.labels.testcaseReview].filter(Boolean),
           [cfg.labels.blocked]);
         await addIssueNote(journal.iid, `Oneshot stopped: **${reason}**\n\nRun \`${journal.runId}\`.`);
+        // The stop note just ended this claim for every conductor that reads
+        // the ticket (lib/claims.ts), so the note is dead weight — and worse,
+        // left in place the resume's by-id check above would find it, call
+        // the claim live and never re-post, while every other desk reads the
+        // ticket as unowned. Removing it makes the resume post one fresh
+        // claim, after the stop note, that everyone counts.
+        if (journal.claimNoteId) {
+          await deleteIssueNote(journal.iid, journal.claimNoteId);
+          journal.claimNoteId = undefined;
+          writeJournal(journal);
+        }
       }
       log.error(`■ #${journal.iid} BLOCKED — ${reason}`);
       logStopDetail(journal, 'BLOCKED');
@@ -1877,9 +1888,9 @@ export async function runTicket(
       }
       // The claim note has done its job — with the exit label on, nothing
       // scans this ticket again — and a claim that outlives its run is exactly
-      // the stale note lib/claims.ts otherwise has to age out. Only 'done'
-      // tidies it: a blocked or aborted run expects to resume, and its place
-      // in line is the note.
+      // the stale note lib/claims.ts otherwise has to age out. 'blocked'
+      // removes it too (above); an aborted or parked run expects to resume,
+      // and its place in line is the note.
       if (!DRY_RUN && journal.claimNoteId) {
         await deleteIssueNote(journal.iid, journal.claimNoteId);
         journal.claimNoteId = undefined;

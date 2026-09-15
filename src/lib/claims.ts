@@ -106,12 +106,23 @@ export function parseClaims(notes: IssueNote[]): Claim[] {
   return out.sort((a, b) => a.noteId - b.noteId);
 }
 
-/** Every run id a stop/complete note on this ticket has reported finished. */
-export function stoppedRuns(notes: IssueNote[]): Set<string> {
-  const done = new Set<string>();
+/**
+ * Every run id a stop/complete note on this ticket has reported finished, with
+ * the id of the LATEST such note.
+ *
+ * The note id matters because a run id outlives a stop: a blocked run that is
+ * resumed keeps its id and posts a fresh claim. A bare "this run stopped" set
+ * read that fresh claim as dead too, so a resumed-then-parked run never saw its
+ * own claim live and posted another one on every re-entry — ten on #168 in
+ * half an hour.
+ */
+export function stoppedRuns(notes: IssueNote[]): Map<string, number> {
+  const done = new Map<string, number>();
   for (const n of notes) {
     if (!STOP_RE.test(n.body ?? '')) continue;
-    for (const id of (n.body ?? '').match(RUN_ID_RE) ?? []) done.add(id);
+    for (const id of (n.body ?? '').match(RUN_ID_RE) ?? []) {
+      done.set(id, Math.max(done.get(id) ?? 0, n.id));
+    }
   }
   return done;
 }
@@ -120,7 +131,8 @@ export function stoppedRuns(notes: IssueNote[]): Set<string> {
 export function activeClaims(notes: IssueNote[], now = Date.now()): Claim[] {
   const stopped = stoppedRuns(notes);
   const stale = staleMs();
-  return parseClaims(notes).filter((c) => !stopped.has(c.runId) && now - c.createdAt < stale);
+  return parseClaims(notes).filter((c) =>
+    (stopped.get(c.runId) ?? 0) < c.noteId && now - c.createdAt < stale);
 }
 
 export interface Ownership {
