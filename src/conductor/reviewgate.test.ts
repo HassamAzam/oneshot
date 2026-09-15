@@ -54,3 +54,27 @@ test('plan markdown omits the new sections for an old plan and renders them for 
   assert.match(md, /\| VoiceOver confirms fix \| not-satisfiable \| — \| 1\.4\.11 is visual \|/);
   assert.match(md, /## Out of scope\n- checkIcon contrast/);
 });
+
+const revisedPlan = {
+  ...newPlan,
+  feedbackResponse: [
+    { point: 'opacity:1 cannot undo the parent', response: 'changed', where: 'step 6', note: 'dot moved out of the faded label' },
+    { point: 'V2 scope', response: 'answered', where: 'open question 1', note: '' },
+    { point: 'rename the token', response: 'declined', where: '', note: 'matches the existing naming' },
+  ],
+};
+
+test('gate comment answers reviewer feedback first, point by point', () => {
+  const body = planApprovalRequestBody(revisedPlan, 'why');
+  assert.ok(body.indexOf('**Your feedback, point by point**') < body.indexOf('**Approach**'));
+  assert.match(body, /- \*\*changed\*\* — opacity:1 cannot undo the parent → step 6: dot moved out of the faded label/);
+  assert.match(body, /- \*\*answered\*\* — V2 scope → open question 1\n/);
+  assert.match(body, /- \*\*declined\*\* — rename the token: matches the existing naming/);
+});
+
+test('no feedback section on a first plan or an old artifact', () => {
+  assert.doesNotMatch(planApprovalRequestBody(newPlan, 'why'), /point by point/);
+  assert.doesNotMatch(planApprovalRequestBody({ ...newPlan, feedbackResponse: [] }, 'why'), /point by point/);
+  assert.doesNotMatch(renderPlanMd(1, 't', newPlan), /point by point/);
+  assert.match(renderPlanMd(1, 't', revisedPlan), /## Reviewer feedback, point by point\n\| Point \| Response \| Where \| Note \|/);
+});

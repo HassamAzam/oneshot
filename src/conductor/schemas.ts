@@ -176,7 +176,26 @@ export const PLAN_SCHEMA = phaseSchema({
       required: ['criterion', 'coveredBy', 'status', 'note'],
     },
   },
-}, ['approach', 'reuse', 'steps', 'migrations', 'risks', 'openQuestions', 'outOfScope', 'acceptanceCoverage']);
+  feedbackResponse: {
+    type: 'array',
+    description:
+      'One entry per distinct point in the reviewer feedback this revision answers. Empty when ' +
+      'there was no feedback. Only what this artifact shows counts: a point you resolved in ' +
+      'your reasoning but did not write into a step, question, out-of-scope entry or risk has ' +
+      'not reached the approver.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        point: str('The reviewer\'s point, in a few words'),
+        response: { type: 'string', enum: ['changed', 'declined', 'answered'] },
+        where: str('Where this plan now carries it, e.g. "step 6", "open question 2", "out of scope". Empty only for declined.'),
+        note: str('One line: what changed, or why declined'),
+      },
+      required: ['point', 'response', 'where', 'note'],
+    },
+  },
+}, ['approach', 'reuse', 'steps', 'migrations', 'risks', 'openQuestions', 'outOfScope', 'acceptanceCoverage', 'feedbackResponse']);
 
 export const TESTCASES_SCHEMA = phaseSchema({
   module: str('Module name for suite tagging'),
