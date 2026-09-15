@@ -147,8 +147,8 @@ Do not claim a dynamic scan ran if it didn't — say "static review only" when P
 
 Severity, consistent with `.claude/skills/erp-code-review/refs/severity-rules.md`:
 
-- **BLOCKER** — keyboard trap, no accessible name on an interactive control, color-only status on an approval/payroll/leave workflow, form field with no label, focus lost on modal open/close.
-- **SUGGESTION** — borderline contrast, missing `aria-live` on an async update, virtualized list missing list semantics, heading level skip.
+- **BLOCKER** — keyboard trap, no accessible name on an interactive control, color-only status on an approval/payroll/leave workflow, form field with no label, focus lost on modal open/close, live region rendered outside an open overlay (silent by construction).
+- **SUGGESTION** — borderline contrast, contrast ratio reported against an unresolved surface or labelled static/unverified, missing `aria-live` on an async update, virtualized list missing list semantics, heading level skip.
 - **NITPICK** — redundant `aria-label` duplicating visible text, minor landmark structure gaps.
 
 If the target is clean: `Clean — no accessibility findings.` Silence means pass — do not list passing checklist items.
