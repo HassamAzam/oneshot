@@ -24,6 +24,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { STATE, artifactDir, runDir } from './config.js';
+import type { MrFeedbackLedger } from '../mrfeedback/types.js';
 
 const RUNS_ARCHIVE = join(STATE, 'runs-archive');
 
@@ -177,6 +178,8 @@ export interface RunJournal {
   phases: PhaseRecord[];
   /** Blocks this run diagnosed and tried to clear by itself, oldest first. */
   remediations?: Remediation[];
+  /** MR review-feedback rounds and per-thread watermarks — see src/mrfeedback. */
+  mrFeedback?: MrFeedbackLedger;
 }
 
 function journalPath(iid: number): string {
@@ -247,14 +250,18 @@ export function lapsOf(iid: number, phase: string): number {
  * phase that ran three times because an earlier phase cycled back to it has not
  * spent any of its own. Counting all laps would strand a run that was doing
  * exactly what it was told to.
+ *
+ * `since` (epoch ms) counts only laps started at or after it: an MR review
+ * round gives review and verify a fresh budget, so failures from before the
+ * round must not spend it.
  */
-export function failedLapsOf(iid: number, phase: string): number {
+export function failedLapsOf(iid: number, phase: string, since = 0): number {
   const j = readJournal(iid);
   if (!j) return 0;
   // 'infra' is deliberately not counted. A phase cancelled by the conductor or
   // killed by a signal never reached a verdict, so charging it a lap spends the
   // budget for revising the work on an attempt that never assessed any.
-  return j.phases.filter((p) => p.phase === phase && p.status === 'failed').length;
+  return j.phases.filter((p) => p.phase === phase && p.status === 'failed' && p.startedAt >= since).length;
 }
 
 /**

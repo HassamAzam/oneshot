@@ -24,6 +24,8 @@ import {
   type PhaseConfig,
 } from '../lib/config.js';
 import { readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
+import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
+import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import {
   GITLAB_PROJECT_URL,
   type CaseResult, type Finding, type Screenshot, type TestCase, type Ticket,
@@ -48,6 +50,8 @@ export interface PromptCtx {
    * nothing.
    */
   block?: { phase: string; reason: string };
+  /** New MR review threads. Set only when the on-demand `mr-feedback` phase is invoked. */
+  mrThreads?: MrFeedbackSignal;
 }
 
 /**
@@ -322,6 +326,7 @@ interface ImplementArtifact {
   lintClean: boolean;
   testsRun: string;
   addressedFindings: string[];
+  addressedFeedback: AddressedFeedback[];
 }
 
 function implementOf(ctx: PromptCtx): Partial<ImplementArtifact> {
@@ -708,6 +713,7 @@ ${cases.map((c) => `  - ${c.id} [${c.blast}] ${c.scenario}\n      expects: ${c.e
 
     return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 ${lapBlock}
+${implementFeedbackBlock(ctx.journal.mrFeedback)}
 ${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'Test-case gate reviewer feedback')}
 ## Plan (phase 2) — this is your specification
 ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
@@ -806,6 +812,7 @@ ${prev.map((f) => `- ${f.id} [${f.severity}] ${f.file}:${f.line} — ${f.what}`)
 
     return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 ${lapBlock}
+${reviewFeedbackBlock(ctx.journal.mrFeedback, i.addressedFeedback ?? [])}
 ## Acceptance criteria (phase 1) — the conformance oracle
 ${criteria(ctx)}
 
@@ -894,9 +901,23 @@ Worktree: ${ctx.worktree ?? '(none leased)'}
 Port:     ${ctx.port ?? '(none leased)'}   (also in $ONESHOT_PORT)
 Branch:   ${ctx.branch ?? '(unleased)'}
 
-One process on that port serves BOTH the Django backend and the webpack frontend —
-\`http://localhost:${ctx.port ?? '<port>'}/\` is the whole app, and there is no second port to
-open. Start it with \`npm start\` from the worktree with PORT set to ${ctx.port ?? '<port>'}.
+The conductor started it in the BACKGROUND the moment this run leased its worktree, so by
+now it is usually already serving. Confirm it with ONE command, and do not improvise around
+it:
+
+\`\`\`
+node $ONESHOT_HOME/scripts/app.cjs ensure
+\`\`\`
+
+No arguments: it reads \`$ONESHOT_WORKTREE\` and \`$ONESHOT_PORT\` and brings up the app for
+THIS checkout, never moving its ref — your uncommitted work is safe from it. If the
+conductor's bring-up already finished you get it back in about a second; if it is still
+compiling you join that one rather than starting a second; if it never started, this starts
+it. It prints the same \`app-env.json\` in all three cases. \`baseUrl\` in that file is the
+whole app; navigate THERE and nowhere else. If it returns a named code
+(\`E_NO_PORTS\`, \`E_DJANGO_DEAD\`, \`E_WEBPACK_DEAD\`, \`E_NO_REBUILD\`, …) report the code and
+its hint rather than starting a bring-up of your own — every session that improvised one
+spent between a third and four fifths of its budget on it.
 
 This worktree was SEEDED, not installed: \`node_modules\` and \`venv\` are symlinks into a
 working checkout, and \`hrdb/local_settings.py\` and \`frontend/src/constants/config.js\` are
@@ -906,17 +927,13 @@ into a shared symlinked \`node_modules\` corrupts every other worktree on this m
 copied from a checkout that runs elsewhere, and the frontend will otherwise call an API that is
 not yours. That file is in \`.git/info/exclude\`, so editing it cannot reach a commit.
 
-The app is TWO processes — the webpack dev server (frontend assets) and Django (HTML + API on
-your leased port) — and the expensive one is webpack: its FIRST compile takes minutes, and
-silence during it is not failure. So before building anything, CHECK what is already alive: a
-previous lap's servers can outlive their session, and a warm webpack is minutes of your budget
-handed back. \`lsof\` the listener's cwd and require it to be THIS worktree — a server from any
-other worktree path is stale evidence and must be killed, never reused. Django restarts in
-seconds, so a missing backend is cheap; a missing webpack is the thing worth checking for
-first. Start whatever is missing DETACHED with \`setsid\` so it survives this session — the
-next phase reuses it instead of re-paying the compile. POLL until ready with a bounded wait;
-never a blind worst-case \`sleep\`. Your whole budget is ${mins} minutes; start servers FIRST
-and do your reading while webpack compiles.
+The app is TWO processes — webpack (assets only, never navigated to) and Django (HTML + API,
+and the origin you use) — and \`ensure\` owns both. It already does what earlier prompts asked
+you to do by hand: it checks what is alive machine-wide, proves a listener belongs to THIS
+worktree before reusing it, starts what is missing detached so the next phase inherits it,
+and polls readiness off the file Django actually reads rather than sleeping. Do not re-derive
+any of that. Your whole budget is ${mins} minutes; run \`ensure\` FIRST and do your reading
+while it works.
 
 Previous laps may also have left your own artifacts in the worktree — a Playwright suite, login
 helpers. REUSE them; re-authoring a script that already exists is pure turn burn.
@@ -994,7 +1011,16 @@ full implement+review lap for what was only your own budgeting. A partial result
 
 ${ORACLE}
 
-Screenshot every fail and every high-blast pass, named \`<case-id>-<pass|fail>.png\`.
+Screenshot every fail and every high-blast pass, named \`<case-id>-<pass|fail>.png\` — when what
+the case asserts is VISIBLE in the viewport. A screenshot is published as proof of the case, so
+one that cannot show the asserted value proves nothing and reads as if it did: for a \`<title>\`,
+an \`aria-*\`/\`alt\` value, a header or a redirect, leave \`screenshot\` empty and put the measured
+value verbatim in \`evidence\`. Never add anything to the page before capturing it — no overlay,
+label, style or script; \`page.evaluate\` reads, it does not write.
+
+A case passes only if its precondition was really in place. If you could not establish it — the
+dark theme did not apply, the role could not be granted, the data could not be made — the case
+is 'skipped' or 'blocked' with that reason, never a 'pass' measured against the default state.
 
 ${artifactsBlock(ctx)}
 
@@ -1024,11 +1050,18 @@ Worktree: ${ctx.worktree ?? '(none leased)'}
 Port:     ${ctx.port ?? '(none leased)'}   (also in $ONESHOT_PORT)
 
 \`verify\` ran immediately before you, on this same worktree and port, and reported
-serverStarted=${v.serverStarted === true}. Check whether it is STILL LISTENING before you start
-anything: a live server is a large part of your ${mins}-minute budget already paid for. Only if
-the port is dead do you start it yourself — \`PORT=${ctx.port ?? '<port>'} npm start\` from the
-worktree, config.js pointed at that port first, and the first webpack compile is slow, so poll
-the port rather than sleeping through it. Never \`npm ci\`: node_modules is a shared symlink.
+serverStarted=${v.serverStarted === true}. Do not check, and do not start anything by hand —
+run the same one command it ran:
+
+\`\`\`
+node $ONESHOT_HOME/scripts/app.cjs ensure
+\`\`\`
+
+If verify's servers are still up on your commit this returns them in about three seconds; if
+they died it rebuilds. Either way you get an \`app-env.json\` with the \`baseUrl\` to navigate
+to. This phase used to spend between a third and four fifths of its budget re-establishing a
+server the previous phase had just killed, and three of six sessions died at the turn cap
+before taking a single screenshot. Never \`npm ci\`: node_modules is a shared symlink.
 
 Drive the browser with Playwright, from Bash, with \`node\`, exactly as \`verify\` did — there is
 no browser tool in this session.
@@ -1045,9 +1078,9 @@ ${taken.map((s) => `  - ${s.screenshot} (${s.id}, ${s.result})`).join('\n') || '
 Produce the screenshot pack a reviewer will look at INSTEAD of checking out the branch. Your
 pack is what verify's shots do not show:
 
-  - a BEFORE/AFTER pair for each changed screen. The 'before' is the base branch's behaviour;
-    if you cannot produce one without a second checkout, say so in the caption rather than
-    passing off an unchanged region as a before.
+  - a BEFORE/AFTER pair for each changed screen whose change you can SEE. The 'before' is the
+    base branch's behaviour; if you cannot produce one without a second checkout, say so in the
+    caption rather than passing off an unchanged region as a before.
   - the states a passing test never reaches: empty, loading, error, and the permission-denied
     view if the change touches a gated screen.
   - one shot per high-blast case that PASSED${highPassed.length ? ` (${highPassed.map((x) => x.id).join(', ')})` : ''}, so the pack shows the feature
@@ -1061,6 +1094,29 @@ because \`document\` links it.
 Filenames are \`<NN>-<slug>.png\`, zero-padded, in the order a reviewer should see them. The
 order IS the argument. Never reuse a filename from an earlier lap: a shot that silently
 overwrites its own 'before' destroys the pair.
+
+## A change a screenshot cannot show goes in \`observations\`, not in a picture
+
+Decide this FIRST. A \`<title>\`, an \`aria-*\`/\`alt\`/\`lang\` value, a meta tag, focus order, a
+response header — none of these is in the viewport, so a before/after screenshot of them is two
+identical pictures. For each such value, add one \`observations\` row: what was measured and on
+which URL, the base-branch value, this branch's value, both verbatim, and how you read it. That
+table is published as the evidence. Take no screenshot for a value the table already carries; a
+pack with zero screenshots and a full table is a complete pack for a non-visual change.
+
+The base-branch value comes from the base branch, read without touching this checkout:
+\`git show origin/${baseBranch()}:<path>\` for the template or component, stated as "from source" in
+\`how\`. If you cannot establish it, write "not measured" and why — never infer it.
+
+## Never alter what you are capturing
+
+- Do not inject anything into the page before a screenshot: no overlay, banner, label, style or
+  script. \`page.evaluate\` may READ the DOM, never write it. A caption painted onto the page is
+  text you wrote, presented as something the app rendered — and on #189 it covered the very
+  header a reviewer would check. Say it in \`caption\` instead.
+- Do not change the worktree to produce a 'before'. You have no write access to it, and the git
+  guard refuses \`checkout\`/\`restore\`/\`stash\`/\`reset\` from this phase: the files on disk are the
+  change under review, and anything left altered there is what \`mr\` pushes.
 
 ${artifactsBlock(ctx)}
 
@@ -1149,6 +1205,16 @@ A conflict with \`${baseBranch()}\` that you cannot resolve IS a block. A thin c
 
 Do not merge. You do not have the tool, and the conductor owns that step.`;
   },
+
+  'mr-feedback': (ctx) => triagePrompt({
+    ticketHead: ticketHead(ctx.ticket),
+    criteria: criteria(ctx),
+    changeSummary: changeSummary(ctx),
+    mrIid: ctx.mrThreads?.mrIid ?? ctx.journal.mrIid ?? 0,
+    branch: ctx.branch ?? '(unleased)',
+    base: baseBranch(),
+    threads: ctx.mrThreads?.threads ?? [],
+  }),
 
   remediate: (ctx) => {
     const b = blockOf(ctx);

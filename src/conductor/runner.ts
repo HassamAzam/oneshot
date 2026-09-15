@@ -47,11 +47,14 @@ import { existsSync, rmSync } from 'node:fs';
 import { promisify } from 'node:util';
 import {
   DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, modelFor,
+  mrFeedbackConfig,
   phases, portPool, projectConfig,
   operatorName,
   type PhaseConfig,
 } from '../lib/config.js';
-import { claimNoteBody, readOwnership, settleMs } from '../lib/claims.js';
+import {
+  claimMarker, claimNoteBody, readOwnership, settleMs,
+} from '../lib/claims.js';
 import {
   archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
   phaseSucceeded, readArtifact,
@@ -64,11 +67,12 @@ import {
   leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort,
 } from '../lib/worktrees.js';
 import {
-  addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, issueNotes,
-  issueUrl, swapLabel, type Issue,
+  addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
+  issueNotes, issueUrl, swapLabel, type Issue,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
 import { checkQuota } from '../lib/quota.js';
+import { checkTestLogin } from '../lib/testlogin.js';
 import {
   claimOwnership, claimTicket, getRun, logEvent, phaseEnd, phaseStart, updateRun,
 } from '../lib/db.js';
@@ -77,6 +81,7 @@ import { log } from '../lib/log.js';
 import { exportRun } from '../lib/langfuse.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
+import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import { mergePhase } from './codephases.js';
@@ -87,6 +92,11 @@ import {
 } from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { Ticket, TestCase } from '../phases/types.js';
+import {
+  activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
+  roundsUsed, startRound,
+} from '../mrfeedback/ledger.js';
+import type { MrFeedbackSignal } from '../mrfeedback/types.js';
 
 const exec = promisify(execFile);
 
@@ -180,6 +190,8 @@ export const CODE_PHASES: Record<
      * or a still-running pipeline is not.
      */
     park?: boolean;
+    /** Set only by `merge`: new MR review threads for the runner to triage. */
+    feedback?: MrFeedbackSignal;
   }>) | undefined
 > = {
   merge: mergePhase,
@@ -294,7 +306,11 @@ type Control =
   | { kind: 'advance' }
   | { kind: 'retry'; at: number }
   | { kind: 'cycle'; jumpTo: number; windowEnd: number }
-  | { kind: 'stop'; status: 'blocked' | 'aborted' | 'parked'; reason: string };
+  | {
+    kind: 'stop'; status: 'blocked' | 'aborted' | 'parked'; reason: string;
+    /** The block is a verdict for a person, not an environment fault — do not spend a remediation on it. */
+    noRemediation?: boolean;
+  };
 
 function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] {
   if (p.onFail === 'skip') return 'skipped';
@@ -577,8 +593,24 @@ export async function runTicket(
   // down. A resume whose own claim is still live re-asserts nothing — it only
   // re-checks that it is still the oldest.
   if (!DRY_RUN) {
-    const before = await readOwnership(iid);
-    const mineLive = before?.active.some((c) => c.runId === runId) ?? false;
+    // Trust the journal's own record before asking issueNotes() to find it
+    // again in a haystack sized for a different caller's needs. issueNotes()
+    // returns only the newest hundred comments — fine for the things that
+    // scan a bounded recent tail, but a claim note this run posted hours ago
+    // ages out of that window the moment a busy ticket (a `--follow` watch
+    // especially) accrues a hundred comments after it. The scan then finds
+    // no claim of ours, mineLive reads false, and the run reposts — a note
+    // that itself ages out a few ticks later, so it reposts again, visibly,
+    // in the ticket's own thread. A direct lookup by id has no window: if
+    // j.claimNoteId still resolves to a note that still names this run, the
+    // claim is live, full stop, and nothing here needs re-deriving it from a
+    // list.
+    let mineLive = false;
+    if (j.claimNoteId !== undefined) {
+      const mine = await getIssueNote(iid, j.claimNoteId);
+      mineLive = mine.ok && (mine.data?.body ?? '').includes(claimMarker(runId));
+      if (!mineLive) j.claimNoteId = undefined;
+    }
     if (!mineLive) {
       const posted = await addIssueNote(iid, claimNoteBody(runId, operatorName()));
       if (posted.ok && posted.data) {
@@ -586,24 +618,30 @@ export async function runTicket(
         writeJournal(j);
       }
       await sleep(settleMs(), opts.signal);
-    }
-    const after = await readOwnership(iid);
-    if (!after) {
-      log.warn(`#${iid} — could not read the ticket's claims; proceeding on the local claim alone`);
-    } else if (after.earliest && after.earliest.runId !== runId) {
-      // Lost. Not an error and not a block: the ticket is somebody's, and the
-      // scan will skip it for as long as their claim is live. Take our note
-      // off so the ticket shows one owner, then stand down with the leases
-      // released. 'aborted' resumes if their claim ever goes stale.
-      if (j.claimNoteId) {
-        await deleteIssueNote(iid, j.claimNoteId);
-        j.claimNoteId = undefined;
-        writeJournal(j);
+
+      // Settled when the note was first posted — nothing that landed since
+      // can be older than it, so a run whose own note the fast path just
+      // confirmed has no later claim to yield to and needs no ownership
+      // re-scan. Only a run that just (re-)posted, or found no journal
+      // record at all, still needs this to find out where it landed.
+      const after = await readOwnership(iid);
+      if (!after) {
+        log.warn(`#${iid} — could not read the ticket's claims; proceeding on the local claim alone`);
+      } else if (after.earliest && after.earliest.runId !== runId) {
+        // Lost. Not an error and not a block: the ticket is somebody's, and the
+        // scan will skip it for as long as their claim is live. Take our note
+        // off so the ticket shows one owner, then stand down with the leases
+        // released. 'aborted' resumes if their claim ever goes stale.
+        if (j.claimNoteId) {
+          await deleteIssueNote(iid, j.claimNoteId);
+          j.claimNoteId = undefined;
+          writeJournal(j);
+        }
+        const who = after.earliest.author ? ` (${after.earliest.author})` : '';
+        log.warn(`#${iid} — yielding: run ${after.earliest.runId}${who} claimed this ticket first`);
+        logEvent('claim_yielded', { iid, to: after.earliest.runId, author: after.earliest.author }, { runId });
+        return finish(j, 'aborted', `yielded — run ${after.earliest.runId}${who} claimed this ticket first`);
       }
-      const who = after.earliest.author ? ` (${after.earliest.author})` : '';
-      log.warn(`#${iid} — yielding: run ${after.earliest.runId}${who} claimed this ticket first`);
-      logEvent('claim_yielded', { iid, to: after.earliest.runId, author: after.earliest.author }, { runId });
-      return finish(j, 'aborted', `yielded — run ${after.earliest.runId}${who} claimed this ticket first`);
     }
   }
 
@@ -618,6 +656,8 @@ export async function runTicket(
     log.warn('recorded worktree is gone — re-leasing', { was: j.worktree });
   }
   let port: number | undefined = j.port;
+  /** One background bring-up per run, whether the worktree was leased now or resumed. */
+  let appStarting = false;
   const branch = j.branch ?? branchFor(cfg.branches.prefix, iid, issue.title);
 
   const prior: Record<string, Record<string, unknown> | null> = {};
@@ -636,6 +676,21 @@ export async function runTicket(
    * "and here is what the machine already ruled out" wastes the attempt.
    */
   let remediationNote = '';
+
+  // A review-feedback round that lost the process anywhere in its fix lap —
+  // before implement succeeded, or after implement but before review, verify
+  // or mr re-ran. `forced` above is in memory only, so without this a resume
+  // would skip straight past whichever of those phases still holds a
+  // pre-round record, and merge would answer reviewers about code nobody
+  // re-reviewed, re-verified, or even re-pushed.
+  {
+    const from = list.findIndex((p) => p.name === 'implement');
+    const to = list.findIndex((p) => p.name === 'merge');
+    const window = from !== -1 && to !== -1
+      ? list.slice(from, to).filter((p) => p.name !== 'testcases' && !p.onDemand).map((p) => p.name)
+      : [];
+    for (const name of phasesOwedByRound(j.mrFeedback, j.phases, window)) forced.add(name);
+  }
 
   let i = 0;
   while (i < list.length) {
@@ -814,6 +869,20 @@ export async function runTicket(
       if (!quota.allowed) return finish(j, 'blocked', `quota: ${quota.reason}`);
       const leaseError = ensureLeases(p);
       if (leaseError) return finish(j, 'blocked', leaseError);
+      // Straight to finish(), not through the control flow: a missing account
+      // is a credential nobody provisioned, which remediation hands back
+      // anyway — spending an Opus session to say so is the cost this avoids.
+      if (p.name === 'verify' && !DRY_RUN && worktree) {
+        const login = await checkTestLogin(worktree);
+        if (login.ok === false) {
+          return finish(j, 'blocked', `verify: ${login.reason.replace('<iid>', String(iid))}`);
+        }
+        if (login.ok === null) {
+          log.warn('test login not pre-checked — verify will find out for itself', { why: login.reason });
+        } else {
+          log.ok(`test login ${login.email} is provisioned`);
+        }
+      }
     }
 
     const running = members.map((k) => list[k]!.name);
@@ -833,6 +902,10 @@ export async function runTicket(
     // A check phase's own account of itself is not evidence. Overrule it before
     // anything is recorded, so the journal and the card show the verdict the
     // conductor reached rather than the one the session reported.
+    // Salvage below must never hand back a verdict the conductor just overruled:
+    // verify-partial.json can be a previous lap's, and reading its passes as
+    // this session's would turn "ran nothing" back into a green phase.
+    const overruled = new Set<PhaseResult>();
     for (const r of results) {
       // The MR is a mechanical API call wearing a session's clothes, and this
       // pipeline already learned what happens when it is left to a tool the
@@ -862,15 +935,42 @@ export async function runTicket(
       // letting it through is how unverified code reaches an MR with a
       // clean-looking card. Hard stop — cycling to implement would burn an
       // Opus lap on what is almost never a code problem.
+      //
+      // Except when it executed nothing. A list that is ALL 'skipped' is not a
+      // verdict on the environment or the change — it is a session that spent
+      // its budget before the first case (ticket #189: the whole lap went on
+      // server bring-up, and the block said the change was "broken end to end"
+      // when the servers it left behind were answering correctly). That is the
+      // shape of an infra death, so it takes the free re-attempt, and only a
+      // session that keeps running nothing reaches a person — told the truth.
       if (r.cfg.name === 'verify' && r.out.ok) {
-        const res = (r.out.data?.results ?? []) as Array<{ result: string }>;
+        const res = (r.out.data?.results ?? []) as Array<{ result: string; evidence?: string }>;
         const passes = res.filter((x) => x.result === 'pass').length;
-        if (res.length > 0 && passes === 0) {
+        const skipped = res.filter((x) => x.result === 'skipped').length;
+        if (res.length > 0 && skipped === res.length) {
+          const first = String(res[0]?.evidence ?? '').split('\n')[0]!.slice(0, 200);
+          const ranNothing = `verify ran none of its ${res.length} case(s) — every one is recorded ` +
+            `'skipped', so nothing about the change was tested${first ? ` (${first})` : ''}`;
           r.out.ok = false;
-          r.hardStop = `verify executed ${res.length} case(s) and NONE passed — an all-negative ` +
-            'local run means the environment or the change is broken end to end, and neither is ' +
-            'something a merge should ride through. A human decides whether the demo-server QA ' +
-            'gate alone is acceptable for this ticket.';
+          r.out.error = ranNothing;
+          overruled.add(r);
+          if (infraAttemptsOf(iid, 'verify') < MAX_INFRA_ATTEMPTS) {
+            r.out.infra = true;
+            log.warn(`verify overruled — ${ranNothing}`);
+          } else {
+            r.hardStop = `${ranNothing}. It has now done that ${MAX_INFRA_ATTEMPTS + 1} times, so ` +
+              'the cause is outside the session: read the evidence above and the verify transcript.';
+            log.error(`verify overruled — ${r.hardStop}`);
+          }
+        } else if (res.length > 0 && passes === 0) {
+          const failed = res.filter((x) => x.result === 'fail').length;
+          r.out.ok = false;
+          overruled.add(r);
+          r.hardStop = `verify recorded ${res.length} case(s) — ${failed} failed, ` +
+            `${res.length - failed - skipped} blocked, ${skipped} skipped — and NONE passed. An ` +
+            'all-negative local run means the environment or the change is broken end to end, and ' +
+            'neither is something a merge should ride through. A human decides whether the ' +
+            'demo-server QA gate alone is acceptable for this ticket.';
           r.out.error = r.hardStop;
           log.error(`verify overruled — ${r.hardStop}`);
         }
@@ -892,7 +992,7 @@ export async function runTicket(
       // a change can merge with cases that were never executed, and the
       // artifact says exactly which, because they are recorded 'skipped'
       // rather than quietly dropped.
-      if (r.cfg.name === 'verify' && !r.out.ok && !r.out.blocked) {
+      if (r.cfg.name === 'verify' && !r.out.ok && !r.out.blocked && !overruled.has(r)) {
         const partial = readArtifact<{ results?: Array<Record<string, unknown>> }>(
           iid, `${r.cfg.name}-partial.json`,
         );
@@ -1030,6 +1130,12 @@ export async function runTicket(
       }
 
       prior[r.cfg.name] = r.out.data;
+      if (r.cfg.name === 'implement' && activeRound(j.mrFeedback)?.status === 'fixing') {
+        const addressed = addressedFeedbackOf(r.out.data);
+        if (addressed.length) {
+          j = updateJournal(iid, { mrFeedback: recordAddressed(j.mrFeedback!, addressed) }) ?? j;
+        }
+      }
       if (isMilestone(r.cfg)) await thread(j.slackTs ?? null, milestoneText(r.cfg, r.out.data, iid));
     }
 
@@ -1066,13 +1172,47 @@ export async function runTicket(
   }
 
   /**
-   * Leases, taken at the last possible moment.
+   * The app for this run, started in the background as soon as there is a
+   * worktree to start it in.
    *
-   * The worktree comes with the first phase that needs a checkout; the PORT is
-   * separate and comes with the first phase that actually runs a server. They
-   * used to be one lease, which held one of three ports across research, plan
-   * and implement — hours of a scarce resource for phases that never bound a
-   * socket.
+   * Called once per run — including on a resume, where the worktree arrives from
+   * the journal and is never re-leased, which is why the guard is a flag and not
+   * `!worktree`. Nothing waits on it: `scripts/app.cjs` holds a per-worktree lock,
+   * so the first phase that calls `ensure` itself is handed the finished instance
+   * or joins the bring-up already in flight.
+   *
+   * A port that cannot be leased is NOT a failure here. It only means this run
+   * does not get its head start; the later `needsPort` lease reports the empty
+   * pool exactly as it always did, and that message is the one worth keeping.
+   */
+  function bringUpApp(): void {
+    if (appStarting || !worktree) return;
+    const leased = port ?? leasePortFor(runId);
+    if (leased === null) {
+      log.info(`#${iid} — no free port to warm the app on; verify will lease one when it runs`);
+      return;
+    }
+    if (port !== leased) {
+      port = leased;
+      j = updateJournal(iid, { port }) ?? j;
+      updateRun(runId, { port });
+    }
+    appStarting = true;
+    startRunApp({ iid, runId, worktree, port: leased });
+  }
+
+  /**
+   * Leases, taken at the last possible moment — with one deliberate exception.
+   *
+   * The worktree comes with the first phase that needs a checkout. The PORT used
+   * to come with the first phase that actually runs a server, because holding one
+   * of three across research, plan and implement was hours of a scarce resource
+   * for phases that never bound a socket. It is now taken WITH the worktree, and
+   * the resource it buys is worth more than the one it spends: the dev server
+   * compiles through those same hours instead of inside `verify`'s clock, where a
+   * model was paying for it out of a turn budget. The pool is still the fleet's
+   * real concurrency limit — this just means one run holds one port for its whole
+   * life, which is what "one app per run" costs.
    */
   function ensureLeases(p: PhaseConfig): string | null {
     if (p.cwd === 'worktree' && !worktree) {
@@ -1085,6 +1225,7 @@ export async function runTicket(
         return `worktree: ${(err as Error).message}`;
       }
     }
+    if (p.cwd === 'worktree') bringUpApp();
     if (p.needsPort && !port) {
       const leased = leasePortFor(runId);
       if (leased === null) {
@@ -1183,6 +1324,14 @@ export async function runTicket(
       if (isMilestone(p)) await thread(j.slackTs ?? null, milestoneText(p, prior[p.name] ?? null, iid));
       return { kind: 'advance' };
     }
+    if (done.feedback) {
+      // Nothing of this run has landed on the base branch — the MR is still
+      // opened — so holding the promotion window through triage and a possibly
+      // hours-long implement→verify→mr lap only starves every other run on the
+      // machine for no reason. The next merge entry re-acquires in queue order.
+      releasePromotion(runId);
+      return feedbackRound(index, done.feedback);
+    }
     // A parked code phase (currently only the Review label's merge-readiness
     // check) bypasses the phase's own onFail policy entirely — 'merge' is
     // configured 'blocked', which is right for a genuine merge failure and
@@ -1228,7 +1377,12 @@ export async function runTicket(
       return { kind: 'advance' };
     }
 
-    const failed = failedLapsOf(iid, p.name);
+    // Inside an MR review round's fix lap the retry and cycle budgets start
+    // over: a review that failed twice before the MR opened has not spent the
+    // budget for revising a reviewer's requested change.
+    const round = activeRound(j.mrFeedback);
+    const since = round?.status === 'fixing' ? round.startedAt : 0;
+    const failed = failedLapsOf(iid, p.name, since);
 
     if (p.onFail === 'retry') {
       const budget = p.maxRetries ?? 1;
@@ -1260,6 +1414,97 @@ export async function runTicket(
     }
 
     return { kind: 'stop', status: 'blocked', reason: `${p.name}: ${why}` };
+  }
+
+  /**
+   * One round of MR review feedback: triage the new threads, then either cycle
+   * back to `implement` (something needs a code change — every phase up to
+   * merge re-runs) or re-enter `merge` at once so it posts the replies (nothing
+   * does). Rounds are counted on their own, not as failures, so review and
+   * verify keep their full lap budgets inside a round.
+   */
+  async function feedbackRound(mergeIndex: number, signal: MrFeedbackSignal): Promise<Control> {
+    // A stop or pause asked for during merge must not be spent on a triage session.
+    if (opts.signal?.aborted) {
+      return { kind: 'stop', status: 'aborted', reason: 'the conductor asked this run to stop' };
+    }
+    if (existsSync(PAUSE)) {
+      return { kind: 'stop', status: 'aborted', reason: 'paused mid-phase — resumes when unpaused' };
+    }
+
+    const fcfg = mrFeedbackConfig();
+    const ledger = j.mrFeedback ?? emptyLedger();
+
+    if (roundsUsed(ledger) >= fcfg.maxRounds) {
+      const reason = `mr-feedback: ${signal.threads.length} new review thread(s) on !${signal.mrIid} after `
+        + `${fcfg.maxRounds} round(s) — a person takes the review from here`;
+      if (j.reviewMode) {
+        // A human already owns the merge on a Review run; wait for them rather than alarm.
+        j = updateJournal(iid, { humanMergeCheckAt: Date.now() }) ?? j;
+        return { kind: 'stop', status: 'parked', reason: `${reason}; still awaiting a human merge` };
+      }
+      return { kind: 'stop', status: 'blocked', reason, noRemediation: true };
+    }
+
+    const cfgT = list.find((q) => q.name === 'mr-feedback');
+    if (!cfgT || !isImplemented(cfgT.name)) {
+      return { kind: 'stop', status: 'blocked', reason: 'mr-feedback: the phase is missing from config/phases.json', noRemediation: true };
+    }
+    const leaseError = ensureLeases(cfgT);
+    if (leaseError) return { kind: 'stop', status: 'blocked', reason: leaseError };
+    const lap = lapsOf(iid, cfgT.name);
+    const quota = checkQuota(runId, cfgT.name, lap);
+    if (!quota.allowed) return { kind: 'stop', status: 'blocked', reason: `quota: ${quota.reason}` };
+
+    const startedAt = Date.now();
+    await updateCard(j.slackTs ?? '', cardState(j, [cfgT.name]));
+    updateRun(runId, { phase: cfgT.name, status: 'running', owner_seen_at: Date.now() });
+
+    const ctx: PromptCtx = {
+      ticket, runId, lap, branch, worktree, port, prior, journal: j, mrThreads: signal,
+    };
+    const rowId = phaseStart(runId, cfgT.name, lap, modelFor(cfgT));
+    const out = await runPhase({
+      iid, runId, lap, cfg: cfgT,
+      prompt: promptFor(cfgT, ctx),
+      systemPrompt: systemPromptFor(cfgT, ctx),
+      worktree, port, branch,
+      signal: opts.signal,
+    });
+    phaseEnd(rowId, out.ok ? 'ok' : statusForFailure(cfgT, out.infra), {
+      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+      detail: out.error ?? out.blocked ?? undefined,
+    });
+    recordPhase(iid, {
+      phase: cfgT.name, lap,
+      status: out.ok ? 'ok' : statusForFailure(cfgT, out.infra),
+      startedAt, endedAt: Date.now(), model: modelFor(cfgT),
+      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+      error: out.error ?? out.blocked ?? undefined,
+    });
+    j = readJournal(iid) ?? j;
+    await updateCard(j.slackTs ?? '', cardState(j));
+
+    // Retrying at merge re-detects the same threads, so an infra death re-triages for free.
+    if (!out.ok) return afterFailure(cfgT, mergeIndex, out.blocked ?? out.error ?? 'triage failed', out.infra);
+
+    const items = normaliseItems(out.data, signal.threads);
+    const next = startRound(ledger, { mrIid: signal.mrIid, threads: signal.threads, items, now: startedAt });
+    j = updateJournal(iid, { mrFeedback: next }) ?? j;
+    const round = activeRound(next)!;
+    const fixes = items.filter((x) => x.disposition === 'fix').length;
+    await thread(j.slackTs ?? null,
+      `#${iid} — review round ${round.n} on !${signal.mrIid}: ${signal.threads.length} thread(s), `
+      + `${fixes} to fix, ${items.length - fixes} to answer`);
+
+    if (round.status === 'fixing') {
+      const jumpTo = list.findIndex((q) => q.name === 'implement');
+      if (jumpTo === -1) {
+        return { kind: 'stop', status: 'blocked', reason: 'mr-feedback: implement is not in the phase list', noRemediation: true };
+      }
+      return { kind: 'cycle', jumpTo, windowEnd: mergeIndex };
+    }
+    return { kind: 'retry', at: mergeIndex };
   }
 
   /**
@@ -1321,7 +1566,7 @@ export async function runTicket(
   async function resumeAfterRemediation(
     control: Extract<Control, { kind: 'stop' }>, from: string,
   ): Promise<number | null> {
-    if (control.status !== 'blocked') return null;
+    if (control.status !== 'blocked' || control.noRemediation) return null;
 
     const resumeFrom = await attemptRemediation(from, control.reason);
     if (!resumeFrom) return null;
@@ -1641,14 +1886,23 @@ export async function runTicket(
     if (status === 'blocked') {
       await alert(`#${journal.iid} ${journal.title} — BLOCKED: ${reason}`);
       if (!DRY_RUN) {
-        await swapLabel(journal.iid, withInReview(cfg, [cfg.labels.entry]), [cfg.labels.blocked]);
+        // The testcases board label comes off too: a blocked ticket still
+        // reading 'TestCase Review' tells the board it is waiting on QA when it
+        // is waiting on a person to unblock it. Parked keeps it — parked at the
+        // gate is the state it marks — and done is only reached via approval.
+        // 'In Review' goes for the same reason: nobody is reviewing a blocked run.
+        await swapLabel(journal.iid,
+          withInReview(cfg, [cfg.labels.entry, cfg.labels.testcaseReview].filter(Boolean)),
+          [cfg.labels.blocked]);
         await addIssueNote(journal.iid, `Oneshot stopped: **${reason}**\n\nRun \`${journal.runId}\`.`);
       }
       log.error(`■ #${journal.iid} BLOCKED — ${reason}`);
       logStopDetail(journal, 'BLOCKED');
     } else if (status === 'done') {
-      // A run that was blocked earlier still carries the blocked label, and a
-      // merged ticket reading "Needs Human" sends someone to look at nothing.
+      // The blocked label goes too. A run that was blocked and later resumed —
+      // past the cooldown, through --ticket, or after a person answered it —
+      // still carries it, and finishing with both "Needs Human" and "merged" on
+      // the ticket tells the board a person is wanted on work that is done.
       // The swap is retried because it is the ticket's only record that the
       // work shipped: a flaky network here otherwise leaves it unlabelled for good.
       if (!DRY_RUN) {

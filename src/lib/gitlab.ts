@@ -10,6 +10,7 @@
 import { envOr, projectConfig, DRY_RUN } from './config.js';
 import { resolveToken, SETUP_HINT } from './token.js';
 import { log } from './log.js';
+import type { MrDiscussion } from '../mrfeedback/types.js';
 
 export type FailKind = 'ok' | 'network' | 'auth' | 'notfound' | 'server' | 'client';
 
@@ -178,6 +179,26 @@ export async function issueNotes(
   );
   if (res.ok && res.data) return { ...res, data: [...res.data].reverse() };
   return res;
+}
+
+/**
+ * One note, by id — not "the newest hundred and hope it's in there".
+ *
+ * issueNotes()'s window is exactly the trap its own comment names: a note
+ * posted long enough ago falls out of it once a busy ticket accrues more than
+ * a hundred comments after it, and a caller scanning that list for something
+ * of its own reads "gone" and re-posts. The claim protocol hit this for real —
+ * a `--follow` ticket's own claim note aged out from under it every tick once
+ * the ticket passed a hundred comments, and it re-claimed itself over and over
+ * (visibly, in the ticket's own thread) because the scan could no longer see
+ * the note it was looking for. A direct lookup by id has no window to fall out
+ * of: GitLab still has the note, this just asks for it by name instead of
+ * finding it in a haystack sized by an unrelated caller's needs.
+ */
+export async function getIssueNote(
+  iid: number, noteId: number,
+): Promise<GitlabResult<IssueNote>> {
+  return call<IssueNote>('GET', `/projects/${projectId()}/issues/${iid}/notes/${noteId}`);
 }
 
 /**
@@ -416,14 +437,9 @@ export function findMergeRequests(q: {
   );
 }
 
-export function mrDiscussions(mrIid: number): Promise<GitlabResult<Array<{
-  id: string;
-  notes: Array<{
-    id: number; body: string; resolvable: boolean; resolved: boolean;
-    author: { username: string };
-  }>;
-}>>> {
-  return call('GET', `/projects/${projectId()}/merge_requests/${mrIid}/discussions?per_page=100`);
+/** One page (100) of an MR's discussions — the merge block message and the review-feedback loop read it. */
+export function mrDiscussions(mrIid: number): Promise<GitlabResult<MrDiscussion[]>> {
+  return call<MrDiscussion[]>('GET', `/projects/${projectId()}/merge_requests/${mrIid}/discussions?per_page=100`);
 }
 
 /** What a comparison actually tells us, with the payload that can be megabytes left behind. */
@@ -590,6 +606,35 @@ export async function addMergeRequestNote(
   }
   return call<{ id: number }>(
     'POST', `/projects/${projectId()}/merge_requests/${mrIid}/notes`, { body }, true,
+  );
+}
+
+/** Reply inside one MR thread. Only the review-feedback loop (src/mrfeedback) posts these. */
+export async function replyToMrDiscussion(
+  mrIid: number, discussionId: string, body: string,
+): Promise<GitlabResult<{ id: number }>> {
+  if (DRY_RUN) {
+    log.warn(`[dry-run] would reply on !${mrIid} thread ${discussionId}`, { chars: body.length });
+    return { ok: true, kind: 'ok', status: 200, data: null };
+  }
+  return call<{ id: number }>(
+    'POST',
+    `/projects/${projectId()}/merge_requests/${mrIid}/discussions/${encodeURIComponent(discussionId)}/notes`,
+    { body }, true,
+  );
+}
+
+export async function resolveMrDiscussion(
+  mrIid: number, discussionId: string,
+): Promise<GitlabResult<unknown>> {
+  if (DRY_RUN) {
+    log.warn(`[dry-run] would resolve !${mrIid} thread ${discussionId}`);
+    return { ok: true, kind: 'ok', status: 200, data: null };
+  }
+  return call<unknown>(
+    'PUT',
+    `/projects/${projectId()}/merge_requests/${mrIid}/discussions/${encodeURIComponent(discussionId)}?resolved=true`,
+    undefined, true,
   );
 }
 

@@ -80,11 +80,14 @@ async function main(): Promise<void> {
   });
   const ctx = await ask('CONTEXT_REPO', {
     default: detectRepo('erp') || '~/Documents/erp',
-    hint: 'Read-only reference AND the source of every skill.',
+    hint: 'Read-only reference for prior art and conventions.',
   });
   body = setKey(body, 'WORK_REPO', work);
   body = setKey(body, 'CONTEXT_REPO', ctx);
-  body = setKey(body, 'ONESHOT_SKILLS_ROOT', `${ctx}/.claude`);
+  // Skills/agents/rules are vendored into this repo's context/, so leave
+  // ONESHOT_SKILLS_ROOT empty to use that self-contained default. Set it only
+  // to override with a live .claude (e.g. `${ctx}/.claude`).
+  body = setKey(body, 'ONESHOT_SKILLS_ROOT', '');
   body = setKey(body, 'ONESHOT_SEED_FROM', ctx);
 
   console.log(`\n${B}Slack${X} ${D}(optional — Enter to skip, status stays on the console)${X}`);

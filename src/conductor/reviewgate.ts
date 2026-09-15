@@ -69,7 +69,9 @@ import {
   readArtifact, readJournal, updateJournal, writeArtifact,
   type ReviewGateState, type RunJournal,
 } from '../lib/artifacts.js';
-import { addIssueNote, issueNotes, issueUrl } from '../lib/gitlab.js';
+import {
+  addIssueNote, issueNotes, issueUrl, swapLabel,
+} from '../lib/gitlab.js';
 import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/slack.js';
 import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
@@ -200,6 +202,43 @@ function approversFor(gate: Gate): string[] {
 }
 
 /**
+ * The board-only marker for the `testcases` gate — `labels.testcaseReview`,
+ * empty/off by default. `plan` has no equivalent: there is nothing on a
+ * board to tell apart there, since 'awaiting plan approval' is already the
+ * only reason a run parks before `implement`. `testcases` is where a QA
+ * hold needs to read differently from every other parked/blocked reason, so
+ * only that gate carries one.
+ */
+function boardLabel(gate: Gate): string | null {
+  if (gate !== 'testcases') return null;
+  const label = projectConfig().labels.testcaseReview;
+  return label || null;
+}
+
+/**
+ * Swap the board label on or off. Best-effort: a label is a board convenience,
+ * never part of the verdict, so a failed swap must not fail the gate check it
+ * rides along with. Checked by result rather than caught — swapLabel reports
+ * every HTTP, timeout and network failure as `ok: false` and never throws, so
+ * a try/catch here would leave the failure silent.
+ *
+ * Turning it off puts the entry label back in the same write. A QA verdict —
+ * approval or feedback — hands the ticket back to the pipeline, and the board
+ * should say `Loop` whether or not someone took it off while the ticket sat
+ * with QA. swapLabel never duplicates a label, so this is a no-op when `Loop`
+ * is already there.
+ */
+async function setBoardLabel(iid: number, gate: Gate, on: boolean): Promise<void> {
+  const label = boardLabel(gate);
+  if (!label) return;
+  const { entry } = projectConfig().labels;
+  const res = await swapLabel(iid, on ? [] : [label], on ? [label] : [entry]);
+  if (!res.ok) {
+    log.warn(`could not swap board label '${label}' on #${iid}`, { status: res.status, error: res.error });
+  }
+}
+
+/**
  * A ticket comment, reduced to the three fields a verdict is decided on.
  *
  * `user` is a GitLab username rather than the Slack id the previous version
@@ -314,6 +353,7 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
     }
     state = { ...state, requestNoteId: posted.data.id };
     persist(iid, gate, state);
+    await setBoardLabel(iid, gate, true);
     // Broadcast: the dev or QA who has to act on this is not the person
     // watching this run's thread, and a thread reply is invisible to them.
     // Once per round, on the transition into 'armed' — every following tick
@@ -380,6 +420,7 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
       feedback: feedback ? [...state.feedback, feedback] : state.feedback,
     };
     persist(iid, gate, state);
+    await setBoardLabel(iid, gate, false);
     if (onApproved) await onApproved();
     await notifySlack(
       journal, gateApprovedText(journal, gate, await mentionOrName(approver)), true,
@@ -396,6 +437,10 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
       ...state, requestNoteId: null, approved: false, feedback: [...state.feedback, feedback],
     };
     persist(iid, gate, state);
+    // Feedback is a verdict too: QA has answered and the ticket is back with
+    // the pipeline. The label returns when the next check re-arms the gate
+    // with a fresh request for the revised list.
+    await setBoardLabel(iid, gate, false);
     log.phase(`${gate} feedback received on #${iid}`, { rounds: state.feedback.length });
     return { verdict: 'feedback', feedback };
   }

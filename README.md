@@ -254,6 +254,39 @@ pipeline on every tick and any phase without a recorded success is re-attempted 
 time — a `skip`-on-fail phase like `recall` burns a full model lap per tick for as long as a human
 takes to reply. The slower cadence still reads a reply promptly while spending a third as much.
 
+## MR review feedback
+
+A reviewer's comment on a run's open merge request is answered, not just waited on. When the
+`merge` phase finds a new unresolved thread from a listed reviewer, it hands the thread to the
+on-demand `mr-feedback` phase, and the run takes one **review round**:
+
+```
+ merge ──▶ new threads? ──▶ mr-feedback (triage: fix / already-done / question / decline)
+             │                  │ any fix                         │ no fix
+             │                  ▼                                 ▼
+             │        implement → review → verify → ui-evidence → mr → merge: reply on every thread,
+             │                                                          resolve per policy
+             └── none ──▶ exactly as before: park for a human merge, or merge
+```
+
+- **Who counts.** Only authors in `config/mr-feedback.json` `authorRoles` / `extraAuthors`. Anyone
+  else's notes are dropped in code before a model sees them — an MR comment is input to a session
+  that pushes to the branch.
+- **Full re-runs.** A round that needs a fix re-runs every phase from `implement` to `merge` except
+  `testcases`, so each reply describes code that review approved and verify passed.
+- **Resolving is configurable** (`resolve`): `never` replies only; `fixed` also resolves threads
+  whose every request was a fix that was made; `all` resolves every fully answered thread. A fix
+  that was *not* made is never resolved, and the thread comes back next round.
+- **Bounded.** `maxRounds` (default 3), counted separately from review/verify laps. Past it a
+  Review run parks for its human merge and a full-auto run blocks.
+- **Replies are marked** `<!-- oneshot:mr-feedback -->`, because the desk posts as its operator,
+  who may also be a reviewer. A reviewer replying on an answered thread starts a new round for it.
+- **Open threads can still block.** On a project that requires all discussions resolved, a
+  full-auto run with `resolve: never` — or with question/decline threads under `fixed` — blocks
+  after Oneshot answers, because its replies leave those threads open for a person to resolve.
+- `npm run mr-feedback:probe -- <mrIid> [ticketIid]` prints exactly which threads would be acted
+  on right now. The feature is off under `DRY_RUN`.
+
 ## Mobilizing agents
 
 Sixteen phases deep, and most of them spend their time waiting — on a webpack build, on a
@@ -347,7 +380,7 @@ ticket.
   | `no seed repo configured` | `ONESHOT_SEED_FROM` is unset | set it (or re-run `npm run setup`) |
   | `seed entries missing from the seed repo: …` | the clone exists but is not installed — the list names exactly what to create | install the clone; re-run `doctor` |
 
-  You are done when `doctor` prints `seed repo <path> (2 linked, 2 copied)`. Both warnings are
+  You are done when `doctor` prints `seed repo <path> (3 linked, 2 copied)`. Both warnings are
   **non-blocking for `doctor` and blocking for the first ticket**: a missing entry does not fail at
   boot, it fails when `verify` tries to start the dev server, three phases in.
 
@@ -358,6 +391,65 @@ ticket.
   `state-dry/state/runs`, not `state/runs`, so view it with a dashboard that resolves the same
   home: `DRY_RUN=1 ONESHOT_DASHBOARD_PORT=8788 npm run dashboard`. A dry run will not appear on
   the ordinary dashboard, and neither will anything that did not go through the conductor.
+
+## The app, in one command
+
+Bringing this app up used to be the largest single cost in a run, and it was paid again on
+every phase, every session and every laptop. It is now one command, and it is the front door
+for humans and phases alike:
+
+```sh
+npm run app -- ensure --ref <branch|!MR|#PR|sha>   # or: node scripts/app.cjs ensure ...
+npm run app -- list                                # every instance running on this machine
+npm run app -- gc --kill                           # reap servers whose run died days ago
+```
+
+`ensure` answers one question machine-wide — *is an app already running, and is it on my
+code?* — and takes whichever path applies. Measured on the machine this was written on:
+
+| what it finds | what it does | cost |
+|---|---|---|
+| an app already serving that commit | hands it over untouched | ~3s |
+| an app up on other code, in a worktree we own and that is clean | checks the ref out into it, migrates if the diff carries migrations, restarts Django, waits for webpack's incremental rebuild | ~11s |
+| nothing usable | seeds a worktree and cold-starts both processes | ~2min |
+
+All three print the same `app-env.json`, so nothing downstream branches on which one ran.
+
+Two things it deliberately will not do. It never checks a ref out into a checkout it did not
+create — your own repo is usually running and usually has uncommitted work in it, and a
+`git checkout` into that is not a cost saving. And it never guesses at a failure: it returns a
+named code (`E_NO_PORTS`, `E_SEED_MISSING`, `E_DJANGO_DEAD`, `E_NO_REBUILD`, …) with the hint
+that fixes it.
+
+`skills/local-browser-verify/scripts/harness.cjs` still owns *how* this app starts — the ASGI
+wedge, `CI=true`, the two files that pin the ports, what "ready" actually means. `app.cjs` owns
+only the reuse decision, and imports the rest rather than restating it.
+
+### The conductor starts it, not a model
+
+No phase pays for a bring-up any more. Two things happen without anyone asking:
+
+- **At loop boot**, the conductor warms one instance for itself, in its own worktree
+  (`warmLoopApp`). A second conductor gets its own rather than sharing — a shared instance is
+  a port its owner is about to want. What this is really keeping hot is the babel cache under
+  the seed repo's `node_modules`, which every worktree on the machine symlinks: warm, the next
+  worktree's first build is two minutes; cold, it is twenty.
+- **At worktree lease**, each run starts its own app in the background, in its own leased
+  worktree, and carries on immediately. webpack compiles through `research`, `plan` and
+  `implement` — two and a half hours that were being spent anyway — so `verify` opens a
+  browser against something already serving.
+
+Phases still run `node $ONESHOT_HOME/scripts/app.cjs ensure` themselves, with no arguments:
+it reads `$ONESHOT_WORKTREE` and `$ONESHOT_PORT` and brings up the app for *that* checkout,
+never moving its ref. That call is the handshake. `app.cjs` holds a per-worktree lock, so a
+phase either gets the finished instance back in about a second, or joins the bring-up already
+in flight instead of killing it and starting a second one — which is the failure this design
+exists to make impossible.
+
+The one cost: a run now holds a pool port for its whole life rather than only for the phases
+that bind a socket. With `PORT_POOL` three wide and `concurrency` 1, that is one port per
+conductor, which is what "one app per run" is worth. A run that cannot lease a port does not
+fail — it just does not get its head start, and `verify` leases one the old way.
 
 ## Claims across machines
 
