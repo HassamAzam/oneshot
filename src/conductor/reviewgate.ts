@@ -619,9 +619,26 @@ function planSteps(plan: Record<string, unknown> | null): PlanStep[] {
   return Array.isArray(v) ? (v as PlanStep[]) : [];
 }
 
-function planRisks(plan: Record<string, unknown> | null): string[] {
-  const v = plan?.risks;
+function planList(plan: Record<string, unknown> | null, key: string): string[] {
+  const v = plan?.[key];
   return Array.isArray(v) ? v.map(String) : [];
+}
+
+interface AcCoverage { criterion: string; coveredBy: string; status: string; note: string }
+
+/** Absent on plans written before the field existed — a resumed run's plan.json reads as empty, not as a crash. */
+function planCoverage(plan: Record<string, unknown> | null): AcCoverage[] {
+  const v = plan?.acceptanceCoverage;
+  return Array.isArray(v) ? (v as AcCoverage[]).filter((c) => c && typeof c.criterion === 'string') : [];
+}
+
+const COVERAGE_MARK: Record<string, string> = { covered: '✅', partial: '⚠️', 'not-satisfiable': '❌' };
+
+interface FeedbackResponse { point: string; response: string; where: string; note: string }
+
+function planFeedbackResponse(plan: Record<string, unknown> | null): FeedbackResponse[] {
+  const v = plan?.feedbackResponse;
+  return Array.isArray(v) ? (v as FeedbackResponse[]).filter((f) => f && typeof f.point === 'string') : [];
 }
 
 /**
@@ -654,11 +671,31 @@ function renderPlanForTicket(plan: Record<string, unknown> | null): string {
   const steps = planSteps(plan)
     .map((s) => `${s.n}. **[${mdText(s.layer)}]** ${mdText(s.what)}${s.files?.length ? ` — \`${s.files.join('`, `')}\`` : ''}`)
     .join('\n');
-  const risks = planRisks(plan).map((r) => `- ${mdText(r)}`).join('\n');
+  const bullets = (key: string): string => planList(plan, key).map((r) => `- ${mdText(r)}`).join('\n');
+  const risks = bullets('risks');
+  // Open questions sit ABOVE the steps: they are the decisions the approver is
+  // actually being asked to make, and a plan that silently picked a scope reads
+  // as settled when it is not. Empty sections are omitted, not labelled "none".
+  const questions = bullets('openQuestions');
+  const outOfScope = bullets('outOfScope');
+  const coverage = planCoverage(plan)
+    .map((c) => `- ${COVERAGE_MARK[c.status] ?? '•'} ${mdText(c.criterion)} — ${mdText(c.coveredBy || '—')}` +
+      `${c.note ? ` _(${mdText(c.note)})_` : ''}`)
+    .join('\n');
+  // First on a revision: the approver's question is "did it take my points",
+  // and the answer has to be checkable against the plan below, not asserted.
+  const answered = planFeedbackResponse(plan)
+    .map((f) => `- **${mdText(f.response)}** — ${mdText(f.point)}${f.where ? ` → ${mdText(f.where)}` : ''}` +
+      `${f.note ? `: ${mdText(f.note)}` : ''}`)
+    .join('\n');
   const approach = planStr(plan, 'approach');
-  return `**Approach**\n${approach ? mdText(approach) : '(not recorded)'}\n\n` +
+  return `${answered ? `**Your feedback, point by point**\n${answered}\n\n` : ''}` +
+    `**Approach**\n${approach ? mdText(approach) : '(not recorded)'}\n\n` +
+    `${questions ? `**Open questions** — answer these in a comment, or the stated default is used\n${questions}\n\n` : ''}` +
     `**Steps**\n${steps || '(none recorded)'}\n\n` +
+    `${coverage ? `**Acceptance coverage**\n${coverage}\n\n` : ''}` +
     `**Risks**\n${risks || '(none identified)'}` +
+    `${outOfScope ? `\n\n**Out of scope**\n${outOfScope}` : ''}` +
     `${plan?.migrations === true ? '\n\n⚠️ includes a database migration' : ''}`;
 }
 
