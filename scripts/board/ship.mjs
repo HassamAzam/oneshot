@@ -1,3 +1,13 @@
+/**
+ * Postgres refuses U+0000 in both text and jsonb, and one refused row fails its whole
+ * batch — which the flush loop then retries forever, so a single `head` of a binary
+ * file in a transcript froze every row behind it. Swap it for U+FFFD, the same mark
+ * the rest of that binary output already renders as.
+ */
+const noNul = (_k, v) => (typeof v === 'string' && v.includes('\u0000') ? v.replaceAll('\u0000', '\uFFFD') : v);
+
+export const serializeBatch = (payload) => JSON.stringify(payload, noNul);
+
 export async function postBatch(url, token, payload, timeoutMs = 60_000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -5,7 +15,7 @@ export async function postBatch(url, token, payload, timeoutMs = 60_000) {
     const res = await fetch(`${url}/api/ingest`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-      body: JSON.stringify(payload),
+      body: serializeBatch(payload),
       signal: ctrl.signal,
     });
     const text = await res.text().catch(() => '');
