@@ -40,6 +40,9 @@ import {
   type MergeRequest, type ProjectSettings,
 } from '../lib/gitlab.js';
 import type { CodePhaseCtx } from './runner.js';
+import { mergeHooksFor, mrFeedbackActive } from '../mrfeedback/wire.js';
+import type { MergeHooks } from '../mrfeedback/mergehooks.js';
+import type { MrFeedbackSignal } from '../mrfeedback/types.js';
 
 const POLL_MS = 8_000;
 const CI_POLL_MS = 15_000;
@@ -381,7 +384,8 @@ async function driveToMerged(
   base: string,
   policy: ProjectSettings | null,
   deadlines: { ci: number; merge: number },
-): Promise<{ ok: true; mr: MergeRequest } | { ok: false; error: string }> {
+  feedback: MergeHooks | null,
+): Promise<{ ok: true; mr: MergeRequest } | { ok: false; error: string; feedback?: MrFeedbackSignal }> {
   let squash = policy?.squash_option === 'always';
   let accepted = false;
   let awaitingRebase = false;
@@ -543,8 +547,19 @@ async function driveToMerged(
       case 'conflict':
         return { ok: false, error: conflictMessage(mr, base) };
 
-      case 'discussions':
+      case 'discussions': {
+        // A reviewer who commented while CI ran is feedback, not a block: the
+        // check before this loop has already passed, so look again here.
+        const threads = feedback ? await feedback.newFeedbackThreads(mrIid) : [];
+        if (threads.length) {
+          return {
+            ok: false,
+            error: `${threads.length} new review thread(s) on !${mrIid} — handing them to mr-feedback`,
+            feedback: { mrIid, threads },
+          };
+        }
         return { ok: false, error: await discussionsMessage(mr) };
+      }
 
       case 'wait':
         await sleep(POLL_MS);
@@ -849,7 +864,7 @@ function qualityGate(iid: number): string | null {
 
 export async function mergePhase(
   ctx: CodePhaseCtx,
-): Promise<{ ok: boolean; error?: string; park?: boolean }> {
+): Promise<{ ok: boolean; error?: string; park?: boolean; feedback?: MrFeedbackSignal }> {
   const cfg = projectConfig();
   const base = cfg.branches.base;
   const budgetMs = (phaseByName('merge')?.timeoutMin ?? 10) * 60_000;
@@ -888,6 +903,26 @@ export async function mergePhase(
   updateJournal(ctx.iid, { mrIid, mrUrl: rec.mrUrl });
   updateRun(ctx.runId, { mr_iid: mrIid });
 
+  // MR review feedback (src/mrfeedback). Answer the round this run just
+  // finished fixing BEFORE the human-merge throttle below can park past it:
+  // qualityGate has already passed, so every "Addressed" reply describes code
+  // that review approved and verify passed.
+  const feedback = mrFeedbackActive() ? mergeHooksFor(ctx.iid) : null;
+  if (feedback) {
+    const answered = await feedback.respondToActiveRound(mrIid);
+    // Parking again cannot fix a thread GitLab keeps refusing: past the attempt
+    // cap the run blocks, so a person hears about it instead of it never merging.
+    if (answered.kind === 'give-up') return failMerge(ctx, rec, answered.why);
+    if (answered.kind === 'retry-later') {
+      rec.summary = `answering review threads on !${mrIid} did not complete`;
+      persistMerge(ctx, rec);
+      return { ok: false, error: answered.why, park: true };
+    }
+    if (answered.kind === 'done') {
+      log.ok(`merge: answered ${answered.replied} review thread(s) on !${mrIid}, resolved ${answered.resolved}`);
+    }
+  }
+
   // A Review ticket's merge is a person's decision, so this phase is a patient
   // watcher. Between polls there is nothing to learn and nothing to do, so the
   // tick is spent without a network round trip at all.
@@ -912,6 +947,18 @@ export async function mergePhase(
   rec.sourceBranch = first.data.source_branch;
   rec.targetBranch = first.data.target_branch;
   rec.alreadyMerged = first.data.state === 'merged';
+
+  // New review threads outrank both waiting for a human merge and merging:
+  // hand them to the runner, which triages and — if anything needs a code
+  // change — cycles the run back to implement.
+  if (feedback && first.data.state === 'opened') {
+    const threads = await feedback.newFeedbackThreads(mrIid);
+    if (threads.length) {
+      rec.summary = `${threads.length} new review thread(s) on !${mrIid} — handing them to mr-feedback`;
+      persistMerge(ctx, rec);
+      return { ok: false, error: rec.summary, feedback: { mrIid, threads } };
+    }
+  }
 
   // The Review label hands merge AND deploy to a person, end to end. Oneshot
   // opens the MR and from here only watches: it never accepts one itself, no
@@ -948,8 +995,13 @@ export async function mergePhase(
     };
   } else {
     const drive = await driveToMerged(
-      ctx, journal.title, mrIid, rec, base, policy, deadlines,
+      ctx, journal.title, mrIid, rec, base, policy, deadlines, feedback,
     );
+    if (!drive.ok && drive.feedback) {
+      rec.summary = drive.error;
+      persistMerge(ctx, rec);
+      return { ok: false, error: drive.error, feedback: drive.feedback };
+    }
     if (!drive.ok) return failMerge(ctx, rec, drive.error);
 
     // Which field holds the merged commit depends on the merge method: a merge

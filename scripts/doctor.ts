@@ -57,6 +57,9 @@ async function main(): Promise<void> {
   pass('project.json', `${cfg.gitlab.project} (id ${cfg.gitlab.projectId})`);
   pass('labels', `"${cfg.labels.entry}" -> "${cfg.labels.exit}", blocked "${cfg.labels.blocked}", ` +
     `optional review gate "${cfg.labels.review}" (off unless a ticket carries it too)`);
+  if (cfg.labels.testcaseReview) {
+    pass('board label', `"${cfg.labels.testcaseReview}" — on while a ticket sits at the testcases QA gate`);
+  }
 
   // Only ONE run may hold the promotion window at a time, enforced by the
   // in-process mutex rather than by pinning the whole pipeline to a single

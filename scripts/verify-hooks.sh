@@ -117,6 +117,31 @@ expect_allow "log from a conductor phase" \
                                        git-guard.cjs "$(bash_payload 'git log --oneline -5')"
 export ONESHOT_WORKTREE="$SAVED_WORKTREE"
 
+# A phase that stands in the worktree without write access to it (ui-evidence,
+# review, mr, …) may read it and push, never change it. Ticket #189's ui-evidence
+# reverted the fix on disk with `git checkout <parent> -- <paths>` for a screenshot.
+SAVED_PHASE="$ONESHOT_PHASE"; SAVED_SCOPES="$ONESHOT_WRITE_SCOPES"
+export ONESHOT_PHASE="ui-evidence"
+export ONESHOT_WRITE_SCOPES="$ROOT/state/runs/0:$ROOT/state/runs/0/artifacts"
+expect_deny  "checkout <ref> -- <paths> from a read-only worktree phase" \
+                                       git-guard.cjs "$(bash_payload 'git checkout e843ab8 -- templates/registration/base.html')"
+expect_deny  "stash from a read-only worktree phase" \
+                                       git-guard.cjs "$(bash_payload 'git stash')"
+expect_deny  "restore from a read-only worktree phase" \
+                                       git-guard.cjs "$(bash_payload 'git restore --source=origin/dev templates/')"
+expect_deny  "commit from a read-only worktree phase" \
+                                       git-guard.cjs "$(bash_payload 'git commit -am wip')"
+expect_allow "show a base-branch file from a read-only worktree phase" \
+                                       git-guard.cjs "$(bash_payload 'git show origin/dev:templates/registration/base.html')"
+expect_allow "diff against base from a read-only worktree phase" \
+                                       git-guard.cjs "$(bash_payload 'git diff origin/dev...HEAD --stat')"
+export ONESHOT_PHASE="mr"
+expect_allow "push the leased branch from mr (read-only worktree)" \
+                                       git-guard.cjs "$(bash_payload 'git push -u origin oneshot/ticket-0-verify')"
+export ONESHOT_PHASE="$SAVED_PHASE"; export ONESHOT_WRITE_SCOPES="$SAVED_SCOPES"
+expect_allow "checkout from implement, which may write the worktree" \
+                                       git-guard.cjs "$(bash_payload 'git checkout -- frontend/src/x.js')"
+
 echo
 echo "write-scope"
 expect_deny  "hooks/ (its own guards)" write-scope.cjs "$(write_payload "$ROOT/hooks/git-guard.cjs")"
@@ -124,6 +149,7 @@ expect_deny  "config/"                 write-scope.cjs "$(write_payload "$ROOT/c
 expect_deny  "src/"                    write-scope.cjs "$(write_payload "$ROOT/src/index.ts")"
 expect_deny  "~/.claude/settings.json" write-scope.cjs "$(write_payload "$HOME/.claude/settings.json")"
 expect_deny  "context repo directly"   write-scope.cjs "$(write_payload "$CONTEXT_REPO/apps/leaves/models.py")"
+expect_deny  "vendored context/ skills" write-scope.cjs "$(write_payload "$ROOT/context/skills/erp-code-review/SKILL.md")"
 expect_deny  "outside every scope"     write-scope.cjs "$(write_payload "/tmp/somewhere-else/x.py")"
 expect_allow "inside the worktree"     write-scope.cjs "$(write_payload "$ONESHOT_WORKTREE/apps/leaves/models.py")"
 expect_allow "inside the run dir"      write-scope.cjs "$(write_payload "$ROOT/state/runs/0/plan.json")"
@@ -149,6 +175,21 @@ if command -v ln >/dev/null 2>&1; then
         # A silent skip here is worse than a failure: this is the test for the
         # one escape that lets a phase rewrite its own governing skills.
         red "  FAIL  symlink test could not run — $CONTEXT_REPO/.claude not present"
+        FAIL=$((FAIL+1))
+    fi
+
+    # The real composition now links each skill into this repo's vendored
+    # context/, not the context repo. A per-skill symlink must not become a
+    # write path into context/ either — same escape, different source.
+    rm -rf "$ONESHOT_WORKTREE/.claude"
+    if [ -d "$ROOT/context/skills" ]; then
+        mkdir -p "$ONESHOT_WORKTREE/.claude/skills"
+        ln -s "$ROOT/context/skills/erp-code-review" \
+            "$ONESHOT_WORKTREE/.claude/skills/erp-code-review" 2>/dev/null
+        expect_deny "symlinked skill into vendored context/ (realpath escape)" \
+            write-scope.cjs "$(write_payload "$ONESHOT_WORKTREE/.claude/skills/erp-code-review/SKILL.md")"
+    else
+        red "  FAIL  vendored-context symlink test could not run — $ROOT/context/skills not present"
         FAIL=$((FAIL+1))
     fi
 fi

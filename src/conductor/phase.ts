@@ -140,6 +140,17 @@ function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
       'mcp__gitlab__push_files',
       'mcp__gitlab__create_or_update_file',
       'mcp__gitlab__create_branch',
+      // Thread writes. The review-feedback loop posts and resolves from conductor
+      // code after verification; a session that could do either would answer a
+      // reviewer on the strength of work nobody has checked yet.
+      'mcp__gitlab__create_merge_request_thread',
+      'mcp__gitlab__create_note',
+      'mcp__gitlab__update_merge_request_note',
+      'mcp__gitlab__update_issue_note',
+      'mcp__gitlab__create_draft_note',
+      'mcp__gitlab__update_draft_note',
+      'mcp__gitlab__publish_draft_note',
+      'mcp__gitlab__bulk_publish_draft_notes',
     );
   }
 
@@ -468,7 +479,16 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       // the message rather than an exit code on purpose: the SDK reports
       // "exited with code 1" on sessions that SUCCEEDED (see the trailing
       // result frame above), so an exit code proves nothing either way.
-      if (SIGNAL_DEATH_RE.test(m)) out.infra = true;
+      //
+      // Zero stream messages is that same claim from the other direction, and
+      // it is the only signal available when the exit code lies: a session that
+      // emitted nothing never reached `system:init`, so whatever killed it did
+      // so before the work began and it holds no opinion about the ticket. The
+      // common causes are account-level gates the bundled CLI meets first — a
+      // usage limit, or a terms notice it hard-exits on — and without this they
+      // are indistinguishable from a phase that ran and came back wrong, which
+      // costs a lap and aborts every run whose onFail says so.
+      if (SIGNAL_DEATH_RE.test(m) || !sawActivity) out.infra = true;
       limitSignals.push(m);
     }
   } finally {

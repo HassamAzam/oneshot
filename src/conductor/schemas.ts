@@ -11,6 +11,7 @@
  * is a model that misunderstood the contract, and silently accepting it means
  * the next phase reads a field that will not be there next time.
  */
+import { ADDRESSED_FEEDBACK_PROP, MR_FEEDBACK_PROPS } from '../mrfeedback/schema.js';
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -23,18 +24,38 @@ const COMMON = {
   blocked: {
     type: ['string', 'null'],
     description:
-      'Non-null ONLY when you could not finish and no retry would help: a missing input, ' +
+      'Set ONLY when you could not finish and no retry would help: a missing input, ' +
       'an environment that is down, a decision only a human can make. State what would ' +
-      'unblock it. Null otherwise.',
+      'unblock it. Omit it, or send null, when nothing is blocking you.',
   },
 } as const;
 
+/**
+ * `blocked` is deliberately NOT required.
+ *
+ * Every other field here describes work the phase did, so demanding it costs
+ * nothing. `blocked` is the opposite: the overwhelmingly common value is "no",
+ * and making it required turns the happy path into a sentence the model has to
+ * serialise correctly in order to say nothing at all. That is not hypothetical
+ * — an implement phase once emitted `</parameter><parameter name="blocked">`
+ * as literal text inside `summary`, so the field never materialised, and five
+ * identical retries later a 28-minute lap whose commits were already on the
+ * branch was recorded as a failure.
+ *
+ * Omission is safe because nothing downstream distinguishes it from null:
+ * runSession() reads `typeof b === 'string' && b.trim() ? b : null`, so absent,
+ * null and empty all mean the same thing at the only place that reads it. The
+ * guarantee this drops — "a phase cannot forget to mention it is blocked" — was
+ * never real either, since a phase could always have sent null anyway. A phase
+ * that IS blocked has every incentive to say so; one that is not should not
+ * have to.
+ */
 function phaseSchema(props: Record<string, unknown>, required: string[]): JsonSchema {
   return {
     type: 'object',
     additionalProperties: false,
     properties: { ...COMMON, ...props },
-    required: ['summary', 'blocked', ...required],
+    required: ['summary', ...required],
   };
 }
 
@@ -174,7 +195,8 @@ export const IMPLEMENT_SCHEMA = phaseSchema({
   lintClean: { type: 'boolean', description: 'flake8 + pylint + eslint all pass.' },
   testsRun: str('What was run and the outcome. Empty string if none were run.'),
   addressedFindings: strArr('Finding ids from a previous review lap that this lap fixed.'),
-}, ['commits', 'filesChanged', 'migrationsAdded', 'lintClean', 'testsRun', 'addressedFindings']);
+  addressedFeedback: ADDRESSED_FEEDBACK_PROP,
+}, ['commits', 'filesChanged', 'migrationsAdded', 'lintClean', 'testsRun', 'addressedFindings', 'addressedFeedback']);
 
 export const FINDINGS_SCHEMA = phaseSchema({
   verdict: { type: 'string', enum: ['approve', 'changes-requested'] },
@@ -233,7 +255,26 @@ export const UI_EVIDENCE_SCHEMA = phaseSchema({
       required: ['file', 'caption', 'caseId'],
     },
   },
-}, ['screenshots']);
+  observations: {
+    type: 'array',
+    description:
+      'Evidence for what a screenshot cannot show — a <title>, an aria-* or alt value, lang, ' +
+      'a meta tag, focus order, a response header. One row per value, measured, never painted ' +
+      'onto the page. Empty array when every change is visible on screen.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        what: str('The value measured and where, e.g. "document.title on /accounts/password_reset/"'),
+        before: str('The value on the base branch, verbatim, or "not measured" with the reason'),
+        after: str('The value on this branch, verbatim'),
+        how: str('How it was read, e.g. "Playwright page.title()", "curl + grep <title>", "git show origin/dev:<path>"'),
+        caseId: str('Related case id, or empty string'),
+      },
+      required: ['what', 'before', 'after', 'how', 'caseId'],
+    },
+  },
+}, ['screenshots', 'observations']);
 
 export const MR_SCHEMA = phaseSchema({
   mrIid: { type: 'number' },
@@ -303,6 +344,9 @@ export const REMEDIATE_SCHEMA = phaseSchema({
   ),
 }, ['diagnosis', 'category', 'fixed', 'changes', 'retryFrom', 'humanNeeded']);
 
+/** Triage of MR review threads — the on-demand `mr-feedback` phase. See src/mrfeedback. */
+export const MR_FEEDBACK_SCHEMA = phaseSchema(MR_FEEDBACK_PROPS, ['items']);
+
 export const SCHEMAS: Record<string, JsonSchema> = {
   recall: RECALL_SCHEMA,
   research: RESEARCH_SCHEMA,
@@ -314,6 +358,7 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   'ui-evidence': UI_EVIDENCE_SCHEMA,
   mr: MR_SCHEMA,
   remediate: REMEDIATE_SCHEMA,
+  'mr-feedback': MR_FEEDBACK_SCHEMA,
 };
 
 export function schemaFor(phase: string): JsonSchema | undefined {

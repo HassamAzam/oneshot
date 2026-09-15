@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 import { homedir, userInfo } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
 import { deskUsername } from './identity.js';
+import { parseMrFeedbackConfig } from '../mrfeedback/config.js';
+import type { MrFeedbackConfig } from '../mrfeedback/types.js';
 
 export const ROOT: string = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -103,6 +105,13 @@ export interface ProjectConfig {
      * nothing: every check that reads it is an additive `labels.includes(...)`.
      */
     review: string;
+    /**
+     * Optional, off-by-default board marker — never required, never gates
+     * anything. Swapped onto the ticket the moment the testcases gate first
+     * posts its request comment, and off again the moment that gate is
+     * approved. See src/conductor/reviewgate.ts.
+     */
+    testcaseReview: string;
   };
   /**
    * Apply the review gates to EVERY run, not only to tickets carrying `labels.review`
@@ -317,6 +326,16 @@ export function reviewersConfig(): ReviewersConfig {
   return _reviewers;
 }
 
+let _mrFeedback: MrFeedbackConfig | null = null;
+/** config/mr-feedback.json, validated. A missing file is the feature switched off. */
+export function mrFeedbackConfig(): MrFeedbackConfig {
+  if (!_mrFeedback) {
+    const present = existsSync(join(ROOT, 'config', 'mr-feedback.json'));
+    _mrFeedback = parseMrFeedbackConfig(present ? loadJson<unknown>('mr-feedback.json') : {}, reviewersConfig());
+  }
+  return _mrFeedback;
+}
+
 export function modelFor(phase: PhaseConfig): string {
   const m = loadJson<{
     tiers: Record<string, string>;
@@ -426,7 +445,14 @@ export const DB_PATH = join(STATE, 'oneshot.db');
 
 export const WORK_REPO = expandPath(envOr('WORK_REPO', '~/Documents/workstreamai'));
 export const CONTEXT_REPO = expandPath(envOr('CONTEXT_REPO', '~/Documents/erp'));
-export const SKILLS_ROOT = expandPath(envOr('ONESHOT_SKILLS_ROOT', '~/Documents/erp/.claude'));
+// Skills, agents and rules are vendored into this repo under `context/` (a
+// committed snapshot of the ERP context repo's `.claude`, which also stays in
+// GitLab), so the loop is self-contained: a fresh clone carries them and
+// claudedir composes `.claude` from links that resolve without a local ERP
+// checkout. Override with ONESHOT_SKILLS_ROOT to point at a live `.claude`
+// (e.g. `~/Documents/erp/.claude`) when a machine's interactive edits should
+// win over the vendored copy.
+export const SKILLS_ROOT = expandPath(envOr('ONESHOT_SKILLS_ROOT', join(ROOT, 'context')));
 export const WT_ROOT = expandPath(envOr('WT_ROOT', '~/Documents/oneshot-wt'));
 
 export function runDir(iid: number): string { return join(RUNS, String(iid)); }
