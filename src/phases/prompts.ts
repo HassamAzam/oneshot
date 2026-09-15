@@ -570,6 +570,12 @@ Produce an implementation plan an engineer could follow without re-deriving the 
 - Steps are ordered and each names the files it touches and its layer.
 - Set \`migrations\` true if any model, field, constraint or relation changes.
 - Risks are concrete: what breaks, and the mitigation.
+- Every item in research's \`unknowns\` ends in exactly one place: resolved (say how, with
+  \`file:line\`), an \`openQuestions\` entry with the default you assume, or an \`outOfScope\`
+  entry. Never decide one silently. A scope or product choice the ticket does not state is an
+  open question, not a risk — the approver reads open questions first and can overrule them.
+- \`acceptanceCoverage\` has one entry per research acceptance criterion. Mark a criterion
+  \`not-satisfiable\` when no change can demonstrate it as written, and say what is done instead.
 
 Do not write or modify any code.`,
 

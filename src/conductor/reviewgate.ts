@@ -620,10 +620,20 @@ function planSteps(plan: Record<string, unknown> | null): PlanStep[] {
   return Array.isArray(v) ? (v as PlanStep[]) : [];
 }
 
-function planRisks(plan: Record<string, unknown> | null): string[] {
-  const v = plan?.risks;
+function planList(plan: Record<string, unknown> | null, key: string): string[] {
+  const v = plan?.[key];
   return Array.isArray(v) ? v.map(String) : [];
 }
+
+interface AcCoverage { criterion: string; coveredBy: string; status: string; note: string }
+
+/** Absent on plans written before the field existed — a resumed run's plan.json reads as empty, not as a crash. */
+function planCoverage(plan: Record<string, unknown> | null): AcCoverage[] {
+  const v = plan?.acceptanceCoverage;
+  return Array.isArray(v) ? (v as AcCoverage[]).filter((c) => c && typeof c.criterion === 'string') : [];
+}
+
+const COVERAGE_MARK: Record<string, string> = { covered: '✅', partial: '⚠️', 'not-satisfiable': '❌' };
 
 /**
  * GitLab Markdown, not Slack mrkdwn.
@@ -638,11 +648,24 @@ function renderPlanForTicket(plan: Record<string, unknown> | null): string {
   const steps = planSteps(plan)
     .map((s) => `${s.n}. **[${mdText(s.layer)}]** ${mdText(s.what)}${s.files?.length ? ` — ${s.files.map(codeSpan).join(', ')}` : ''}`)
     .join('\n');
-  const risks = planRisks(plan).map((r) => `- ${mdText(r)}`).join('\n');
+  const bullets = (key: string): string => planList(plan, key).map((r) => `- ${mdText(r)}`).join('\n');
+  const risks = bullets('risks');
+  // Open questions sit ABOVE the steps: they are the decisions the approver is
+  // actually being asked to make, and a plan that silently picked a scope reads
+  // as settled when it is not. Empty sections are omitted, not labelled "none".
+  const questions = bullets('openQuestions');
+  const outOfScope = bullets('outOfScope');
+  const coverage = planCoverage(plan)
+    .map((c) => `- ${COVERAGE_MARK[c.status] ?? '•'} ${mdText(c.criterion)} — ${mdText(c.coveredBy || '—')}` +
+      `${c.note ? ` _(${mdText(c.note)})_` : ''}`)
+    .join('\n');
   const approach = planStr(plan, 'approach');
   return `**Approach**\n${approach ? mdText(approach) : '(not recorded)'}\n\n` +
+    `${questions ? `**Open questions** — answer these in a comment, or the stated default is used\n${questions}\n\n` : ''}` +
     `**Steps**\n${steps || '(none recorded)'}\n\n` +
+    `${coverage ? `**Acceptance coverage**\n${coverage}\n\n` : ''}` +
     `**Risks**\n${risks || '(none identified)'}` +
+    `${outOfScope ? `\n\n**Out of scope**\n${outOfScope}` : ''}` +
     `${plan?.migrations === true ? '\n\n⚠️ includes a database migration' : ''}`;
 }
 

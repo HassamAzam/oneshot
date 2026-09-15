@@ -66,29 +66,38 @@ interface PlanArtifact {
   steps?: Array<{ n: number; what: string; files: string[]; layer: string }>;
   migrations?: boolean;
   risks?: string[];
+  /** The next three are absent on plans written before they existed. */
+  openQuestions?: string[];
+  outOfScope?: string[];
+  acceptanceCoverage?: Array<{ criterion: string; coveredBy: string; status: string; note: string }>;
   summary?: string;
 }
 
-function renderPlanMd(iid: number, title: string, plan: PlanArtifact): string {
+export function renderPlanMd(iid: number, title: string, plan: PlanArtifact): string {
   const steps = (plan.steps ?? [])
     .map((s) => `| ${s.n} | ${s.layer} | ${s.what} | ${(s.files ?? []).join('<br>') || '—'} |`)
+    .join('\n');
+  const questions = (plan.openQuestions ?? []).map((q) => `- ${q}`).join('\n');
+  const outOfScope = (plan.outOfScope ?? []).map((o) => `- ${o}`).join('\n');
+  const coverage = (plan.acceptanceCoverage ?? [])
+    .map((c) => `| ${c.criterion} | ${c.status} | ${c.coveredBy || '—'} | ${c.note || ''} |`)
     .join('\n');
   return `# Implementation plan — #${iid} ${title}
 
 ## Approach
 ${plan.approach ?? '(not recorded)'}
-
+${questions ? `\n## Open questions\n${questions}\n` : ''}
 ## Steps
 | # | Layer | Change | Files |
 |---|---|---|---|
 ${steps || '| — | — | (none recorded) | — |'}
-
+${coverage ? `\n## Acceptance coverage\n| Criterion | Status | Covered by | Note |\n|---|---|---|---|\n${coverage}\n` : ''}
 ## Reuse before writing
 ${(plan.reuse ?? []).map((r) => `- ${r}`).join('\n') || '- (none identified)'}
 
 ## Risks
 ${(plan.risks ?? []).map((r) => `- ${r}`).join('\n') || '- (none identified)'}
-
+${outOfScope ? `\n## Out of scope\n${outOfScope}\n` : ''}
 ## Migrations
 ${plan.migrations ? 'This change requires a database migration.' : 'No schema change.'}
 `;
