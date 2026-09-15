@@ -351,6 +351,36 @@ function failedCases(name: string, data: Record<string, unknown> | null | undefi
 }
 
 /**
+ * `labels` plus the in-review label, when one is configured — the set a run
+ * takes off the ticket when it stops waiting on a reviewer.
+ */
+function withInReview(cfg: ReturnType<typeof projectConfig>, labels: string[]): string[] {
+  return cfg.labels.inReview ? [...labels, cfg.labels.inReview] : labels;
+}
+
+/**
+ * Set a ticket's labels, retrying across a short network blip.
+ *
+ * Three attempts 10s apart: long enough to ride out a VPN reconnect, short
+ * enough not to hold a finished run open. A final failure is logged loudly
+ * rather than thrown — the run's outcome is already decided, only its label
+ * is missing, and the warning says exactly which label to add by hand.
+ */
+async function labelWithRetry(iid: number, remove: string[], add: string[]): Promise<boolean> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await swapLabel(iid, remove, add);
+    if (res.ok) return true;
+    if (attempt < 3) await sleep(10_000);
+    else {
+      log.warn(`#${iid} label update failed — add ${add.join(', ')} by hand`, {
+        remove: remove.join(', '), error: res.error ?? res.kind,
+      });
+    }
+  }
+  return false;
+}
+
+/**
  * The one-screen account of a run that did not finish.
  *
  * A stopped run previously said only what went wrong, on a single line that
@@ -1860,8 +1890,9 @@ export async function runTicket(
         // reading 'TestCase Review' tells the board it is waiting on QA when it
         // is waiting on a person to unblock it. Parked keeps it — parked at the
         // gate is the state it marks — and done is only reached via approval.
+        // 'In Review' goes for the same reason: nobody is reviewing a blocked run.
         await swapLabel(journal.iid,
-          [cfg.labels.entry, cfg.labels.testcaseReview].filter(Boolean),
+          withInReview(cfg, [cfg.labels.entry, cfg.labels.testcaseReview].filter(Boolean)),
           [cfg.labels.blocked]);
         await addIssueNote(journal.iid, `Oneshot stopped: **${reason}**\n\nRun \`${journal.runId}\`.`);
       }
@@ -1872,8 +1903,12 @@ export async function runTicket(
       // past the cooldown, through --ticket, or after a person answered it —
       // still carries it, and finishing with both "Needs Human" and "merged" on
       // the ticket tells the board a person is wanted on work that is done.
+      // The swap is retried because it is the ticket's only record that the
+      // work shipped: a flaky network here otherwise leaves it unlabelled for good.
       if (!DRY_RUN) {
-        await swapLabel(journal.iid, [cfg.labels.entry, cfg.labels.blocked], [cfg.labels.exit]);
+        await labelWithRetry(
+          journal.iid, withInReview(cfg, [cfg.labels.entry, cfg.labels.blocked]), [cfg.labels.exit],
+        );
       }
       // The claim note has done its job — with the exit label on, nothing
       // scans this ticket again — and a claim that outlives its run is exactly

@@ -24,7 +24,7 @@
 import { execFileSync } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 import {
-  DRY_RUN, MERGE_POLL_MS, WORK_REPO, phaseByName, projectConfig,
+  APPROVAL_POLL_MS, DRY_RUN, MERGE_POLL_MS, WORK_REPO, phaseByName, projectConfig,
 } from '../lib/config.js';
 import {
   artifactsDirFor, readArtifact, readJournal, updateJournal, writeArtifact, type RunJournal,
@@ -35,8 +35,9 @@ import { alert, thread } from '../lib/slack.js';
 import { releasePort } from '../lib/worktrees.js';
 import {
   acceptMergeRequest, addIssueNote, addMergeRequestNote, compareRefs, createMergeRequest,
-  failedJobs, findMergeRequests, getBranch, getMergeRequest, issueNotes, mergeRefusal,
-  mergeRequestUrl, mrDiscussions, projectSettings, rebaseMergeRequest, updateMergeRequest,
+  failedJobs, findMergeRequests, getBranch, getMergeRequest, getMergeRequestApprovals,
+  issueNotes, mergeRefusal,
+  mergeRequestUrl, mrDiscussions, projectSettings, rebaseMergeRequest, swapLabel, updateMergeRequest,
   type MergeRequest, type ProjectSettings,
 } from '../lib/gitlab.js';
 import type { CodePhaseCtx } from './runner.js';
@@ -111,6 +112,8 @@ type MergeArtifact = {
   squashed: boolean;
   squashForcedBy: string | null;
   alreadyMerged: boolean;
+  /** On a Review run, the people whose MR approval let Oneshot merge it. */
+  approvedBy: string[] | null;
   undrafted: boolean;
   rebaseCount: number;
   rebasedFrom: string | null;
@@ -120,6 +123,8 @@ type MergeArtifact = {
   promotion: PromotionRecord | null;
   promotionsSkipped: Array<{ from: string; to: string; detail: string }>;
   threadPosted: boolean;
+  /** The in-review label is on the ticket. Carried so each poll does not re-apply it. */
+  inReviewLabeled: boolean;
   /** The completion record, once posted. Carried across a re-run so it is posted once. */
   successNoteId: number | null;
   successNotePosted: boolean;
@@ -136,11 +141,12 @@ function blankMerge(): MergeArtifact {
   return {
     mrIid: null, mrUrl: null, sourceBranch: null, targetBranch: null,
     mergedSha: null, baseTipAfterMerge: null, mergeMethod: null,
-    squashed: false, squashForcedBy: null, alreadyMerged: false, undrafted: false,
+    squashed: false, squashForcedBy: null, alreadyMerged: false, approvedBy: null, undrafted: false,
     rebaseCount: 0, rebasedFrom: null, rebasedTo: null,
     waitedForCiMs: 0, pipeline: null,
     promotion: null, promotionsSkipped: [],
     threadPosted: false,
+    inReviewLabeled: false,
     successNoteId: null, successNotePosted: false, mrNotePosted: false, recordFailures: [],
     dryRun: false, wouldAccept: null,
     blockedWhy: null, summary: '',
@@ -796,8 +802,56 @@ function mergeSummary(rec: MergeArtifact): string {
     return `[dry-run] !${rec.mrIid} would merge into ${rec.targetBranch}; ${promotionLine(rec)}`;
   }
   const verb = rec.alreadyMerged ? 'was already merged' : 'merged';
-  return `!${rec.mrIid} ${verb} into ${rec.targetBranch} as ${short(rec.mergedSha)}; ` +
+  const approval = rec.approvedBy?.length ? ` after approval by ${rec.approvedBy.join(', ')}` : '';
+  return `!${rec.mrIid} ${verb} into ${rec.targetBranch} as ${short(rec.mergedSha)}${approval}; ` +
     promotionLine(rec);
+}
+
+/**
+ * Label the ticket as waiting on a reviewer, once per run.
+ *
+ * Applied on the first real poll of the wait — which is the tick right after
+ * the MR opens — and never re-applied while the flag is carried, so a ticket
+ * parked for a day costs one label write, not one per poll. A failed write
+ * leaves the flag down and is retried next poll. finish() takes it off.
+ */
+async function markInReview(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<void> {
+  const label = projectConfig().labels.inReview;
+  if (!label || rec.inReviewLabeled) return;
+  const res = await swapLabel(ctx.iid, [], [label]);
+  if (res.ok) {
+    rec.inReviewLabeled = true;
+    log.info(`merge: #${ctx.iid} labelled '${label}' while !${rec.mrIid} awaits review`);
+  } else {
+    log.warn(`merge: could not add '${label}' to #${ctx.iid} — will retry next poll`, {
+      error: res.error ?? res.kind,
+    });
+  }
+}
+
+/**
+ * The people whose approval currently satisfies the MR, or none.
+ *
+ * GitLab's own verdict comes first: approvals still owed under the project's
+ * rules means not approved, whoever has clicked. Bot accounts (project and
+ * group access tokens) never count — an approval stands for a person's
+ * decision, and a token approving would be the machine signing off its own
+ * work. A read failure is treated as "not approved": the run parks and asks
+ * again next poll, which is always the safe way to be wrong.
+ */
+async function humanApprovers(mrIid: number): Promise<string[]> {
+  const res = await getMergeRequestApprovals(mrIid);
+  if (!res.ok || !res.data) {
+    log.warn(`merge: cannot read approvals for !${mrIid} — treating as not approved`, {
+      error: res.error ?? res.kind,
+    });
+    return [];
+  }
+  if ((res.data.approvals_left ?? 0) > 0) return [];
+  return (res.data.approved_by ?? [])
+    .map((a) => a.user)
+    .filter((u) => u && u.state !== 'blocked' && !/^(project|group)_\d+_bot/.test(u.username))
+    .map((u) => u.username);
 }
 
 /**
@@ -882,6 +936,7 @@ export async function mergePhase(
   const rec = blankMerge();
   rec.rebaseCount = carried?.rebaseCount ?? 0;
   rec.threadPosted = carried?.threadPosted === true;
+  rec.inReviewLabeled = carried?.inReviewLabeled === true;
   rec.successNoteId = carried?.successNoteId ?? null;
   rec.successNotePosted = carried?.successNotePosted === true;
   rec.mrNotePosted = carried?.mrNotePosted === true;
@@ -926,11 +981,13 @@ export async function mergePhase(
   // A Review ticket's merge is a person's decision, so this phase is a patient
   // watcher. Between polls there is nothing to learn and nothing to do, so the
   // tick is spent without a network round trip at all.
+  const mergeOnApproval = cfg.mergeOnApproval === true;
+  const pollMs = mergeOnApproval ? APPROVAL_POLL_MS : MERGE_POLL_MS;
   const sinceLastAsk = Date.now() - (journal.humanMergeCheckAt ?? 0);
-  if (journal.reviewMode && !DRY_RUN && sinceLastAsk < MERGE_POLL_MS) {
-    const mins = Math.ceil((MERGE_POLL_MS - sinceLastAsk) / 60_000);
-    const why = `!${mrIid} is not merged yet — merging is a person's call on a Review ticket. `
-      + `Next check in ${mins}m. ${rec.mrUrl}`;
+  if (journal.reviewMode && !DRY_RUN && sinceLastAsk < pollMs) {
+    const mins = Math.ceil((pollMs - sinceLastAsk) / 60_000);
+    const why = `!${mrIid} is not ${mergeOnApproval ? 'approved or merged' : 'merged'} yet — `
+      + `merging is a person's call on a Review ticket. Next check in ${mins}m. ${rec.mrUrl}`;
     rec.summary = `[Review] awaiting a human merge of !${mrIid}`;
     persistMerge(ctx, rec);
     return { ok: false, error: why, park: true };
@@ -960,27 +1017,36 @@ export async function mergePhase(
     }
   }
 
-  // The Review label hands merge AND deploy to a person, end to end. Oneshot
-  // opens the MR and from here only watches: it never accepts one itself, no
-  // matter how green the pipeline or how complete the approvals. Anything else
-  // would put a machine's judgement on the last irreversible step, which is
-  // the one step this label exists to reserve for a human.
+  // The Review label reserves the last irreversible step for a person. Oneshot
+  // never decides to merge on its own judgement, however green the pipeline.
   //
-  // So this is a wait, not a gate with a ready/not-ready verdict. The only
-  // thing that moves the run on is the MR's own state turning 'merged',
-  // whoever did it and whenever. Re-asking every --follow tick would be noise
-  // against a decision measured in hours, so the question is put to GitLab at
-  // MERGE_POLL_MS and the ticks in between park without touching the network.
+  // What it waits for is that person's decision, in either form: the MR's own
+  // state turning 'merged' (they pressed merge), or — with `mergeOnApproval` —
+  // a human approval that satisfies the project's approval rules, after which
+  // Oneshot carries out the merge through the same path an unreviewed run uses
+  // (pipeline wait, rebase, accept). The approval is the decision; the click is
+  // mechanics. Re-asking every --follow tick would be noise against a decision
+  // measured in hours, so GitLab is asked once per poll interval and the ticks
+  // in between park without touching the network.
   if (journal.reviewMode && !rec.alreadyMerged && !DRY_RUN) {
-    updateJournal(ctx.iid, { humanMergeCheckAt: Date.now() });
-    const why = `!${mrIid} is not merged yet — this ticket carries Review, so merging is a `
-      + `person's call. Oneshot will not accept it; merge it yourself when you are ready and `
-      + `the run picks up from there. Next check in ${Math.round(MERGE_POLL_MS / 60_000)}m. `
-      + `${rec.mrUrl ?? ''}`;
-    rec.summary = `[Review] awaiting a human merge of !${mrIid}`;
-    persistMerge(ctx, rec);
-    log.warn(`merge: awaiting a human merge — ${why}`);
-    return { ok: false, error: why, park: true };
+    const approvers = mergeOnApproval ? await humanApprovers(mrIid) : [];
+    if (approvers.length) {
+      rec.approvedBy = approvers;
+      log.ok(`merge: !${mrIid} approved by ${approvers.join(', ')} — merging`);
+    } else {
+      updateJournal(ctx.iid, { humanMergeCheckAt: Date.now() });
+      const next = mergeOnApproval
+        ? 'approve the MR and Oneshot merges it, or merge it yourself'
+        : 'merge it yourself when you are ready and the run picks up from there';
+      const why = `!${mrIid} is not ${mergeOnApproval ? 'approved or merged' : 'merged'} yet — `
+        + `this ticket carries Review, so merging is a person's call; ${next}. `
+        + `Next check in ${Math.round(pollMs / 60_000)}m. ${rec.mrUrl ?? ''}`;
+      rec.summary = `[Review] awaiting a human ${mergeOnApproval ? 'approval' : 'merge'} of !${mrIid}`;
+      await markInReview(ctx, rec);
+      persistMerge(ctx, rec);
+      log.warn(`merge: awaiting a human decision — ${why}`);
+      return { ok: false, error: why, park: true };
+    }
   }
 
   if (DRY_RUN) {
