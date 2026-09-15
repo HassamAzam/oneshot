@@ -70,6 +70,7 @@ import {
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
 import { checkQuota } from '../lib/quota.js';
+import { checkTestLogin } from '../lib/testlogin.js';
 import {
   claimOwnership, claimTicket, getRun, logEvent, phaseEnd, phaseStart, updateRun,
 } from '../lib/db.js';
@@ -811,6 +812,20 @@ export async function runTicket(
       if (!quota.allowed) return finish(j, 'blocked', `quota: ${quota.reason}`);
       const leaseError = ensureLeases(p);
       if (leaseError) return finish(j, 'blocked', leaseError);
+      // Straight to finish(), not through the control flow: a missing account
+      // is a credential nobody provisioned, which remediation hands back
+      // anyway — spending an Opus session to say so is the cost this avoids.
+      if (p.name === 'verify' && !DRY_RUN && worktree) {
+        const login = await checkTestLogin(worktree);
+        if (login.ok === false) {
+          return finish(j, 'blocked', `verify: ${login.reason.replace('<iid>', String(iid))}`);
+        }
+        if (login.ok === null) {
+          log.warn('test login not pre-checked — verify will find out for itself', { why: login.reason });
+        } else {
+          log.ok(`test login ${login.email} is provisioned`);
+        }
+      }
     }
 
     const running = members.map((k) => list[k]!.name);
@@ -830,6 +845,10 @@ export async function runTicket(
     // A check phase's own account of itself is not evidence. Overrule it before
     // anything is recorded, so the journal and the card show the verdict the
     // conductor reached rather than the one the session reported.
+    // Salvage below must never hand back a verdict the conductor just overruled:
+    // verify-partial.json can be a previous lap's, and reading its passes as
+    // this session's would turn "ran nothing" back into a green phase.
+    const overruled = new Set<PhaseResult>();
     for (const r of results) {
       // The MR is a mechanical API call wearing a session's clothes, and this
       // pipeline already learned what happens when it is left to a tool the
@@ -859,15 +878,42 @@ export async function runTicket(
       // letting it through is how unverified code reaches an MR with a
       // clean-looking card. Hard stop — cycling to implement would burn an
       // Opus lap on what is almost never a code problem.
+      //
+      // Except when it executed nothing. A list that is ALL 'skipped' is not a
+      // verdict on the environment or the change — it is a session that spent
+      // its budget before the first case (ticket #189: the whole lap went on
+      // server bring-up, and the block said the change was "broken end to end"
+      // when the servers it left behind were answering correctly). That is the
+      // shape of an infra death, so it takes the free re-attempt, and only a
+      // session that keeps running nothing reaches a person — told the truth.
       if (r.cfg.name === 'verify' && r.out.ok) {
-        const res = (r.out.data?.results ?? []) as Array<{ result: string }>;
+        const res = (r.out.data?.results ?? []) as Array<{ result: string; evidence?: string }>;
         const passes = res.filter((x) => x.result === 'pass').length;
-        if (res.length > 0 && passes === 0) {
+        const skipped = res.filter((x) => x.result === 'skipped').length;
+        if (res.length > 0 && skipped === res.length) {
+          const first = String(res[0]?.evidence ?? '').split('\n')[0]!.slice(0, 200);
+          const ranNothing = `verify ran none of its ${res.length} case(s) — every one is recorded ` +
+            `'skipped', so nothing about the change was tested${first ? ` (${first})` : ''}`;
           r.out.ok = false;
-          r.hardStop = `verify executed ${res.length} case(s) and NONE passed — an all-negative ` +
-            'local run means the environment or the change is broken end to end, and neither is ' +
-            'something a merge should ride through. A human decides whether the demo-server QA ' +
-            'gate alone is acceptable for this ticket.';
+          r.out.error = ranNothing;
+          overruled.add(r);
+          if (infraAttemptsOf(iid, 'verify') < MAX_INFRA_ATTEMPTS) {
+            r.out.infra = true;
+            log.warn(`verify overruled — ${ranNothing}`);
+          } else {
+            r.hardStop = `${ranNothing}. It has now done that ${MAX_INFRA_ATTEMPTS + 1} times, so ` +
+              'the cause is outside the session: read the evidence above and the verify transcript.';
+            log.error(`verify overruled — ${r.hardStop}`);
+          }
+        } else if (res.length > 0 && passes === 0) {
+          const failed = res.filter((x) => x.result === 'fail').length;
+          r.out.ok = false;
+          overruled.add(r);
+          r.hardStop = `verify recorded ${res.length} case(s) — ${failed} failed, ` +
+            `${res.length - failed - skipped} blocked, ${skipped} skipped — and NONE passed. An ` +
+            'all-negative local run means the environment or the change is broken end to end, and ' +
+            'neither is something a merge should ride through. A human decides whether the ' +
+            'demo-server QA gate alone is acceptable for this ticket.';
           r.out.error = r.hardStop;
           log.error(`verify overruled — ${r.hardStop}`);
         }
@@ -889,7 +935,7 @@ export async function runTicket(
       // a change can merge with cases that were never executed, and the
       // artifact says exactly which, because they are recorded 'skipped'
       // rather than quietly dropped.
-      if (r.cfg.name === 'verify' && !r.out.ok && !r.out.blocked) {
+      if (r.cfg.name === 'verify' && !r.out.ok && !r.out.blocked && !overruled.has(r)) {
         const partial = readArtifact<{ results?: Array<Record<string, unknown>> }>(
           iid, `${r.cfg.name}-partial.json`,
         );

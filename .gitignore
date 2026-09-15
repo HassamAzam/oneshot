@@ -17,3 +17,6 @@ logs/
 
 # document phase stages attachments here before upload_markdown (it rejects absolute paths)
 /evidence_upload/
+
+# Planning docs never get committed
+/docs/superpowers/
