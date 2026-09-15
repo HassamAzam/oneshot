@@ -30,6 +30,7 @@ import {
   addIssueNote, addMergeRequestNote, mergeRequestUrl, uploadFile, type Upload,
 } from './gitlab.js';
 import { log } from './log.js';
+import { mdText } from './gitlabmd.js';
 
 /** GitLab rejects very large attachments; skip them with a note rather than failing. */
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -212,7 +213,7 @@ const SPECS: Spec[] = [
     target: 'ticket',
     build: (data, ctx) => ({
       body: `**Plan** — how Oneshot intends to implement this.\n\n> ${
-        (data.approach as string ?? '').slice(0, 400)}\n\n` +
+        mdText((data.approach as string ?? '').slice(0, 400))}\n\n` +
         `${(data.steps as unknown[] ?? []).length} step(s)${data.migrations ? ' · includes a migration' : ''}. ` +
         'Full plan attached; implementation follows it unless a step proves wrong.',
       attachments: [{
