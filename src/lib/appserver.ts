@@ -19,14 +19,12 @@
  * nothing.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, openSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { DRY_RUN, ROOT } from './config.js';
 import { log } from './log.js';
 
-function appScript(): string {
-  return join(ROOT, 'scripts', 'app.cjs');
-}
+const APP_SCRIPT = join(ROOT, 'scripts', 'app.cjs');
 
 /**
  * Fire and forget, deliberately.
@@ -38,8 +36,7 @@ function appScript(): string {
  * the harness's own named code.
  */
 function spawnApp(args: string[], logName: string, env: Record<string, string>): number | null {
-  const script = appScript();
-  if (!existsSync(script)) {
+  if (!existsSync(APP_SCRIPT)) {
     log.warn('app       scripts/app.cjs is missing — phases will bring the app up themselves');
     return null;
   }
@@ -47,9 +44,13 @@ function spawnApp(args: string[], logName: string, env: Record<string, string>):
     const dir = join(ROOT, 'state', 'apps');
     mkdirSync(dir, { recursive: true });
     const out = openSync(join(dir, logName), 'a');
-    const child = spawn(process.execPath, [script, ...args], {
+    const child = spawn(process.execPath, [APP_SCRIPT, ...args], {
       cwd: ROOT, detached: true, stdio: ['ignore', out, out], env: { ...process.env, ...env },
     });
+    // The child holds its own dup of this fd for stdout/stderr; the parent's copy is done
+    // the moment spawn returns. A long-lived conductor calls this on every warm/startRun,
+    // so not closing it here leaks one fd per bring-up.
+    closeSync(out);
     child.unref();
     return child.pid ?? null;
   } catch (err) {

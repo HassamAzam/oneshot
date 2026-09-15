@@ -111,6 +111,35 @@ function git(args, cwd, soft = false) {
 /* ------------------------------------------------------------------ locking */
 
 /**
+ * Reclaim a lock whose holder is dead, without ever deleting a live one.
+ *
+ * A blind `rmSync` is the race the review flagged: two waiters both read the same dead
+ * holder, the first evicts it and writes its own valid lock, and the second's rmSync
+ * then deletes THAT — so both proceed. `rename` is content-blind too, so it alone does
+ * not fix it: a slow waiter can move a fresh valid lock aside. So we rename the file
+ * aside (atomic — exactly one waiter wins the inode; the rest get ENOENT), then look at
+ * what we actually moved. If it is a LIVE lock, a faster waiter had already reclaimed
+ * between our read and our rename — link it back into place if the slot is free and back
+ * off. Only a dead or unparseable file is dropped. Either way the `wx` create in the
+ * caller is the real acquire, and its loser re-reads and waits.
+ */
+function stealStale(f, budgetMs) {
+  const aside = `${f}.stale.${process.pid}.${Date.now()}`;
+  try {
+    fs.renameSync(f, aside);
+  } catch (e) {
+    if (e.code === 'ENOENT') return;
+    throw e;
+  }
+  const moved = readJson(aside);
+  const live = moved && H.alive(moved.pid) && Date.now() - moved.at <= budgetMs;
+  if (live) {
+    try { fs.linkSync(aside, f); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  }
+  fs.rmSync(aside, { force: true });
+}
+
+/**
  * One bring-up per target at a time.
  *
  * The conductor now starts the app in the BACKGROUND the moment a run leases its
@@ -136,7 +165,7 @@ async function withLock(key, fn, budgetMs = 25 * 60000) {
       if (err.code !== 'EEXIST') throw err;
       const held = readJson(f);
       if (!held || !H.alive(held.pid) || Date.now() - held.at > budgetMs) {
-        fs.rmSync(f, { force: true });
+        stealStale(f, budgetMs);
         continue; // eslint-disable-line no-continue
       }
       if (Date.now() > deadline) {
