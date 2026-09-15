@@ -75,6 +75,7 @@ import {
 import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/slack.js';
 import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
+import { mdText } from '../lib/gitlabmd.js';
 import type { TestCase } from '../phases/types.js';
 
 export type Gate = 'plan' | 'testcases';
@@ -622,23 +623,6 @@ function planSteps(plan: Record<string, unknown> | null): PlanStep[] {
 function planRisks(plan: Record<string, unknown> | null): string[] {
   const v = plan?.risks;
   return Array.isArray(v) ? v.map(String) : [];
-}
-
-/**
- * Neutralise a model-authored free-text run so it renders as literal prose in a
- * GitLab comment.
- *
- * Plan `approach`/`what`/`risks` routinely contain bare tags — `<title>`,
- * `<head>`, `<h1>` — as part of the sentence. GitLab's CommonMark renderer
- * treats a line holding such a tag as the start of an HTML block and stops
- * converting Markdown from that point on; its sanitiser then drops the
- * unsafelisted tag, so the reader gets a gap followed by exposed list markup
- * for the rest of the comment. Escaping the three HTML-significant characters
- * is enough to stop the block from ever opening, and `&lt;title&gt;` renders
- * back as `<title>`. Emphasis and backtick spans in the text are left intact.
- */
-function mdText(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 /**
