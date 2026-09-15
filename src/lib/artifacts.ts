@@ -274,8 +274,26 @@ export function failedLapsOf(iid: number, phase: string, since = 0): number {
  */
 export function infraAttemptsOf(iid: number, phase: string): number {
   const j = readJournal(iid);
-  if (!j) return 0;
-  return j.phases.filter((p) => p.phase === phase && p.status === 'infra').length;
+  return j ? trailingInfraDeaths(j.phases, phase) : 0;
+}
+
+/**
+ * Consecutive infra deaths at the end of this phase's own history.
+ *
+ * Counted since the phase last reached any verdict (ok, warned, failed…),
+ * not over the whole run: a phase that hung twice last night and then ran
+ * cleanly has not used up today's re-attempts. Records of other phases in
+ * between do not break the streak.
+ */
+export function trailingInfraDeaths(phases: Array<{ phase: string; status: string }>, phase: string): number {
+  let n = 0;
+  for (let i = phases.length - 1; i >= 0; i--) {
+    const p = phases[i]!;
+    if (p.phase !== phase) continue;
+    if (p.status !== 'infra') break;
+    n += 1;
+  }
+  return n;
 }
 
 /** True if the phase completed successfully at any lap — the resume check. */

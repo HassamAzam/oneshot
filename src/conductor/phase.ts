@@ -82,6 +82,21 @@ const SIGNAL_DEATH_RE = /terminated by signal|SIGKILL|SIGTERM|SIGSEGV/i;
  */
 const PROGRESS_EVERY_MS = 60_000;
 
+/**
+ * No stream frame for this long means the session is stalled, not slow.
+ *
+ * Observed live on #179: a verify session's stream went silent mid-response —
+ * one ESTABLISHED socket, 0% CPU, the API answering fresh requests in 0.1s —
+ * and the phase waited out its whole 150m wall clock for a reply that was never
+ * coming, four times in one night. The only legitimate frameless stretch is a
+ * single tool call in flight, and the CLI caps a Bash call at 10 minutes, so 15
+ * is past any real one. Aborting here lets the infra re-attempt start on a
+ * fresh connection instead of after the full budget.
+ * ONESHOT_PHASE_IDLE_MIN overrides it; 0 disables the check.
+ */
+const IDLE_STALL_MS = Math.max(0, Number(envOr('ONESHOT_PHASE_IDLE_MIN', '15')) || 0) * 60_000;
+const IDLE_CHECK_MS = 30_000;
+
 /** Write scopes handed to hooks/write-scope.cjs. Anything outside is denied. */
 function writeScopes(cfg: PhaseConfig, iid: number, worktree?: string): string[] {
   const scopes: string[] = [];
@@ -266,6 +281,17 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     }
   };
   const killer = setTimeout(() => { timedOut = true; ac.abort(); armForce(); }, cfg.timeoutMin * 60_000);
+  let lastFrameAt = Date.now();
+  let stalled = false;
+  const watchdog = IDLE_STALL_MS > 0
+    ? setInterval(() => {
+      if (stalled || timedOut || Date.now() - lastFrameAt < IDLE_STALL_MS) return;
+      stalled = true;
+      log.warn(`${cfg.name}: no stream message for ${Math.round(IDLE_STALL_MS / 60_000)}m — aborting the stalled session`);
+      ac.abort();
+      armForce();
+    }, IDLE_CHECK_MS)
+    : undefined;
   const cancel = (): void => { ac.abort(); armForce(); };
   if (input.signal) {
     if (input.signal.aborted) { ac.abort(); armForce(); }
@@ -337,6 +363,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       if (step.done === true) break;
       const msg = step.value;
       sawActivity += 1;
+      lastFrameAt = Date.now();
       if (msg.type === 'assistant') {
         turnsSoFar += 1;
         // Each assistant frame is one real, already-billed API call — this is
@@ -453,7 +480,15 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     }
   } catch (err) {
     const m = (err as Error).message ?? String(err);
-    if (timedOut) {
+    if (stalled) {
+      // Not a verdict and not a budget problem: the connection to the model
+      // went quiet mid-session. Kept out of limitSignals — it says nothing
+      // about the account.
+      out.error = `stalled: no stream message for ${Math.round(IDLE_STALL_MS / 60_000)}m after `
+        + `${sawActivity} message(s) — the model connection went silent mid-session, so it was `
+        + 'aborted early rather than left to run out its wall clock';
+      out.infra = true;
+    } else if (timedOut) {
       // `turns` is only populated by a result frame, so a session killed
       // mid-work reports zero of them however long it actually worked. Read
       // the stream instead: nothing at all means the spawn wedged, whereas
@@ -493,6 +528,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     }
   } finally {
     clearTimeout(killer);
+    if (watchdog) clearInterval(watchdog);
     if (forceTimer) clearTimeout(forceTimer);
     input.signal?.removeEventListener('abort', cancel);
   }

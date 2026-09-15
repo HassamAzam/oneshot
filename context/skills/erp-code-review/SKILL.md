@@ -66,7 +66,8 @@ When all agents return:
 2. Within each section, sort by severity: BLOCKER → SUGGESTION → NITPICK
 3. Dedupe identical `[SEVERITY] path:line — problem` lines (agents can overlap on edge cases — a backend "ad-hoc auth check" finding and a spec "behavior contradicts ticket" finding on the same line are *not* duplicates; keep both)
 4. Collect all `Missing / Cannot Verify` items into a single section
-5. If `spec-conformance-agent` returned "Skipped — no ticket body supplied", drop the empty section and note "Spec match: skipped (no ticket context)" in the Checklist Summary
+5. Collect all `Pre-existing (not caused by this change)` items into a single **Follow-ups** section. They are not findings: never re-grade them as BLOCKER / SUGGESTION / NITPICK and never let them decide the verdict
+6. If `spec-conformance-agent` returned "Skipped — no ticket body supplied", drop the empty section and note "Spec match: skipped (no ticket context)" in the Checklist Summary
 
 ## Step 5 — Impact analysis (always, produced by you)
 

@@ -30,7 +30,24 @@ Read `.claude/skills/erp-code-review/refs/frontend-checklist.md` once. Do not re
 - `.claude/rules/frontend-performance.md` (React performance and anti-patterns)
 - `.claude/rules/frontend-style.md` (imports, inline styles, schemas, PropTypes)
 - `.claude/rules/frontend-structure.md` (container/component split, file/function limits)
-- Do NOT read backend files or anything outside your scope
+- Read outside `frontend/src/**` only to confirm a data fact a fix depends on (Step 2b) — never to review that code
+
+## Step 2a — Review the change, not the whole file
+
+- A finding must be about a line the diff adds or modifies, or behaviour those lines directly cause.
+- A problem that already exists on the base branch in a line the diff does not touch is **not a finding for this change**. List it under `## Pre-existing (not caused by this change)` as a one-line note. It is never BLOCKER, SUGGESTION or NITPICK, and it must not send the change back.
+- Exception: if the diff makes a pre-existing problem worse or newly reachable, it IS a finding — say exactly how the diff changed it.
+
+## Step 2b — A fix that depends on data needs evidence
+
+Some fixes are only correct if the data has a property: a list key must be unique and stable, a field must always be present, a list must stay short. Before a finding's fix relies on such a property:
+
+1. Find where the data is produced — the view / serializer / payload builder that the API returns (e.g. `apps/**/serializers.py`, `apps/**/utils/*.py`) — by following the API URL or the field name. Read only what you need, and cite `file:line`.
+2. Check the property for **every** place that produces that data, not just the common case.
+3. Confirmed → give the fix and cite the evidence.
+4. Not true, or you cannot confirm it → **do not invent a fix.** State the fact that blocks it (e.g. "no field in the reminder payload is both unique and stable: `reminders.py:201` and `:225` share `url` and `title`; `detail` changes on refresh") and name the real options: the backend change that would enable it, or accepting it as a known limitation. If you could not check, put it under `## Missing / Cannot Verify`.
+
+Reading backend code here is to check a fact, not to review it: report no backend findings.
 
 ## Step 3 — Walk the diff
 
@@ -50,7 +67,7 @@ For each changed frontend file, apply the checklist and look for:
 5. **Inline styles / schemas** — `sx` / `style` props inline instead of a centralized style file; inline Yup/Formik schemas instead of `formValidations.js`.
 6. **Imports** — `import *` from icon/UI libs instead of named imports.
 7. **Lists**:
-   - `key={index}` on reorderable / filterable lists
+   - `key={index}` added or changed by the diff on a reorderable / filterable / live-refreshing list. A replacement key must be **unique** across all items **and stable** across refreshes (its value does not change while the item is still the same item). Check both per Step 2b — `url`, `title`, `type` and display text are often neither. If no such field exists, the fix is a backend-issued id, not a composite of display fields. An index key the diff did not touch is pre-existing (Step 2a).
    - Lists with 100+ items not virtualized (`react-window`)
 8. **Storage reads on every render** — `localStorage` / `sessionStorage` / `cookie` read inside the component body instead of cached in a ref or module scope.
 9. **File / function size** — file > 200 lines, function > 50 lines (ESLint usually catches but diffs can slip).
@@ -72,7 +89,7 @@ Every finding must name:
 
 - Exact `file:line` (use the post-change line number from the diff)
 - The rule violated (e.g. "re-render: new object literal prop", "cascading useEffect", "inline sx")
-- A **concrete fix** — not "refactor this"
+- A **concrete fix** — not "refactor this" — and, when the fix depends on data, the `file:line` evidence for it (Step 2b). No evidence means no guessed fix: say what is missing instead
 - A link to `.claude/rules/frontend-performance.md` or `.claude/rules/frontend-style.md` where applicable
 
 ## Step 5 — Output format (strict)
@@ -91,8 +108,11 @@ Return ONLY this block. No preamble, no summary, no praise.
 [NITPICK] <path>:<line> — <problem>
   Fix: <concrete suggestion>.
 
+## Pre-existing (not caused by this change)
+- <path>:<line> — <problem that already exists on the base branch; follow-up, not a finding>
+
 ## Missing / Cannot Verify
-- <things you couldn't check from the diff alone>
+- <things you couldn't check from the diff alone, including data facts a fix would need>
 ```
 
 If the frontend diff is clean:
@@ -108,7 +128,9 @@ Load `.claude/skills/erp-code-review/refs/severity-rules.md` once. Apply strictl
 
 ## Do NOT
 
-- Do NOT review backend files. Those go to `backend-reviewer-agent`.
+- Do NOT review backend files. Those go to `backend-reviewer-agent`. Reading one to confirm a data fact (Step 2b) is allowed; reporting findings on it is not.
+- Do NOT propose a fix whose correctness depends on data you have not checked.
+- Do NOT turn a pre-existing problem in an untouched line into a finding (Step 2a).
 - Do NOT review accessibility (keyboard operability, ARIA, contrast, focus management, screen-reader semantics) — that's `accessibility-reviewer-agent`'s job. You may still flag an obvious `<div onClick>` under the container/component or re-render lens, but the full a11y checklist lives with the dedicated agent.
 - Do NOT search for duplicate utils across the repo — that's `util-reuse-agent`'s job. You may still flag an *obvious* local duplicate within the same folder.
 - Do NOT post to GitLab. Your output goes back to the skill for aggregation.
