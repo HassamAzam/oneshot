@@ -24,6 +24,7 @@ import { recordUsage, looksLikeUsageLimit, parkForQuota } from '../lib/quota.js'
 import { transcriptPath, writeArtifact } from '../lib/artifacts.js';
 import { logEvent } from '../lib/db.js';
 import { log } from '../lib/log.js';
+import { accountActionRequired } from '../lib/accountgate.js';
 import { schemaFor } from './schemas.js';
 import { hooksFor } from './hooks.js';
 
@@ -66,6 +67,12 @@ export interface PhaseOutput {
    * instead of spending a cycle lap on them. See PhaseRecord['status'].
    */
   infra?: boolean;
+  /**
+   * The bundled CLI exited on an account-level notice before the session began
+   * (lib/accountgate.ts). Also `infra` — no lap is spent — but the runner stops
+   * on it instead of re-attempting, because every re-attempt dies the same way.
+   */
+  accountAction?: string;
   rateLimited: boolean;
 }
 
@@ -280,6 +287,8 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   const limitSignals: string[] = [];
   /** Stream messages seen — the only honest way to tell a wedged spawn from a slow phase. */
   let sawActivity = 0;
+  /** Head of the CLI's stderr, kept to recognise an account-action exit. Bounded. */
+  let stderrHead = '';
   let settled = false;
   let turnsSoFar = 0;
   const phaseStartedAt = Date.now();
@@ -322,6 +331,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
         abortController: ac,
         stderr: (d: string) => {
           try { appendFileSync(tee, `${JSON.stringify({ type: 'cli-stderr', text: d })}\n`); } catch { /* best effort */ }
+          if (stderrHead.length < 8_000) stderrHead += d;
         },
       },
     });
@@ -489,6 +499,8 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       // are indistinguishable from a phase that ran and came back wrong, which
       // costs a lap and aborts every run whose onFail says so.
       if (SIGNAL_DEATH_RE.test(m) || !sawActivity) out.infra = true;
+      const action = !sawActivity ? accountActionRequired(stderrHead) : null;
+      if (action) out.accountAction = action;
       limitSignals.push(m);
     }
   } finally {

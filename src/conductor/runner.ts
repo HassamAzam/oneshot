@@ -78,6 +78,7 @@ import {
 } from '../lib/db.js';
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
 import { log } from '../lib/log.js';
+import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
@@ -1073,6 +1074,21 @@ export async function runTicket(
         continue;
       }
 
+      // Checked ahead of the infra re-attempt in afterFailure: the CLI refuses
+      // to start until a person acts on the account, so a re-attempt only
+      // dies the same way. Not a remediation case either — nothing on this
+      // machine can accept a notice on the account's behalf.
+      if (!phaseOk && r.out.accountAction) {
+        prior[r.cfg.name] = null;
+        claim({
+          kind: 'stop',
+          status: 'blocked',
+          reason: `${r.cfg.name}: ${accountActionReason(r.out.accountAction, iid)}`,
+          noRemediation: true,
+        }, r.cfg.name);
+        continue;
+      }
+
       if (!phaseOk) {
         prior[r.cfg.name] = null;
         if (r.hardStop) {
@@ -1489,7 +1505,17 @@ export async function runTicket(
   function nextIndex(
     control: Exclude<Control, { kind: 'stop' }>, current: number, lastMember: number,
   ): number {
-    if (control.kind === 'retry') return control.at;
+    if (control.kind === 'retry') {
+      // A retry means "run it again", and runOne() has already taken the phase
+      // out of `forced` at its start. Without putting it back, a phase that
+      // succeeded on an EARLIER lap reads as done and shouldSkip() passes the
+      // retry by: #168's re-plan against reviewer feedback died of infra, was
+      // skipped, and the old plan was re-published for approval as though it
+      // were the revision. The same hole skips an implement retry inside a
+      // review cycle.
+      forced.add(list[control.at]!.name);
+      return control.at;
+    }
     if (control.kind === 'cycle') {
       for (let k = control.jumpTo; k <= control.windowEnd; k += 1) {
         const name = list[k]!.name;
