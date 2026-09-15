@@ -188,7 +188,12 @@ const server = createServer((req, res) => {
   }
 });
 
-server.listen(PORT, () => {
+// Loopback, explicitly. `listen(PORT)` with no host binds every interface, so
+// the page below was reachable from any machine on the network while the banner
+// promised localhost — and it renders run journals, which carry whatever a
+// failing phase quoted into its own error text. Verified once from a LAN
+// address: 200, with the pinned ONESHOT_TEST_LOGIN password in the body.
+server.listen(PORT, '127.0.0.1', () => {
   console.log(`\n  Oneshot dashboard  →  http://localhost:${PORT}\n`);
   console.log('  Lists every run. Click a ticket for its phases, the agents each');
   console.log('  one dispatched, and the transcripts. Refresh for current state.');
