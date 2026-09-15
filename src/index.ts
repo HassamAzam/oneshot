@@ -44,6 +44,7 @@ import { getIssue, projectUrl } from './lib/gitlab.js';
 import { alert } from './lib/slack.js';
 import { checkIdentity, describeIdentity } from './lib/identity.js';
 import { log } from './lib/log.js';
+import { warmLoopApp } from './lib/appserver.js';
 import { refuseIfAnotherConductor } from './lib/singleton.js';
 
 /**
@@ -561,6 +562,11 @@ async function main(): Promise<void> {
   await banner();
   if (!preflight()) process.exit(1);
   ensureCollector();
+  // Before the first ticket is even looked at: one warm app for this loop, in its own
+  // worktree. It is the shared babel cache under the seed repo's node_modules that
+  // this is really keeping hot — every worktree on the machine symlinks it, and a warm
+  // one is the difference between a two-minute first build and a twenty-minute one.
+  if (!watchOnly && !DRY_RUN) warmLoopApp(me);
 
   const b = budgetConfig();
   log.info(`quota      ${Math.round(windowUsage() / 1e6)}M / ${Math.round(b.window_tokens / 1e6)}M this window · ` +

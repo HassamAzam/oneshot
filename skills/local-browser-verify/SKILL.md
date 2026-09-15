@@ -8,16 +8,25 @@ description: Bring a checkout's app up on a leased port and execute an existing 
 Execution, not authorship. The case list is an input. You establish what is true
 about this branch, in a browser, and record it.
 
-## Bring the app up with the harness. Do not do it by hand.
+## Bring the app up with one command. Do not do it by hand.
 
 ```
-node .claude/skills/local-browser-verify/scripts/harness.cjs up
+node $ONESHOT_HOME/scripts/app.cjs ensure --ref <branch|!MR|#PR|sha>
 ```
 
-One command. It starts both processes on the leased ports, patches the two files
-that pin them, waits until the app can actually render, and writes
-`state/runs/<iid>/harness/app-env.json`. It is idempotent: if the app is already
-up it reuses it.
+That is the front door, and it is the one to use. It asks the question
+`harness.cjs up` cannot — *is an app already running on this machine, and is it on
+my code?* — and takes whichever path applies: reuse an instance already on that
+commit (~3s), check the ref out into a clean instance we own and restart Django
+(~11s), or seed a worktree and cold-start (~2min, measured). All three write the
+same `state/runs/<iid>/harness/app-env.json`, so never branch on which one ran.
+
+`harness.cjs up` still exists and still does the starting; it just cannot see an
+instance belonging to another run, which is how four orphaned server pairs came to
+be live on one machine while every new session still paid a cold start. Call it
+directly only when you have been handed a worktree and told which ports to use.
+
+It is idempotent either way: if the app is already up it reuses it.
 
 **Everything below the command is context, not a procedure.** The harness already
 does it. If `up` fails it returns a named code (`E_PORT_BUSY_FOREIGN`,
@@ -46,9 +55,15 @@ What the harness knows, and why each fact cost a run to learn:
   listener's working directory. Confirming HTTP 200 is not confirming it is *your*
   build — a phase that drove a stranger's server recorded every value against the
   wrong code while reading green.
-- **Never `npm ci`, never rebuild the venv.** `node_modules` and `venv` are
-  symlinks into a working repo. Reinstalling rewrites that repo's dependencies
-  for every other worktree on this machine.
+- **Never `npm ci`, never rebuild the venv.** `node_modules`, `venv` and
+  `staticfiles` are symlinks into a working repo. Reinstalling rewrites that repo's
+  dependencies for every other worktree on this machine.
+- **`staticfiles/` must be seeded or Django 500s on every page.** local_settings.py
+  ships DEBUG=False with ManifestStaticFilesStorage, so `{% static %}` raises
+  `Missing staticfiles manifest entry` until collectstatic has run — including on
+  `/admin/login/`, which is this harness's own readiness probe. Every fresh worktree
+  died as `E_DJANGO_DEAD` after the full 90s Django budget until 2026-09-10.
+  `app.cjs ensure` collects it in the seed repo if it is missing (5s, once).
 - **A detached dev server needs `CI=true`.** `frontend/scripts/start.js` exits when
   stdin closes unless that is set, which is why detached starts died silently and
   phases then polled a dead port for minutes. The harness sets it; the old
@@ -154,3 +169,5 @@ harness is idempotent, so leaving them up costs nothing and saves the next phase
 its entire bring-up.
 
 Run `harness.cjs down` only if you are told the run is finishing with you.
+`node $ONESHOT_HOME/scripts/app.cjs gc --kill` reaps servers whose run is long gone,
+and is the fix for a leased port that has nothing to do with you.
