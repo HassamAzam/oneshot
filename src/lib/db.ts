@@ -199,6 +199,22 @@ export function getRun(runId: string): RunRow | undefined {
   return db.prepare('SELECT * FROM runs WHERE run_id = ?').get(runId) as RunRow | undefined;
 }
 
+/**
+ * The status of the MOST RECENT run for a ticket, or null if it has never run.
+ *
+ * The dispatcher reads it to tell work that will make progress this tick apart
+ * from work that will only re-park or re-block until a human acts: a 'parked' or
+ * 'blocked' latest run is stalled on a person, and must not sit at the head of
+ * the queue where the single dispatch slot would be spent re-parking it while
+ * fresh tickets behind it starve. See orderCandidates() in conductor/watcher.ts.
+ */
+export function latestRunStatus(iid: number): string | null {
+  const row = db.prepare(
+    'SELECT status FROM runs WHERE iid = ? ORDER BY started_at DESC LIMIT 1',
+  ).get(iid) as { status: string } | undefined;
+  return row?.status ?? null;
+}
+
 /** Runs that are claimed or running, whoever owns them. */
 export function activeRuns(): RunRow[] {
   return db.prepare(

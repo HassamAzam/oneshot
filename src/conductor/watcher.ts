@@ -15,7 +15,7 @@
  */
 import { gitlabUsername, projectConfig } from '../lib/config.js';
 import { foreignOwner } from '../lib/claims.js';
-import { isClaimed, logEvent, seeTicket } from '../lib/db.js';
+import { isClaimed, latestRunStatus, logEvent, seeTicket } from '../lib/db.js';
 import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
 import { isReachable, netState } from '../lib/reachability.js';
 import { checkQuota } from '../lib/quota.js';
@@ -105,7 +105,46 @@ export async function scan(): Promise<WatchResult> {
     candidates.push(issue);
   }
 
-  return { candidates, skipped };
+  return { candidates: orderCandidates(candidates, latestRunStatus), skipped };
+}
+
+/**
+ * Latest-run statuses that mean a ticket is waiting on a PERSON, not on capacity:
+ * a plan/qa PARK waiting for an `approved` comment, or a BLOCK waiting for someone
+ * to clear it. Such a ticket stays claimable on purpose — a park is resumed by
+ * re-claiming it and re-reading its gate — but it makes no forward progress until
+ * the human acts.
+ */
+const STALLED_STATUSES = new Set(['parked', 'blocked']);
+
+/**
+ * Order candidates so fresh and resumable work is dispatched before human-stalled
+ * work, without dropping the stalled tickets.
+ *
+ * The dispatcher fills its one slot from the HEAD of this list (src/index.ts,
+ * `candidates.slice(0, slots)`). A parked ticket is re-offered every tick — a
+ * park is not an "active" run, so nothing filters it out — and sorted by
+ * updated_at it can sit at the head indefinitely, where every conductor keeps
+ * re-claiming and re-parking it and no fresh ticket behind it is ever reached.
+ * #87 parked on plan approval did exactly that to #235 and #237, and adding
+ * conductors did not help because they all piled onto the same head ticket.
+ *
+ * A stable partition — ready first, stalled last, original order preserved within
+ * each half — fixes it while keeping a parked ticket claimable: it is still tried
+ * once the ready work ahead of it is in flight, so an approved plan is still
+ * picked up on a later tick.
+ */
+export function orderCandidates(
+  candidates: Issue[],
+  statusOf: (iid: number) => string | null,
+): Issue[] {
+  const ready: Issue[] = [];
+  const stalled: Issue[] = [];
+  for (const issue of candidates) {
+    if (STALLED_STATUSES.has(statusOf(issue.iid) ?? '')) stalled.push(issue);
+    else ready.push(issue);
+  }
+  return [...ready, ...stalled];
 }
 
 /** Human-readable one-liner for the console on every tick. */
