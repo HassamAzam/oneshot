@@ -182,6 +182,26 @@ export async function issueNotes(
 }
 
 /**
+ * One note, by id — not "the newest hundred and hope it's in there".
+ *
+ * issueNotes()'s window is exactly the trap its own comment names: a note
+ * posted long enough ago falls out of it once a busy ticket accrues more than
+ * a hundred comments after it, and a caller scanning that list for something
+ * of its own reads "gone" and re-posts. The claim protocol hit this for real —
+ * a `--follow` ticket's own claim note aged out from under it every tick once
+ * the ticket passed a hundred comments, and it re-claimed itself over and over
+ * (visibly, in the ticket's own thread) because the scan could no longer see
+ * the note it was looking for. A direct lookup by id has no window to fall out
+ * of: GitLab still has the note, this just asks for it by name instead of
+ * finding it in a haystack sized by an unrelated caller's needs.
+ */
+export async function getIssueNote(
+  iid: number, noteId: number,
+): Promise<GitlabResult<IssueNote>> {
+  return call<IssueNote>('GET', `/projects/${projectId()}/issues/${iid}/notes/${noteId}`);
+}
+
+/**
  * Remove one of our own notes. Only the claim protocol calls this, to take a
  * losing claim back off the ticket — GitLab lets the author delete a note, and
  * the write token is the author of every note this conductor posts.

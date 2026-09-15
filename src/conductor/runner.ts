@@ -52,7 +52,9 @@ import {
   operatorName,
   type PhaseConfig,
 } from '../lib/config.js';
-import { claimNoteBody, readOwnership, settleMs } from '../lib/claims.js';
+import {
+  claimMarker, claimNoteBody, readOwnership, settleMs,
+} from '../lib/claims.js';
 import {
   archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
   phaseSucceeded, readArtifact,
@@ -65,8 +67,8 @@ import {
   leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort,
 } from '../lib/worktrees.js';
 import {
-  addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, issueNotes,
-  issueUrl, swapLabel, type Issue,
+  addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
+  issueNotes, issueUrl, swapLabel, type Issue,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
 import { checkQuota } from '../lib/quota.js';
@@ -561,8 +563,24 @@ export async function runTicket(
   // down. A resume whose own claim is still live re-asserts nothing — it only
   // re-checks that it is still the oldest.
   if (!DRY_RUN) {
-    const before = await readOwnership(iid);
-    const mineLive = before?.active.some((c) => c.runId === runId) ?? false;
+    // Trust the journal's own record before asking issueNotes() to find it
+    // again in a haystack sized for a different caller's needs. issueNotes()
+    // returns only the newest hundred comments — fine for the things that
+    // scan a bounded recent tail, but a claim note this run posted hours ago
+    // ages out of that window the moment a busy ticket (a `--follow` watch
+    // especially) accrues a hundred comments after it. The scan then finds
+    // no claim of ours, mineLive reads false, and the run reposts — a note
+    // that itself ages out a few ticks later, so it reposts again, visibly,
+    // in the ticket's own thread. A direct lookup by id has no window: if
+    // j.claimNoteId still resolves to a note that still names this run, the
+    // claim is live, full stop, and nothing here needs re-deriving it from a
+    // list.
+    let mineLive = false;
+    if (j.claimNoteId !== undefined) {
+      const mine = await getIssueNote(iid, j.claimNoteId);
+      mineLive = mine.ok && (mine.data?.body ?? '').includes(claimMarker(runId));
+      if (!mineLive) j.claimNoteId = undefined;
+    }
     if (!mineLive) {
       const posted = await addIssueNote(iid, claimNoteBody(runId, operatorName()));
       if (posted.ok && posted.data) {
@@ -570,24 +588,30 @@ export async function runTicket(
         writeJournal(j);
       }
       await sleep(settleMs(), opts.signal);
-    }
-    const after = await readOwnership(iid);
-    if (!after) {
-      log.warn(`#${iid} — could not read the ticket's claims; proceeding on the local claim alone`);
-    } else if (after.earliest && after.earliest.runId !== runId) {
-      // Lost. Not an error and not a block: the ticket is somebody's, and the
-      // scan will skip it for as long as their claim is live. Take our note
-      // off so the ticket shows one owner, then stand down with the leases
-      // released. 'aborted' resumes if their claim ever goes stale.
-      if (j.claimNoteId) {
-        await deleteIssueNote(iid, j.claimNoteId);
-        j.claimNoteId = undefined;
-        writeJournal(j);
+
+      // Settled when the note was first posted — nothing that landed since
+      // can be older than it, so a run whose own note the fast path just
+      // confirmed has no later claim to yield to and needs no ownership
+      // re-scan. Only a run that just (re-)posted, or found no journal
+      // record at all, still needs this to find out where it landed.
+      const after = await readOwnership(iid);
+      if (!after) {
+        log.warn(`#${iid} — could not read the ticket's claims; proceeding on the local claim alone`);
+      } else if (after.earliest && after.earliest.runId !== runId) {
+        // Lost. Not an error and not a block: the ticket is somebody's, and the
+        // scan will skip it for as long as their claim is live. Take our note
+        // off so the ticket shows one owner, then stand down with the leases
+        // released. 'aborted' resumes if their claim ever goes stale.
+        if (j.claimNoteId) {
+          await deleteIssueNote(iid, j.claimNoteId);
+          j.claimNoteId = undefined;
+          writeJournal(j);
+        }
+        const who = after.earliest.author ? ` (${after.earliest.author})` : '';
+        log.warn(`#${iid} — yielding: run ${after.earliest.runId}${who} claimed this ticket first`);
+        logEvent('claim_yielded', { iid, to: after.earliest.runId, author: after.earliest.author }, { runId });
+        return finish(j, 'aborted', `yielded — run ${after.earliest.runId}${who} claimed this ticket first`);
       }
-      const who = after.earliest.author ? ` (${after.earliest.author})` : '';
-      log.warn(`#${iid} — yielding: run ${after.earliest.runId}${who} claimed this ticket first`);
-      logEvent('claim_yielded', { iid, to: after.earliest.runId, author: after.earliest.author }, { runId });
-      return finish(j, 'aborted', `yielded — run ${after.earliest.runId}${who} claimed this ticket first`);
     }
   }
 
