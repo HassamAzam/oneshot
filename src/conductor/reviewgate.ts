@@ -75,6 +75,7 @@ import {
 import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/slack.js';
 import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
+import { codeSpan, mdText } from '../lib/gitlabmd.js';
 import type { TestCase } from '../phases/types.js';
 
 export type Gate = 'plan' | 'testcases';
@@ -625,23 +626,6 @@ function planRisks(plan: Record<string, unknown> | null): string[] {
 }
 
 /**
- * Neutralise a model-authored free-text run so it renders as literal prose in a
- * GitLab comment.
- *
- * Plan `approach`/`what`/`risks` routinely contain bare tags — `<title>`,
- * `<head>`, `<h1>` — as part of the sentence. GitLab's CommonMark renderer
- * treats a line holding such a tag as the start of an HTML block and stops
- * converting Markdown from that point on; its sanitiser then drops the
- * unsafelisted tag, so the reader gets a gap followed by exposed list markup
- * for the rest of the comment. Escaping the three HTML-significant characters
- * is enough to stop the block from ever opening, and `&lt;title&gt;` renders
- * back as `<title>`. Emphasis and backtick spans in the text are left intact.
- */
-function mdText(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-/**
  * GitLab Markdown, not Slack mrkdwn.
  *
  * The two are close enough to look interchangeable and are not: Slack's
@@ -652,7 +636,7 @@ function mdText(s: string): string {
 function renderPlanForTicket(plan: Record<string, unknown> | null): string {
   if (!plan) return '_(no plan recorded)_';
   const steps = planSteps(plan)
-    .map((s) => `${s.n}. **[${mdText(s.layer)}]** ${mdText(s.what)}${s.files?.length ? ` — \`${s.files.join('`, `')}\`` : ''}`)
+    .map((s) => `${s.n}. **[${mdText(s.layer)}]** ${mdText(s.what)}${s.files?.length ? ` — ${s.files.map(codeSpan).join(', ')}` : ''}`)
     .join('\n');
   const risks = planRisks(plan).map((r) => `- ${mdText(r)}`).join('\n');
   const approach = planStr(plan, 'approach');
