@@ -371,6 +371,23 @@ function layersOf(files: string[]): { backend: boolean; frontend: boolean } {
   };
 }
 
+/**
+ * Whether a change reaches what the user sees or operates — the condition for
+ * `accessibility-reviewer-agent`.
+ *
+ * erp-code-review routes that agent on "a frontend file that renders JSX", but
+ * this list is built in code and the prompt says to dispatch exactly what it
+ * names, so an agent missing here never runs. Wider than JSX on purpose: a
+ * contrast fix is often a style sheet alone (jss/, styles/), and that is the
+ * change the agent exists to check. Pure logic folders and tests are what stay
+ * out.
+ */
+export function touchesRenderedUi(files: string[]): boolean {
+  return files.some((f) => /^frontend\/src\/.+\.(jsx?|tsx?|css|scss)$/.test(f)
+    && !/(^|\/)(utils|selectors|reducers|actions|constants|services|api|__tests__|__snapshots__)\//.test(f)
+    && !/\.test\.[jt]sx?$/.test(f));
+}
+
 /** Highest F-NN already issued, so a later lap continues the numbering. */
 function maxFindingId(list: Finding[]): number {
   return list.reduce((m, f) => Math.max(m, Number(String(f.id).replace(/\D+/g, '')) || 0), 0);
@@ -772,6 +789,7 @@ them. Do not edit anything outside your worktree.`;
     const agents = [
       layers.backend ? '`backend-reviewer-agent`' : '',
       layers.frontend ? '`frontend-reviewer-agent`' : '',
+      touchesRenderedUi(files) ? '`accessibility-reviewer-agent`' : '',
       '`util-reuse-agent`',
     ].filter(Boolean);
 
