@@ -102,11 +102,33 @@ const SKILL_LINE = (skills: string[], lazy = false): string => {
  *
  * These two are also 25KB of the 47KB the phase loads, which is why gating the
  * recoverable half is worth doing at all.
+ *
+ * A predicate belongs here only when the answer must be COMPUTED — both of
+ * these read `steps[].files` and `steps[].layer` out of an artifact. A skill
+ * chosen by a ticket label is decided by config instead (`labelSkills` in
+ * config/phases.json): there is nothing to compute, and putting data in code
+ * would mean two edits in two languages every time a skill is added.
  */
-const CONDITIONAL_SKILLS: Record<string, (p: PlanForecast) => boolean> = {
-  'django-migration-standards': (p) => p.migration,
-  'script-writing-standards': (p) => p.script,
+const CONDITIONAL_SKILLS: Record<string, (f: PlanForecast | null) => boolean> = {
+  'django-migration-standards': (f) => f?.migration ?? true,
+  'script-writing-standards': (f) => f?.script ?? true,
 };
+
+/**
+ * The skills this ticket's labels call for.
+ *
+ * Case-insensitive because labels are typed by hand and applied by whoever
+ * triages: `accessibility` and `Accessibility` must not be the difference
+ * between a phase having the method and not, when the failure is silent either
+ * way. The comparison stays exact beyond case — a label is a deliberate act,
+ * and matching loosely would put us back to guessing from prose.
+ */
+function labelSkills(cfg: PhaseConfig, ticket: Ticket): string[] {
+  const pairs = Object.entries(cfg.labelSkills ?? {});
+  if (!pairs.length) return [];
+  const carried = new Set(ticket.labels.map((l) => l.toLowerCase()));
+  return pairs.filter(([label]) => carried.has(label.toLowerCase())).map(([, skill]) => skill);
+}
 
 interface PlanForecast {
   migration: boolean; script: boolean; backend: boolean; frontend: boolean;
@@ -140,19 +162,24 @@ function planForecast(ctx: PromptCtx): PlanForecast {
 }
 
 /**
- * The configured list minus what this ticket demonstrably does not need.
+ * This phase's own method, minus what the plan rules out, plus what the
+ * ticket's labels call for.
  *
- * No plan artifact means no forecast, and no forecast means no grounds to drop
- * anything — a remediate lap or a run with `plan` skipped gets the full list.
- * Absence of evidence is not evidence of absence, and the asymmetry here is
- * brutal: an unnecessary skill costs a few thousand cached tokens, a missing
- * one costs a review lap.
+ * A missing signal KEEPS a skill, which is why the forecast predicates end in
+ * `?? true`: no plan artifact means no forecast, and no forecast means no
+ * grounds to drop anything — a remediate lap or a run with `plan` skipped gets
+ * the full list. Absence of evidence is not evidence of absence, and the
+ * asymmetry is brutal: an unnecessary skill costs a few thousand cached tokens,
+ * a missing one costs a review lap.
+ *
+ * A label is the exception that proves it, and it runs the other way: an absent
+ * label is not a missing signal, it is the answer. The ticket was triaged and
+ * this is not that kind of work.
  */
 function skillsFor(cfg: PhaseConfig, ctx: PromptCtx): string[] {
-  const skills = cfg.skills ?? [];
-  if (!skills.length || !ctx.prior.plan) return skills;
-  const forecast = planForecast(ctx);
-  return skills.filter((s) => CONDITIONAL_SKILLS[s]?.(forecast) ?? true);
+  const forecast = ctx.prior.plan ? planForecast(ctx) : null;
+  const always = (cfg.skills ?? []).filter((s) => CONDITIONAL_SKILLS[s]?.(forecast) ?? true);
+  return [...new Set([...always, ...labelSkills(cfg, ctx.ticket)])];
 }
 
 /**

@@ -149,7 +149,19 @@ export interface PhaseConfig {
   maxLaps?: number;
   coding?: boolean;
   needsPort?: boolean;
+  /** Loaded for every ticket this phase runs on. */
   skills?: string[];
+  /**
+   * Ticket label -> the skill that label calls for, loaded only when the
+   * ticket carries it.
+   *
+   * Data rather than a predicate in code, because that is all it is: a label
+   * is set by whoever triages and read here, with nothing to compute. Keeping
+   * it in the config is what makes the next one a single line — the skills a
+   * phase can load, and the labels that decide them, are then answerable
+   * without reading TypeScript.
+   */
+  labelSkills?: Record<string, string>;
   agents?: string[];
   artifact?: string;
   /**
