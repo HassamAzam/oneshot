@@ -20,7 +20,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import {
-  chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ensureClaudeDir } from './claudedir.js';
@@ -245,9 +245,52 @@ function seed(worktree: string): void {
     excluded.push(rel);
   }
 
+  detachTrackedClaude(worktree);
   excluded.push(...ensureClaudeDir(worktree));
 
   addExcludes(worktree, excluded);
+}
+
+/**
+ * Clear the work repo's own `.claude` out of the worktree, without deleting it.
+ *
+ * The work repo COMMITS `.claude/`, so `git worktree add` lays down a real
+ * directory for every skill, rule and agent before this process gets a say.
+ * ensureClaudeDir() then declines to overwrite any of them — relink() treats a
+ * real directory as something a human put there — so the copies this repo
+ * maintains under SKILLS_ROOT only ever filled the four GAPS, and every name
+ * the work repo also ships resolved the work repo's file. That is invisible
+ * from outside: the phase invokes the skill, gets an older file, and reports
+ * success. It bit `frontend-accessibility`, where the rule about an open dialog
+ * hiding the app-wide live region exists only in this repo's copy, and it
+ * silently un-did EXCLUDED_SKILLS too, because a real directory is not a
+ * symlink and unlinkExcluded() only removes symlinks.
+ *
+ * `--skip-worktree` rather than a delete: the files stay in the index and in
+ * HEAD, so nothing about the branch changes and no deletion can reach a commit
+ * or an MR diff. Git simply stops comparing those paths against the working
+ * tree, which is what makes removing them invisible to `git status` — the same
+ * job .git/info/exclude does for the seeded symlinks, for tracked paths.
+ *
+ * The whole directory goes rather than the tracked files alone: an emptied
+ * `.claude/skills/<name>/` is still a real directory, and relink() would back
+ * off from it exactly as before. A lease is a fresh compose either way.
+ */
+export function detachTrackedClaude(worktree: string): void {
+  try {
+    const tracked = git(['ls-files', '-z', '--', '.claude'], worktree);
+    if (!tracked) return;
+    execFileSync('git', ['update-index', '--skip-worktree', '-z', '--stdin'], {
+      cwd: worktree, input: tracked, timeout: 120_000, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    rmSync(join(worktree, '.claude'), { recursive: true, force: true });
+  } catch (err) {
+    // A phase with the work repo's skills still runs; one with no worktree does
+    // not. Warn and leave the checkout as git wrote it.
+    log.warn('could not detach the work repo\'s .claude — its skills will shadow ours', {
+      worktree, error: (err as Error).message,
+    });
+  }
 }
 
 /**
