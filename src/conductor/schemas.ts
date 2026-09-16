@@ -131,7 +131,42 @@ export const RESEARCH_SCHEMA = phaseSchema({
   },
   unknowns: strArr('What you could NOT determine. State these rather than guessing.'),
   module: str('Primary module, e.g. Payroll, Leaves, Project Logs.'),
-}, ['understanding', 'acceptanceCriteria', 'codePath', 'blastRadius', 'uiPath', 'unknowns', 'module']);
+  reproduction: {
+    type: 'object',
+    additionalProperties: false,
+    description:
+      'Whether the reported defect actually happens on the base branch, established by running ' +
+      'it (skill: bug-reproduction). A verdict of not-reproduced STOPS the run and labels the ' +
+      'ticket Not a Bug, so it must rest on steps you executed, never on reading code.',
+    properties: {
+      kind: {
+        type: 'string',
+        enum: ['bug', 'feature'],
+        description:
+          'bug: the ticket reports existing behaviour that is wrong. feature: it asks for ' +
+          'something new or different. Only a bug can be reproduced.',
+      },
+      verdict: {
+        type: 'string',
+        enum: ['reproduced', 'not-reproduced', 'inconclusive', 'not-applicable'],
+        description:
+          'reproduced: you saw the reported behaviour. not-reproduced: app up, logged in with ' +
+          'access to the screen, every reported step executed, and the CORRECT behaviour ' +
+          'observed. inconclusive: anything that stopped you from getting that far (data, ' +
+          'role, environment, browser, flake). not-applicable: a feature, no UI surface, or ' +
+          'reproduction disabled.',
+      },
+      testedCommit: str('The commit the app ran on (git rev-parse HEAD in the worktree). Empty if the app never ran.'),
+      account: str('The account/role the steps ran as. Empty if you never logged in.'),
+      steps: strArr('The steps you actually executed, in order, each with what you did.'),
+      expected: str('What the ticket says SHOULD happen.'),
+      observed: str('What actually happened when you ran the steps — concrete values, not impressions.'),
+      evidence: strArr('Bare filenames of screenshots written to the run artifacts dir, plus any measurement.'),
+      reason: str('Why this verdict. For inconclusive or not-applicable, what stopped you.'),
+    },
+    required: ['kind', 'verdict', 'testedCommit', 'account', 'steps', 'expected', 'observed', 'evidence', 'reason'],
+  },
+}, ['understanding', 'acceptanceCriteria', 'codePath', 'blastRadius', 'uiPath', 'unknowns', 'module', 'reproduction']);
 
 export const PLAN_SCHEMA = phaseSchema({
   approach: str('The chosen approach and, in one line, why over the alternative.'),

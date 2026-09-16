@@ -48,7 +48,7 @@ import { promisify } from 'node:util';
 import {
   DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, modelFor,
   mrFeedbackConfig,
-  phases, portPool, projectConfig,
+  bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
   type PhaseConfig,
 } from '../lib/config.js';
@@ -77,6 +77,7 @@ import {
   claimOwnership, claimTicket, getRun, logEvent, phaseEnd, phaseStart, updateRun,
 } from '../lib/db.js';
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
+import { declareNotABug, notABugDecision } from './reproduction.js';
 import { log } from '../lib/log.js';
 import { exportRun } from '../lib/langfuse.js';
 import { writeRunReport } from '../lib/report.js';
@@ -1100,6 +1101,21 @@ export async function runTicket(
       }
 
       prior[r.cfg.name] = r.out.data;
+      // Research reproduced (or failed to reproduce) the reported bug on the
+      // unfixed base branch. Only a complete not-reproduced verdict stops the
+      // run — see src/conductor/reproduction.ts for why the bar is that high.
+      // Evaluated only on a research that RAN this pass: a resumed run skips
+      // research, which is how a person overrules Not a Bug (remove the label,
+      // add the entry label back) without the run re-stopping itself.
+      if (r.cfg.name === 'research' && bugReproductionEnabled()) {
+        const decision = notABugDecision(r.out.data);
+        if (!decision.stop && decision.note) log.warn(`research: ${decision.note}`);
+        if (decision.stop) {
+          const reason = await declareNotABug(iid, ticket.title, runId, decision.repro);
+          claim({ kind: 'stop', status: 'aborted', reason, noRemediation: true }, r.cfg.name);
+          continue;
+        }
+      }
       if (r.cfg.name === 'implement' && activeRound(j.mrFeedback)?.status === 'fixing') {
         const addressed = addressedFeedbackOf(r.out.data);
         if (addressed.length) {

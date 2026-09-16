@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
   CONTEXT_REPO, SKILLS_ROOT, WORK_REPO, WT_ROOT,
-  auditAuth, budgetConfig, envOr, expandPath, phases, portPool,
+  auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, phases, portPool,
   projectConfig, reviewersConfig, slackConfig,
 } from '../src/lib/config.js';
 import { ping, listBranches } from '../src/lib/gitlab.js';
@@ -59,6 +59,17 @@ async function main(): Promise<void> {
     `optional review gate "${cfg.labels.review}" (off unless a ticket carries it too)`);
   if (cfg.labels.testcaseReview) {
     pass('board label', `"${cfg.labels.testcaseReview}" — on while a ticket sits at the testcases QA gate`);
+  }
+  if (bugReproductionEnabled()) {
+    if (cfg.labels.notABug) {
+      pass('bug reproduction', `on — a bug research cannot reproduce stops the run as "${cfg.labels.notABug}" ` +
+        '(the label must exist on the project)');
+    } else {
+      warn('bug reproduction without a label',
+        'labels.notABug is unset — a run that cannot reproduce its bug still stops and says so, but the ticket gets no label');
+    }
+  } else {
+    pass('bug reproduction', 'off (bugReproduction: false)');
   }
 
   // Only ONE run may hold the promotion window at a time, enforced by the
