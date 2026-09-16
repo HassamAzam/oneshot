@@ -620,26 +620,51 @@ function planSteps(plan: Record<string, unknown> | null): PlanStep[] {
   return Array.isArray(v) ? (v as PlanStep[]) : [];
 }
 
-function planList(plan: Record<string, unknown> | null, key: string): string[] {
+type PlanListKey = 'risks' | 'openQuestions' | 'outOfScope';
+
+function planList(plan: Record<string, unknown> | null, key: PlanListKey): string[] {
   const v = plan?.[key];
   return Array.isArray(v) ? v.map(String) : [];
 }
+
+/**
+ * Every free-text field below is coerced the same way `planList` coerces its
+ * items, and for a harder reason than tidiness: `mdText` calls `.replace` on
+ * what it is handed, so one absent or numeric field throws a TypeError. The
+ * throw does not stay local — `planApprovalRequestBody` is called straight in
+ * `runner.ts`'s implement-phase gate with no try/catch, so a half-written
+ * plan.json takes down the whole phase, not just the comment it was rendering.
+ */
+const text = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
 
 interface AcCoverage { criterion: string; coveredBy: string; status: string; note: string }
 
 /** Absent on plans written before the field existed — a resumed run's plan.json reads as empty, not as a crash. */
 function planCoverage(plan: Record<string, unknown> | null): AcCoverage[] {
   const v = plan?.acceptanceCoverage;
-  return Array.isArray(v) ? (v as AcCoverage[]).filter((c) => c && typeof c.criterion === 'string') : [];
+  if (!Array.isArray(v)) return [];
+  return (v as AcCoverage[])
+    .filter((c) => c && typeof c.criterion === 'string')
+    .map((c) => ({ ...c, coveredBy: text(c.coveredBy), note: text(c.note) }));
 }
 
 const COVERAGE_MARK: Record<string, string> = { covered: '✅', partial: '⚠️', 'not-satisfiable': '❌' };
 
 interface FeedbackResponse { point: string; response: string; where: string; note: string }
 
+/**
+ * `point` is what makes an entry worth rendering, so it alone is filtered on.
+ * `response` is then coerced rather than assumed: it is the one field the
+ * renderer interpolates with no truthiness guard in front of it, and an entry
+ * carrying a point but no response is exactly the shape a plan.json written
+ * halfway through a revision has.
+ */
 function planFeedbackResponse(plan: Record<string, unknown> | null): FeedbackResponse[] {
   const v = plan?.feedbackResponse;
-  return Array.isArray(v) ? (v as FeedbackResponse[]).filter((f) => f && typeof f.point === 'string') : [];
+  if (!Array.isArray(v)) return [];
+  return (v as FeedbackResponse[])
+    .filter((f) => f && typeof f.point === 'string')
+    .map((f) => ({ ...f, response: text(f.response), where: text(f.where), note: text(f.note) }));
 }
 
 /**
@@ -655,7 +680,7 @@ function renderPlanForTicket(plan: Record<string, unknown> | null): string {
   const steps = planSteps(plan)
     .map((s) => `${s.n}. **[${mdText(s.layer)}]** ${mdText(s.what)}${s.files?.length ? ` — ${s.files.map(codeSpan).join(', ')}` : ''}`)
     .join('\n');
-  const bullets = (key: string): string => planList(plan, key).map((r) => `- ${mdText(r)}`).join('\n');
+  const bullets = (key: PlanListKey): string => planList(plan, key).map((r) => `- ${mdText(r)}`).join('\n');
   const risks = bullets('risks');
   // Open questions sit ABOVE the steps: they are the decisions the approver is
   // actually being asked to make, and a plan that silently picked a scope reads

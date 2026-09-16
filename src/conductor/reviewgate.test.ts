@@ -78,3 +78,69 @@ test('no feedback section on a first plan or an old artifact', () => {
   assert.doesNotMatch(renderPlanMd(1, 't', newPlan), /point by point/);
   assert.match(renderPlanMd(1, 't', revisedPlan), /## Reviewer feedback, point by point\n\| Point \| Response \| Where \| Note \|/);
 });
+
+/** The artifact shape, so a deliberately malformed fixture can be cast back to it. */
+type Plan = Parameters<typeof renderPlanMd>[2];
+
+/** One row's cells, split the way GFM splits them: on pipes that are not backslash-escaped. */
+function cells(md: string, marker: string): string[] {
+  const rows = md.split('\n').filter((l) => l.startsWith('|') && l.includes(marker));
+  assert.equal(rows.length, 1, `expected one row holding ${marker}, got ${rows.length}`);
+  return rows[0]!.replace(/^\||\|$/g, '').split(/(?<!\\)\|/);
+}
+
+// A pipe or a newline in model prose does not render wrong, it renders as a
+// different number of columns — every later cell shifts left, and a newline
+// ends the table and spills the remaining rows into the surrounding prose.
+test('plan markdown keeps four columns when a cell carries a pipe', () => {
+  const md = renderPlanMd(1, 't', {
+    ...newPlan,
+    steps: [{ n: 1, what: 'Split the Save | Cancel row', files: ['a.js'], layer: 'frontend' }],
+    acceptanceCoverage: [
+      { criterion: 'Save | Cancel reach 3:1', coveredBy: 'step 1', status: 'covered', note: '' },
+    ],
+    feedbackResponse: [
+      { point: 'the | in the label', response: 'changed', where: 'step 1 | test', note: 'a | b' },
+    ],
+  });
+  assert.equal(cells(md, 'Save \\| Cancel reach').length, 4);
+  assert.equal(cells(md, 'the \\| in the label').length, 4);
+  assert.equal(cells(md, 'Split the Save').length, 4);
+});
+
+test('plan markdown keeps a multi-line note inside its own row', () => {
+  const md = renderPlanMd(1, 't', {
+    ...newPlan,
+    acceptanceCoverage: [
+      { criterion: 'Contrast', coveredBy: 'step 1', status: 'partial', note: 'first line\nsecond line' },
+    ],
+  });
+  assert.equal(cells(md, 'first line').length, 4);
+  assert.match(md, /\| first line<br>second line \|/);
+  assert.ok(md.includes('## Reuse before writing'), 'the sections after the table survive');
+});
+
+test('plan markdown escapes HTML in table cells as well as in prose', () => {
+  const md = renderPlanMd(1, 't', {
+    ...newPlan,
+    acceptanceCoverage: [
+      { criterion: 'Add a <main> landmark', coveredBy: 'step 1', status: 'covered', note: '' },
+    ],
+  });
+  assert.match(md, /\| Add a &lt;main&gt; landmark \|/);
+});
+
+// `point` present, `response` absent: the shape a plan.json written halfway
+// through a revision has, and the one field the renderers interpolate with no
+// truthiness guard in front of it.
+test('a feedback entry missing its response renders instead of throwing', () => {
+  const partial = { ...newPlan, feedbackResponse: [{ point: 'V2 scope' }] };
+  const body = planApprovalRequestBody(partial, 'why');
+  assert.match(body, /\*\*Your feedback, point by point\*\*\n- \*\*\*\* — V2 scope/);
+  assert.equal(cells(renderPlanMd(1, 't', partial as unknown as Plan), 'V2 scope').length, 4);
+});
+
+test('non-string coverage fields render instead of throwing', () => {
+  const odd = { ...newPlan, acceptanceCoverage: [{ criterion: 'Contrast', coveredBy: 2, note: 3 }] };
+  assert.match(planApprovalRequestBody(odd, 'why'), /- • Contrast — 2 _\(3\)_/);
+});
