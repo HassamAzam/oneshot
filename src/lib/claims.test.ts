@@ -44,3 +44,17 @@ test('stoppedRuns records the latest stop note per run', () => {
 test('a claim past the stale bound is not live', () => {
   assert.deepEqual(activeClaims([claim(1, 'r-a', 25 * 60)], NOW), []);
 });
+
+// GitLab writes the run id into system notes of its own — a mention, an MR
+// cross-reference — and parseClaims has always skipped them. stoppedRuns did
+// not, so a system note that happened to quote a stop could end a live claim
+// the pipeline never stopped.
+test('a system note cannot end a claim', () => {
+  const notes = [claim(1, 'r-a', 60), { ...stop(2, 'r-a', 30), system: true }];
+  assert.deepEqual(activeClaims(notes, NOW).map((c) => c.noteId), [1]);
+  assert.deepEqual([...stoppedRuns(notes)], []);
+});
+
+test('a system note cannot create a claim', () => {
+  assert.deepEqual(activeClaims([{ ...claim(1, 'r-a', 10), system: true }], NOW), []);
+});

@@ -41,6 +41,14 @@ import { issueNotes, type IssueNote } from './gitlab.js';
  * the phrase is the compatibility contract.
  */
 const CLAIM_RE = /claimed this ticket — run `(r-[a-z0-9-]+)`/;
+
+/**
+ * The `— complete` arm matches nothing this code posts today: the success note
+ * has read `— merged ✅` since 59c5835 ("merge is the last phase") retired the
+ * old "Oneshot run r-… — complete" close note. It stays because the tickets
+ * that note landed on are still on the board, and dropping the arm would make
+ * every one of their finished runs read live again.
+ */
 const STOP_RE = /Oneshot stopped|— complete/;
 const RUN_ID_RE = /r-[a-z0-9-]+/g;
 
@@ -113,12 +121,18 @@ export function parseClaims(notes: IssueNote[]): Claim[] {
  * The note id matters because a run id outlives a stop: a blocked run that is
  * resumed keeps its id and posts a fresh claim. A bare "this run stopped" set
  * read that fresh claim as dead too, so a resumed-then-parked run never saw its
- * own claim live and posted another one on every re-entry — ten on #168 in
- * half an hour.
+ * own claim live and posted another one on every re-entry — one after another
+ * down #168's thread in half an hour.
  */
 export function stoppedRuns(notes: IssueNote[]): Map<string, number> {
   const done = new Map<string, number>();
   for (const n of notes) {
+    // Mirrors parseClaims. A system note cannot create a claim, so letting one
+    // end a claim is the asymmetry that fails open: GitLab writes the run id
+    // into a system note on its own (a mention, a cross-reference from the MR),
+    // and it only has to sit next to the word "stopped" to kill a live run's
+    // claim on every desk that reads the ticket.
+    if (n.system) continue;
     if (!STOP_RE.test(n.body ?? '')) continue;
     for (const id of (n.body ?? '').match(RUN_ID_RE) ?? []) {
       done.set(id, Math.max(done.get(id) ?? 0, n.id));
@@ -131,8 +145,10 @@ export function stoppedRuns(notes: IssueNote[]): Map<string, number> {
 export function activeClaims(notes: IssueNote[], now = Date.now()): Claim[] {
   const stopped = stoppedRuns(notes);
   const stale = staleMs();
-  return parseClaims(notes).filter((c) =>
-    (stopped.get(c.runId) ?? 0) < c.noteId && now - c.createdAt < stale);
+  return parseClaims(notes).filter((c) => {
+    const s = stopped.get(c.runId);
+    return (s === undefined || s < c.noteId) && now - c.createdAt < stale;
+  });
 }
 
 export interface Ownership {
