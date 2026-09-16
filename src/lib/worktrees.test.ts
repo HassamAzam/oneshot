@@ -4,7 +4,9 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { detachTrackedClaude } from './worktrees.js';
+import { readlinkSync } from 'node:fs';
+import { detachTrackedClaude, seedWorktree } from './worktrees.js';
+import { SKILLS_ROOT } from './config.js';
 
 const git = (args: string[], cwd: string): string =>
   execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -65,6 +67,60 @@ test('a second lease over the same worktree is a no-op', () => {
     assert.equal(git(['status', '--porcelain'], dir), '');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a skill the work repo also ships still resolves to THIS repo\'s copy', () => {
+  // The requirement in one assertion: a phase invokes the skill that lives
+  // here, whatever the work repo happens to have committed under the same name.
+  const dir = repoWithCommittedClaude();
+  try {
+    seedWorktree(dir);
+
+    const entry = join(dir, '.claude', 'skills', 'frontend-accessibility');
+    assert.equal(
+      readlinkSync(entry),
+      join(SKILLS_ROOT, 'skills', 'frontend-accessibility'),
+      'the work repo\'s committed copy must not shadow ours',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('seeding again — as a resumed run does — picks up a skill changed since', () => {
+  const dir = repoWithCommittedClaude();
+  try {
+    seedWorktree(dir);
+    // Whatever a first seed produced, a second must still leave the link
+    // pointing here. This is the resume path: the worktree already exists, and
+    // the files behind it may have moved on.
+    seedWorktree(dir);
+
+    const entry = join(dir, '.claude', 'skills', 'frontend-accessibility');
+    assert.equal(readlinkSync(entry), join(SKILLS_ROOT, 'skills', 'frontend-accessibility'));
+    assert.equal(git(['status', '--porcelain'], dir), '');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('what we compose stays out of git status in a LINKED worktree', () => {
+  // The exclude git consults lives in the common dir, not in
+  // .git/worktrees/<name>/. Writing the right file to the wrong path left every
+  // composed symlink showing as untracked, one `git add -A` from an MR.
+  const main = repoWithCommittedClaude();
+  const linked = join(main, '..', `wt-${Date.now()}`);
+  try {
+    git(['worktree', 'add', '-q', '--detach', linked], main);
+
+    seedWorktree(linked);
+
+    assert.equal(git(['status', '--porcelain'], linked), '');
+  } finally {
+    try { git(['worktree', 'remove', '--force', linked], main); } catch { /* best effort */ }
+    rmSync(main, { recursive: true, force: true });
+    rmSync(linked, { recursive: true, force: true });
   }
 });
 

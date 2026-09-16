@@ -64,7 +64,7 @@ import {
 } from '../lib/artifacts.js';
 import { branchFor, newRunId, worktreeName } from '../lib/ids.js';
 import {
-  leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort,
+  leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort, seedWorktree,
 } from '../lib/worktrees.js';
 import {
   addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
@@ -625,6 +625,15 @@ export async function runTicket(
   if (j.worktree && !worktree) {
     log.warn('recorded worktree is gone — re-leasing', { was: j.worktree });
   }
+  // A RESUMED run never leases: ensureLeases() only calls leaseWorktree() when
+  // `worktree` is unset, and the line above just set it from the journal. So
+  // the seeding that composes `.claude` — the skills, rules and agents every
+  // phase reasons with — ran once, whenever this worktree was first created,
+  // and never again. A worktree that outlives a change to those files keeps
+  // serving the old ones, and a run resumed after an approval gate is exactly
+  // that case. Re-seed here: it is idempotent by construction, and it is the
+  // only point on the resume path that sees the worktree before a phase does.
+  if (worktree) seedWorktree(worktree);
   let port: number | undefined = j.port;
   /** One background bring-up per run, whether the worktree was leased now or resumed. */
   let appStarting = false;
