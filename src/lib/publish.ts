@@ -30,7 +30,7 @@ import {
   addIssueNote, addMergeRequestNote, mergeRequestUrl, uploadFile, type Upload,
 } from './gitlab.js';
 import { log } from './log.js';
-import { mdText } from './gitlabmd.js';
+import { mdText, tableCell } from './gitlabmd.js';
 
 /** GitLab rejects very large attachments; skip them with a note rather than failing. */
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -75,16 +75,23 @@ interface PlanArtifact {
 }
 
 export function renderPlanMd(iid: number, title: string, plan: PlanArtifact): string {
+  // Every cell holding model prose goes through `tableCell`; `layer` and
+  // `status` are schema enums and `n` is a number, so they cannot break a row.
+  // `files` are paths joined with `<br>` — that is a rendering choice for an
+  // array, not an escape, which is why the path itself still needs one.
   const steps = (plan.steps ?? [])
-    .map((s) => `| ${s.n} | ${s.layer} | ${s.what} | ${(s.files ?? []).join('<br>') || '—'} |`)
+    .map((s) => `| ${s.n} | ${s.layer} | ${tableCell(s.what)} | ${
+      (s.files ?? []).map(tableCell).join('<br>') || '—'} |`)
     .join('\n');
   const questions = (plan.openQuestions ?? []).map((q) => `- ${q}`).join('\n');
   const outOfScope = (plan.outOfScope ?? []).map((o) => `- ${o}`).join('\n');
   const answered = (plan.feedbackResponse ?? [])
-    .map((f) => `| ${f.point} | ${f.response} | ${f.where || '—'} | ${f.note || ''} |`)
+    .map((f) => `| ${tableCell(f.point)} | ${tableCell(f.response)} | ${
+      tableCell(f.where) || '—'} | ${tableCell(f.note)} |`)
     .join('\n');
   const coverage = (plan.acceptanceCoverage ?? [])
-    .map((c) => `| ${c.criterion} | ${c.status} | ${c.coveredBy || '—'} | ${c.note || ''} |`)
+    .map((c) => `| ${tableCell(c.criterion)} | ${c.status} | ${
+      tableCell(c.coveredBy) || '—'} | ${tableCell(c.note)} |`)
     .join('\n');
   return `# Implementation plan — #${iid} ${title}
 

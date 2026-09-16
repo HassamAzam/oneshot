@@ -105,3 +105,30 @@ export function codeSpan(s: string): string {
   const pad = /^`|`$/.test(s) ? ' ' : '';
   return `${tick}${pad}${s}${pad}${tick}`;
 }
+
+/**
+ * One cell of a GitLab Markdown table, from a value nothing has validated.
+ *
+ * A table row is delimited by `|` and terminated by a newline, and GFM decides
+ * both BEFORE any inline parsing — so a `criterion` reading "Save | Cancel",
+ * or a `note` the model wrote across two lines, does not render wrong, it
+ * renders as a DIFFERENT NUMBER OF COLUMNS. Everything after it in the row
+ * shifts one cell left, and a newline ends the table outright, dropping the
+ * rest of the rows into the surrounding prose. Both are silent.
+ *
+ * Composition order is load-bearing, and it is: `mdText` FIRST, then the
+ * table-structural escapes.
+ *
+ * - `mdText` needs the real newlines to find fenced blocks at all, so it
+ *   cannot run on text whose newlines are already `<br>`.
+ * - `<br>` must be introduced after `mdText`, or `mdText` escapes it into a
+ *   visible `&lt;br&gt;`.
+ * - `\|` survives `mdText` untouched (it escapes only `&`, `<`, `>`), and GFM
+ *   resolves `\|` before inline parsing, so it holds inside the code spans
+ *   `mdText` wraps hex colours in as well as in plain prose.
+ */
+export function tableCell(v: unknown): string {
+  return mdText(String(v ?? ''))
+    .replace(/\|/g, '\\|')
+    .replace(/\r?\n/g, '<br>');
+}
