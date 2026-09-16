@@ -18,6 +18,9 @@ test('a concurrent-fetch ref lock is recognised; other git failures are not', ()
   assert.equal(isRefLockRace({ stderr: raceStderr }), true);
   assert.equal(isRefLockRace(new Error(`Command failed: git fetch origin dev\n${raceStderr}`)), true);
   assert.equal(isRefLockRace({ stderr: "fatal: couldn't find remote ref nope" }), false);
+  // Without the lock failure above it, this line is a transaction or reflog
+  // write that went wrong — fatal, and deliberately not retried.
+  assert.equal(isRefLockRace({ stderr: "error: unable to update local ref 'refs/remotes/origin/dev'" }), false);
   assert.equal(isRefLockRace({ stderr: 'ssh: Could not resolve hostname gitlab.arbisoft.com' }), false);
   assert.equal(isRefLockRace(null), false);
 });
@@ -33,6 +36,23 @@ test('the race is retried until the fetch goes through', () => {
   assert.equal(out, 'fetched');
   assert.equal(calls, 3);
   assert.deepEqual(waits, [10, 20]);
+});
+
+/**
+ * Every other test here injects its own attempts/waitMs, so the numbers a real
+ * conductor actually runs with were never observed by anything: shrinking
+ * waitMs to a tenth kept the suite green. This is the one test that passes no
+ * options but the spy.
+ */
+test('left to its own defaults it backs off 1.5s, 3s, 4.5s over four attempts', () => {
+  const waits: number[] = [];
+  let calls = 0;
+  assert.throws(() => retryRefLockRace(() => {
+    calls++;
+    throw Object.assign(new Error('Command failed'), { stderr: raceStderr });
+  }, { sleep: (ms) => waits.push(ms) }), /Command failed/);
+  assert.equal(calls, 4);
+  assert.deepEqual(waits, [1_500, 3_000, 4_500]);
 });
 
 test('any other failure is thrown on the first attempt', () => {
