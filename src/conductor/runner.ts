@@ -380,6 +380,61 @@ function logStopDetail(journal: RunJournal, headline: string): void {
 }
 
 /**
+ * Move the index, or end the run.
+ *
+ * A cycle forces every phase from the target up to the one that failed, which
+ * is the whole point: a qa cycle sits AFTER mr, merge and deploy, so unless
+ * those re-run the fix never reaches the box that rejected it. `testcases` is
+ * the single exception — that list is written once and pinned, because verify
+ * and qa comparing runs against two different lists compares nothing.
+ *
+ * `list` and `forced` are passed in rather than closed over so the index
+ * arithmetic can be single-stepped in a test without standing up a run — it
+ * decides which phases re-run, which is the one thing here worth proving.
+ */
+export function nextIndex(
+  control: Exclude<Control, { kind: 'stop' }>,
+  current: number,
+  lastMember: number,
+  list: PhaseConfig[],
+  forced: Set<string>,
+): number {
+  if (control.kind === 'retry') {
+    // A retry means "run it again", and runOne() has already taken the phase
+    // out of `forced` at its start. Without putting it back, a phase that
+    // succeeded on an EARLIER lap reads as done and shouldSkip() passes the
+    // retry by: #168's re-plan against reviewer feedback died of infra, was
+    // skipped, and the old plan was re-published for approval as though it
+    // were the revision. The same hole skips an implement retry inside a
+    // review cycle, and an infra re-attempt of any phase that had passed.
+    //
+    // Only the retried phase is re-forced, and that is deliberate even though
+    // a phase can belong to a `group` (testcases+review, ui-evidence+mr). The
+    // group is rebuilt from scratch on the retry pass, and its rebuild breaks
+    // on the first member shouldSkip() answers true for — a still-succeeded
+    // sibling is not forced, so it is not re-run and the group collapses to a
+    // solo run of the retried member. That is the intended shape: the sibling
+    // passed and re-running it buys nothing. Forcing the whole group back in
+    // would spend a fresh session on work that is already done.
+    forced.add(list[control.at]!.name);
+    return control.at;
+  }
+  if (control.kind === 'cycle') {
+    for (let k = control.jumpTo; k <= control.windowEnd; k += 1) {
+      const name = list[k]!.name;
+      if (name === 'testcases') continue;
+      forced.add(name);
+    }
+    log.warn(`cycling back to ${list[control.jumpTo]!.name}`, {
+      from: list[control.windowEnd]!.name,
+      forced: [...forced].join(', '),
+    });
+    return control.jumpTo;
+  }
+  return Math.max(current, lastMember) + 1;
+}
+
+/**
  * Free re-attempts a phase gets for deaths that were never its own verdict.
  *
  * Two, because the failures this exists for are one-offs — a conductor
@@ -700,7 +755,7 @@ export async function runTicket(
         i = resumeAt;
         continue;
       }
-      i = nextIndex(control, i, i);
+      i = nextIndex(control, i, i, list, forced);
       continue;
     }
 
@@ -1130,7 +1185,7 @@ export async function runTicket(
       i = resumeAt;
       continue;
     }
-    i = nextIndex(control ?? { kind: 'advance' }, i, members[members.length - 1]!);
+    i = nextIndex(control ?? { kind: 'advance' }, i, members[members.length - 1]!, list, forced);
   }
 
   return finish(j, 'done');
@@ -1475,34 +1530,6 @@ export async function runTicket(
       return { kind: 'cycle', jumpTo, windowEnd: mergeIndex };
     }
     return { kind: 'retry', at: mergeIndex };
-  }
-
-  /**
-   * Move the index, or end the run.
-   *
-   * A cycle forces every phase from the target up to the one that failed, which
-   * is the whole point: a qa cycle sits AFTER mr, merge and deploy, so unless
-   * those re-run the fix never reaches the box that rejected it. `testcases` is
-   * the single exception — that list is written once and pinned, because verify
-   * and qa comparing runs against two different lists compares nothing.
-   */
-  function nextIndex(
-    control: Exclude<Control, { kind: 'stop' }>, current: number, lastMember: number,
-  ): number {
-    if (control.kind === 'retry') return control.at;
-    if (control.kind === 'cycle') {
-      for (let k = control.jumpTo; k <= control.windowEnd; k += 1) {
-        const name = list[k]!.name;
-        if (name === 'testcases') continue;
-        forced.add(name);
-      }
-      log.warn(`cycling back to ${list[control.jumpTo]!.name}`, {
-        from: list[control.windowEnd]!.name,
-        forced: [...forced].join(', '),
-      });
-      return control.jumpTo;
-    }
-    return Math.max(current, lastMember) + 1;
   }
 
   /**
