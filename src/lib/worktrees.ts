@@ -20,7 +20,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import {
-  chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ensureClaudeDir } from './claudedir.js';
@@ -207,18 +207,34 @@ function copyContents(src: string, dst: string): void {
   try { chmodSync(dst, statSync(src).mode & 0o777); } catch { /* mode is a nicety, content is not */ }
 }
 
-function seed(worktree: string): void {
+/**
+ * Everything a leased or resumed worktree needs before a phase runs in it.
+ *
+ * `.claude` is composed FIRST and unconditionally, ahead of the seed-repo
+ * check. The two have nothing to do with each other: the seed repo supplies an
+ * installed `node_modules` and a venv so the APP can be brought up, while
+ * `.claude` supplies the skills, rules and agents every phase reasons with.
+ * They were in one function with one early return, so a machine with no seed
+ * repo configured ran every phase with whatever `.claude` the work repo
+ * happened to commit — the failure this composition exists to prevent, reached
+ * by way of an unrelated setting.
+ */
+export function seedWorktree(worktree: string): void {
+  const excluded: string[] = [];
+  detachTrackedClaude(worktree);
+  excluded.push(...ensureClaudeDir(worktree));
+
   const from = expandPath(envOr('ONESHOT_SEED_FROM', ''));
   if (!from || !existsSync(from)) {
     log.warn('no seed repo — the worktree cannot run the app without npm ci / venv setup', {
       fix: 'set ONESHOT_SEED_FROM to an already-installed clone',
     });
+    addExcludes(worktree, excluded);
     return;
   }
 
   const links = envOr('ONESHOT_SEED_LINKS', '').split(',').map((s) => s.trim()).filter(Boolean);
   const copies = envOr('ONESHOT_SEED_COPIES', '').split(',').map((s) => s.trim()).filter(Boolean);
-  const excluded: string[] = [];
 
   /**
    * A missing seed SOURCE is announced, not swallowed.
@@ -254,9 +270,49 @@ function seed(worktree: string): void {
     excluded.push(rel);
   }
 
-  excluded.push(...ensureClaudeDir(worktree));
-
   addExcludes(worktree, excluded);
+}
+
+/**
+ * Clear the work repo's own `.claude` out of the worktree, without deleting it.
+ *
+ * The work repo COMMITS `.claude/`, so `git worktree add` lays down a real
+ * directory for every skill, rule and agent before this process gets a say.
+ * ensureClaudeDir() then declines to overwrite any of them — relink() treats a
+ * real directory as something a human put there — so the copies this repo
+ * maintains under SKILLS_ROOT only ever filled the four GAPS, and every name
+ * the work repo also ships resolved the work repo's file. That is invisible
+ * from outside: the phase invokes the skill, gets an older file, and reports
+ * success. It bit `frontend-accessibility`, where the rule about an open dialog
+ * hiding the app-wide live region exists only in this repo's copy, and it
+ * silently un-did EXCLUDED_SKILLS too, because a real directory is not a
+ * symlink and unlinkExcluded() only removes symlinks.
+ *
+ * `--skip-worktree` rather than a delete: the files stay in the index and in
+ * HEAD, so nothing about the branch changes and no deletion can reach a commit
+ * or an MR diff. Git simply stops comparing those paths against the working
+ * tree, which is what makes removing them invisible to `git status` — the same
+ * job .git/info/exclude does for the seeded symlinks, for tracked paths.
+ *
+ * The whole directory goes rather than the tracked files alone: an emptied
+ * `.claude/skills/<name>/` is still a real directory, and relink() would back
+ * off from it exactly as before. A lease is a fresh compose either way.
+ */
+export function detachTrackedClaude(worktree: string): void {
+  try {
+    const tracked = git(['ls-files', '-z', '--', '.claude'], worktree);
+    if (!tracked) return;
+    execFileSync('git', ['update-index', '--skip-worktree', '-z', '--stdin'], {
+      cwd: worktree, input: tracked, timeout: 120_000, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    rmSync(join(worktree, '.claude'), { recursive: true, force: true });
+  } catch (err) {
+    // A phase with the work repo's skills still runs; one with no worktree does
+    // not. Warn and leave the checkout as git wrote it.
+    log.warn('could not detach the work repo\'s .claude — its skills will shadow ours', {
+      worktree, error: (err as Error).message,
+    });
+  }
 }
 
 /**
@@ -268,9 +324,15 @@ function seed(worktree: string): void {
 function addExcludes(worktree: string, paths: string[]): void {
   if (!paths.length) return;
   try {
-    const gitDir = git(['rev-parse', '--git-dir'], worktree);
-    const abs = gitDir.startsWith('/') ? gitDir : join(worktree, gitDir);
-    const file = join(abs, 'info', 'exclude');
+    // `--git-path info/exclude`, never `--git-dir` + join. In a LINKED worktree
+    // those are different files: --git-dir is .git/worktrees/<name>/, while the
+    // exclude git actually consults lives in the common dir. Oneshot wrote a
+    // correct exclude file to the per-worktree path for months and git never
+    // read a line of it, so every seeded symlink showed as untracked in the very
+    // `git status` this function exists to keep quiet — and sat one `git add -A`
+    // away from an MR. --git-path resolves whichever is right for the checkout.
+    const resolved = git(['rev-parse', '--git-path', 'info/exclude'], worktree);
+    const file = resolved.startsWith('/') ? resolved : join(worktree, resolved);
     mkdirSync(dirname(file), { recursive: true });
     const existing = existsSync(file) ? readFileSync(file, 'utf8') : '';
     const missing = paths.filter((p) => !existing.includes(`\n${p}\n`));
@@ -387,7 +449,7 @@ export function leaseWorktree(
     log.info(`re-attached to existing worktree ${worktree}`);
   }
 
-  seed(worktree);
+  seedWorktree(worktree);
   pinIdentity(worktree);
 
   const lease: Lease = { worktree, branch, baseSha: forkPoint(worktree, base) };
