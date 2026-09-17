@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { systemPromptFor, type PromptCtx } from './prompts.js';
+import { promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
 import { phaseByName, type PhaseConfig } from '../lib/config.js';
 import type { Ticket } from './types.js';
 
@@ -90,4 +90,37 @@ test('implement drops a plan-gated skill the plan rules out', () => {
   })));
   assert.ok(!got.includes('django-migration-standards'));
   assert.ok(!got.includes('script-writing-standards'));
+});
+
+// ------------------------------------------- research's reproduction is gated
+
+test('the bug label puts the reproduction skill in front of research', () => {
+  const prompt = systemPromptFor(cfg('research'), ctx(ticket({ labels: ['Bug', 'Loop'] })));
+  assert.ok(names(prompt).includes('bug-reproduction'));
+});
+
+test('without the bug label research is not offered the reproduction skill', () => {
+  // #91 is the case: an accessibility ticket carrying no labels at all spent 57
+  // turns failing to bring the app up, for a verdict of 'inconclusive'.
+  const prompt = systemPromptFor(cfg('research'), ctx(ticket({ labels: ['Loop'] })));
+  assert.ok(!names(prompt).includes('bug-reproduction'));
+});
+
+test('the reproduction instructions follow the same gate as the skill', () => {
+  // The two halves must agree: loading the skill file without the prose leaves
+  // research a method for a job it was never asked to do, and the prose without
+  // the skill sends it to reproduce with no method. One label decides both.
+  const withLabel = promptFor(cfg('research'), ctx(ticket({ labels: ['Bug'] })));
+  assert.match(withLabel, /Reproduce the bug before anything is planned/);
+
+  const without = promptFor(cfg('research'), ctx(ticket({ labels: ['Loop'] })));
+  assert.ok(!/Reproduce the bug before anything is planned/.test(without));
+  assert.match(without, /'not-applicable'/);
+});
+
+test('an unlabelled ticket is never told to bring the app up', () => {
+  // The expensive half is not the skill text, it is the app: bring-up, login and
+  // driving the steps is what raised this phase to 180 turns.
+  const without = promptFor(cfg('research'), ctx(ticket({ labels: [] })));
+  assert.ok(!/app\.cjs ensure/.test(without));
 });
