@@ -77,6 +77,7 @@ import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
 import { codeSpan, mdText } from '../lib/gitlabmd.js';
 import type { TestCase } from '../phases/types.js';
+import { parseEdgeCases } from './edgecases.js';
 
 export type Gate = 'plan' | 'testcases';
 export type GateVerdict = 'approved' | 'feedback' | 'pending' | 'unavailable';
@@ -760,9 +761,11 @@ export function testcasesApprovalRequestBody(cases: TestCase[], why: string): st
   return `**Oneshot pauses here** — ${why}\n\n` +
     `**Test cases to be verified** (${cases.length})\n${renderCasesForTicket(cases)}\n\n---\n\n` +
     `${approverLine('testcases')}\n\n` +
-    'Comment the single word **`approved`** to continue to `review`. Any other comment from ' +
-    'those accounts is treated as edge case(s) to add to this list — each line becomes a new ' +
-    'case, appended to `testcases.json`, and this gate asks again with the updated list. There ' +
+    'Comment the single word **`approved`** to continue to `review`. To add edge cases, comment ' +
+    'them one per line as bullets (`- Verify that …`), optionally with `— expects: …` for the ' +
+    'pass condition. Only bullet lines, or lines starting with Verify / Check / Ensure / Confirm / ' +
+    'Test, become cases; other text in the comment is ignored. They are appended to ' +
+    '`testcases.json` and this gate asks again with the updated list. There ' +
     'is no limit on how many rounds this can take. Anything added here is tested by THIS run, ' +
     'before the MR is opened. Comments from anyone else are ignored by this gate.';
 }
@@ -809,9 +812,9 @@ function nextCaseNumber(cases: TestCase[]): number {
  * `approved` is an edge case" rule, applied mechanically (this file never
  * runs a model).
  *
- * One case per non-empty line: that is the only structure a plain chat reply
- * reliably carries, since a reviewer listing three edge cases types them as
- * three lines, not as JSON. `pass` and `blast` are not something free text
+ * One case per case-shaped line — a bullet, or a line starting with a test
+ * verb — parsed by `parseEdgeCases` (see edgecases.ts for why "every non-empty
+ * line" was not good enough). `pass` and `blast` are not something free text
  * safely implies, so every appended case is tagged uniformly rather than
  * guessed — close enough to be found and re-run later without asserting a
  * category nobody actually stated.
@@ -829,16 +832,20 @@ export function appendEdgeCases(iid: number, feedback: string): TestCase[] | nul
   if (!data) return null;
 
   const cases = data.cases ?? [];
-  const lines = feedback.split('\n').map((l) => l.trim()).filter(Boolean);
+  const parsed = parseEdgeCases(feedback);
+  if (!parsed.length) {
+    log.info(`test-case gate reply on #${iid} carried no case-shaped lines — nothing appended`);
+    return cases;
+  }
   const first = nextCaseNumber(cases);
-  const added: TestCase[] = lines.map((line, idx) => {
+  const added: TestCase[] = parsed.map((c, idx) => {
     const n = first + idx;
     return {
       id: `TC-${String(n).padStart(2, '0')}`,
-      scenario: /^verify that/i.test(line) ? line : `Verify that ${line}`,
+      scenario: c.scenario,
       precondition: '',
-      steps: [line],
-      expected: `Matches the QA-reported edge case: ${line}`,
+      steps: c.steps,
+      expected: c.expected ?? `Matches the QA-reported edge case: ${c.steps[0]}`,
       pass: [EDGE_CASE_PASS_TAG],
       blast: EDGE_CASE_BLAST,
     };

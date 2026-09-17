@@ -371,7 +371,16 @@ tests run: ${i.testsRun || '(none)'}`;
 }
 
 function findingsOf(ctx: PromptCtx): Finding[] {
-  return artifact<{ findings: Finding[] }>(ctx, 'review').findings ?? [];
+  const fromPrior = artifact<{ findings: Finding[] }>(ctx, 'review').findings;
+  if (fromPrior) return fromPrior;
+  // On a resumed run `implement` is built before `review` is reached, so
+  // prior.review is not loaded yet and a review that sent the work back is
+  // invisible to the lap meant to fix it (#179: two implement laps finished in
+  // a minute with nothing to do). Read it off disk, as verifyFailuresOf does —
+  // only when it asked for changes, so an approved review's minor notes never
+  // turn an ordinary lap into a fix lap.
+  const onDisk = readArtifact<{ verdict?: string; findings?: Finding[] }>(ctx.ticket.iid, 'findings.json');
+  return onDisk?.verdict === 'changes-requested' ? onDisk.findings ?? [] : [];
 }
 
 /**
@@ -734,6 +743,16 @@ suggestions unless doing so contradicts the plan — say which you left and why 
 Return the ids you actually closed in \`addressedFindings\`; an id you list but did not fix is
 worse than one you admit you skipped, because the next review trusts this field.
 
+Each \`fix:\` below is the reviewer's suggestion, not an instruction. The reviewer reads a diff
+and can be wrong about the data behind it. Before you apply a fix that depends on data — a list
+key, an id, a field assumed unique, stable or always present — confirm that property where the
+data is produced, and cite \`file:line\` in \`summary\`. If the suggestion does not hold, close
+the finding a correct way and say why. If a correct fix needs work outside this ticket's layer
+or scope (a backend field for a frontend ticket, say), do not ship a workaround: leave the id
+out of \`addressedFindings\` and name the blocker in \`summary\`. When you delegate a finding to
+an agent, pass that same caution on — never tell it a data property is true that you have not
+checked yourself.
+
 ${findings.map((f) => `- ${f.id} [${f.severity}] ${f.file}:${f.line}\n    ${f.what}\n    fix: ${f.fix}`).join('\n')}
 `
       : verifyFailures.length
@@ -827,6 +846,7 @@ them. Do not edit anything outside your worktree.`;
       layers.frontend ? '`frontend-reviewer-agent`' : '',
       touchesRenderedUi(files) ? '`accessibility-reviewer-agent`' : '',
       '`util-reuse-agent`',
+      '`spec-conformance-agent`',
     ].filter(Boolean);
 
     // Both layers changed is the case worth spelling out: three sequential
@@ -836,7 +856,10 @@ them. Do not edit anything outside your worktree.`;
 reviewed against and they resolve from your worktree's \`.claude/agents\`. Dispatch ALL OF THEM
 IN ONE MESSAGE so they run in parallel; issuing them one at a time multiplies your wall clock
 for identical output. If the Task tool cannot resolve one of them, review that layer yourself
-against \`.claude/rules/\` and say in \`summary\` which agent was unavailable.`;
+against \`.claude/rules/\` and say in \`summary\` which agent was unavailable.
+Give \`spec-conformance-agent\` the ticket's title, description and acceptance criteria from
+above as its \`ticket_context\`: it is the one agent that says whether the change — and each
+thing a finding asks for — is inside this ticket's scope.`;
 
     const lapBlock = ctx.lap > 0 && prev.length
       ? `## This is review lap ${ctx.lap}
@@ -849,8 +872,13 @@ Verify that claim first, one id at a time, in the code — before you read anyth
   - Claimed closed but NOT fixed: re-raise it with the SAME id at severity 'blocker', and say
     in \`what\` that it was reported closed and was not. A finding re-raised under a new id lets
     a lap loop run forever with nobody able to see it.
-  - Not claimed and not fixed: re-raise it with the same id and the same severity.
-  - Genuinely closed: do not carry it forward.
+  - Not claimed and not fixed: re-raise it with the same id and the same severity — unless it
+    is about a line this diff never touched. A pre-existing problem is a follow-up, not a
+    finding: move it to \`summary\` and drop it from \`findings\`.
+  - Genuinely closed: do not carry it forward. If it was closed by applying a fix a previous
+    review SUGGESTED, check that the fix itself is sound — trace the data it depends on — not
+    only that the old symptom is gone. A suggested fix that introduced a defect is a new
+    finding, and say that the earlier suggestion caused it.
   - A NEW defect introduced by the fix: new id, continuing from F-${String(maxFindingId(prev) + 1).padStart(2, '0')}.
     A regression introduced while fixing a review finding is the most expensive kind, and it is
     the reason this lap exists.
@@ -899,9 +927,19 @@ approve or send back.
   was false. The plan says migrations=${p.migrations === true} and implement added
   ${(i.migrationsAdded ?? []).join(', ') || 'none'} — a mismatch there is a blocker, because a
   model change with no migration is a broken deploy.
+- Review what this diff CHANGED. A problem that already exists on \`origin/${baseBranch()}\`
+  in a line the diff does not touch is not a finding: name it in \`summary\` as a follow-up,
+  and never let it decide the verdict — unless the diff makes it worse, and then say how.
+- A \`fix\` is advice the next lap will act on, so it must be right. When it depends on data —
+  a list key being unique and stable, a field always being present — cite the \`file:line\`
+  where that data is produced and show the property holds. If you cannot, say so in \`fix\`
+  and name the real options (the backend change that would enable it, or accepting it as a
+  known limitation). Never prescribe a guess.
 - Check conformance against the acceptance criteria, and check each test case against the code:
   a case whose \`expected\` the code plainly cannot produce is a finding NOW, not a \`verify\`
-  failure forty minutes from now.
+  failure forty minutes from now — unless producing it needs work outside this ticket's scope
+  (\`spec-conformance-agent\` will tell you) or the behaviour is already broken on the base
+  branch. Then it is a follow-up for the ticket owner, not a reason to send this change back.
 - Consult the blast radius. A change inside a linked module pair that touches only one side is
   a finding.
 

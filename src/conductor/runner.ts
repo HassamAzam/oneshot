@@ -1443,7 +1443,13 @@ export async function runTicket(
     // The policy answers "the work came back wrong, now what" — cycle to
     // implement, block, abort — and none of those answers fit a phase that was
     // cancelled or killed before it could produce any work to be wrong about.
-    // Past the cap it falls through and is treated exactly as before.
+    //
+    // Past the cap the run BLOCKS. It used to fall through to the onFail
+    // policy, which was worse than stopping: failedLapsOf() does not count
+    // infra records, so a phase that kept hanging never used up maxLaps or
+    // maxRetries, and every further death cycled back to implement — a lap
+    // that cannot fix a dead connection — forever. Seen on #179: four verify
+    // hangs, 12h, and implement re-run with nothing to change.
     if (infra && p.onFail !== 'skip' && p.onFail !== 'warn') {
       const spent = infraAttemptsOf(iid, p.name);
       if (spent <= MAX_INFRA_ATTEMPTS) {
@@ -1452,9 +1458,15 @@ export async function runTicket(
         });
         return { kind: 'retry', at: index };
       }
-      log.warn(`${p.name} died of infrastructure ${spent} times — treating as a real failure`, {
+      log.warn(`${p.name} died of infrastructure ${spent} times in a row — stopping the run`, {
         why: why.slice(0, 120),
       });
+      return {
+        kind: 'stop', status: 'blocked',
+        reason: `${p.name}: ${why} — died of infrastructure ${spent} times in a row. A code change `
+          + 'cannot fix that, so the run stops here instead of cycling: check the network, disk '
+          + 'and quota, then unblock it',
+      };
     }
 
     if (p.onFail === 'skip' || p.onFail === 'warn') {
