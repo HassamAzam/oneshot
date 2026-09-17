@@ -2,7 +2,7 @@
 name: erp-ticket-test-plan
 description: >-
   Phase 2 of ERP ticket testing — turn a ticket's requirements into a concrete list of test scenarios,
-  WAIT for the user's go-ahead, and revise the list when feedback comes back instead of a go-ahead.
+  WAIT for the user's go-ahead, and extend the list when feedback comes back instead of a go-ahead.
   Use standalone when the user says "plan test cases for this ticket", "what scenarios should we test",
   "make a test plan", "add these edge cases to the plan", "update the test plan with my feedback",
   "revise the scenarios", or as the second step invoked by the test-erp-ticket orchestrator. Covers
@@ -36,15 +36,28 @@ Also surface here: which scenarios are UI-driven vs API/webshell, and which **pe
 
 ## Revising the plan after feedback
 
-When the reply to the GATE is anything other than a go-ahead, treat it as edits to the scenario list. Append new scenarios; never renumber or rewrite existing ones unless asked.
+When the reply to the GATE is anything other than a go-ahead, read the whole reply first and work out what the reviewer is actually asking for. The reply is raw material, not a list of lines to paste in. Turn what it contains into proper test cases, then append those to the existing list — existing scenarios keep their ids and their wording.
 
-**1. A verdict is not a scenario.**
-Discard any line carrying no testable content: `Disapproved`, `Approved`, `Rejected`, `Not approving`, `Needs work`, greetings, `@mentions`, headings, `---`, blank lines, and closing remarks ("fix these and I'll approve"). A line becomes a scenario only if it names something a tester can execute and observe. If a line is ambiguous, ask — never silently drop it, never silently promote it.
+**1. Classify every line before acting on any of it.**
+Each line is one of three things:
 
-> Real failure: a reply opening with the single word "Disapproved" became `Verify that Disapproved`, Expected the verdict should be ignored and it should not be added as a separate test case.
+- **Scenario** — names something a tester can execute and observe. Author it (rule 2) and append it.
+- **Instruction** — tells you to change a case that is already in the list: `TC-21 is junk — please delete it`, `merge 3 and 4`, `the Expected on TC-07 is wrong, it should be X`. Handle it under rule 5. It is never appended as a new case.
+- **Feedback comment** — no testable content and no instruction: `Disapproved`, `Approved`, `Rejected`, `Not approving`, `Needs work`, greetings, `@mentions`, headings, `---`, blank lines, closing remarks ("fix these and I'll approve"). Discard it.
 
-**2. Apply the "Verify that" stem exactly once.**
-Feedback usually arrives already phrased as scenarios. Before adding a line: strip leading list markers (`-`, `*`, `•`, `1.`, `1)`), then strip any leading stem (`Verify that`, `Verify`, `Check that`, `Ensure that`, `Confirm that`, `Validate that` — case-insensitive), then apply one canonical `Verify that`. Assert the text after the stem does not itself begin with another stem. The result must never read `Verify that - Verify that …` or `Verify that Verify …`.
+A line can be two at once — `TC-21 is junk, instead verify that the filter survives a refresh` is an instruction *and* a scenario; split it and handle each half. If a line is ambiguous, ask — never silently drop it, never silently promote it.
+
+> Real failures: a reply opening with the single word "Disapproved" became `Verify that Disapproved`, Expected `Matches the QA-reported edge case: Disapproved`. Pasted in unread, `TC-21 is junk — please delete it` becomes the case `Verify that TC-21 is junk — please delete it` — and TC-21 is still in the list.
+
+**2. Author each feedback scenario into a real case, then append it.**
+The reviewer's line is the input, never the output. For each one:
+
+1. Strip leading list markers (`-`, `*`, `•`, `1.`, `1)`).
+2. Strip any leading stem (`Verify that`, `Verify`, `Check that`, `Ensure that`, `Confirm that`, `Validate that` — case-insensitive), then apply one canonical `Verify that`. Assert the remaining text does not itself begin with another stem: the result must never read `Verify that - Verify that …` or `Verify that Verify …`.
+3. Give it steps, an Expected (rule 3) and a Type and labels (rule 4) — the same fields every other case in the plan carries.
+4. Append it with the next free id, continuing the existing sequence.
+
+**Existing cases are not touched.** No renumbering, no rewording, no re-deriving the ones that were already approved. `ui-evidence` and `qa` refer back to cases by id, and each feedback round is cumulative, so an id has to keep meaning the same case for the life of the run.
 
 **3. Every added scenario needs its own Expected.**
 A restatement is not an Expected. Banned: "Matches the QA-reported edge case: `<scenario>`" (the string an append-only gate fills in for you), "As described by the user", "See scenario", or any paraphrase of the scenario text.
@@ -74,9 +87,14 @@ Anything that would invalidate other scenarios if it failed — wrong server, wr
 
 This labelling holds for the plan you present in chat. It does **not** survive an append-only external gate, which tags every case it creates `boundary` / `medium` blast uniformly, on the reasoning that free text cannot safely imply either. So if a Type matters downstream, say it inside the scenario line's own words — the structured field will read `boundary` no matter what you intended.
 
-**5. Re-confirm with a diff, then re-gate.**
-Show count before → after, the numbers added, any line discarded under rule 1 and why, and confirmation that the existing scenarios are unchanged. Then run the GATE again.
+**5. An instruction changes a case in place — it is never appended.**
+`delete TC-21`, `merge 3 and 4`, `TC-07's Expected should be X` all mutate the list rather than extend it. Where you own the list, apply the instruction directly: delete, merge or reword that case, retire its id without reusing it, and leave every other id untouched. Never satisfy a deletion by appending anything.
 
-> **If the plan feeds an append-only external gate** (e.g. a Oneshot "Test cases to be verified" list, where each line of a reply becomes a case that cannot later be edited or deleted by commenting): compose the reply as bare scenario lines only — no verdict word, no bullets, no sign-off — and carry the Expected inside each line. A comment cannot set the Expected field at all: the gate **always** overwrites it with a restatement of the line, so the only place your Expected survives is inside the line's own text. Corrections go to the run owner directly; a comment asking for a deletion only creates another case.
+Where the list lives behind an append-only gate you cannot do this at all — appending is the only operation a comment has. Say so plainly, list the instructions you could not apply, and hand them to the run owner, who re-runs the phase with them. Do not pretend a deletion happened.
+
+**6. Re-confirm with a diff, then re-gate.**
+Show: count before → after; the ids added and what each one came from; the ids changed or retired under rule 5, each with the instruction that did it; every line discarded as a feedback comment and why; and confirmation that no other existing case was touched. Then run the GATE again.
+
+> **If the plan feeds an append-only external gate** (e.g. a Oneshot "Test cases to be verified" list): every non-empty line of a comment becomes a case verbatim — instructions and verdict words included — and the Expected field cannot be set by comment at all, because the gate always overwrites it with a restatement of the line. So compose the reply as bare scenario lines only: no verdict word, no instructions, no bullets, no sign-off, with the Expected carried inside each line's own text. Deletions and corrections go to the run owner directly; a comment asking for one only creates another case.
 
 Next in the pipeline: `erp-ticket-test-data`.
