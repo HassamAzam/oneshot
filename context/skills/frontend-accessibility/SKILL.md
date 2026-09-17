@@ -37,7 +37,7 @@ Target: **WCAG 2.1 AA**. MUI v6 gets you most of the way there by default — mo
 ### Forms
 
 - [ ] Every `TextField`/`Select`/`Checkbox`/`RadioGroup` has a real `label` prop, or `aria-label` if a visible label is intentionally absent. A `placeholder` alone is not a label — it disappears on input and isn't consistently read by all screen readers.
-- [ ] Validation errors are wired through MUI's `error` + `helperText` props (MUI auto-links `helperText` via `aria-describedby`) — a custom error `<Typography>` rendered next to the field without that wiring is invisible to assistive tech.
+- [ ] Validation errors are wired through MUI's `error` + `helperText` props — a custom error `<Typography>` rendered next to the field without that wiring is invisible to assistive tech. `TextField` links `helperText` via `aria-describedby` for you; the other controls do **not** all behave the same way, so establish the association per control instead of assuming it holds (see "Confirm the attribute reaches the node").
 - [ ] Required fields are marked with `required` (MUI renders `aria-required`) — not just a visual `*` in the label text.
 - [ ] Grouped radio/checkbox sets have a `FormLabel`/`legend` naming the group, not just individual option labels.
 
@@ -126,13 +126,31 @@ Audit-generated tickets often name a criterion and a page but not the elements (
 <Table><TableHead>...</TableHead><TableBody>...</TableBody></Table>
 ```
 
+## Confirm the attribute reaches the node
+
+A prop named like an ARIA attribute is not an ARIA attribute. Between the JSX you write and the element a screen reader actually reads, this codebase interposes its own wrappers (`FormSelect`, `FormTextEditor`, `FormReactDatePicker`, `TextFieldWrapper`, `MaterialSelect`, `DatePicker`) and then the library's internals — commonly five or more hops. The attribute can be renamed, dropped, or landed on a non-focusable node at any one of them, and nothing errors when it is.
+
+Three ways it fails silently:
+
+- **A wrapper never spreads it.** The prop stops at a component that destructures a fixed list of props and passes only those on.
+- **The component reads a different name.** A component that reads `this.props.ariaLabel` ignores an `aria-label` prop entirely, so the control has no accessible name while the JSX looks correct.
+- **The library owns that attribute.** Some components delete an incoming ARIA prop and derive the attribute from their own state instead, so what you passed is discarded.
+
+Before asserting — in a plan, a review, or an MR — that an attribute is set:
+
+1. Follow the prop from the JSX to the element that actually receives focus. Read each wrapper in the chain, and where it ends in a library component, read that component's source under `node_modules`.
+2. Prefer the library's own supported prop for state it already manages over hand-setting the attribute yourself.
+3. Confirm it in the rendered DOM, not in the JSX.
+
+**When you check the DOM, confirm the attribute is there *because of your change*.** An attribute the library already derives is present either way, so finding it proves nothing about the line you added. Either remove your change and watch the attribute disappear, or assert on something only your change can produce. A check that passes whether or not the code works is not a verification.
+
 ## Dynamic verification (when Playwright is available)
 
 Static review catches most issues, but contrast and computed-role checks are more reliable measured against a rendered page. If `mcp__playwright` is available (it is for `frontend-agent`/`qa-agent`), run an automated scan against the dev server rather than estimating contrast by eye:
 
 1. `npm start` (or confirm it's already running on port 3000).
 2. Navigate Playwright to the target page/component.
-3. Inject and run `axe-core` (`https://unpkg.com/axe-core@latest/axe.min.js` is blocked in sandboxed contexts — vendor a local copy under `frontend/node_modules/axe-core/axe.min.js` if present, or fall back to static review and say so).
+3. Inject and run `axe-core` (`https://unpkg.com/axe-core@latest/axe.min.js` is blocked in sandboxed contexts — use the local copy at `node_modules/axe-core/axe.min.js`, off the repo root: `package.json` is at the root, so there is no `frontend/node_modules`). Check `node_modules` for it directly — a package can be present and usable without being declared in `package.json`, so "not in `package.json`" is not grounds to report that no scanner is available.
 4. Report violations with the DOM selector axe returns, mapped back to the source file/component.
 5. For contrast, confirm the colours axe (or your own check) used: read `getComputedStyle(el).color` / `backgroundColor` up the ancestor chain to the first opaque background, and multiply the `opacity` of every ancestor. Do this in each theme mode and in each view the component appears in.
 
@@ -158,3 +176,4 @@ If the target is clean: `Clean — no accessibility findings.` Silence means pas
 - Do NOT flag issues ESLint's `jsx-a11y` plugin already catches if it's configured — check `.eslintrc` first; trust CI for what it enforces.
 - Do NOT restate `.claude/rules/frontend-style.md` styling rules (inline `sx`, schema location) — that's `frontend-reviewer-agent`'s scope. Only flag a style violation here if it's the direct cause of an a11y failure (e.g. a color-only status chip).
 - Do NOT invent WCAG success-criterion numbers you haven't verified — describe the concrete failure instead of citing "SC 1.4.3" from memory.
+- Do NOT report an ARIA attribute as set because a prop of that name was passed, or as fixed because it appears in the DOM — follow it to the focusable node, and confirm your change is what put it there (see "Confirm the attribute reaches the node").
