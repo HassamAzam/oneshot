@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { nextIndex } from './runner.js';
-import type { PhaseConfig } from '../lib/config.js';
+import { codePhaseStatus, mergePollWait, nextIndex } from './runner.js';
+import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
 
 function phase(name: string, n: number, group?: string): PhaseConfig {
   return { name, n, kind: 'session', timeoutMin: 30, onFail: 'abort', ...(group ? { group } : {}) };
@@ -70,4 +70,49 @@ test('an advance steps past the last member of a group, not past the current ind
     at('verify'),
   );
   assert.deepEqual([...forced], []);
+});
+
+// ------------------------------------------------ merge parked on a human merge
+
+const MERGE: PhaseConfig = { name: 'merge', n: 9, kind: 'code', timeoutMin: 10, onFail: 'blocked' };
+
+test('a merge waiting on a human is recorded parked, not failed', () => {
+  assert.equal(codePhaseStatus(MERGE, { ok: false, park: true }), 'parked');
+});
+
+test('a genuine merge refusal is still recorded failed, and a merge ok', () => {
+  assert.equal(codePhaseStatus(MERGE, { ok: false }), 'failed');
+  assert.equal(codePhaseStatus(MERGE, { ok: true }), 'ok');
+  // A success wins over a stray park flag.
+  assert.equal(codePhaseStatus(MERGE, { ok: true, park: true }), 'ok');
+});
+
+const T0 = 1_800_000_000_000;
+const poll = (o: Partial<Parameters<typeof mergePollWait>[0]> = {}): number | null => mergePollWait({
+  wasParked: true, reviewMode: true, dryRun: false,
+  lastCheckAt: T0, mergeSucceeded: false, now: T0 + 3 * 60_000, ...o,
+});
+
+test('a merge-parked run inside its poll window is held until the window is up', () => {
+  assert.equal(poll(), MERGE_POLL_MS - 3 * 60_000);
+});
+
+test('the hold is keyed on the CLAIMED status, so a resumed parked run is held', () => {
+  // The defect: the gate read the journal after the resume had set it to
+  // 'running', so wasParked was effectively always false and every tick
+  // walked to merge. Only the claimed status can hold the run.
+  assert.equal(poll({ wasParked: false }), null);
+  assert.notEqual(poll({ wasParked: true }), null);
+});
+
+test('the run goes through once the poll window is due', () => {
+  assert.equal(poll({ now: T0 + MERGE_POLL_MS }), null);
+  assert.equal(poll({ now: T0 + MERGE_POLL_MS + 1 }), null);
+});
+
+test('nothing holds a run that is not waiting on a human merge', () => {
+  assert.equal(poll({ reviewMode: false }), null, 'Review label removed: release at once');
+  assert.equal(poll({ dryRun: true }), null);
+  assert.equal(poll({ mergeSucceeded: true }), null, 'a later park must not wait behind a finished merge');
+  assert.equal(poll({ lastCheckAt: undefined }), null, 'never asked GitLab yet: ask now');
 });

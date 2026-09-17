@@ -183,7 +183,9 @@ notification and never a verdict.
    reserve for a human. The phase parks until the MR's own state reads `merged`, whoever merged
    it and whenever, then writes the run's record and finishes. Because that decision is measured
    in hours, the question is put to GitLab every 30 minutes (`MERGE_POLL_MS`); ticks in between
-   park without a network round trip.
+   return before walking the pipeline, so they add no phase record. Each check that finds the MR
+   still open is recorded `parked`, not `failed`: waiting on a person is not a verdict, and it
+   must not bury the merge refusals that are.
 **The label is not the only trigger.** A person applies it, so it is forgettable — and the
 tickets most worth pausing on are exactly the ones nobody remembers to label. So the gates also
 arm themselves when a run *touches* anything in `highScrutinyPaths` (config/project.json):

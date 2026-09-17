@@ -162,7 +162,8 @@ export async function exportRun(journal: RunJournal): Promise<void> {
           'oneshot.error': p.error?.slice(0, 300),
           'langfuse.session.id': journal.runId,
         }),
-        status: { code: p.status === 'ok' || p.status === 'warned' ? 1 : 2 },
+        // OTel: 1 OK, 2 ERROR, 0 UNSET. A park is a wait on a person, not an error.
+        status: { code: p.status === 'ok' || p.status === 'warned' ? 1 : p.status === 'parked' ? 0 : 2 },
       });
     }
 

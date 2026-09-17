@@ -164,7 +164,8 @@ function paintStatus(s: PhaseRecord['status']): string {
   // reached a verdict, so it is not evidence that anything is wrong with the
   // work. It is still pruned like a failure, because a re-entered phase wants
   // a clean slate either way.
-  if (s === 'warned' || s === 'skipped' || s === 'infra') return `${Y}${s}${X}`;
+  // 'parked' likewise: waiting on a person to merge is not a verdict.
+  if (s === 'warned' || s === 'skipped' || s === 'infra' || s === 'parked') return `${Y}${s}${X}`;
   return `${R}${s}${X}`;
 }
 

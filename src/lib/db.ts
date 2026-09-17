@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS phase_runs (
   phase       TEXT NOT NULL,
   lap         INTEGER NOT NULL DEFAULT 0,
   model       TEXT,
-  status      TEXT NOT NULL,            -- running|ok|failed|skipped|refused
+  status      TEXT NOT NULL,            -- running|ok|failed|infra|skipped|refused|warned|parked
   started_at  INTEGER NOT NULL,
   ended_at    INTEGER,
   turns       INTEGER,
