@@ -181,6 +181,37 @@ export async function issueNotes(
   return res;
 }
 
+/**
+ * One file somebody attached to a ticket, as raw bytes. `filename` is passed as
+ * it appears in the markdown link — already URL-encoded — because that is the
+ * path GitLab stored it under.
+ */
+export async function downloadUpload(
+  secret: string, filename: string,
+): Promise<GitlabResult<Buffer>> {
+  const controller = new AbortController();
+  const killer = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const res = await fetch(`${base()}/projects/${projectId()}/uploads/${secret}/${filename}`, {
+      headers: { 'PRIVATE-TOKEN': token() },
+      signal: controller.signal,
+    });
+    const kind = classify(res.status);
+    if (kind !== 'ok') {
+      const text = await res.text().catch(() => '');
+      return { ok: false, kind, status: res.status, data: null, error: text.slice(0, 300) };
+    }
+    return { ok: true, kind: 'ok', status: res.status, data: Buffer.from(await res.arrayBuffer()) };
+  } catch (err) {
+    return {
+      ok: false, kind: 'network', status: 0, data: null,
+      error: (err as Error).message.slice(0, 300),
+    };
+  } finally {
+    clearTimeout(killer);
+  }
+}
+
 /** Enough for any real ticket; only here so a misbehaving API cannot loop forever. */
 const MAX_NOTE_PAGES = 50;
 
