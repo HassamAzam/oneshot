@@ -603,7 +603,10 @@ export async function runTicket(
         // off so the ticket shows one owner, then stand down with the leases
         // released. 'aborted' resumes if their claim ever goes stale.
         if (j.claimNoteId) {
-          await deleteIssueNote(iid, j.claimNoteId);
+          const del = await deleteIssueNote(iid, j.claimNoteId);
+          if (!del.ok) {
+            log.warn(`#${iid} — claim note ${j.claimNoteId} left on the ticket: ${del.error ?? del.kind}`);
+          }
           j.claimNoteId = undefined;
           writeJournal(j);
         }
@@ -1864,6 +1867,27 @@ export async function runTicket(
           [cfg.labels.entry, cfg.labels.testcaseReview].filter(Boolean),
           [cfg.labels.blocked]);
         await addIssueNote(journal.iid, `Oneshot stopped: **${reason}**\n\nRun \`${journal.runId}\`.`);
+        // The stop note just posted names this run and lands AFTER the claim
+        // note, so every conductor reading the ticket (lib/claims.ts) now counts
+        // that claim dead. Deleting it is what keeps this desk agreeing with
+        // them: the resume's by-id fast path near the top of this file asks only
+        // whether the note still carries this run's marker — no stop note, no
+        // staleness — so a surviving note would have the resume call the claim
+        // live and never re-post, while every other desk reads the ticket as
+        // unowned. The fast path stays that cheap only because this delete
+        // holds; do not drop it without first teaching the fast path to read
+        // stop notes.
+        if (!DRY_RUN && journal.claimNoteId) {
+          // A failed delete is not worth stopping for — the note reads dead to
+          // everyone either way — but nothing else ever comes back for it, so
+          // say so rather than orphan it on the ticket in silence.
+          const del = await deleteIssueNote(journal.iid, journal.claimNoteId);
+          if (!del.ok) {
+            log.warn(`#${journal.iid} — claim note ${journal.claimNoteId} left on the ticket: ${del.error ?? del.kind}`);
+          }
+          journal.claimNoteId = undefined;
+          writeJournal(journal);
+        }
       }
       log.error(`■ #${journal.iid} BLOCKED — ${reason}`);
       logStopDetail(journal, 'BLOCKED');
@@ -1877,11 +1901,14 @@ export async function runTicket(
       }
       // The claim note has done its job — with the exit label on, nothing
       // scans this ticket again — and a claim that outlives its run is exactly
-      // the stale note lib/claims.ts otherwise has to age out. Only 'done'
-      // tidies it: a blocked or aborted run expects to resume, and its place
-      // in line is the note.
+      // the stale note lib/claims.ts otherwise has to age out. 'blocked'
+      // removes it too (above); an aborted or parked run expects to resume,
+      // and its place in line is the note.
       if (!DRY_RUN && journal.claimNoteId) {
-        await deleteIssueNote(journal.iid, journal.claimNoteId);
+        const del = await deleteIssueNote(journal.iid, journal.claimNoteId);
+        if (!del.ok) {
+          log.warn(`#${journal.iid} — claim note ${journal.claimNoteId} left on the ticket: ${del.error ?? del.kind}`);
+        }
         journal.claimNoteId = undefined;
         writeJournal(journal);
       }
