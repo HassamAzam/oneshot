@@ -82,7 +82,10 @@ export async function scan(): Promise<WatchResult> {
         continue;
       }
       if (!issue.assignees.some((a) => a.username === me)) {
-        skipped.push({ iid: issue.iid, why: `assigned to ${issue.assignees.map((a) => a.username).join(', ')}` });
+        // Assigned to a teammate — not this desk's board at all. It is neither
+        // claimable here nor a skip worth reporting, so it is dropped silently
+        // rather than pushed to `skipped`: one line per teammate's ticket every
+        // tick buried this desk's own tickets in noise.
         continue;
       }
     }
