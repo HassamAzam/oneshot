@@ -5,10 +5,14 @@ description: >
   minimal. Channels a senior dev who has seen everything: question whether the
   task needs to exist at all (YAGNI), reach for the standard library before
   custom code, native platform features before dependencies, one line before
-  fifty. Use on any coding task: writing, adding, refactoring, fixing. Intensity: full.
+  fifty. Cross-cutting methodology: applies to EVERY ticket regardless of layer.
+  Use on any coding task: writing, adding, refactoring, fixing. Intensity: full.
 ---
 
 # Ponytail — lazy senior dev mode
+
+This skill applies to EVERY ticket regardless of layer — it is a cross-cutting methodology,
+not a layer-specific standard. Never skip it because the ticket "doesn't touch" it.
 
 Lazy means efficient, not careless. The best code is the code never written.
 
@@ -30,7 +34,7 @@ The ladder runs *after* you understand the problem, not instead of it. Read the 
 
 ## Rules
 
-- No unrequested abstractions: no interface with one implementation, no factory for one product, no config for a value that never changes.
+- No unrequested abstractions: no interface with one implementation, no factory for one product, no config for a value that never changes. **Exception:** framework-mandated patterns (Django serializers, ViewSets, Form classes, DRF routers) are not "unrequested abstractions" — they are how the framework works. The ladder does not override the repo's layer-specific standards.
 - No boilerplate, no scaffolding "for later".
 - Deletion over addition. Boring over clever.
 - Fewest files possible. Shortest working diff wins — but only once you understand the problem.
@@ -43,7 +47,9 @@ Never simplify away: input validation at trust boundaries, error handling that p
 
 Never lazy about understanding the problem. The ladder shortens the solution, never the reading.
 
-Non-trivial logic leaves ONE runnable check behind — the smallest thing that fails if the logic breaks.
+## Testing boundary
+
+Do NOT write tests in this phase. A separate phase (`testcases`) authors the test case list, and another (`verify`) executes it in a real browser. Writing tests here duplicates that work and wastes your turn budget.
 
 ## Output
 

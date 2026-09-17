@@ -1,46 +1,57 @@
 ---
 name: ponytail-review
 description: >
-  Code review focused exclusively on over-engineering. Finds what to delete:
-  reinvented standard library, unneeded dependencies, speculative abstractions,
-  dead flexibility. One line per finding: location, what to cut, what replaces
-  it. Complements correctness-focused review — this one only hunts complexity.
+  Code review dimension focused on over-engineering. Finds what to shrink or
+  replace with stdlib/native: reinvented standard library, unneeded dependencies,
+  speculative abstractions. Complements correctness-focused review and
+  dead-code-sweep — does NOT flag dead code (dead-code-sweep handles that).
+  Outputs in the same {id, severity, file, line, what, why, fix} schema the
+  review phase uses, so findings integrate into the structured findings.json.
 ---
 
 # Ponytail Review — over-engineering sweep
 
-Review diffs for unnecessary complexity. One line per finding. The diff's best outcome is getting shorter.
+Review the diff for unnecessary complexity. The diff's best outcome is getting shorter.
 
-## Format
+## Integration
 
-`L<line>: <tag> <what>. <replacement>.`, or `<file>:L<line>: ...` for multi-file diffs.
+You are one review dimension inside erp-code-review's orchestrated flow. Your findings
+go into the SAME `findings` array as every other reviewer's, using the SAME schema:
 
-Tags:
+```json
+{
+  "id": "F-XX",
+  "severity": "minor|suggestion",
+  "file": "repo-relative path",
+  "line": 123,
+  "what": "one-sentence defect description",
+  "why": "concrete consequence: what breaks, what's wasted, what's duplicated",
+  "fix": "the specific replacement or deletion"
+}
+```
 
-- `delete:` dead code, unused flexibility, speculative feature. Replacement: nothing.
+Continue the id sequence from the highest existing finding id. Over-engineering findings
+are `minor` when the bloat is measurable (extra dependency, duplicated stdlib, unnecessary
+indirection in a hot path) and `suggestion` when it is stylistic (verbose but correct).
+They are never `blocker` or `major` — those are for correctness. If you find a correctness
+bug while reviewing for complexity, raise it as a normal finding with the appropriate
+severity; do not drop it.
+
+## What to flag
+
 - `stdlib:` hand-rolled thing the standard library ships. Name the function.
 - `native:` dependency or code doing what the platform already does. Name the feature.
 - `yagni:` abstraction with one implementation, config nobody sets, layer with one caller.
-- `shrink:` same logic, fewer lines. Show the shorter form.
+- `shrink:` same logic, fewer lines. Show the shorter form in `fix`.
 
-## Examples
+## What NOT to flag
 
-`L12-38: stdlib: 27-line validator class. "@" in email, 1 line, real validation is the confirmation mail.`
-
-`L4: native: moment.js imported for one format call. Intl.DateTimeFormat, 0 deps.`
-
-`repo.py:L88: yagni: AbstractRepository with one implementation. Inline it until a second one exists.`
-
-`L52-71: delete: retry wrapper around an idempotent local call. Nothing replaces it.`
-
-`L30-44: shrink: manual loop builds dict. dict(zip(keys, values)), 1 line.`
+- **Dead code, unused imports, unreachable branches** — `dead-code-sweep` already covers this. Do not duplicate its work.
+- **Framework-mandated patterns** (Django serializers, ViewSets, Form classes) — these are how the framework works, not over-engineering.
+- **A single assert-based self-check or smoke test** — that is the ponytail minimum, not bloat.
 
 ## Scoring
 
-End with: `net: -<N> lines possible.`
+End with: `net: -<N> lines possible.` in your summary.
 
-If nothing to cut: `Lean already. Ship.` and stop.
-
-## Scope
-
-Over-engineering and complexity only. Correctness bugs, security holes, and performance are out of scope — route them to the normal review agents. A single smoke test or assert-based self-check is the ponytail minimum, not bloat — never flag it for deletion.
+If nothing to cut: note `Lean already.` in summary and produce zero findings.
