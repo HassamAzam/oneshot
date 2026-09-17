@@ -30,27 +30,43 @@ Cover every category:
 
 Show the full plan as a numbered list (Type · Scenario · Expected). Then:
 
-> **GATE — WAIT for explicit go-ahead.** Do not create data or execute until the user confirms. If they add/drop/modify scenarios, update and re-confirm.
+> **GATE — WAIT for explicit go-ahead.** Do not create data or execute until the user confirms. If the reply is anything other than a go-ahead, route each line by intent (see "Revising the plan after feedback"): **add** appends a new case, **drop/modify** act on the case named — delete, edit, re-prioritize, reclassify, reorder, merge or split it in place — then re-confirm. Only "add" ever creates a case.
 
 Also surface here: which scenarios are UI-driven vs API/webshell, and which **persist data / send real emails** (destructive) vs which roll back (safe).
 
 ## Revising the plan after feedback
 
-When the reply to the GATE is anything other than a go-ahead, read the whole reply first and work out what the reviewer is actually asking for. The reply is raw material, not a list of lines to paste in. Turn what it contains into proper test cases, then append those to the existing list — existing scenarios keep their ids and their wording.
+When the reply to the GATE is anything other than a go-ahead, read the whole reply first and work out what the reviewer is actually asking for. The reply is raw material, not a list of lines to paste in. Classify each line by intent (rule 1), then route it: a genuinely new scenario becomes a proper case and is appended (rules 2–4); a line acting on an existing case edits/deletes/re-prioritizes/reclassifies/reorders/merges/splits that case in place (rule 5); a verdict, question or meta note is answered or discarded, never made a case. Only newly appended cases get new ids — every untouched existing case keeps its id and wording.
 
-**1. Classify every line before acting on any of it.**
-Each line is one of three things:
+**1. Classify every line by INTENT before acting on any of it.**
+Read the whole reply, then decide what each line *intends*. The intent picks the route — and **only intent 1 ever appends a new case.** Decide intent in this order:
 
-- **Scenario** — names something a tester can execute and observe. Author it (rule 2) and append it.
-- **Instruction** — tells you to change a case that is already in the list: `TC-21 is junk — please delete it`, `merge 3 and 4`, `the Expected on TC-07 is wrong, it should be X`. Handle it under rule 5. It is never appended as a new case.
-- **Feedback comment** — no testable content and no instruction: `Disapproved`, `Approved`, `Rejected`, `Not approving`, `Needs work`, greetings, `@mentions`, headings, `---`, blank lines, closing remarks ("fix these and I'll approve"). Discard it.
+- A line that **names an existing TC number, or clearly restates a case already in the list, is an action on that case** — intents 2–8 (delete / edit / re-prioritize / reclassify / reorder / merge / split). It is *never* a new case, even when it is phrased like one. `TC-22: record its exact casing…` edits TC-22's Expected; `TC-22 and TC-23 should be [high]` changes their severity; `TC-21 is junk, delete it` deletes TC-21. Appending any of these leaves the named case untouched and adds a junk twin.
+- A line that is a **process word or commentary about the list** — a verdict, a heading, a "suggested expectations:" lead-in, a "N things to fix by hand" note, a sign-off — is intent 9–11. Proceed or discard; never a case.
+- A line that is a **genuinely new, executable scenario** is intent 1 — append it (rule 2).
+- A line that reads like a new case *and* an edit is intent 12 — **ask**. Never silently guess, never silently drop.
 
-A line can be two at once — `TC-21 is junk, instead verify that the filter survives a refresh` is an instruction *and* a scenario; split it and handle each half. If a line is ambiguous, ask — never silently drop it, never silently promote it.
+| # | Intent | Example phrasing | Action |
+|---|---|---|---|
+| 1 | **Add** | "also add a case for an empty export" | Append a new case — the only append route (rules 2–4) |
+| 2 | **Delete** | "TC-21 is junk, remove it" | Delete that case; retire its id; record in the diff (rule 5) |
+| 3 | **Edit text/Expected** | "TC-22: the Expected should be…" | Replace that case's scenario/Expected — **no** new case (rule 5) |
+| 4 | **Re-prioritize** | "TC-22 should be [high], not [medium]" | Change that case's severity (rule 5) |
+| 5 | **Reclassify type** | "TC-17 is a regression case, not edge" | Change its Type (rule 5) |
+| 6 | **Reorder** | "run TC-23 first — it's a pre-condition for TC-06" | Change run order (rule 5) |
+| 7 | **Merge / dedupe** | "TC-22 and TC-05 are the same, combine them" | Merge into one; delete the duplicate (rule 5) |
+| 8 | **Split** | "TC-04 tests two things, split it" | Turn one case into two (rule 5) |
+| 9 | **Approve** | the single word "approved" | Proceed; leave the list unchanged |
+| 10 | **Question** | "does TC-06 cover the short-form export?" | Answer or ask back — never make it a case |
+| 11 | **Noise / meta** | "Disapproved", "Suggested expectations:", "Four things to fix by hand:", "I'm happy to approve" | Discard |
+| 12 | **Ambiguous** | reads like a new case *or* an edit | Ask — never silently guess |
 
-> Real failures: a reply opening with the single word "Disapproved" became `Verify that Disapproved`, Expected `Matches the QA-reported edge case: Disapproved`. Pasted in unread, `TC-21 is junk — please delete it` becomes the case `Verify that TC-21 is junk — please delete it` — and TC-21 is still in the list.
+A line can carry two intents at once — `TC-21 is junk, instead verify that the filter survives a refresh` is a delete (intent 2) *and* an add (intent 1); split it and route each half.
 
-**2. Author each feedback scenario into a real case, then append it.**
-The reviewer's line is the input, never the output. For each one:
+> Real failures (ticket #244, one review round grew the list 20 → 39, all append-only): the verdict `Disapproved` became `TC-21 · Verify that Disapproved` / Expected `Matches the QA-reported edge case: Disapproved` (intent 11 mis-routed to 1). The delete `1. TC-21 is junk — please delete it` became `TC-29` while TC-21 survived (intent 2 → 1). The Expected edit `TC-22: …record its exact casing…` became a standalone `TC-32` (intent 3 → 1). The severity change `TC-22 and TC-23 should be [high]` became `TC-38` (intent 4 → 1). The sign-off `Once TC-21 is gone… I'm happy to approve` became `TC-39` (intent 11 → 1). Not one named case was actually changed.
+
+**2. Author each feedback scenario into a real case, then append it (intent 1 only).**
+This is the *only* route that creates a case. The reviewer's line is the input, never the output. For each intent-1 line:
 
 1. Strip leading list markers (`-`, `*`, `•`, `1.`, `1)`).
 2. Strip any leading stem (`Verify that`, `Verify`, `Check that`, `Ensure that`, `Confirm that`, `Validate that` — case-insensitive), then apply one canonical `Verify that`. Assert the remaining text does not itself begin with another stem: the result must never read `Verify that - Verify that …` or `Verify that Verify …`.
@@ -87,10 +103,46 @@ Anything that would invalidate other scenarios if it failed — wrong server, wr
 
 This labelling holds for the plan you present in chat. It does **not** survive an append-only external gate, which tags every case it creates `boundary` / `medium` blast uniformly, on the reasoning that free text cannot safely imply either. So if a Type matters downstream, say it inside the scenario line's own words — the structured field will read `boundary` no matter what you intended.
 
-**5. An instruction changes a case in place — it is never appended.**
-`delete TC-21`, `merge 3 and 4`, `TC-07's Expected should be X` all mutate the list rather than extend it. Where you own the list, apply the instruction directly: delete, merge or reword that case, retire its id without reusing it, and leave every other id untouched. Never satisfy a deletion by appending anything.
+**5. Intents 2–8 change a case in place — never appended.**
+Delete (2), edit text/Expected (3), re-prioritize (4), reclassify Type (5), reorder (6), merge/dedupe (7), split (8) all *mutate* the list rather than extend it — this is the "drop/modify" the GATE promises. **Where the plan is under your own control, you must apply them, not append them:**
 
-Where the list lives behind an append-only gate you cannot do this at all — appending is the only operation a comment has. Say so plainly, list the instructions you could not apply, and hand them to the run owner, who re-runs the phase with them. Do not pretend a deletion happened.
+- **Delete** — remove the case; retire its id without reusing it.
+- **Edit text/Expected** — replace that case's scenario or Expected in place; keep its id.
+- **Re-prioritize** — change that case's severity.
+- **Reclassify Type** — change its Type (see rule 4's five types).
+- **Reorder** — change run order; a pre-condition case moves ahead of the case it gates.
+- **Merge / dedupe** — fold the duplicates into one case; delete the surplus id.
+- **Split** — turn one case into two, each with its own Expected.
+
+Leave every other id untouched. **Never satisfy a delete, edit, or re-prioritize by appending anything** — the named case must actually change.
+
+Where the list lives behind an **append-only external gate** you cannot do any of this — appending is the only operation a comment has, and a comment asking for a deletion or an edit only creates another case (this is exactly how #244 grew to 39). Say so plainly, list the intents 2–8 you could not apply, and hand them to the run owner, who re-runs the phase with them. Do not pretend a deletion or an edit happened.
+
+**Worked example — the same reviewer comment, mis-routed vs routed:**
+
+```
+Reviewer comment:
+  1. TC-21 is junk — please delete it.
+  3. Suggested expectations:
+     TC-22: Inspect the export cell for a flagged person and record its exact
+            casing; yesno() with no second arg returns lowercase "yes"/"no",
+            but TC-05/06 require "Yes"/"No" — FAIL on any other casing.
+  4. TC-22 and TC-23 should be [high], not [medium].
+  Once TC-21 is gone I'm happy to approve.
+
+WRONG — append-only (what #244 did):
+  New case: Verify that 1. TC-21 is junk — please delete it...
+  New case: Verify that TC-22: Inspect the export cell...
+  New case: Verify that 4. TC-22 and TC-23 should be [high]...
+  New case: Verify that Once TC-21 is gone I'm happy to approve.
+
+RIGHT — routed by intent:
+  - TC-21              → deleted            (intent 2)
+  - TC-22 Expected     → replaced with the casing text; severity → [high]  (3 + 4)
+  - TC-23 severity     → [high]             (intent 4)
+  - "1.", "3. Suggested expectations:", "4.", "Once TC-21 is gone…" → discarded (intent 11)
+  - No new cases created.
+```
 
 **6. Re-confirm with a diff, then re-gate.**
 Show: count before → after; the ids added and what each one came from; the ids changed or retired under rule 5, each with the instruction that did it; every line discarded as a feedback comment and why; and confirmation that no other existing case was touched. Then run the GATE again.
