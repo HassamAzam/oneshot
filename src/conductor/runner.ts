@@ -68,7 +68,7 @@ import {
 } from '../lib/worktrees.js';
 import {
   addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
-  issueNotes, issueUrl, swapLabel, type Issue,
+  allIssueNotes, issueUrl, swapLabel, type Issue,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
 import { checkQuota } from '../lib/quota.js';
@@ -241,22 +241,23 @@ function cardState(j: RunJournal, running: string[] = []): CardState {
 async function fetchTicket(iid: number): Promise<Ticket | null> {
   const res = await getIssue(iid);
   if (!res.ok || !res.data) return null;
-  const notes = await issueNotes(iid);
+  const notes = await allIssueNotes(iid);
+  if (!notes.ok) log.warn(`#${iid}: could not read the ticket's comments; phases see the description only`, { error: notes.error });
   return {
     iid: res.data.iid,
     title: res.data.title,
     description: res.data.description,
     labels: res.data.labels,
-    // Newest last, and bounded: a ticket with 200 comments must not blow the
-    // research prompt's budget before it has read a line of code. Oneshot's own
-    // claim and stop notes are dropped too — feeding this system's output back
-    // in as ticket requirements is how a phase ends up working on a summary of
-    // itself.
+    // Every human comment, oldest first and unbounded: requirements are amended
+    // and recordings linked anywhere in a thread, and a window drops them
+    // silently. GitLab's system notes (label swaps, assignments, "mentioned in")
+    // are not comments and would only crowd the prompt. Oneshot's own claim and
+    // stop notes are dropped too — feeding this system's output back in as
+    // ticket requirements is how a phase ends up working on a summary of itself.
     notes: notes.ok && notes.data
       ? notes.data
+        .filter((n) => !n.system && n.body && !n.body.startsWith('Oneshot '))
         .map((n) => n.body)
-        .filter((b) => b && !b.startsWith('assigned to') && !b.startsWith('Oneshot '))
-        .slice(-25)
       : [],
   };
 }
