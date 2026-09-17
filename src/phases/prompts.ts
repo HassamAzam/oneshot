@@ -20,7 +20,7 @@
  *    attributed to this ticket.
  */
 import {
-  STATE, artifactDir, envOr, phaseByName, phases, projectConfig, runDir,
+  STATE, artifactDir, bugReproductionEnabled, envOr, phaseByName, phases, projectConfig, runDir,
   type PhaseConfig,
 } from '../lib/config.js';
 import { readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
@@ -370,6 +370,52 @@ lint reported clean: ${i.lintClean === true}
 tests run: ${i.testsRun || '(none)'}`;
 }
 
+/**
+ * The research phase's bug-reproduction step.
+ *
+ * Research is the last point where the worktree is still the unfixed base
+ * branch, and the conductor has already started the app on it — so this is
+ * where "does the reported bug actually happen?" is cheapest to answer, and
+ * the answer is worth the most: a plan built on a bug nobody saw is a guess.
+ * The verdict lands in research.json; the runner, not the session, acts on it.
+ */
+function reproductionBlock(ctx: PromptCtx): string {
+  if (!bugReproductionEnabled()) {
+    return `
+- Bug reproduction is switched off for this project: set \`reproduction.verdict\` to
+  'not-applicable', \`reason\` to "reproduction disabled", and every other field empty.
+`;
+  }
+  return `
+## Reproduce the bug before anything is planned (skill: bug-reproduction)
+
+Load the \`bug-reproduction\` skill and follow it. In short:
+
+- Decide first whether this ticket reports a BUG (existing behaviour that is wrong) or asks
+  for a FEATURE. A feature, or a change with no runnable surface, is 'not-applicable' — do
+  not bring the app up.
+- For a bug, run it. Your worktree has no ticket commits yet, so it IS unfixed
+  \`${baseBranch()}\` — confirm with \`git log --oneline origin/${baseBranch()}..HEAD\` (must be
+  empty) and record \`git rev-parse HEAD\` as \`testedCommit\`.
+- The app for this worktree was started in the background when this phase began:
+  Worktree ${ctx.worktree ?? '(none leased)'}, port ${ctx.port ?? '(none leased)'} (also
+  \`$ONESHOT_PORT\`). Reach it with \`node $ONESHOT_HOME/scripts/app.cjs ensure\` — no
+  arguments, never \`--ref\` — and log in with the harness exactly as the skill says.
+- Follow the ticket's steps, measure what the bug is about, screenshot into the run's
+  artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`.
+
+**'not-reproduced' stops this run** and labels the ticket Not a Bug on the ticket and in Slack.
+Use it ONLY when the app ran on this unfixed code, you were logged in with access to the screen,
+you executed every reported step, and you observed the correct behaviour — with evidence. A
+different browser, device, data set, role or environment from the one the ticket describes, a
+harness error, or anything you could not run to the end is 'inconclusive', and the run carries on.
+Reading code is never evidence that a bug does not exist.
+
+Do not let reproduction starve the rest of this phase: if bring-up or login is still failing
+after a reasonable wait, record 'inconclusive' with the error and finish the research.
+`;
+}
+
 function findingsOf(ctx: PromptCtx): Finding[] {
   const fromPrior = artifact<{ findings: Finding[] }>(ctx, 'review').findings;
   if (fromPrior) return fromPrior;
@@ -591,7 +637,7 @@ Work out what this ticket actually requires, and trace the code that implements 
   the rest empty when the change genuinely has no UI surface.
 - List what you could NOT determine. An explicit unknown is worth more than a confident
   guess — the plan phase can work around a stated gap and cannot work around a wrong claim.
-
+${reproductionBlock(ctx)}
 Do not write or modify any code.`,
 
   plan: (ctx) => `${ticketBlock(ctx.ticket)}${priorArt(ctx)}

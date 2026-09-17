@@ -112,7 +112,20 @@ export interface ProjectConfig {
      * approved. See src/conductor/reviewgate.ts.
      */
     testcaseReview: string;
+    /**
+     * Put on a ticket whose reported defect `research` could not reproduce on the
+     * base branch, in place of the entry label. Must exist on the project; unset
+     * means the run still stops and says why, but no label is added.
+     */
+    notABug?: string;
   };
+  /**
+   * Reproduce a reported bug on the base branch during `research` before any
+   * fix is planned (skill: bug-reproduction). A run whose defect does not
+   * reproduce stops, is labelled `labels.notABug`, and says so on the ticket
+   * and in Slack. False turns the whole step off.
+   */
+  bugReproduction?: boolean;
   /**
    * Apply the review gates to EVERY run, not only to tickets carrying `labels.review`
    * or touching `highScrutinyPaths`. A change of posture rather than a tuning knob:
@@ -227,6 +240,11 @@ export function projectConfig(): ProjectConfig {
     _project = c;
   }
   return _project;
+}
+
+/** True unless config/project.json switches bug reproduction off. */
+export function bugReproductionEnabled(): boolean {
+  return projectConfig().bugReproduction !== false;
 }
 
 let _phases: PhaseConfig[] | null = null;

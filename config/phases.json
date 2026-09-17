@@ -15,9 +15,10 @@
     },
     {
       "name": "research", "n": 1, "kind": "session", "tier": "heavy",
-      "cwd": "worktree", "maxTurns": 120, "timeoutMin": 45,
+      "cwd": "worktree", "maxTurns": 180, "timeoutMin": 70,
+      "_why_budget": "Raised from 120 turns / 45m when research began reproducing reported bugs in the real app: bring-up of a warm app is seconds but a cold one is ~2m, the login is a handful of turns, and driving the steps costs ~12 turns per step-set, as it does for verify.",
       "writes": ["run"], "onFail": "abort",
-      "skills": [],
+      "skills": ["bug-reproduction"],
       "artifact": "research.json"
     },
     {
