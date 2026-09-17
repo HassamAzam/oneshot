@@ -6,6 +6,22 @@ export interface Ticket {
   description: string | null;
   labels: string[];
   notes?: string[];
+  /** Files attached in the description or a comment, downloaded to the run dir. */
+  documents?: TicketDoc[];
+  /** Document links that point outside GitLab (Google Docs, SharePoint, …). */
+  externalDocs?: Array<{ url: string; where: string }>;
+}
+
+export interface TicketDoc {
+  name: string;
+  /** "description" or "comment N", numbered as the prompt numbers comments. */
+  where: string;
+  /** Absolute path of the downloaded original. Absent when the download failed. */
+  path?: string;
+  /** A plain-text extraction, for formats the Read tool cannot open itself. */
+  textPath?: string;
+  /** Why this one could not be downloaded or converted. */
+  error?: string;
 }
 
 /**

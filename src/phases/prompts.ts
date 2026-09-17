@@ -28,7 +28,7 @@ import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mr
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import {
   GITLAB_PROJECT_URL,
-  type CaseResult, type Finding, type Screenshot, type TestCase, type Ticket,
+  type CaseResult, type Finding, type Screenshot, type TestCase, type Ticket, type TicketDoc,
 } from './types.js';
 
 export interface PromptCtx {
@@ -240,7 +240,30 @@ Labels: ${t.labels.join(', ') || 'none'}
 
 ### Description
 ${t.description?.trim() || '(empty)'}
-${t.notes?.length ? `\n### Comments (${t.notes.length}) — acceptance criteria are often amended here\n${t.notes.map((n, i) => `--- comment ${i + 1} ---\n${n}`).join('\n')}` : '\n(no comments)'}`;
+${t.notes?.length ? `\n### Comments (${t.notes.length}) — acceptance criteria are often amended here\n${t.notes.map((n, i) => `--- comment ${i + 1} ---\n${n}`).join('\n')}` : '\n(no comments)'}${documentsBlock(t)}`;
+}
+
+/**
+ * The ticket's documents by LOCAL path. The upload links in the text above sit
+ * behind GitLab auth; the conductor has already downloaded them, so a phase
+ * opens these paths instead of trying to fetch the links.
+ */
+function documentsBlock(t: Ticket): string {
+  const docs = t.documents ?? [];
+  const external = t.externalDocs ?? [];
+  if (!docs.length && !external.length) return '';
+  const line = (d: TicketDoc): string => {
+    const at = `\`${d.name}\` (${d.where})`;
+    if (!d.path) return `- ${at} — could not be read: ${d.error}`;
+    if (d.textPath) return `- ${at} — text: \`${d.textPath}\` (original: \`${d.path}\`)`;
+    return `- ${at} — \`${d.path}\`${d.error ? ` (${d.error})` : ''}`;
+  };
+  return (docs.length
+    ? `\n\n### Documents attached to the ticket (${docs.length})\nDownloaded from the upload links above. Open these local paths with Read — not the links.\n${docs.map(line).join('\n')}`
+    : '')
+    + (external.length
+      ? `\n\n### Documents linked outside GitLab (${external.length})\n${external.map((e) => `- ${e.url} (${e.where})`).join('\n')}`
+      : '');
 }
 
 /** Title and description only. Captions and demo scripts do not need the AC debate. */
@@ -621,6 +644,12 @@ Work out what this ticket actually requires, and trace the code that implements 
 
 - Read the description AND every comment. Acceptance criteria are routinely amended in a
   comment rather than the description.
+- Open EVERY document listed under the ticket's documents, in full. An attached spec, sheet or
+  PDF is part of the ticket: a requirement or an expected figure that only appears there is
+  still a requirement — put it in \`acceptanceCriteria\` and name the document it came from.
+  Try each document linked outside GitLab with WebFetch; most sit behind a company login, and
+  one that returns a sign-in page or nothing goes in \`unknowns\` by URL. Never guess what an
+  unopened document says.
 - Trace the real execution path and cite \`file:line\` for each step. Do not describe the
   architecture in general terms — follow THIS ticket's path.
 - Determine the blast radius. Consult the module-linkage table in CLAUDE.md: payroll↔leaves,

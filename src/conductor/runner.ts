@@ -53,8 +53,9 @@ import {
   type PhaseConfig,
 } from '../lib/config.js';
 import {
-  claimMarker, claimNoteBody, readOwnership, settleMs,
+  claimMarker, claimNoteBody, isMachineNote, readOwnership, settleMs,
 } from '../lib/claims.js';
+import { collectTicketDocs } from '../lib/ticketdocs.js';
 import {
   archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
   phaseSucceeded, readArtifact,
@@ -243,22 +244,33 @@ async function fetchTicket(iid: number): Promise<Ticket | null> {
   if (!res.ok || !res.data) return null;
   const notes = await allIssueNotes(iid);
   if (!notes.ok) log.warn(`#${iid}: could not read the ticket's comments; phases see the description only`, { error: notes.error });
+  // Every human comment, oldest first and unbounded: requirements are amended
+  // and documents attached anywhere in a thread, and a window drops them
+  // silently. GitLab's system notes (label swaps, assignments, "mentioned in")
+  // are not comments and would only crowd the prompt. This system's own notes
+  // are dropped too — by marker, and by the older 'Oneshot ' prefix — because
+  // feeding its plan and test cases back in as ticket requirements is how a
+  // phase ends up working on a summary of itself.
+  const comments = notes.ok && notes.data
+    ? notes.data
+      .filter((n) => !n.system && n.body && !isMachineNote(n.body) && !n.body.startsWith('Oneshot '))
+      .map((n) => n.body)
+    : [];
+  const docs = await collectTicketDocs(iid, [
+    { where: 'description', body: res.data.description ?? '' },
+    ...comments.map((body, i) => ({ where: `comment ${i + 1}`, body })),
+  ]).catch((err: Error) => {
+    log.warn(`#${iid}: could not collect the ticket's documents`, { error: err.message });
+    return { documents: [], externalDocs: [] };
+  });
   return {
     iid: res.data.iid,
     title: res.data.title,
     description: res.data.description,
     labels: res.data.labels,
-    // Every human comment, oldest first and unbounded: requirements are amended
-    // and recordings linked anywhere in a thread, and a window drops them
-    // silently. GitLab's system notes (label swaps, assignments, "mentioned in")
-    // are not comments and would only crowd the prompt. Oneshot's own claim and
-    // stop notes are dropped too — feeding this system's output back in as
-    // ticket requirements is how a phase ends up working on a summary of itself.
-    notes: notes.ok && notes.data
-      ? notes.data
-        .filter((n) => !n.system && n.body && !n.body.startsWith('Oneshot '))
-        .map((n) => n.body)
-      : [],
+    notes: comments,
+    documents: docs.documents,
+    externalDocs: docs.externalDocs,
   };
 }
 
