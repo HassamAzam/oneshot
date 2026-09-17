@@ -36,7 +36,7 @@ Also surface here: which scenarios are UI-driven vs API/webshell, and which **pe
 
 ## Revising the plan after feedback
 
-When the reply to the GATE is anything other than a go-ahead, read the whole reply first and work out what the reviewer is actually asking for. The reply is raw material, not a list of lines to paste in. Classify each line by intent (rule 1), then route it: a genuinely new scenario becomes a proper case and is appended (rules 2–4); a line acting on an existing case edits/deletes/re-prioritizes/reclassifies/reorders/merges/splits that case in place (rule 5); a verdict, question or meta note is answered or discarded, never made a case. Only newly appended cases get new ids — every untouched existing case keeps its id and wording.
+When the reply to the GATE is anything other than a go-ahead, read the whole reply first and work out what the reviewer is actually asking for. The reply is raw material, not a list of lines to paste in. Classify each line by intent (rule 1), then route it: a genuinely new scenario becomes a proper case and is appended (rules 2–4, intent 1); a line acting on an existing case edits/deletes/re-prioritizes/reclassifies/reorders/merges/splits that case in place (rule 5, intents 2–8); a verdict, question, ambiguous or meta note is answered, held or discarded, never made a case (rule 6, intents 9–12). Only newly appended cases get new ids — every untouched existing case keeps its id and wording.
 
 **1. Classify every line by INTENT before acting on any of it.**
 Read the whole reply, then decide what each line *intends*. The intent picks the route — and **only intent 1 ever appends a new case.** Decide intent in this order:
@@ -48,22 +48,22 @@ Read the whole reply, then decide what each line *intends*. The intent picks the
 
 | # | Intent | Example phrasing | Action |
 |---|---|---|---|
-| 1 | **Add** | "also add a case for an empty export" | Append a new case — the only append route (rules 2–4) |
-| 2 | **Delete** | "TC-21 is junk, remove it" | Delete that case; retire its id; record in the diff (rule 5) |
-| 3 | **Edit text/Expected** | "TC-22: the Expected should be…" | Replace that case's scenario/Expected — **no** new case (rule 5) |
-| 4 | **Re-prioritize** | "TC-22 should be [high], not [medium]" | Change that case's severity (rule 5) |
-| 5 | **Reclassify type** | "TC-17 is a regression case, not edge" | Change its Type (rule 5) |
-| 6 | **Reorder** | "run TC-23 first — it's a pre-condition for TC-06" | Change run order (rule 5) |
-| 7 | **Merge / dedupe** | "TC-22 and TC-05 are the same, combine them" | Merge into one; delete the duplicate (rule 5) |
-| 8 | **Split** | "TC-04 tests two things, split it" | Turn one case into two (rule 5) |
-| 9 | **Approve** | the single word "approved" | Proceed; leave the list unchanged |
-| 10 | **Question** | "does TC-06 cover the short-form export?" | Answer or ask back — never make it a case |
-| 11 | **Noise / meta** | "Disapproved", "Suggested expectations:", "Four things to fix by hand:", "I'm happy to approve" | Discard |
-| 12 | **Ambiguous** | reads like a new case *or* an edit | Ask — never silently guess |
+| 1 | **Add** | "also add a case for the empty/zero state" | Append a new case — the only append route (rules 2–4) |
+| 2 | **Delete** | "TC-N is junk, remove it" | Delete that case; retire its id; record in the diff (rule 5) |
+| 3 | **Edit text/Expected** | "TC-N: the Expected should be…" | Replace that case's scenario/Expected — **no** new case (rule 5) |
+| 4 | **Re-prioritize** | "TC-N should be [high], not [medium]" | Change that case's severity (rule 5) |
+| 5 | **Reclassify type** | "TC-N is a regression case, not edge" | Change its Type (rule 5) |
+| 6 | **Reorder** | "run TC-N first — it's a pre-condition for TC-M" | Change run order (rule 5) |
+| 7 | **Merge / dedupe** | "TC-N and TC-M are the same, combine them" | Merge into one; delete the duplicate (rule 5) |
+| 8 | **Split** | "TC-N tests two things, split it" | Turn one case into two (rule 5) |
+| 9 | **Approve** | the single word "approved" | Proceed unchanged (rule 6) |
+| 10 | **Question** | "does TC-N cover the short-form path?" | Answer or ask back — never a case (rule 6) |
+| 11 | **Noise / meta** | "Disapproved", "Suggested expectations:", "N things to fix by hand:", "I'm happy to approve" | Discard (rule 6) |
+| 12 | **Ambiguous** | reads like a new case *or* an edit | Ask before acting (rule 6) |
 
-A line can carry two intents at once — `TC-21 is junk, instead verify that the filter survives a refresh` is a delete (intent 2) *and* an add (intent 1); split it and route each half.
+A line can carry two intents at once — `TC-N is junk, instead verify that the filter survives a refresh` is a delete (intent 2) *and* an add (intent 1); split it and route each half.
 
-> Real failures (ticket #244, one review round grew the list 20 → 39, all append-only): the verdict `Disapproved` became `TC-21 · Verify that Disapproved` / Expected `Matches the QA-reported edge case: Disapproved` (intent 11 mis-routed to 1). The delete `1. TC-21 is junk — please delete it` became `TC-29` while TC-21 survived (intent 2 → 1). The Expected edit `TC-22: …record its exact casing…` became a standalone `TC-32` (intent 3 → 1). The severity change `TC-22 and TC-23 should be [high]` became `TC-38` (intent 4 → 1). The sign-off `Once TC-21 is gone… I'm happy to approve` became `TC-39` (intent 11 → 1). Not one named case was actually changed.
+> Classic mis-routes, all the same failure — a non-append intent appended as a new case, leaving the list to grow append-only across rounds while the named case stays untouched: a verdict (`Disapproved`) appended as `Verify that Disapproved` / Expected `Matches the QA-reported edge case: Disapproved` (intent 11 → 1); a delete (`TC-N is junk — please delete it`) appended as a fresh case while TC-N survives (intent 2 → 1); an Expected edit (`TC-N: record its exact casing…`) appended as a standalone case instead of replacing TC-N's Expected (intent 3 → 1); a severity change (`TC-N and TC-M should be [high]`) appended rather than re-prioritizing those cases (intent 4 → 1); a sign-off (`Once TC-N is gone I'm happy to approve`) appended as a case (intent 11 → 1). In each, the correct route was to act on the named case (or discard the meta line), never to append.
 
 **2. Author each feedback scenario into a real case, then append it (intent 1 only).**
 This is the *only* route that creates a case. The reviewer's line is the input, never the output. For each intent-1 line:
@@ -116,7 +116,7 @@ Delete (2), edit text/Expected (3), re-prioritize (4), reclassify Type (5), reor
 
 Leave every other id untouched. **Never satisfy a delete, edit, or re-prioritize by appending anything** — the named case must actually change.
 
-Where the list lives behind an **append-only external gate** you cannot do any of this — appending is the only operation a comment has, and a comment asking for a deletion or an edit only creates another case (this is exactly how #244 grew to 39). Say so plainly, list the intents 2–8 you could not apply, and hand them to the run owner, who re-runs the phase with them. Do not pretend a deletion or an edit happened.
+Where the list lives behind an **append-only external gate** you cannot do any of this — appending is the only operation a comment has, and a comment asking for a deletion or an edit only creates another case. Say so plainly, list the intents 2–8 you could not apply, and hand them to the run owner, who re-runs the phase with them. Do not pretend a deletion or an edit happened.
 
 **Worked example — the same reviewer comment, mis-routed vs routed:**
 
@@ -130,7 +130,7 @@ Reviewer comment:
   4. TC-22 and TC-23 should be [high], not [medium].
   Once TC-21 is gone I'm happy to approve.
 
-WRONG — append-only (what #244 did):
+WRONG — append-only:
   New case: Verify that 1. TC-21 is junk — please delete it...
   New case: Verify that TC-22: Inspect the export cell...
   New case: Verify that 4. TC-22 and TC-23 should be [high]...
@@ -144,8 +144,16 @@ RIGHT — routed by intent:
   - No new cases created.
 ```
 
-**6. Re-confirm with a diff, then re-gate.**
-Show: count before → after; the ids added and what each one came from; the ids changed or retired under rule 5, each with the instruction that did it; every line discarded as a feedback comment and why; and confirmation that no other existing case was touched. Then run the GATE again.
+**6. Intents 9–12 never touch the case list.**
+The remaining intents change nothing structurally — they are answered, acted on outside the list, or held:
+
+- **Approve (9)** — a go-ahead. Proceed to the next phase; leave every case exactly as it is.
+- **Question (10)** — the reviewer is asking, not instructing. Answer it (or ask back); if the answer implies a change, that change is a *fresh* intent 1–8 line to route on its own. The question itself is never a case.
+- **Noise / meta (11)** — verdict words, headings, "suggested expectations:" lead-ins, "N things to fix by hand" notes, greetings, `@mentions`, `---`, blank lines, sign-offs. Discard; record in the diff as discarded and why.
+- **Ambiguous (12)** — reads like a new case *and* like an edit, or names no case yet clearly refers to one. Ask which before acting. Never silently append, never silently drop.
+
+**7. Re-confirm with a diff, then re-gate.**
+Show: count before → after; the ids added and what each one came from (intent 1); the ids changed or retired under rule 5 (intents 2–8), each with the line that did it; every line answered or discarded under rule 6 (intents 9–12) and why; and confirmation that no other existing case was touched. Then run the GATE again.
 
 > **If the plan feeds an append-only external gate** (e.g. a Oneshot "Test cases to be verified" list): every non-empty line of a comment becomes a case verbatim — instructions and verdict words included — and the Expected field cannot be set by comment at all, because the gate always overwrites it with a restatement of the line. So compose the reply as bare scenario lines only: no verdict word, no instructions, no bullets, no sign-off, with the Expected carried inside each line's own text. Deletions and corrections go to the run owner directly; a comment asking for one only creates another case.
 
