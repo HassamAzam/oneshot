@@ -28,11 +28,20 @@ import {
   CONTEXT_REPO, WORK_REPO, WT_ROOT, envOr, expandPath, portPool, projectConfig,
 } from './config.js';
 import { db } from './db.js';
+import { retryRefLockRace } from './gitfetch.js';
 import { log } from './log.js';
 
 function git(args: string[], cwd = WORK_REPO): string {
   return execFileSync('git', args, {
     cwd, encoding: 'utf8', timeout: 120_000,
+    // Hygiene, not a load-bearing fix: whatever reads this stderr should read
+    // it in one language. "cannot lock ref", the message gitfetch.ts matches
+    // on, is NOT translated by git's files backend — run under
+    // LC_ALL=fr_FR.UTF-8 it comes back byte-identical English — so nothing
+    // today depends on this. It starts mattering the day a conductor runs on a
+    // Linux box with the message catalogs installed, or the day these refs move
+    // to the reftable backend, where that string IS in the translations.
+    env: { ...process.env, LC_ALL: 'C' },
     // stderr is piped, not inherited: `rev-parse --verify` on a branch that
     // does not exist yet is an expected probe, and letting its `fatal:` reach
     // the console makes a normal worktree creation look like a failure.
@@ -357,7 +366,9 @@ export function leaseWorktree(
   const worktree = join(WT_ROOT, name);
 
   if (!existsSync(worktree)) {
-    git(['fetch', 'origin', base]);
+    // Two runs starting together fetch the same base in the same shared repo;
+    // the loser of the ref lock is retried rather than blocked — see gitfetch.ts.
+    retryRefLockRace(() => git(['fetch', 'origin', base]));
     const branchExists = (() => {
       try { git(['rev-parse', '--verify', `refs/heads/${branch}`]); return true; } catch { return false; }
     })();
