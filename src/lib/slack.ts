@@ -82,7 +82,7 @@ async function call(method: string, body: Record<string, unknown>): Promise<Reco
 
 export interface PhaseLine {
   phase: string;
-  state: 'done' | 'running' | 'pending' | 'failed' | 'skipped';
+  state: 'done' | 'running' | 'pending' | 'failed' | 'skipped' | 'waiting';
   detail?: string;
 }
 
@@ -92,6 +92,7 @@ const ICON: Record<PhaseLine['state'], string> = {
   pending: ':white_circle:',
   failed: ':x:',
   skipped: ':heavy_minus_sign:',
+  waiting: ':hourglass:',
 };
 
 export interface CardState {

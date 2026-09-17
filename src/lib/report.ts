@@ -543,7 +543,7 @@ td.err{color:#a3341f;max-width:340px;overflow-wrap:anywhere}
 .pill.ok{background:#dff3e2;color:#20603a}
 .pill.failed,.pill.refused,.pill.blocked,.pill.aborted{background:#fadfd9;color:#8f2c17}
 .pill.warned,.pill.unrecorded{background:#fdf1cf;color:#7a5606}
-.pill.skipped{background:#e6e9ed;color:#5b636d}
+.pill.skipped,.pill.parked{background:#e6e9ed;color:#5b636d}
 .hidden{display:none}
 .detail td{background:#fbfcfd;padding:0}
 .pad{padding:14px 16px}

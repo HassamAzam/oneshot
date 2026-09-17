@@ -41,8 +41,13 @@ export interface PhaseRecord {
    * it was. Conflating them is how a run spends its cycle budget on deaths
    * that produced no findings, then blocks on the bookkeeping rather than on
    * anything wrong with the ticket.
+   *
+   * 'parked' is neither: the phase is waiting on a person (a Review ticket's
+   * MR awaiting a human merge). It is not a verdict, so it spends no lap and is
+   * never mistaken for the block a remediation should repair — and it is not a
+   * success, so a resumed run still re-enters the phase to check again.
    */
-  status: 'ok' | 'failed' | 'infra' | 'skipped' | 'refused' | 'warned';
+  status: 'ok' | 'failed' | 'infra' | 'skipped' | 'refused' | 'warned' | 'parked';
   startedAt: number;
   endedAt: number;
   model?: string;

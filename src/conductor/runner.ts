@@ -219,6 +219,7 @@ function cardLines(j: RunJournal, running: string[]): PhaseLine[] {
         return { phase: p.name, state: 'done', detail: recs.length > 1 ? `${recs.length} laps` : undefined };
       }
       if (last.status === 'skipped') return { phase: p.name, state: 'skipped' };
+      if (last.status === 'parked') return { phase: p.name, state: 'waiting' };
       return { phase: p.name, state: 'failed' };
     });
 }
@@ -342,6 +343,43 @@ function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] 
   // what a WRONG RESULT means and an infra death produced no result at all.
   if (infra) return 'infra';
   return 'failed';
+}
+
+/**
+ * The status a code phase's result is recorded under.
+ *
+ * A park is decided BEFORE the failure policy, because it is not a failure:
+ * `merge` returns `ok: false, park: true` on every poll of a Review ticket's MR
+ * that no person has merged yet. Recording those as 'failed' filled the ledger
+ * with a failed merge per poll (32 of 37 merge rows), burying the handful of
+ * real refusals and disagreeing with the `In Review` label on the ticket.
+ */
+export function codePhaseStatus(
+  p: PhaseConfig, done: { ok: boolean; park?: boolean },
+): PhaseRecord['status'] {
+  if (done.ok) return 'ok';
+  if (done.park) return 'parked';
+  return statusForFailure(p);
+}
+
+/**
+ * How long a resumed, merge-parked run should keep waiting before the merge
+ * phase asks GitLab again — or null when it should run now.
+ *
+ * `wasParked` must be the run's status as it was CLAIMED, before the resume
+ * flips the journal to 'running'. Checking the live journal instead is what
+ * made this gate dead code: it always read 'running', so every conductor tick
+ * walked the pipeline to `merge` and wrote another row, every ~3 minutes under
+ * --follow and every minute under the loop, instead of once per poll window.
+ */
+export function mergePollWait(o: {
+  wasParked: boolean; reviewMode: boolean; dryRun: boolean;
+  lastCheckAt: number | undefined; mergeSucceeded: boolean; now: number;
+}): number | null {
+  if (!o.wasParked || !o.reviewMode || o.dryRun || o.mergeSucceeded) return null;
+  if (typeof o.lastCheckAt !== 'number') return null;
+  const dueIn = o.lastCheckAt + MERGE_POLL_MS - o.now;
+  return dueIn > 0 ? dueIn : null;
 }
 
 /**
@@ -517,6 +555,9 @@ export async function runTicket(
   }
 
   const resuming = decision.kind === 'resume';
+  // Read before the resume below overwrites both: `j` IS decision.journal.
+  const wasParked = decision.kind === 'resume' && decision.journal.status === 'parked';
+  const parkedWhy = wasParked ? decision.journal.blockedWhy : undefined;
   const runId = resuming ? decision.journal.runId : newRunId();
 
   // The claim is an OWNERSHIP test on both paths, and that is the whole point.
@@ -609,16 +650,18 @@ export async function runTicket(
   // merge poll that has already served its purpose. Removing the Review
   // label still releases it immediately — `reviewMode` is re-derived above,
   // and this is skipped the moment it reads false.
-  if (j.status === 'parked' && reviewMode && !DRY_RUN
-    && typeof j.humanMergeCheckAt === 'number' && !phaseSucceeded(iid, 'merge')) {
-    const dueIn = j.humanMergeCheckAt + MERGE_POLL_MS - Date.now();
-    if (dueIn > 0) {
+  {
+    const dueIn = mergePollWait({
+      wasParked, reviewMode, dryRun: DRY_RUN, lastCheckAt: j.humanMergeCheckAt,
+      mergeSucceeded: phaseSucceeded(iid, 'merge'), now: Date.now(),
+    });
+    if (dueIn !== null) {
       log.info(`#${iid} parked on a human merge — next check in ${Math.ceil(dueIn / 60_000)}m`);
       // Through finish(), not a bare return: the claim above has already
       // flipped the journal and the run row to 'running'. Leaving them there
       // would hold a dispatch slot with no phase behind it — the exact
       // starvation a park exists to avoid.
-      return finish(j, 'parked', j.blockedWhy ?? 'awaiting a human merge');
+      return finish(j, 'parked', parkedWhy ?? 'awaiting a human merge');
     }
   }
 
@@ -1415,7 +1458,8 @@ export async function runTicket(
 
     const rowId = phaseStart(runId, p.name, lap, 'code');
     const done = await CODE_PHASES[p.name]!({ iid, runId, journal: j, prior });
-    phaseEnd(rowId, done.ok ? 'ok' : statusForFailure(p), { detail: done.error });
+    const status = codePhaseStatus(p, done);
+    phaseEnd(rowId, status, { detail: done.error });
 
     // A code phase hands off exactly like a session one: through an artifact on
     // disk, so a resumed run reads the same thing the live one did.
@@ -1429,7 +1473,7 @@ export async function runTicket(
     recordPhase(iid, {
       phase: p.name,
       lap,
-      status: done.ok ? 'ok' : statusForFailure(p),
+      status,
       startedAt,
       endedAt: Date.now(),
       error: done.error,
