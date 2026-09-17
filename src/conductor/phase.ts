@@ -24,6 +24,7 @@ import { recordUsage, looksLikeUsageLimit, parkForQuota } from '../lib/quota.js'
 import { transcriptPath, writeArtifact } from '../lib/artifacts.js';
 import { logEvent } from '../lib/db.js';
 import { log } from '../lib/log.js';
+import { accountActionRequired } from '../lib/accountgate.js';
 import { schemaFor } from './schemas.js';
 import { hooksFor } from './hooks.js';
 
@@ -66,6 +67,12 @@ export interface PhaseOutput {
    * instead of spending a cycle lap on them. See PhaseRecord['status'].
    */
   infra?: boolean;
+  /**
+   * The bundled CLI exited on an account-level notice (lib/accountgate.ts).
+   * Also `infra` — no lap is spent — but the runner stops on it instead of
+   * re-attempting, because every re-attempt dies the same way.
+   */
+  accountAction?: string;
   rateLimited: boolean;
 }
 
@@ -280,6 +287,17 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   const limitSignals: string[] = [];
   /** Stream messages seen — the only honest way to tell a wedged spawn from a slow phase. */
   let sawActivity = 0;
+  /**
+   * The CLI's stderr, kept so an account-action exit can be recognised after
+   * the fact. Bounded at BOTH ends on purpose: an account notice is printed
+   * first, before anything else runs, so the head is where it normally lands —
+   * but MCP and npx startup chatter can run to tens of kilobytes, and a
+   * head-only buffer then holds nothing but that chatter. Whichever end a
+   * bounded buffer keeps is the end it misses the notice at, so keep both.
+   */
+  const STDERR_KEEP = 8_000;
+  let stderrHead = '';
+  let stderrTail = '';
   let settled = false;
   let turnsSoFar = 0;
   const phaseStartedAt = Date.now();
@@ -322,6 +340,8 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
         abortController: ac,
         stderr: (d: string) => {
           try { appendFileSync(tee, `${JSON.stringify({ type: 'cli-stderr', text: d })}\n`); } catch { /* best effort */ }
+          if (stderrHead.length < STDERR_KEEP) stderrHead += d;
+          stderrTail = (stderrTail + d).slice(-STDERR_KEEP);
         },
       },
     });
@@ -519,6 +539,30 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     parkForQuota(signalText);
     out.rateLimited = true;
     out.ok = false;
+  }
+
+  // An account gate is a fact about what the CLI PRINTED, so it is read once,
+  // here, off every failure path rather than from inside one of them.
+  //
+  // It used to live in the catch's `else` branch and only when sawActivity was
+  // 0, and missed three ways. sawActivity counts EVERY stream frame including
+  // `system:init`, so one frame before the exit was enough to null it. A phase
+  // that timed out took the `timedOut` branch and never consulted it at all —
+  // and nothing about running out of wall clock makes the notice less true.
+  // And the notice could sit behind more startup chatter than the head buffer
+  // held, which is what the tail is for.
+  //
+  // Gated on the phase having FAILED, and on nothing else: a session that
+  // finished its work is not blocked on anything, whatever its stderr said on
+  // the way. Marked infra for the same reason the other pre-session deaths are
+  // — no lap is spent on a phase that never ran — while the runner treats it
+  // as a stop rather than a re-attempt.
+  if (!out.ok) {
+    const action = accountActionRequired(stderrHead) ?? accountActionRequired(stderrTail);
+    if (action) {
+      out.accountAction = action;
+      out.infra = true;
+    }
   }
 
   if (out.data) writeArtifact(iid, cfg.artifact ?? `${cfg.name}.json`, out.data);

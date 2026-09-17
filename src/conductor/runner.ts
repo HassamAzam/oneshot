@@ -78,6 +78,7 @@ import {
 } from '../lib/db.js';
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
 import { log } from '../lib/log.js';
+import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
@@ -1040,6 +1041,15 @@ export async function runTicket(
     // The claiming PHASE travels with the control decision, not just its
     // reason string: remediation is told which phase to diagnose, and reading
     // that back out of a reason built for a human would be guesswork.
+    //
+    // KNOWN GAP, deliberately not fixed here: "first wins" is positional, and
+    // the position is phase order. In a group, an earlier member failing
+    // ordinarily out-claims a later member that hit an account gate — the run
+    // then retries the earlier phase straight back into the same gate. It takes
+    // BOTH members failing on the same pass to reach, so nothing does it today,
+    // and the fix is a precedence rule over every control kind (a stop nothing
+    // can retry past should outrank a retry) rather than anything about account
+    // gates. That belongs in its own change, with its own tests.
     const flow: Array<{ control: Control; from: string }> = [];
     const claim = (c: Control, from: string): void => {
       if (c.kind !== 'advance' && flow.length === 0) flow.push({ control: c, from });
@@ -1051,6 +1061,7 @@ export async function runTicket(
       // successful one whose artifact happens to say otherwise.
       const caseFail = r.out.ok ? failedCases(r.cfg.name, r.out.data) : null;
       const phaseOk = r.out.ok && caseFail === null;
+      const accountAction = phaseOk ? undefined : r.out.accountAction;
 
       recordPhase(iid, {
         phase: r.cfg.name,
@@ -1062,9 +1073,46 @@ export async function runTicket(
         turns: r.out.turns,
         weighted: r.out.weighted,
         sessionId: r.out.sessionId,
-        error: r.out.error ?? r.out.blocked ?? caseFail ?? undefined,
+        // The notice ahead of r.out.error, which for an account-gate exit is
+        // the SDK's bare "Claude Code process exited with code 1" — a string
+        // that says nothing and reads like a wedged spawn. The record's status
+        // is still 'infra' (there is no account-gate member on PhaseRecord, and
+        // adding one means touching infraAttemptsOf, the dashboard and unblock
+        // for no decision any of them make differently), so this text is the
+        // only thing in the journal that tells the two apart.
+        error: accountAction ?? r.out.error ?? r.out.blocked ?? caseFail ?? undefined,
       });
       j = readJournal(iid) ?? j;
+
+      // Ahead of the rate-limit park below, and ahead of the infra re-attempt
+      // in afterFailure: a park is recoverable by waiting and an account gate
+      // never is, so whichever of the two is real, stopping on the gate is the
+      // answer that does not cost a run.
+      //
+      // Honestly: the two flags cannot both be set today. `rateLimited` needs a
+      // mid-stream frame naming a limit, and a CLI that hard-exits on an
+      // account notice emits no frames at all — the stderr text is never fed to
+      // the limit detector either, so it cannot cross-trigger. What makes the
+      // order matter is the check above it, which now runs on every failure
+      // path instead of only on a session that produced nothing. A phase that
+      // streamed, hit a limit frame, and had a gate notice in its stderr is now
+      // expressible, and without this it would park on the recoverable one.
+      if (accountAction) {
+        prior[r.cfg.name] = null;
+        logEvent('account_action', {
+          phase: r.cfg.name, lap: r.lap, notice: accountAction,
+        }, { runId, phase: r.cfg.name });
+        claim({
+          kind: 'stop',
+          status: 'blocked',
+          reason: `${r.cfg.name}: ${accountActionReason(accountAction, iid)}`,
+          // Nothing on this machine can accept a notice on the account's
+          // behalf, so offering the stop to remediation only spends a heavy
+          // session establishing that.
+          noRemediation: true,
+        }, r.cfg.name);
+        continue;
+      }
 
       if (r.out.rateLimited) {
         prior[r.cfg.name] = null;
@@ -1453,10 +1501,25 @@ export async function runTicket(
       status: out.ok ? 'ok' : statusForFailure(cfgT, out.infra),
       startedAt, endedAt: Date.now(), model: modelFor(cfgT),
       turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
-      error: out.error ?? out.blocked ?? undefined,
+      error: out.accountAction ?? out.error ?? out.blocked ?? undefined,
     });
     j = readJournal(iid) ?? j;
     await updateCard(j.slackTs ?? '', cardState(j));
+
+    // The same stop the reconciler makes above, on the other runPhase() call
+    // site: an account gate is not something re-triaging gets past, and this
+    // path would otherwise spend the free infra re-attempts below on it.
+    if (out.accountAction) {
+      logEvent('account_action', {
+        phase: cfgT.name, lap, notice: out.accountAction,
+      }, { runId, phase: cfgT.name });
+      return {
+        kind: 'stop',
+        status: 'blocked',
+        reason: `${cfgT.name}: ${accountActionReason(out.accountAction, iid)}`,
+        noRemediation: true,
+      };
+    }
 
     // Retrying at merge re-detects the same threads, so an infra death re-triages for free.
     if (!out.ok) return afterFailure(cfgT, mergeIndex, out.blocked ?? out.error ?? 'triage failed', out.infra);
