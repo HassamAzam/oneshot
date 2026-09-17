@@ -36,7 +36,7 @@ import { releasePort } from '../lib/worktrees.js';
 import {
   acceptMergeRequest, addIssueNote, addMergeRequestNote, compareRefs, createMergeRequest,
   failedJobs, findMergeRequests, getBranch, getMergeRequest, issueNotes, mergeRefusal,
-  mergeRequestUrl, mrDiscussions, projectSettings, rebaseMergeRequest, updateMergeRequest,
+  mergeRequestUrl, mrDiscussions, projectSettings, rebaseMergeRequest, swapLabel, updateMergeRequest,
   type MergeRequest, type ProjectSettings,
 } from '../lib/gitlab.js';
 import type { CodePhaseCtx } from './runner.js';
@@ -120,6 +120,8 @@ type MergeArtifact = {
   promotion: PromotionRecord | null;
   promotionsSkipped: Array<{ from: string; to: string; detail: string }>;
   threadPosted: boolean;
+  /** The in-review label is on the ticket. Carried so each poll does not re-apply it. */
+  inReviewLabeled: boolean;
   /** The completion record, once posted. Carried across a re-run so it is posted once. */
   successNoteId: number | null;
   successNotePosted: boolean;
@@ -141,6 +143,7 @@ function blankMerge(): MergeArtifact {
     waitedForCiMs: 0, pipeline: null,
     promotion: null, promotionsSkipped: [],
     threadPosted: false,
+    inReviewLabeled: false,
     successNoteId: null, successNotePosted: false, mrNotePosted: false, recordFailures: [],
     dryRun: false, wouldAccept: null,
     blockedWhy: null, summary: '',
@@ -862,6 +865,28 @@ function qualityGate(iid: number): string | null {
   return null;
 }
 
+/**
+ * Label the ticket as waiting on a reviewer, once per run.
+ *
+ * Applied on the first real poll of the human-merge wait — the tick right
+ * after the MR opens — and never re-applied while the flag is carried, so a
+ * ticket parked for a day costs one label write, not one per poll. A failed
+ * write leaves the flag down and is retried next poll. finish() takes it off.
+ */
+async function markInReview(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<void> {
+  const label = projectConfig().labels.inReview;
+  if (!label || rec.inReviewLabeled) return;
+  const res = await swapLabel(ctx.iid, [], [label]);
+  if (res.ok) {
+    rec.inReviewLabeled = true;
+    log.info(`merge: #${ctx.iid} labelled '${label}' while !${rec.mrIid} awaits review`);
+  } else {
+    log.warn(`merge: could not add '${label}' to #${ctx.iid} — will retry next poll`, {
+      error: res.error ?? res.kind,
+    });
+  }
+}
+
 export async function mergePhase(
   ctx: CodePhaseCtx,
 ): Promise<{ ok: boolean; error?: string; park?: boolean; feedback?: MrFeedbackSignal }> {
@@ -882,6 +907,7 @@ export async function mergePhase(
   const rec = blankMerge();
   rec.rebaseCount = carried?.rebaseCount ?? 0;
   rec.threadPosted = carried?.threadPosted === true;
+  rec.inReviewLabeled = carried?.inReviewLabeled === true;
   rec.successNoteId = carried?.successNoteId ?? null;
   rec.successNotePosted = carried?.successNotePosted === true;
   rec.mrNotePosted = carried?.mrNotePosted === true;
@@ -978,6 +1004,7 @@ export async function mergePhase(
       + `the run picks up from there. Next check in ${Math.round(MERGE_POLL_MS / 60_000)}m. `
       + `${rec.mrUrl ?? ''}`;
     rec.summary = `[Review] awaiting a human merge of !${mrIid}`;
+    await markInReview(ctx, rec);
     persistMerge(ctx, rec);
     log.warn(`merge: awaiting a human merge — ${why}`);
     return { ok: false, error: why, park: true };
