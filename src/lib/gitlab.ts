@@ -181,6 +181,36 @@ export async function issueNotes(
   return res;
 }
 
+/** Enough for any real ticket; only here so a misbehaving API cannot loop forever. */
+const MAX_NOTE_PAGES = 50;
+
+/**
+ * EVERY comment on a ticket, oldest first — for the phases that read the ticket
+ * as requirements. issueNotes()'s newest-hundred window is right for the claim
+ * protocol, which looks for recent notes of its own, and wrong here: an
+ * acceptance criterion amended in comment 3 of 140, or the link to a recording,
+ * is exactly what a window drops without a trace.
+ *
+ * All or nothing. A page failing half-way returns the failure rather than the
+ * pages already read, because a partial thread looks exactly like a whole one.
+ */
+export async function allIssueNotes(
+  iid: number,
+): Promise<GitlabResult<IssueNote[]>> {
+  const all: IssueNote[] = [];
+  for (let page = 1; page <= MAX_NOTE_PAGES; page++) {
+    const res = await call<IssueNote[]>(
+      'GET',
+      `/projects/${projectId()}/issues/${iid}/notes?per_page=100&page=${page}&order_by=created_at&sort=asc`,
+    );
+    if (!res.ok || !res.data) return res;
+    all.push(...res.data);
+    if (res.data.length < 100) return { ...res, data: all };
+  }
+  log.warn(`#${iid}: notes exceed ${MAX_NOTE_PAGES * 100}; reading only the oldest ${all.length}`);
+  return { ok: true, kind: 'ok', status: 200, data: all };
+}
+
 /**
  * One note, by id — not "the newest hundred and hope it's in there".
  *
