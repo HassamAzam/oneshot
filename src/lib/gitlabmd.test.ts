@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { codeSpan, mdText } from './gitlabmd.js';
+import { codeSpan, mdText, tableCell } from './gitlabmd.js';
 
 test('bare tags outside code are escaped so no HTML block opens', () => {
   assert.equal(mdText('set the <title> & <h1>'), 'set the &lt;title&gt; &amp; &lt;h1&gt;');
@@ -73,4 +73,21 @@ test('codeSpan survives backticks in its content', () => {
   assert.equal(codeSpan('src/a.js'), '`src/a.js`');
   assert.equal(codeSpan('we`ird.js'), '``we`ird.js``');
   assert.equal(codeSpan('`edge'), '`` `edge ``');
+});
+
+test('tableCell escapes the two characters that decide a row\'s shape', () => {
+  assert.equal(tableCell('Save | Cancel'), 'Save \\| Cancel');
+  assert.equal(tableCell('first\nsecond'), 'first<br>second');
+  assert.equal(tableCell('first\r\nsecond'), 'first<br>second');
+  assert.equal(tableCell(undefined), '');
+  assert.equal(tableCell(3), '3');
+});
+
+// The order is the whole point: mdText needs real newlines to find fences, and
+// would escape a <br> that was introduced before it ran.
+test('tableCell keeps mdText\'s HTML-block guard and hex chip', () => {
+  assert.equal(tableCell('a <main> landmark'), 'a &lt;main&gt; landmark');
+  assert.equal(tableCell('the #fafafa | #0af pair'), 'the `#fafafa` \\| `#0af` pair');
+  // GFM resolves \| before inline parsing, so an escape holds inside a code span too.
+  assert.equal(tableCell('`a | b`'), '`a \\| b`');
 });

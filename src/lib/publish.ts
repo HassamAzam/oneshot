@@ -30,7 +30,7 @@ import {
   addIssueNote, addMergeRequestNote, mergeRequestUrl, uploadFile, type Upload,
 } from './gitlab.js';
 import { log } from './log.js';
-import { mdText } from './gitlabmd.js';
+import { mdText, tableCell } from './gitlabmd.js';
 
 /** GitLab rejects very large attachments; skip them with a note rather than failing. */
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -66,29 +66,49 @@ interface PlanArtifact {
   steps?: Array<{ n: number; what: string; files: string[]; layer: string }>;
   migrations?: boolean;
   risks?: string[];
+  /** The next three are absent on plans written before they existed. */
+  openQuestions?: string[];
+  outOfScope?: string[];
+  acceptanceCoverage?: Array<{ criterion: string; coveredBy: string; status: string; note: string }>;
+  feedbackResponse?: Array<{ point: string; response: string; where: string; note: string }>;
   summary?: string;
 }
 
-function renderPlanMd(iid: number, title: string, plan: PlanArtifact): string {
+export function renderPlanMd(iid: number, title: string, plan: PlanArtifact): string {
+  // Every cell holding model prose goes through `tableCell`; `layer` and
+  // `status` are schema enums and `n` is a number, so they cannot break a row.
+  // `files` are paths joined with `<br>` — that is a rendering choice for an
+  // array, not an escape, which is why the path itself still needs one.
   const steps = (plan.steps ?? [])
-    .map((s) => `| ${s.n} | ${s.layer} | ${s.what} | ${(s.files ?? []).join('<br>') || '—'} |`)
+    .map((s) => `| ${s.n} | ${s.layer} | ${tableCell(s.what)} | ${
+      (s.files ?? []).map(tableCell).join('<br>') || '—'} |`)
+    .join('\n');
+  const questions = (plan.openQuestions ?? []).map((q) => `- ${q}`).join('\n');
+  const outOfScope = (plan.outOfScope ?? []).map((o) => `- ${o}`).join('\n');
+  const answered = (plan.feedbackResponse ?? [])
+    .map((f) => `| ${tableCell(f.point)} | ${tableCell(f.response)} | ${
+      tableCell(f.where) || '—'} | ${tableCell(f.note)} |`)
+    .join('\n');
+  const coverage = (plan.acceptanceCoverage ?? [])
+    .map((c) => `| ${tableCell(c.criterion)} | ${c.status} | ${
+      tableCell(c.coveredBy) || '—'} | ${tableCell(c.note)} |`)
     .join('\n');
   return `# Implementation plan — #${iid} ${title}
 
-## Approach
+${answered ? `## Reviewer feedback, point by point\n| Point | Response | Where | Note |\n|---|---|---|---|\n${answered}\n\n` : ''}## Approach
 ${plan.approach ?? '(not recorded)'}
-
+${questions ? `\n## Open questions\n${questions}\n` : ''}
 ## Steps
 | # | Layer | Change | Files |
 |---|---|---|---|
 ${steps || '| — | — | (none recorded) | — |'}
-
+${coverage ? `\n## Acceptance coverage\n| Criterion | Status | Covered by | Note |\n|---|---|---|---|\n${coverage}\n` : ''}
 ## Reuse before writing
 ${(plan.reuse ?? []).map((r) => `- ${r}`).join('\n') || '- (none identified)'}
 
 ## Risks
 ${(plan.risks ?? []).map((r) => `- ${r}`).join('\n') || '- (none identified)'}
-
+${outOfScope ? `\n## Out of scope\n${outOfScope}\n` : ''}
 ## Migrations
 ${plan.migrations ? 'This change requires a database migration.' : 'No schema change.'}
 `;

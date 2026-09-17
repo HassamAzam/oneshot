@@ -151,8 +151,51 @@ export const PLAN_SCHEMA = phaseSchema({
     },
   },
   migrations: { type: 'boolean', description: 'True if any model/schema change is required.' },
-  risks: strArr('What could go wrong, and the mitigation.'),
-}, ['approach', 'reuse', 'steps', 'migrations', 'risks']);
+  risks: strArr('What could break, and the mitigation. Not a place for undecided scope — that is openQuestions.'),
+  openQuestions: strArr(
+    'Decisions only a person (requester, PM, dev) can make — a scope or product choice the ' +
+    'ticket does not state. Each: the question, the default this plan assumes if nobody ' +
+    'answers, and what changes if the answer differs. Empty when nothing is undecided.',
+  ),
+  outOfScope: strArr(
+    'Related problems found and deliberately NOT fixed here. Each: what, why excluded, and ' +
+    'where it belongs (e.g. a separate ticket).',
+  ),
+  acceptanceCoverage: {
+    type: 'array',
+    description: 'One entry per acceptance criterion from research, in the same order.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        criterion: str('The criterion, as research recorded it'),
+        coveredBy: str('Step numbers and/or the check that demonstrates it, e.g. "steps 2-3; step 5 test"'),
+        status: { type: 'string', enum: ['covered', 'partial', 'not-satisfiable'] },
+        note: str('Why partial or not satisfiable, and what is done instead. Empty string when covered.'),
+      },
+      required: ['criterion', 'coveredBy', 'status', 'note'],
+    },
+  },
+  feedbackResponse: {
+    type: 'array',
+    description:
+      'One entry per distinct point in the reviewer feedback this revision answers. Empty when ' +
+      'there was no feedback. Only what this artifact shows counts: a point you resolved in ' +
+      'your reasoning but did not write into a step, question, out-of-scope entry or risk has ' +
+      'not reached the approver.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        point: str('The reviewer\'s point, in a few words'),
+        response: { type: 'string', enum: ['changed', 'declined', 'answered'] },
+        where: str('Where this plan now carries it, e.g. "step 6", "open question 2", "out of scope". Empty only for declined.'),
+        note: str('One line: what changed, or why declined'),
+      },
+      required: ['point', 'response', 'where', 'note'],
+    },
+  },
+}, ['approach', 'reuse', 'steps', 'migrations', 'risks', 'openQuestions', 'outOfScope', 'acceptanceCoverage', 'feedbackResponse']);
 
 export const TESTCASES_SCHEMA = phaseSchema({
   module: str('Module name for suite tagging'),
