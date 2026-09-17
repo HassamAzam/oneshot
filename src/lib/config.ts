@@ -118,6 +118,12 @@ export interface ProjectConfig {
      * means the run still stops and says why, but no label is added.
      */
     notABug?: string;
+    /**
+     * Put on the ticket while its MR waits for a person to merge it, and taken
+     * off when the run finishes or blocks — so the board shows which tickets are
+     * waiting on a reviewer. Unset disables it.
+     */
+    inReview?: string;
   };
   /**
    * Reproduce a reported bug on the base branch during `research` before any

@@ -314,6 +314,14 @@ type Control =
     noRemediation?: boolean;
   };
 
+/**
+ * `labels` plus the in-review label, when one is configured — the set a run
+ * takes off the ticket when it stops waiting on a reviewer.
+ */
+function withInReview(cfg: ReturnType<typeof projectConfig>, labels: string[]): string[] {
+  return cfg.labels.inReview ? [...labels, cfg.labels.inReview] : labels;
+}
+
 function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] {
   if (p.onFail === 'skip') return 'skipped';
   if (p.onFail === 'warn') return 'warned';
@@ -1991,7 +1999,7 @@ export async function runTicket(
         // is waiting on a person to unblock it. Parked keeps it — parked at the
         // gate is the state it marks — and done is only reached via approval.
         await swapLabel(journal.iid,
-          [cfg.labels.entry, cfg.labels.testcaseReview].filter(Boolean),
+          withInReview(cfg, [cfg.labels.entry, cfg.labels.testcaseReview].filter(Boolean)),
           [cfg.labels.blocked]);
         await addIssueNote(journal.iid, `Oneshot stopped: **${reason}**\n\nRun \`${journal.runId}\`.`);
         // The stop note just posted names this run and lands AFTER the claim
@@ -2024,7 +2032,7 @@ export async function runTicket(
       // still carries it, and finishing with both "Needs Human" and "merged" on
       // the ticket tells the board a person is wanted on work that is done.
       if (!DRY_RUN) {
-        await swapLabel(journal.iid, [cfg.labels.entry, cfg.labels.blocked], [cfg.labels.exit]);
+        await swapLabel(journal.iid, withInReview(cfg, [cfg.labels.entry, cfg.labels.blocked]), [cfg.labels.exit]);
       }
       // The claim note has done its job — with the exit label on, nothing
       // scans this ticket again — and a claim that outlives its run is exactly
