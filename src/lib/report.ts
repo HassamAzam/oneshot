@@ -32,7 +32,7 @@
  */
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { runDir } from './config.js';
+import { envOr, runDir } from './config.js';
 import { readJournal, type PhaseRecord, type RunJournal } from './artifacts.js';
 import { log } from './log.js';
 
@@ -106,8 +106,46 @@ const SECRET_RULES: Array<[RegExp, string]> = [
     '$1$2[redacted: $1]'],
 ];
 
+/**
+ * Shortest credential worth hiding. Below this a "secret" is a word first, and
+ * blanking words out of the page costs more than it protects.
+ */
+const MIN_SECRET_LEN = 6;
+
+/**
+ * The literal secrets this desk actually holds.
+ *
+ * SECRET_RULES above is a denylist: it recognises a credential by the text
+ * AROUND it, so it catches `password='hunter2'` and misses the identical value
+ * written any other way. That is not a theoretical gap. A failing `verify`
+ * quotes its own login into its error, and does it twice in one paragraph — as
+ * `password='…'`, which gets marked, and in the `user@host:secret` form `.env`
+ * pins it in, which does not. The page then shows one redaction and one
+ * credential, which reads as though redaction worked.
+ *
+ * These values need no shape, because they are known exactly. Matching the
+ * literal covers every spelling at once, including the spellings nobody has
+ * thought of yet, and cannot redact prose by accident the way a broader pattern
+ * would. Longest first so a secret containing another is replaced whole.
+ */
+function knownSecrets(): string[] {
+  const out: string[] = [];
+  for (const name of ['ONESHOT_TEST_LOGIN', 'ONESHOT_DEMO_LOGIN']) {
+    const pin = envOr(name);
+    const colon = pin.indexOf(':');
+    if (colon < 0) continue;
+    const secret = pin.slice(colon + 1).trim();
+    if (secret.length >= MIN_SECRET_LEN) out.push(secret);
+  }
+  return out.sort((a, b) => b.length - a.length);
+}
+
 function redact(value: string): string {
   let out = value;
+  // Literals first: a shape rule that fires afterwards can only re-mark text
+  // that is already a marker, and the ordering note above explains why that is
+  // worse than leaving it alone.
+  for (const secret of knownSecrets()) out = out.split(secret).join('[redacted: credential]');
   for (const [pattern, replacement] of SECRET_RULES) out = out.replace(pattern, replacement);
   return out;
 }
