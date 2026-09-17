@@ -34,7 +34,8 @@ import {
   phaseByName, projectConfig, runDir,
 } from '../src/lib/config.js';
 import {
-  readJournal, writeJournal, type PhaseRecord, type RunJournal,
+  readArtifact, readJournal, writeArtifact, writeJournal,
+  type PhaseRecord, type RunJournal,
 } from '../src/lib/artifacts.js';
 import { db, logEvent, updateRun } from '../src/lib/db.js';
 import { liveConductorIds } from '../src/lib/fleet.js';
@@ -52,17 +53,47 @@ const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', D = '\x1b[2m', B = '\x1b[1
  */
 const KEPT_STATUSES = new Set<PhaseRecord['status']>(['ok', 'warned', 'skipped']);
 
-interface Args { iid: number; phase?: string; forcePhase?: string; dryRun: boolean }
+interface Args {
+  iid: number; phase?: string; forcePhase?: string; dryRun: boolean;
+  skipCases: string[]; reason?: string;
+}
 
 function parseArgs(argv: string[]): Args | string {
   let iid = 0;
   let phase: string | undefined;
   let forcePhase: string | undefined;
   let dryRun = false;
+  const skipCases: string[] = [];
+  let reason: string | undefined;
 
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]!;
     if (a === '--dry-run' || a === '-n') { dryRun = true; continue; }
+    if (a === '--skip-case') {
+      const next = argv[i + 1];
+      if (!next || next.startsWith('-')) return '--skip-case needs a case id, e.g. TC-14';
+      skipCases.push(next);
+      i += 1;
+      continue;
+    }
+    if (a.startsWith('--skip-case=')) {
+      const v = a.slice('--skip-case='.length);
+      if (!v) return '--skip-case needs a case id, e.g. TC-14';
+      skipCases.push(v);
+      continue;
+    }
+    if (a === '--reason') {
+      const next = argv[i + 1];
+      if (!next) return '--reason needs some text';
+      reason = next;
+      i += 1;
+      continue;
+    }
+    if (a.startsWith('--reason=')) {
+      reason = a.slice('--reason='.length);
+      if (!reason) return '--reason needs some text';
+      continue;
+    }
     if (a === '--phase') {
       const next = argv[i + 1];
       if (!next || next.startsWith('-')) return '--phase needs a phase name';
@@ -92,12 +123,14 @@ function parseArgs(argv: string[]): Args | string {
   }
 
   if (!iid) return 'no ticket iid given';
-  return { iid, phase, forcePhase, dryRun };
+  if (reason !== undefined && !skipCases.length) return '--reason only means something with --skip-case';
+  return { iid, phase, forcePhase, dryRun, skipCases, reason };
 }
 
 function usage(): void {
   console.log(`
-${B}npm run unblock -- <iid> [--phase <name>] [--force-phase <name>] [--dry-run]${X}
+${B}npm run unblock -- <iid> [--phase <name>] [--force-phase <name>]
+                        [--skip-case <id> ...] [--reason <text>] [--dry-run]${X}
 
   ${D}Drops the failed phase records from a blocked run's journal, deletes the
   artifacts those laps half-wrote, refunds their phase quota, and puts the
@@ -108,6 +141,13 @@ ${B}npm run unblock -- <iid> [--phase <name>] [--force-phase <name>] [--dry-run]
                          its artifact, so a phase whose record is 'ok' but whose
                          result is stale (a verify that hit its turn cap after
                          correcting its verdicts) can be forced to re-run
+  --skip-case <id>       retire a test case from this run's list, repeatable.
+                         The case MOVES to a 'descoped' array rather than being
+                         deleted, so the record survives and can be put back —
+                         but verify, ui-evidence and qa stop executing it, which
+                         is what stops a lap being re-paid to re-discover a case
+                         nobody is going to act on
+  --reason <text>        why, recorded beside the descoped case
   --dry-run              print every change and make none
 `);
 }
@@ -199,6 +239,55 @@ function printJournal(title: string, j: RunJournal, doomed = new Set<PhaseRecord
  * salvaged; carried into a fresh lap it would salvage results the new lap never
  * produced.
  */
+interface DescopedCase { id?: string; descopedReason?: string; descopedAt?: number }
+interface TestcasesArtifact {
+  cases?: Array<{ id?: string }>;
+  descoped?: DescopedCase[];
+  [k: string]: unknown;
+}
+
+/**
+ * Retire a test case from this run's list.
+ *
+ * MOVED into `descoped`, never deleted. The list is the record of what this run
+ * agreed to check, so a case that silently vanished would leave a verify verdict
+ * nobody could interpret later — 24 cases in the note, 23 in the file, and no
+ * trace of which one went or why. Moving keeps the audit trail and makes the
+ * decision reversible by hand.
+ *
+ * Only `cases` is executed, so moving is enough to stop verify, ui-evidence and
+ * qa re-running it. That is the point: a lap spent re-discovering a case nobody
+ * is going to act on is a lap not spent on the defects that are real.
+ */
+function descopeCases(
+  iid: number, ids: string[], reason: string, apply: boolean,
+): { moved: string[]; missing: string[]; remaining: number } {
+  const data = readArtifact<TestcasesArtifact>(iid, 'testcases.json');
+  if (!data || !Array.isArray(data.cases)) return { moved: [], missing: ids, remaining: 0 };
+
+  const wanted = new Set(ids.map((s) => s.toUpperCase()));
+  const keep: Array<{ id?: string }> = [];
+  const moved: DescopedCase[] = [];
+  for (const c of data.cases) {
+    if (c && typeof c.id === 'string' && wanted.has(c.id.toUpperCase())) {
+      moved.push({ ...c, descopedReason: reason, descopedAt: Date.now() });
+    } else {
+      keep.push(c);
+    }
+  }
+
+  const movedIds = moved.map((m) => String(m.id));
+  const seen = new Set(movedIds.map((s) => s.toUpperCase()));
+  const missing = ids.filter((s) => !seen.has(s.toUpperCase()));
+
+  if (apply && moved.length) {
+    writeArtifact(iid, 'testcases.json', {
+      ...data, cases: keep, descoped: [...(data.descoped ?? []), ...moved],
+    });
+  }
+  return { moved: movedIds, missing, remaining: keep.length };
+}
+
 function artifactsOf(iid: number, phase: string): string[] {
   const configured = phaseByName(phase)?.artifact ?? `${phase}.json`;
   return [configured, `${phase}-partial.json`]
@@ -233,7 +322,8 @@ async function main(): Promise<void> {
     usage();
     process.exit(1);
   }
-  const { iid, phase: only, forcePhase, dryRun } = parsed;
+  const { iid, phase: only, forcePhase, dryRun, skipCases, reason } = parsed;
+  const skipReason = reason ?? 'retired by an operator via npm run unblock';
 
   const journal = readJournal(iid);
   if (!journal) {
@@ -318,6 +408,19 @@ async function main(): Promise<void> {
   console.log(`  runs row  ${inFlight.length ? `${inFlight.length} orphaned ${inFlight.map((r) => r.status).join('/')} row(s) -> aborted` : `${D}clean${X}`}`);
   console.log(`  owner     ${orphaned.length ? `${orphaned.map((o) => o.slice(0, 6)).join(', ')} ${D}— no longer in the fleet${X}` : `${D}unowned${X}`}`);
 
+  const descope = skipCases.length
+    ? descopeCases(iid, skipCases, skipReason, false)
+    : { moved: [], missing: [], remaining: 0 };
+  if (skipCases.length) {
+    console.log(`  cases     ${descope.moved.length
+      ? `retire ${descope.moved.join(', ')} -> descoped, ${descope.remaining} left to run`
+      : `${D}none of ${skipCases.join(', ')} matched${X}`}`);
+    if (descope.missing.length) {
+      console.log(`  ${Y}not found${X}  ${descope.missing.join(', ')} ${D}— check the id against testcases.json${X}`);
+    }
+    if (descope.moved.length) console.log(`  ${D}reason: ${skipReason}${X}`);
+  }
+
   const cfg = projectConfig();
   const issue = await getIssue(iid);
   if (issue.ok && issue.data) {
@@ -345,6 +448,12 @@ async function main(): Promise<void> {
   writeJournal(journal);
 
   for (const f of files) rmSync(f, { force: true });
+
+  // After the artifact deletions above, so a --force-phase that deletes
+  // testcases.json cannot silently undo the retirement by writing it first.
+  const retired = skipCases.length
+    ? descopeCases(iid, skipCases, skipReason, true)
+    : { moved: [], missing: [], remaining: 0 };
 
   if (retried.length) {
     const holes = retried.map(() => '?').join(', ');
@@ -375,7 +484,15 @@ async function main(): Promise<void> {
   logEvent('unblocked', {
     iid, phases: retried, records: doomed.size, artifacts: files.length,
     quotaRows: quota.n, ports: leases, orphanedOwners: orphaned,
+    descopedCases: retired.moved, descopeReason: retired.moved.length ? skipReason : undefined,
   }, { runId: journal.runId });
+
+  if (retired.moved.length) {
+    console.log(
+      `\n${G}retired ${retired.moved.join(', ')}${X} ${D}— ${retired.remaining} case(s) left; ` +
+      `they are under "descoped" in testcases.json, not deleted${X}`,
+    );
+  }
 
   printJournal('AFTER', readJournal(iid) ?? journal);
 
