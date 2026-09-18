@@ -1,5 +1,5 @@
 ---
-name: django_query_optimization
+name: django-query-optimisation
 description: Best practices for resolving N+1 query issues in Django and DRF. Trigger when user asks to optimize a Django view, queryset, or serializer; user mentions N+1 queries, slow queries, or performance issues in Django/DRF; user asks to add `select_related`, `prefetch_related`, or `annotate`; user asks to optimize a list endpoint or API; code contains a serializer with `SerializerMethodField` that hits the DB; user says "optimize", "speed up", or "fix queries" in a Django context.
 DO NOT TRIGGER when: the task is unrelated to Django database queries (e.g., frontend work, migrations, authentication).
 version: 1.0.0
@@ -170,7 +170,16 @@ Calling `.aggregate()` (e.g., `Sum`, `Avg`) inside a loop is an N+1 issue.
 - Use `annotate()` on the main queryset to perform the calculation in the same SQL query.
 - If too complex for `annotate()`, use the **Bulk Lookup Map Pattern** with a manual aggregate query (`values('group_field').annotate(total=Sum('value'))`).
 
-## 6. Optimization Checklist
+## 6. Cache Key Constants
+
+Always define cache key strings as named constants with `.format()` templates — never inline f-strings. Place them in the module's `constants.py`.
+
+```python
+# Good — key comes from a named constant
+subteam_approver_key = SUBTEAM_APPROVER_KEY_TEMPLATE.format(subteam_id=person_team.nsubteam_id)
+```
+
+## 7. Optimization Checklist
 
 - [ ] **Hierarchical Data?** Use `path__startswith` for bulk fetching.
 - [ ] **Redundant fields?** Use instance-level memoization in the serializer.

@@ -19,7 +19,7 @@ description: Django coding rules for this ERP repo — views, serializers, manag
 
 ## ORM & Query Optimization
 
-Read and follow the **`code-optimization`** skill for all ORM and query performance rules (N+1 prevention, `select_related`/`prefetch_related`, bulk ops, `.exists()`, `.count()`, indexing, etc.).
+Read and follow the **`django-query-optimisation`** skill for all ORM and query performance rules (N+1 prevention, `select_related`/`prefetch_related`, bulk ops, the bulk-lookup map pattern, context passing, `annotate`/`Prefetch`, cache key constants).
 
 ## Manager Selection — Active Objects Manager (checklist item)
 
