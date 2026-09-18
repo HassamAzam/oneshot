@@ -247,6 +247,9 @@ export function projectConfig(): ProjectConfig {
     c.gitlab.project = envOr('ONESHOT_GITLAB_PROJECT', c.gitlab.project);
     const idOverride = envOr('ONESHOT_PROJECT_ID');
     if (idOverride) c.gitlab.projectId = Number(idOverride);
+    // Shared with the Plane triage router, so the gates and the routing can never disagree.
+    const risk = loadJson<{ modules: Array<{ paths: string[] }> }>('risk-modules.json');
+    c.highScrutinyPaths = [...new Set([...(c.highScrutinyPaths ?? []), ...risk.modules.flatMap((m) => m.paths)])];
     _project = c;
   }
   return _project;

@@ -31,16 +31,8 @@
   "reviewAllRuns": true,
   "_comment_bugReproduction": "TRUE = before planning a fix, research reproduces a reported BUG on the base branch in the real app (skill: bug-reproduction). This is the project-wide switch, not the per-ticket one: a run only reproduces when the ticket ALSO carries the label mapped to bug-reproduction in config/phases.json (`Bug`), because bring-up and login are paid whether or not the ticket turns out to be a bug. An unlabelled ticket records 'not-applicable' and never starts the app. If the steps run and the correct behaviour is observed, the run stops: labels.notABug replaces the entry label, the evidence is posted as a ticket comment and in the Slack channel. Features, no-UI changes and anything that could not be run to the end (inconclusive) carry on as before. To overrule a Not a Bug verdict, remove that label and add Loop back: the run resumes at plan without reproducing again. labels.notABug must exist on the project. FALSE switches the step off.",
   "bugReproduction": true,
-  "_comment_high_scrutiny": "Paths the ERP's own .claude/rules/security.md marks 'escalate immediately'. A ticket whose PLAN or DIFF touches one gets the Review gates even without the Review label, because the label is human-applied and therefore forgettable \u2014 and the tickets most worth pausing on are exactly the ones nobody remembers to label. Matching is a plain substring test against repo-relative paths, so 'apps/payroll/' catches everything under it. Empty this array to switch the behaviour off entirely. Note the last two entries: authentication on the FRONTEND has no single directory the way apps/auth/ does, so its entry points are listed by name. Found the hard way \u2014 ticket #8 is an auth-context bug with 600+ production occurrences, and a backend-only list would not have gated it.",
-  "highScrutinyPaths": [
-    "apps/auth/",
-    "apps/payroll/",
-    "apps/leaves/",
-    "apps/project_logs/",
-    "common/permissions.py",
-    "frontend/src/components/login/",
-    "frontend/src/components/AuthenticatedComponent.js"
-  ],
+  "_comment_high_scrutiny": "Paths the ERP's own .claude/rules/security.md marks 'escalate immediately'. A ticket whose PLAN or DIFF touches one gets the Review gates even without the Review label, because the label is human-applied and therefore forgettable \u2014 and the tickets most worth pausing on are exactly the ones nobody remembers to label. Matching is a plain substring test against repo-relative paths, so 'apps/payroll/' catches everything under it. Empty this array to switch the behaviour off entirely. Note the last two entries: authentication on the FRONTEND has no single directory the way apps/auth/ does, so its entry points are listed by name. Found the hard way \u2014 ticket #8 is an auth-context bug with 600+ production occurrences, and a backend-only list would not have gated it. The paths now live in config/risk-modules.json (the `paths` of every module), shared with the Plane triage router so routing and gating read one list; they are merged into this array at load. Add a one-off path here only if it has no module.",
+  "highScrutinyPaths": [],
   "_comment_markers": "Persistent labels Oneshot must copy through untouched on any label write. A label swap is one update_issue call carrying the full array, so anything not listed here and not the entry/exit label would be silently dropped.",
   "preserveLabels": [
     "AI",

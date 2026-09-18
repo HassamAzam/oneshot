@@ -1,0 +1,29 @@
+{
+  "_comment": "ONE list of the ERP modules too consequential to ship unwatched, shared by Oneshot and the Plane triage router (triage-cron reads this file via ONESHOT_HOME). Oneshot uses `paths`: a plan or diff touching one arms the review gates (highScrutinyPaths is derived from this file in src/lib/config.ts). Triage uses `keywords`: a Plane ticket whose text names one is routed to the human erp board, never the AI board. Add a module here and both sides pick it up.",
+  "modules": [
+    { "name": "payroll", "paths": ["apps/payroll/"],
+      "keywords": ["payroll", "payslip", "salary", "compensation", "increment", "bonus", "encashment", "settlement", "tax", "provident fund", "eobi"] },
+    { "name": "leaves", "paths": ["apps/leaves/"],
+      "keywords": ["leave balance", "leave quota", "leave policy", "accrual", "entitlement", "maternity", "paternity"] },
+    { "name": "auth", "paths": ["apps/auth/", "frontend/src/components/login/", "frontend/src/components/AuthenticatedComponent.js"],
+      "keywords": ["auth", "login", "logout", "password", "sso", "token", "session", "2fa", "otp"] },
+    { "name": "permissions", "paths": ["common/permissions.py"],
+      "keywords": ["permission", "access control", "role", "rbac", "visible to", "hide from"] },
+    { "name": "project_logs", "paths": ["apps/project_logs/"],
+      "keywords": ["project log", "timesheet", "logged hours", "billable hours"] },
+    { "name": "invoices", "paths": ["apps/invoices/"],
+      "keywords": ["invoice", "billing", "reimburse"] },
+    { "name": "costing", "paths": ["apps/costing/"],
+      "keywords": ["costing", "people cost", "person cost", "pnl", "p&l", "currency rate"] }
+  ],
+  "_comment_coupled": "No separate coupled-pair list: every linked pair in the ERP's CLAUDE.md table (payroll↔leaves, payroll↔costing, costing↔invoices, allowances↔payroll, leaves↔costing, payroll↔odoo) has at least one side in `modules`, so the module keywords already route it to the human board. Add a pair list only if a pair appears with neither side here.",
+  "_comment_external": "Integrations Oneshot's local verify phase cannot exercise: no sandbox, real third-party state, or timing it cannot drive. A ticket whose behaviour lives here would 'pass' verify without anything being tested, so triage routes it to the human board.",
+  "externalIntegrations": [
+    { "name": "odoo", "keywords": ["odoo"] },
+    { "name": "google calendar", "keywords": ["google calendar", "calendar sync"] },
+    { "name": "email", "keywords": ["email", "e-mail", "mail notification", "smtp"] },
+    { "name": "oauth", "keywords": ["gitlab oauth", "github oauth", "oauth"] },
+    { "name": "listentool", "keywords": ["listentool", "listen tool"] },
+    { "name": "scheduled jobs", "keywords": ["cron", "celery", "scheduled job", "nightly job", "background task"] }
+  ]
+}
