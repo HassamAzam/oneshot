@@ -64,22 +64,26 @@
  * list, arriving later and looking exactly like a reviewer who has not read it
  * yet. config/reviewers.json records when its list was last checked.
  */
-import { DRY_RUN, projectConfig, reviewersConfig } from '../lib/config.js';
+import { DRY_RUN, phases, projectConfig, reviewersConfig } from '../lib/config.js';
 import {
   readArtifact, readJournal, updateJournal, writeArtifact,
   type ReviewGateState, type RunJournal,
 } from '../lib/artifacts.js';
 import {
-  addIssueNote, issueNotes, issueUrl, swapLabel,
+  addIssueNote, issueNotes, issueUrl, swapLabel, uploadFile, type Upload,
 } from '../lib/gitlab.js';
 import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/slack.js';
 import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
 import { codeSpan, mdText } from '../lib/gitlabmd.js';
-import type { TestCase } from '../phases/types.js';
+import type { DesignArtifact, TestCase } from '../phases/types.js';
 import { parseEdgeCases } from './edgecases.js';
+import { MAX_UPLOAD_BYTES, mimeFor } from '../lib/publish.js';
+import { artifactDir } from '../lib/config.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
-export type Gate = 'plan' | 'testcases';
+export type Gate = 'plan' | 'testcases' | 'design';
 export type GateVerdict = 'approved' | 'feedback' | 'pending' | 'unavailable';
 
 export interface GateResult {
@@ -196,7 +200,29 @@ function isApprovedReply(text: string): boolean {
  * pipeline they were not asked to own.
  */
 export type ReviewRole = 'dev' | 'qa';
-const GATE_ROLE: Record<Gate, ReviewRole> = { plan: 'dev', testcases: 'qa' };
+const GATE_ROLE: Record<Gate, ReviewRole> = { plan: 'dev', testcases: 'qa', design: 'dev' };
+
+/**
+ * Does the DESIGN gate apply to this run?
+ *
+ * Its own label, and only its own label — not `Review`, not `reviewAllRuns`,
+ * not the guarded paths. The three are answers to a different question: how
+ * much scrutiny does this CODE need. `Design` answers "the UI has to be agreed
+ * before it is built", which is a decision about the work rather than about
+ * the risk, and a team that switches `reviewAllRuns` off has not thereby said
+ * designs may ship unreviewed.
+ *
+ * It follows that the gate cannot arm on a ticket the `design` phase never ran
+ * on — the same label decides both (`labelGated` in config/phases.json), so
+ * the two can only agree.
+ */
+export function designGateApplies(labels: string[]): boolean {
+  const phase = phases().find((p) => p.name === 'design');
+  const label = phase?.labelGated;
+  if (!label) return false;
+  const carried = new Set(labels.map((l) => l.toLowerCase()));
+  return carried.has(label.toLowerCase());
+}
 
 /** The GitLab usernames permitted to resolve this gate. */
 function approversFor(gate: Gate): string[] {
@@ -212,9 +238,14 @@ function approversFor(gate: Gate): string[] {
  * only that gate carries one.
  */
 function boardLabel(gate: Gate): string | null {
-  if (gate !== 'testcases') return null;
-  const label = projectConfig().labels.testcaseReview;
-  return label || null;
+  const { testcaseReview, designReview } = projectConfig().labels;
+  if (gate === 'testcases') return testcaseReview || null;
+  // `design` earns one for the same reason `testcases` does: a board that
+  // cannot tell 'waiting on a design sign-off' from every other parked reason
+  // sends somebody to read a journal to find out. Optional and off unless the
+  // label is configured AND exists on the project, same as the other.
+  if (gate === 'design') return designReview || null;
+  return null;
 }
 
 /**
@@ -267,14 +298,18 @@ function blankState(): ReviewGateState {
   return { requestTs: null, requestNoteId: null, approved: false, feedback: [] };
 }
 
+const GATE_STATE: Record<Gate, keyof Pick<RunJournal, 'planApproval' | 'testcasesApproval' | 'designApproval'>> = {
+  plan: 'planApproval',
+  testcases: 'testcasesApproval',
+  design: 'designApproval',
+};
+
 function stateOf(j: RunJournal, gate: Gate): ReviewGateState {
-  return (gate === 'plan' ? j.planApproval : j.testcasesApproval) ?? blankState();
+  return j[GATE_STATE[gate]] ?? blankState();
 }
 
 function persist(iid: number, gate: Gate, state: ReviewGateState): RunJournal | null {
-  return gate === 'plan'
-    ? updateJournal(iid, { planApproval: state })
-    : updateJournal(iid, { testcasesApproval: state });
+  return updateJournal(iid, { [GATE_STATE[gate]]: state });
 }
 
 export interface CheckGateOpts {
@@ -309,6 +344,46 @@ export interface CheckGateOpts {
    * clause.
    */
   trigger?: GateTrigger;
+  /**
+   * Files uploaded with the request comment, every time this gate arms.
+   *
+   * The `design` gate is the reason this exists: what it asks a reviewer to
+   * approve is pictures, a walkthrough and a clickable file, none of which
+   * survive being described in a string. They are re-uploaded on every round
+   * rather than cached, which is not waste — a round exists precisely because
+   * the screens changed, and a request carrying the PREVIOUS round's
+   * screenshots is worse than one carrying none.
+   *
+   * Not routed through lib/publish.ts, which posts each key exactly once by
+   * design (`journal.published` is the lock). A gate that re-arms needs the
+   * opposite guarantee.
+   */
+  attachments?: GateAttachment[];
+}
+
+export interface GateAttachment { name: string; content: Buffer | string; mime: string }
+
+/**
+ * Upload what the request carries and return the markdown that renders it.
+ *
+ * Best-effort per file: an attachment that will not upload costs that
+ * attachment and not the gate. The alternative — refusing to arm — would park
+ * the run in silence over a failed image, which is the one outcome worse than
+ * a request with a picture missing. The failure is logged and the body says
+ * so, so a reviewer looking at four screenshots where the text promised five
+ * is told why rather than left to wonder.
+ */
+async function uploadAll(iid: number, attachments: GateAttachment[]): Promise<string[]> {
+  const links: string[] = [];
+  for (const a of attachments) {
+    const up = await uploadFile(a.name, a.content, a.mime);
+    if (!up.ok || !up.data) {
+      log.warn(`gate: upload failed for ${a.name}`, { iid, error: up.error?.slice(0, 120) });
+      continue;
+    }
+    links.push((up.data as Upload).markdown);
+  }
+  return links;
 }
 
 /**
@@ -348,7 +423,12 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
   // compare every note against a number no note will ever exceed. Absent
   // means "not armed on the ticket yet", which re-asks — the only safe read.
   if (state.requestNoteId == null) {
-    const posted = await addIssueNote(iid, requestBody);
+    const links = opts.attachments?.length ? await uploadAll(iid, opts.attachments) : [];
+    const missing = (opts.attachments?.length ?? 0) - links.length;
+    const body = `${requestBody}`
+      + (links.length ? `\n\n${links.join('\n\n')}` : '')
+      + (missing > 0 ? `\n\n_${missing} attachment(s) could not be uploaded to GitLab._` : '');
+    const posted = await addIssueNote(iid, body);
     if (!posted.ok || !posted.data) {
       log.warn(`${gate} approval request could not be posted to the ticket — will retry next tick`, { iid });
       return { verdict: 'pending' };
@@ -569,12 +649,29 @@ function linkLabel(title: string): string {
     .replace(/\|/g, '\u2758');
 }
 
+/**
+ * Each gate's three variable words: what is up for approval, what approving
+ * releases the run into, and what a non-`approved` comment does instead.
+ *
+ * A table rather than the ternaries this used to be — with two gates those
+ * read fine, and with three they become a chain where the third case is
+ * whatever the second one is not.
+ */
+const ASK_WORDS: Record<Gate, { what: string; next: string; other: string }> = {
+  plan: { what: 'the plan', next: '`implement`', other: 'feedback to have the plan revised' },
+  testcases: { what: 'the test-case list', next: '`review`', other: 'edge case(s) to add to the list' },
+  design: {
+    what: 'the proposed design',
+    next: '`plan`',
+    other: 'what to change, to have the design redrawn',
+  },
+};
+
 export function gateAskText(
   journal: RunJournal, gate: Gate, noteId: number, mentions: string, trigger?: GateTrigger,
 ): string {
   const role = GATE_ROLE[gate].toUpperCase();
-  const what = gate === 'plan' ? 'the plan' : 'the test-case list';
-  const next = gate === 'plan' ? '`implement`' : '`review`';
+  const { what, next, other } = ASK_WORDS[gate];
   const link = `<${issueUrl(journal.iid)}#note_${noteId}|#${journal.iid} ${linkLabel(journal.title)}>`;
   const why = trigger?.hits.length
     ? ` — armed by guarded paths (${trigger.hits.join(', ')})`
@@ -583,7 +680,7 @@ export function gateAskText(
 
   return `:pause_button: *${role} approval needed* on ${link}${why}\n` +
     `${who} — ${what} is posted on the ticket. Comment *\`approved\`* there to release the run ` +
-    `into ${next}, or comment ${gate === 'plan' ? 'feedback to have the plan revised' : 'edge case(s) to add to the list'}.\n` +
+    `into ${next}, or comment ${other}.\n` +
     '_Reply on the ticket, not here — this run reads its verdict from GitLab._';
 }
 
@@ -854,4 +951,138 @@ export function appendEdgeCases(iid: number, feedback: string): TestCase[] | nul
   const updated = [...cases, ...added];
   writeArtifact(iid, 'testcases.json', { ...data, cases: updated });
   return updated;
+}
+
+// ------------------------------------------------------------- design gate
+
+/**
+ * The `design` artifact, read as the fields these renderers want — same
+ * defensive coercion as `planStr`/`planList` above, and for the same reason:
+ * `mdText` calls `.replace` on what it is handed, so one absent field throws.
+ */
+function designOf(design: Record<string, unknown> | null): DesignArtifact {
+  const d = (design ?? {}) as Partial<DesignArtifact>;
+  return {
+    applicable: d.applicable !== false,
+    rationale: typeof d.rationale === 'string' ? d.rationale : '',
+    flowChange: d.flowChange === true,
+    tokensFile: typeof d.tokensFile === 'string' ? d.tokensFile : '',
+    screens: Array.isArray(d.screens) ? d.screens : [],
+    prototype: d.prototype && typeof d.prototype === 'object' ? d.prototype : null,
+    decisions: Array.isArray(d.decisions) ? d.decisions.map(String) : [],
+    newPatterns: Array.isArray(d.newPatterns) ? d.newPatterns.map(String) : [],
+    openQuestions: Array.isArray(d.openQuestions) ? d.openQuestions : [],
+  };
+}
+
+/**
+ * Everything the reviewer has to actually LOOK at, read off the run's artifact
+ * directory.
+ *
+ * Order is the argument, exactly as it is in the ui-evidence pack: for each
+ * screen the current state first and the proposal second, so a reviewer
+ * scrolling the comment reads before→after per screen rather than a block of
+ * one followed by a block of the other. The walkthrough follows the screens,
+ * and the clickable file last — it is the thing you open if the pictures left
+ * you with a question.
+ *
+ * A file the artifact names but disk does not have is skipped silently here
+ * and named in the body by the renderer, which reads the same list: a gate
+ * that refuses to arm over a missing screenshot parks the run in silence.
+ */
+export function designAttachments(iid: number, design: Record<string, unknown> | null): GateAttachment[] {
+  const d = designOf(design);
+  const dir = artifactDir(iid);
+  const out: GateAttachment[] = [];
+  // Two sets, because they answer different questions. `seen` is "have I
+  // already attached this file", keyed on the artifact-relative path the
+  // design named. `names` is "will the reviewer see two attachments called the
+  // same thing", keyed on what GitLab will actually label them — and
+  // design/a/shot.png and design/b/shot.png collide there while being
+  // genuinely different files.
+  const seen = new Set<string>();
+  const names = new Set<string>();
+  const push = (rel: string): void => {
+    if (!rel || seen.has(rel)) return;
+    seen.add(rel);
+    const full = join(dir, rel);
+    if (!existsSync(full)) return;
+    const content = readFileSync(full);
+    if (content.length > MAX_UPLOAD_BYTES) {
+      log.warn(`design gate: ${rel} is too large to attach`, { iid, bytes: content.length });
+      return;
+    }
+    const short = basename(rel);
+    const name = names.has(short) ? rel.replace(/\//g, '-') : short;
+    names.add(name);
+    out.push({ name, content, mime: mimeFor(rel) });
+  };
+  for (const s of d.screens) {
+    push(s.before);
+    push(s.screenshot);
+  }
+  if (d.prototype) {
+    push(d.prototype.video);
+    push(d.prototype.entry);
+  }
+  return out;
+}
+
+/**
+ * GitLab Markdown, not Slack mrkdwn — same warning as `renderPlanForTicket`.
+ *
+ * What a design reviewer is being asked is narrower than what a plan reviewer
+ * is asked, so this leads with the two things that decide the answer: the
+ * choices that were made on their behalf, and anything invented that is not
+ * already in the design system. The pictures are attached below the text by
+ * the gate, because GitLab renders an uploaded image inline and a reviewer
+ * scrolls to them naturally; repeating them as a list would be a caption
+ * track for something already on screen.
+ */
+function renderDesignForTicket(design: Record<string, unknown> | null): string {
+  const d = designOf(design);
+  const bullets = (xs: string[]): string => xs.map((x) => `- ${mdText(x)}`).join('\n');
+  const screens = d.screens
+    .map((s) => `- **${mdText(s.name)}** — ${mdText(s.purpose)}`
+      + `${s.states?.length ? ` _(${s.states.map(mdText).join(', ')})_` : ''}`
+      + `${s.note ? `\n  - ${mdText(s.note)}` : ''}`)
+    .join('\n');
+  const questions = d.openQuestions
+    .filter((q) => q && typeof q.q === 'string')
+    .map((q) => `- ${mdText(q.q)}${q.recommendation ? ` — _recommended: ${mdText(q.recommendation)}_` : ''}`)
+    .join('\n');
+
+  return `**Screens** (${d.screens.length})\n${screens || '_(none recorded)_'}\n\n`
+    + `${d.decisions.length ? `**Decisions worth your attention**\n${bullets(d.decisions)}\n\n` : ''}`
+    + `${d.newPatterns.length
+      ? `**New — needs approval**\nNot in the design system today. Approving the design approves these too.\n${bullets(d.newPatterns)}\n\n`
+      : ''}`
+    + `${questions ? `**Open questions** — answer in a comment, or the recommendation is used\n${questions}\n\n` : ''}`
+    + (d.flowChange
+      ? 'The flow changes, so a silent walkthrough is attached below, and the clickable '
+        + 'prototype with it — download it and open it in a browser to click through the whole '
+        + 'journey yourself.\n'
+      : 'Single screen, no flow change, so there is no prototype to click through.\n');
+}
+
+/** Posted as a ticket comment when the design gate first arms, or re-arms after feedback. */
+export function designApprovalRequestBody(design: Record<string, unknown> | null): string {
+  return '**Oneshot pauses here** — this ticket carries **Design**, so the UI is agreed before '
+    + 'it is built.\n\n'
+    + `${renderDesignForTicket(design)}\n---\n\n`
+    + `${approverLine('design')}\n\n`
+    + 'Comment the single word **`approved`** to continue to `plan` and `implement` — what is '
+    + 'approved here becomes the specification they build to, and the shipped screens are posted '
+    + 'back against these on the MR. Any other comment from those accounts is treated as '
+    + 'feedback and `design` is re-run with it, with no limit on how many rounds that takes. '
+    + 'Comments from anyone else are ignored by this gate.';
+}
+
+/** The ticket's record that the design was approved — audit only, posted after the decision. */
+export function designApprovedRecordBody(design: Record<string, unknown> | null): string {
+  const d = designOf(design);
+  const names = d.screens.map((s) => `\`${mdText(s.name)}\``).join(', ');
+  return 'Oneshot record: the design above was approved on this ticket — proceeding to `plan`.'
+    + `${names ? `\n\nApproved screens: ${names}.` : ''}`
+    + `${d.newPatterns.length ? `\n\nApproved as new to the design system:\n${d.newPatterns.map((x) => `- ${mdText(x)}`).join('\n')}` : ''}`;
 }

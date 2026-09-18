@@ -24,6 +24,20 @@
       "artifact": "research.json"
     },
     {
+      "name": "design", "n": 1.5, "kind": "session", "tier": "heavy",
+      "cwd": "worktree", "maxTurns": 160, "timeoutMin": 60,
+      "writes": ["run", "artifacts"], "onFail": "abort",
+      "needsPort": true,
+      "labelGated": "Design",
+      "skills": ["design-proposal"],
+      "artifact": "design.json",
+      "_why": "The Design label asks for the UI to be AGREED before it is built, so this sits between research (which has just traced where the UI lives) and plan (which would otherwise decide the shape itself). It produces mockups, screenshots, an optional clickable prototype and a silent annotated walkthrough; the conductor posts them to the ticket and the design gate parks the run until a dev approves. HEAVY because the job is making a mockup read as OUR app with the feature in it rather than a generic dashboard, which is exactly the judgement a cheaper model does badly — it reaches for a plausible-looking default. onFail 'abort' matches research and plan: a Design ticket whose design phase died has nothing to approve, and carrying on to plan would build whatever the model felt like, which is the outcome the label exists to prevent.",
+      "_why_n": "1.5, not 2, and the fraction is load-bearing. `n` is read in exactly one place — the numeric sort in config.ts — but phase NUMBERS are quoted in fifteen model-facing prompt headings ('## Plan (phase 2) — this is your specification'). Renumbering to insert an integer here would rewrite every one of those strings, and they are read by models as ground truth. A fraction sorts correctly and leaves them all true.",
+      "_why_cwd_port": "cwd 'worktree' because the tokens have to come from the real frontend (Theme.js, style.js, _variables.scss) rather than from taste, and research.json is read from the run. needsPort because the phase screenshots the CURRENT screens off the running base branch: that is the 'before' half of every pair, and it is also how a mockup inherits the real shell instead of inventing one. It costs no wall clock — the app is already warming from the worktree lease — the flag only makes an empty pool fail here rather than halfway through.",
+      "_why_writes": "'artifacts', NOT 'worktree'. Mockup HTML committed to the ticket branch would land in the MR diff, and six HTML files inside a 200-line review is a worse review. Keeping them in state/runs/<iid>/artifacts/design/ also means a second design round after feedback does not dirty the branch.",
+      "_why_turns": "160 is an ESTIMATE, not a measurement — the first real runs should correct it, the way verify went 200->300->450 and research 60->120. Derived from verify's measured ~12 turns per browser interaction: ~15 to capture the current screens, ~10 for tokens, ~8 per mockup across ~5 screens, ~25 for the prototype, ~20 for the walkthrough recording."
+    },
+    {
       "name": "plan", "n": 2, "kind": "session", "tier": "heavy",
       "cwd": "worktree", "maxTurns": 50, "timeoutMin": 20,
       "writes": ["run"], "onFail": "abort",

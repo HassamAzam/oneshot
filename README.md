@@ -58,6 +58,8 @@ Three things fall out of that:
  issue labelled `Loop`
    0  recall          Haiku     prior art from past runs
    1  research        Opus 5    trace the code path, state blast radius
+ 1.5  design      ⟨D⟩ Opus 5    mockups, before/after, prototype + silent walkthrough
+                                ── parks until a dev approves on the ticket ──
    2  plan            Opus 5    phased plan
    3  implement       Opus 5    commits on oneshot/ticket-<iid>-<slug>
    4  testcases    ∥  Opus 5    ONE shared case list, written against real code
@@ -75,6 +77,11 @@ Three things fall out of that:
   ⟨R⟩ the optional `Review` label adds three human pauses to this same list —
       before 3, before 5, and inside 9. Nothing else changes: no phase is
       added, removed or reordered. See "Optional human review gates".
+
+  ⟨D⟩ the optional `Design` label ADDS a phase, which is what makes it
+      different from ⟨R⟩: the UI is drawn and agreed before it is planned.
+      A ticket without the label never runs it and never sees the pause.
+      See "Designing before building".
 ```
 
 **Merge is the last phase.** A merged change is where this pipeline's warrant runs out: the
@@ -255,6 +262,62 @@ Three minutes rather than the watcher's `TICK_MS` minute, because a parked run r
 pipeline on every tick and any phase without a recorded success is re-attempted from scratch each
 time — a `skip`-on-fail phase like `recall` burns a full model lap per tick for as long as a human
 takes to reply. The slower cadence still reads a reply promptly while spending a third as much.
+
+## Designing before building
+
+The `Review` label above changes how much scrutiny a run's **code** gets. `Design` answers a
+different question — what should this look like — and it is the one label that **adds a phase**
+rather than adding a guard around one.
+
+Put `Design` on a ticket alongside `Loop` and a `design` phase runs between `research` and
+`plan`. It reads the tokens out of the real frontend, captures the screens this ticket touches
+as they are **today**, draws each one as a self-contained mockup against those tokens, and — when
+the change spans more than one screen or adds a step — builds a clickable prototype and records a
+**silent, annotated** walkthrough of it. The conductor posts all of that to the ticket as one
+comment, and the run **parks**.
+
+```
+ … research ──▶ design ──▶[ D  a dev approves the design ]──▶ plan ──▶ implement …
+                   ▲                                    │
+                   └──────── anything else is feedback ──┘
+```
+
+**Why before `plan` and not after.** Same reason the test-case gate sits before `review`: this is
+the last point at which approving still changes everything downstream. A design agreed here is
+what `plan` plans and `implement` builds. The same approval taken once a plan existed would be
+approving a picture of a decision already made — and a gate that cannot change what it guards is
+decoration.
+
+**A ticket without the label never runs the phase.** It is filtered out of the run's phase list
+entirely rather than skipped in place, so nothing downstream does index arithmetic around a phase
+nobody is running. `ONESHOT_SKIP_PHASES=design` switches it off globally without touching config.
+
+**`Design` arms this gate and nothing else arms it** — not `Review`, not `reviewAllRuns`, not
+`highScrutinyPaths`. Those three are answers to "how risky is this code". This one is a decision
+about the work, and a team that turns the code-review posture off has not thereby said designs may
+ship unreviewed. The same label decides both the phase and the gate, so the two cannot disagree.
+
+**Approval is a dev sign-off** — `config/reviewers.json`'s `dev` list, read exactly the way the
+plan gate reads it. Comment the single word `approved` on the ticket to release the run into
+`plan`; any other comment from that list is feedback, `design` re-runs with it, and the gate asks
+again with the redrawn screens. No cap on rounds. Widening this to QA, or to a named product
+owner, is a config edit and not a code change.
+
+**A Design ticket with no UI is not an error.** The phase can answer `applicable: false` — the
+ticket turned out backend-only, or someone labelled optimistically — and the run continues to
+`plan` with no gate and no pause, the same way an inconclusive bug reproduction carries on. A
+mislabelled ticket costs one artifact, not a person.
+
+**What was approved is then held to.** The approved design goes into `plan` and `implement` as
+their specification, and `ui-evidence` captures each approved screen as it actually shipped and
+posts the pair on the MR with every departure listed. An empty departure list is the claim that
+it matches — which is a claim a reviewer can check against two pictures, rather than an assertion
+they have to take on trust.
+
+**GitLab is the whole channel.** The design is posted there, the verdict is read there, and the
+audit record lands there. Slack gets the same write-only heads-up every other gate sends, because
+the dev who has to look is not the person watching the run's thread — but nothing is ever read
+back out of it, so a Slack that is down costs a notification and never a verdict.
 
 ## MR review feedback
 

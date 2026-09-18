@@ -112,6 +112,7 @@ export interface ProjectConfig {
      * approved. See src/conductor/reviewgate.ts.
      */
     testcaseReview: string;
+    designReview: string;
     /**
      * Put on a ticket whose reported defect `research` could not reproduce on the
      * base branch, in place of the entry label. Must exist on the project; unset
@@ -185,6 +186,24 @@ export interface PhaseConfig {
    * without reading TypeScript.
    */
   labelSkills?: Record<string, string>;
+  /**
+   * A phase that runs ONLY when the ticket carries this label.
+   *
+   * Read case-insensitively, for the reason `labelSkills` already gives: a
+   * label is typed by hand, and `design` versus `Design` must not be the
+   * difference between a phase running and not when the failure is silent
+   * either way.
+   *
+   * Applied by FILTERING the phase out of the run's list, not by skipping it
+   * inside the loop. A phase that is skipped in place still occupies an index,
+   * and `nextIndex`, `cycleTo` and group batching all do arithmetic on those —
+   * so a phase nobody is running must not be in the list they walk.
+   *
+   * Not `onDemand`: that means "never scheduled, invoked out of band by the
+   * conductor when something needs it" (remediate, mr-feedback). This one is
+   * scheduled, in order, for the tickets it applies to.
+   */
+  labelGated?: string;
   agents?: string[];
   artifact?: string;
   /**
