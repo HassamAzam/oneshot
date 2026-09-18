@@ -393,6 +393,35 @@ lint reported clean: ${i.lintClean === true}
 tests run: ${i.testsRun || '(none)'}`;
 }
 
+const REPRODUCTION_SKILL = 'bug-reproduction';
+
+/**
+ * The label that asks for a reproduction, per config/phases.json.
+ *
+ * Read back out of the config rather than written here, so the sentence the
+ * session is shown names the label that actually gates it. Null when the skill
+ * is not label-gated at all — it is then an every-ticket skill, and the caller
+ * treats it as asked for.
+ */
+function reproductionLabel(): string | null {
+  const pairs = Object.entries(phaseByName('research')?.labelSkills ?? {});
+  return pairs.find(([, skill]) => skill === REPRODUCTION_SKILL)?.[0] ?? null;
+}
+
+/**
+ * Whether this ticket was triaged as something to reproduce.
+ *
+ * Deliberately the SAME computation that decides whether the skill file is
+ * loaded, rather than a second reading of the labels: the two halves cannot
+ * then disagree, and moving `bug-reproduction` between `skills` and
+ * `labelSkills` in config/phases.json changes both at once with no edit here —
+ * which is the property `labelSkills` exists to have.
+ */
+function reproductionRequested(ctx: PromptCtx): boolean {
+  const cfg = phaseByName('research');
+  return !!cfg && skillsFor(cfg, ctx).includes(REPRODUCTION_SKILL);
+}
+
 /**
  * The research phase's bug-reproduction step.
  *
@@ -401,12 +430,26 @@ tests run: ${i.testsRun || '(none)'}`;
  * where "does the reported bug actually happen?" is cheapest to answer, and
  * the answer is worth the most: a plan built on a bug nobody saw is a guess.
  * The verdict lands in research.json; the runner, not the session, acts on it.
+ *
+ * It runs only for a ticket triaged as a bug. The step used to run on every
+ * ticket and ask the session to classify the ticket itself, but the expensive
+ * half is not the classification — it is the app bring-up and login that come
+ * before the session can act on it, and those are spent whichever way the
+ * answer goes. Triage already knows, and says so in one label.
  */
 function reproductionBlock(ctx: PromptCtx): string {
   if (!bugReproductionEnabled()) {
     return `
 - Bug reproduction is switched off for this project: set \`reproduction.verdict\` to
   'not-applicable', \`reason\` to "reproduction disabled", and every other field empty.
+`;
+  }
+  if (!reproductionRequested(ctx)) {
+    return `
+- This ticket is not labelled \`${reproductionLabel() ?? 'Bug'}\`, so there is nothing to
+  reproduce here: set \`reproduction.verdict\` to 'not-applicable', \`reason\` to "not triaged
+  as a bug", and every other field empty. Do NOT bring the app up or log in — spend this
+  phase on the trace above.
 `;
   }
   return `

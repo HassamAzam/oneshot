@@ -130,6 +130,10 @@ export interface ProjectConfig {
    * fix is planned (skill: bug-reproduction). A run whose defect does not
    * reproduce stops, is labelled `labels.notABug`, and says so on the ticket
    * and in Slack. False turns the whole step off.
+   *
+   * The project-wide half of the switch. The per-ticket half is the label
+   * mapped to `bug-reproduction` in the research phase's `labelSkills`: both
+   * must be true, so this being on does not mean every run reproduces.
    */
   bugReproduction?: boolean;
   /**
