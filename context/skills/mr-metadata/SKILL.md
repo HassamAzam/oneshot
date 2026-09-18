@@ -284,6 +284,9 @@ These rules apply to **every** MR/PR creation path:
 - Any agent (orchestrator, frontend-agent, backend-agent, qa-agent, etc.) that opens a PR/MR as part of its work
 
 **Hard rules:**
+
+These govern **opening an MR**. They do not govern posting to an MR that already exists — a changelog or QA guide on an open MR is `mr-change-logger`'s job, and that skill deliberately never creates a ticket and never blocks on a missing one. When both skills are loaded in the same session, each applies to its own object: this skill owns the title and the closes line at creation time; `mr-change-logger` owns what gets posted afterwards and never overrides a closes line this skill set.
+
 - Never fabricate a ticket URL — only use URLs confirmed via session context, the GitLab API response, or user input.
 - Never skip the closes line — if no ticket exists yet, create one (after asking) rather than omitting it. (Exception: the automated docs / chore-sync case above creates the ticket non-interactively, without asking — it still gets a closes line.)
 - Never pick an unrelated ticket just to satisfy the requirement.

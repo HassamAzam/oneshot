@@ -387,6 +387,8 @@ Confirm both return HTTP 201.
 
 ## Hard rules
 
+These govern **documenting an MR that already exists**. Creating the MR — its title and its `Closes` line — belongs to `mr-metadata`, which does require a ticket and will ask for or create one. The two are not in conflict: that skill runs at creation, this one runs after. Never treat the rules below as a reason to strip or skip a closes line `mr-metadata` already set.
+
 - **Never run `git merge` or `git push`** — read-only on git; diff only
 - **Never print `GITLAB_TOKEN`** to the user
 - **Always offer current branch as first option** — run `git branch --show-current` and present it as the first choice when asking for MR branch
