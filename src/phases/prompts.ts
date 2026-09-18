@@ -829,7 +829,13 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
     };
     const cases = testCases(ctx);
     const findings = findingsOf(ctx);
-    const verifyFailures = findings.length ? [] : verifyFailuresOf(ctx);
+    // Both can be non-empty at once, and when they are the verify failures are
+    // the ones that matter: a review finding is a reader's hypothesis about a
+    // diff, a verify failure is a measurement taken against a running build.
+    // This used to discard the failures whenever review had anything to say, so
+    // #194 spent both cycle laps closing a rebase and a test-file move while a
+    // reproducible h3 duplication — observed, with evidence — went untouched.
+    const verifyFailures = verifyFailuresOf(ctx);
 
     // Named from the plan's forecast, phrased as a default rather than a
     // permission. The conductor cannot enforce this — `agents` in phases.json
@@ -854,7 +860,18 @@ reviewed against.${unplanned}`;
     // A review lap and a retry lap are different jobs and must not read the
     // same: one has a defect list to close, the other has an unknown amount of
     // its own half-finished work already committed on the branch.
-    const lapBlock = findings.length
+    const verifyBlock = verifyFailures.length
+      ? `## Verify failed these cases — fix them (lap ${ctx.lap})
+\`verify\` ran the case list against a real build of the previous lap and reported these as
+failing. These are observed defects, not a hypothesis: fix the code so each one passes, do not
+argue with the verdict. Commits from the lap verify tested may already be on the branch — run
+\`git log --oneline origin/${baseBranch()}..HEAD\` and read the diff before writing anything.
+
+${verifyFailures.map((c) => `- ${c.id}: ${c.evidence}`).join('\n')}
+`
+      : '';
+
+    const reviewBlock = findings.length
       ? `## Review findings to fix (lap ${ctx.lap})
 The previous lap was reviewed and sent back. Fix every blocker and major. Address minors and
 suggestions unless doing so contradicts the plan — say which you left and why in \`summary\`.
@@ -873,22 +890,29 @@ checked yourself.
 
 ${findings.map((f) => `- ${f.id} [${f.severity}] ${f.file}:${f.line}\n    ${f.what}\n    fix: ${f.fix}`).join('\n')}
 `
-      : verifyFailures.length
-        ? `## Verify failed these cases — fix them (lap ${ctx.lap})
-\`verify\` ran the case list against a real build of the previous lap and reported these as
-failing. These are observed defects, not a hypothesis: fix the code so each one passes, do not
-argue with the verdict. Commits from the lap verify tested may already be on the branch — run
-\`git log --oneline origin/${baseBranch()}..HEAD\` and read the diff before writing anything.
+      : '';
 
-${verifyFailures.map((c) => `- ${c.id}: ${c.evidence}`).join('\n')}
+    // Verify first when both are present: the review block opens by telling this
+    // phase what its job is, and whichever block leads is the one that frames the
+    // lap. A caller that fixes the measured failures and then reads the review is
+    // doing them in the right order.
+    const bothBlock = verifyFailures.length && findings.length
+      ? `Both a verify failure list and a review finding list are present below. The verify
+failures come first and are not optional: they were observed against a running build. Treat
+review's findings as secondary to them, and if the two disagree, the measurement wins.
+
 `
-        : ctx.lap > 0
-          ? `## This is lap ${ctx.lap}
+      : '';
+
+    const lapBlock = verifyFailures.length || findings.length
+      ? `${bothBlock}${verifyBlock}${reviewBlock}`
+      : ctx.lap > 0
+        ? `## This is lap ${ctx.lap}
 A previous attempt at this phase did not finish. Its commits may already be on the branch.
 Run \`git log --oneline origin/${baseBranch()}..HEAD\` and read the diff
 BEFORE writing anything, and continue from there rather than redoing work that landed.
 `
-          : '';
+        : '';
 
     // Empty on lap 0 — testcases runs AFTER this phase. On a review or verify
     // cycle lap it exists, and then it is the sharpest statement of what the
