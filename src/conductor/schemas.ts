@@ -319,6 +319,79 @@ export const VERIFY_SCHEMA = phaseSchema({
   regressions: strArr('Things that worked before this change and no longer do.'),
 }, ['serverStarted', 'port', 'results', 'regressions']);
 
+export const DESIGN_SCHEMA = phaseSchema({
+  applicable: {
+    type: 'boolean',
+    description:
+      'False when this ticket has no UI surface to design — it is backend-only, or the change ' +
+      'is invisible. Say so in `rationale` and send empty screens. That is a correct answer, ' +
+      'not a failure: the run continues to `plan` and nobody is asked to approve a blank page.',
+  },
+  rationale: str('Why applicable is what it is, in one or two sentences.'),
+  flowChange: {
+    type: 'boolean',
+    description:
+      'True when the change spans more than one screen, or adds a step to an existing journey. ' +
+      'True means you also build the clickable prototype and record the walkthrough.',
+  },
+  tokensFile: str('Artifact-relative path of the tokens.css distilled from the real frontend.'),
+  screens: {
+    type: 'array',
+    description: 'One entry per screen designed. Empty when applicable is false.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: str('Short stable id, e.g. "approvals-inbox"'),
+        name: str('What a reviewer would call this screen'),
+        purpose: str('What someone does on it, in one line'),
+        states: strArr('States drawn: default, empty, loading, error, permission-denied'),
+        mockupHtml: str('Artifact-relative path of the mockup HTML'),
+        screenshot: str('Artifact-relative path of the render of that mockup'),
+        before: str(
+          'Artifact-relative path of the same screen as it looks TODAY, captured from the ' +
+          'running app. Empty string only when the screen does not exist yet — never because ' +
+          'it was not captured.',
+        ),
+        note: str('The one design decision on this screen worth the reviewer\'s attention'),
+      },
+      required: ['id', 'name', 'purpose', 'states', 'mockupHtml', 'screenshot', 'before', 'note'],
+    },
+  },
+  prototype: {
+    type: ['object', 'null'],
+    additionalProperties: false,
+    description: 'Set when flowChange is true, null otherwise.',
+    properties: {
+      entry: str('Artifact-relative path of the prototype index.html'),
+      video: str('Artifact-relative path of the silent annotated walkthrough (.webm)'),
+    },
+    required: ['entry', 'video'],
+  },
+  decisions: strArr(
+    'The choices you made on the reviewer\'s behalf that they would want to know about. ' +
+    'Not a changelog — the two or three that would start an argument if they disagreed.',
+  ),
+  newPatterns: strArr(
+    'Anything here that is NOT already in the design system — a new token, a component pattern ' +
+    'the product does not have. Surface them; never smuggle one in as if it were existing. ' +
+    'Empty array when everything reuses what is there.',
+  ),
+  openQuestions: {
+    type: 'array',
+    description: 'Decisions you could not make from the ticket. Always carry a recommendation.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        q: str('The question, answerable in a sentence'),
+        recommendation: str('What you would do absent an answer — this is used if nobody replies'),
+      },
+      required: ['q', 'recommendation'],
+    },
+  },
+}, ['applicable', 'rationale', 'flowChange', 'tokensFile', 'screens', 'decisions', 'newPatterns', 'openQuestions']);
+
 export const UI_EVIDENCE_SCHEMA = phaseSchema({
   screenshots: {
     type: 'array',
@@ -350,6 +423,27 @@ export const UI_EVIDENCE_SCHEMA = phaseSchema({
         caseId: str('Related case id, or empty string'),
       },
       required: ['what', 'before', 'after', 'how', 'caseId'],
+    },
+  },
+  designConformance: {
+    type: 'array',
+    description:
+      'One row per screen of an APPROVED design, comparing it to what actually shipped. Empty ' +
+      'array when this ticket had no design phase, which is the usual case.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        screenId: str('The screen id from design.json'),
+        designShot: str('Filename of the approved mockup render (already in artifacts/)'),
+        builtShot: str('Filename of the same screen as built, captured by you'),
+        differences: strArr(
+          'Every way the built screen departs from the approved one, one per item. An EMPTY ' +
+          'array is the claim that it matches — so list the small ones too rather than ' +
+          'deciding for the reviewer which departures were allowed.',
+        ),
+      },
+      required: ['screenId', 'designShot', 'builtShot', 'differences'],
     },
   },
 }, ['screenshots', 'observations']);
@@ -428,6 +522,7 @@ export const MR_FEEDBACK_SCHEMA = phaseSchema(MR_FEEDBACK_PROPS, ['items']);
 export const SCHEMAS: Record<string, JsonSchema> = {
   recall: RECALL_SCHEMA,
   research: RESEARCH_SCHEMA,
+  design: DESIGN_SCHEMA,
   plan: PLAN_SCHEMA,
   testcases: TESTCASES_SCHEMA,
   implement: IMPLEMENT_SCHEMA,

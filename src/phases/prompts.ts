@@ -23,12 +23,14 @@ import {
   STATE, artifactDir, bugReproductionEnabled, envOr, phaseByName, phases, projectConfig, runDir,
   type PhaseConfig,
 } from '../lib/config.js';
+import { join } from 'node:path';
 import { readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import {
   GITLAB_PROJECT_URL,
-  type CaseResult, type Finding, type Screenshot, type TestCase, type Ticket, type TicketDoc,
+  type CaseResult, type DesignArtifact, type Finding, type Screenshot, type TestCase,
+  type Ticket, type TicketDoc,
 } from './types.js';
 
 export interface PromptCtx {
@@ -286,9 +288,11 @@ function priorArt(ctx: PromptCtx): string {
  * the journal is already ground truth for run-scoped facts (branch, MR,
  * merged SHA) and every phase already receives it.
  */
-function reviewGateFeedbackBlock(rounds: string[] | undefined, heading: string): string {
+function reviewGateFeedbackBlock(
+  rounds: string[] | undefined, heading: string, label = 'Review',
+): string {
   if (!rounds?.length) return '';
-  return `\n## ${heading}\nThis ticket carries **Review**: a human read an earlier version of this and replied ` +
+  return `\n## ${heading}\nThis ticket carries **${label}**: a human read an earlier version of this and replied ` +
     'with the feedback below instead of `approved`. Address it directly.\n\n' +
     `${rounds.map((f, i) => `### Round ${i + 1}\n${f}`).join('\n\n')}\n`;
 }
@@ -563,6 +567,46 @@ const ORACLE =
   'one that disappears when you compare cell-to-Total instead of cell-to-raw-row-sum — is a\n' +
   'reading artifact, not a defect, and is not a fail.';
 
+/**
+ * The approved design, for the phases that must build to it.
+ *
+ * Empty for every ticket without the `Design` label, and for a Design ticket
+ * whose design phase found no UI to draw — both reach here as a missing or
+ * `applicable: false` artifact, and both mean the same thing downstream: there
+ * is no agreed picture, carry on as normal.
+ *
+ * It hands over PATHS rather than inlined markup on purpose. A mockup is a
+ * whole HTML file; pasting five of them into a prompt would cost more than the
+ * phase reading the one it is currently working on, and the exact values —
+ * the hex, the spacing, the copy — are what "build it like the design" means,
+ * so they have to be readable at source rather than summarised.
+ */
+function approvedDesignBlock(ctx: PromptCtx): string {
+  const d = artifact<DesignArtifact>(ctx, 'design');
+  if (!d.screens || d.applicable === false) return '';
+  const dir = artifactDir(ctx.ticket.iid);
+  const screens = d.screens
+    .map((x) => `- **${x.name}** (${x.id}) — ${x.purpose}\n`
+      + `  - design: \`${join(dir, x.mockupHtml)}\`\n`
+      + `  - rendered: \`${join(dir, x.screenshot)}\`${x.note ? `\n  - ${x.note}` : ''}`)
+    .join('\n');
+  const approved = ctx.journal.designApproval?.approved === true;
+
+  return `\n## The approved design — this is the specification
+${approved
+    ? 'A human approved these screens on the ticket before any of this was planned.'
+    : 'These screens were designed for this ticket. (No approval is recorded yet.)'}
+Build to them: the same layout, the same states, the same copy, and the same values from
+\`${join(dir, d.tokensFile ?? 'tokens.css')}\` rather than new ones. Where the design and your own
+judgement disagree, the design won the argument already — if it is genuinely wrong, say so
+rather than quietly improving it, because the reviewer approved what they saw.
+
+${screens}
+${d.prototype ? `\nThe full flow is prototyped at \`${join(dir, d.prototype.entry)}\`.` : ''}
+${d.newPatterns?.length ? `\nApproved as NEW to the design system: ${d.newPatterns.join('; ')}.` : ''}
+`;
+}
+
 /** How a phase names a screenshot the schema will only carry as a bare filename. */
 function artifactsBlock(ctx: PromptCtx): string {
   return `Everything you capture goes in ${artifactDir(ctx.ticket.iid)} (create it if it is not
@@ -712,8 +756,94 @@ Work out what this ticket actually requires, and trace the code that implements 
 ${reproductionBlock(ctx)}
 Do not write or modify any code.`,
 
+  design: (ctx) => `${ticketBlock(ctx.ticket)}
+${reviewGateFeedbackBlock(ctx.journal.designApproval?.feedback, 'Reviewer feedback on an earlier design', 'Design')}
+## Research (phase 1)
+${JSON.stringify(ctx.prior.research ?? {}, null, 2)}
+
+This ticket carries **Design**: what the UI should look like is agreed with a human BEFORE it is
+planned or built. Your output is what they approve, and what \`plan\` and \`implement\` then build
+to. Nothing you write here ships — you are drawing, not implementing.
+
+## Your app instance
+Worktree: ${ctx.worktree ?? '(none leased)'}
+Port:     ${ctx.port ?? '(none leased)'}   (also in $ONESHOT_PORT)
+
+The app is on the BASE branch — this runs before anything is implemented — which is exactly what
+you need it for. Start it with the one command everything else uses; do not start a server by hand:
+
+\`\`\`
+node $ONESHOT_HOME/scripts/app.cjs ensure
+\`\`\`
+
+## FIRST: is there anything to design?
+
+Decide this before you draw a pixel. If the ticket changes no UI — backend-only, a data fix, an
+invisible refactor — send \`applicable: false\` with a one-line \`rationale\`, empty \`screens\`, and
+STOP. That is a correct, cheap answer. The label is applied by a person and people label
+optimistically; a design phase that invents a screen to justify itself costs a reviewer a round
+of their attention to say "there was nothing here".
+
+## Ground the design in the REAL product, not in taste
+
+A mockup succeeds when the reaction is "that's our app with the feature in it", and fails when it
+is "that's a nice generic dashboard". So, in order:
+
+1. Read the real tokens out of the frontend: \`frontend/src/jss/Theme.js\` (getColors,
+   getPalateColors), \`frontend/src/jss/style.js\` (Lato/Montserrat), \`frontend/src/scss/_variables.scss\`.
+   Distil them into one \`tokens.css\` that every mockup imports, so a system-level change is a
+   one-file edit.
+2. Open the running app and screenshot the screens this ticket touches AS THEY ARE TODAY. That
+   capture is the \`before\` on each screen, and it is also where you read the real shell — nav,
+   header, density, spacing — which every mockup then reproduces.
+3. Use research's \`uiPath\` to find those screens rather than hunting for them.
+
+## What to draw
+
+One self-contained \`.html\` per screen, importing \`../tokens.css\`. No CDN scripts, no external
+fonts or images — inline everything. Real content always: plausible names, dates, amounts and
+statuses for this product, 5-8 varied rows in any table, one long value that tests truncation.
+Never lorem ipsum and never "Item 1". Draw the states that matter — empty, error,
+permission-denied — not only the happy one; a state you deliberately skip is worth a word in the
+screen's \`note\`.
+
+Render each at 1280x800 and screenshot it. Then look at your own screenshots once, critically:
+misaligned edges, doubled borders, overflow, contrast. Fix what you find. A flaw you could have
+caught yourself spends the reviewer's round on your typo instead of on your design.
+
+## If the flow changes, make it clickable and record it
+
+\`flowChange\` is true when the change spans more than one screen or adds a step to an existing
+journey. Then, additionally:
+
+- Build \`prototype/index.html\`: one self-contained file, hash routing, vanilla JS, the same
+  \`tokens.css\`. Buttons navigate, forms accept input and carry values forward, submit -> pending
+  -> approved actually plays out. Include one unhappy branch. Seed it with data so it is
+  demonstrable with no setup.
+- Record a SILENT annotated walkthrough of the happy path with Playwright's \`recordVideo\`
+  (\`.webm\`, which GitLab renders inline in a comment). No narration and no audio track — ever.
+  The annotations ARE the narration: before each click, inject a small absolutely-positioned
+  overlay with an arrow and a short caption pointing at the control you are about to use, hold it
+  ~1.5s, then click. Keep it under 60 seconds and to one flow.
+
+Annotating is right HERE and wrong in \`ui-evidence\`, and the difference is worth holding on to:
+this video argues for a design, so labelling it helps; that phase's screenshots are evidence that
+a case ran, so drawing on them would be painting the result onto the page.
+
+${artifactsBlock(ctx)}
+
+## What the reviewer decides
+
+\`decisions\` is the two or three choices you made on their behalf that they would argue with —
+not a changelog. \`newPatterns\` is anything not already in the design system; surface it there
+rather than slipping it in as though it existed, because approving the design approves it.
+\`openQuestions\` always carries a recommendation, since a question with a default gets answered
+and one without it parks the run.
+
+Do not modify any application code. The only files you create are under the artifact directory.`,
+
   plan: (ctx) => `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
-${reviewGateFeedbackBlock(ctx.journal.planApproval?.feedback, 'Reviewer feedback on an earlier plan')}
+${reviewGateFeedbackBlock(ctx.journal.planApproval?.feedback, 'Reviewer feedback on an earlier plan')}${approvedDesignBlock(ctx)}
 ## Research (phase 1)
 ${JSON.stringify(ctx.prior.research ?? {}, null, 2)}
 
@@ -904,7 +1034,7 @@ ${cases.map((c) => `  - ${c.id} [${c.blast}] ${c.scenario}\n      expects: ${c.e
     return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 ${lapBlock}
 ${implementFeedbackBlock(ctx.journal.mrFeedback)}
-${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'Test-case gate reviewer feedback')}
+${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'Test-case gate reviewer feedback')}${approvedDesignBlock(ctx)}
 ## Plan (phase 2) — this is your specification
 ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 
@@ -1243,6 +1373,33 @@ impossible.`;
   },
 
   'ui-evidence': (ctx) => {
+    const design = artifact<DesignArtifact>(ctx, 'design');
+    const designed = design.applicable === false ? [] : (design.screens ?? []);
+    // Only a design a human signed off on is worth pairing against. An
+    // unapproved one is a draft, and "the build departs from the draft" is not
+    // a finding — the run never promised to match it.
+    const conformance = ctx.journal.designApproval?.approved && designed.length
+      ? `
+## Pair the shipped screens against the approved design
+This ticket went through the \`design\` gate: a human approved these screens before the code was
+written, so the reviewer's question on the MR is "is this what I approved". Answer it for them.
+
+For each screen below, navigate to it in the running app, capture it at the SAME 1280x800 the
+mockup was drawn at, and fill one \`designConformance\` row: the approved render, your capture,
+and every way they differ. An empty \`differences\` IS the claim that it matches, so list the
+small departures too — a spacing change, a reworded label, a missing empty state. Deciding for
+the reviewer which ones were fine is the one thing this row must not do.
+
+Also put both files in \`screenshots\`, approved first and built immediately after, captioned so
+the pair reads in order. The ordering is what makes them comparable at a glance.
+
+${designed.map((x) => `- **${x.name}** (\`${x.id}\`) — approved render \`${x.screenshot}\`, already in your artifact dir`).join('\n')}
+
+A screen you genuinely cannot reach (the route needs data or a role you cannot make) gets a row
+with an empty \`builtShot\` and the reason as its single \`differences\` entry. Never pair a
+screenshot of a different screen.
+`
+      : '';
     const v = artifact<{ results: CaseResult[]; serverStarted: boolean; port: number }>(ctx, 'verify');
     const results = v.results ?? [];
     const taken = results.filter((x) => x.screenshot);
@@ -1318,6 +1475,7 @@ The base-branch value comes from the base branch, read without touching this che
 \`git show origin/${baseBranch()}:<path>\` for the template or component, stated as "from source" in
 \`how\`. If you cannot establish it, write "not measured" and why — never infer it.
 
+${conformance}
 ## Never alter what you are capturing
 
 - Do not inject anything into the page before a screenshot: no overlay, banner, label, style or

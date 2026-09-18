@@ -89,9 +89,10 @@ import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import { mergePhase } from './codephases.js';
 import {
-  appendEdgeCases, checkApprovalGate, declaredFiles, gatesApply, planApprovalRequestBody,
-  planApprovedRecordBody, reviewAllRuns, reviewLabelPresent, testcasesApprovalRequestBody,
-  testcasesApprovedRecordBody, triggerLine,
+  appendEdgeCases, checkApprovalGate, declaredFiles, designApprovalRequestBody,
+  designApprovedRecordBody, designAttachments, designGateApplies, gatesApply,
+  planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
+  testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { Ticket, TestCase } from '../phases/types.js';
@@ -532,7 +533,12 @@ export async function runTicket(
 ): Promise<RunOutcome> {
   const cfg = projectConfig();
   const iid = issue.iid;
-  const list = phases();
+  // Label-gated phases are FILTERED OUT, not skipped in place. A phase skipped
+  // in place still occupies an index, and `nextIndex`, `cycleTo` and the group
+  // batching all do arithmetic on those — so a phase nobody is running must
+  // not be in the list they walk. See `labelGated` in src/lib/config.ts.
+  const carried = new Set(issue.labels.map((l) => l.toLowerCase()));
+  const list = phases().filter((p) => !p.labelGated || carried.has(p.labelGated.toLowerCase()));
   const owner = opts.conductor;
 
   if (issue.assignees.length > 0) {
@@ -842,6 +848,49 @@ export async function runTicket(
       log.info(`skip ${phase.name} — already succeeded this run`);
       i += 1;
       continue;
+    }
+
+    // The Design label's design-approval gate — between `design` and `plan`.
+    //
+    // It sits BEFORE `plan` rather than after it for the same reason the
+    // test-case gate sits before `review`: this is the last point at which
+    // approving still changes everything downstream. A design agreed here is
+    // what `plan` plans and `implement` builds; the same approval taken after
+    // the plan existed would be approving a picture of something already
+    // decided.
+    //
+    // A design that found no UI to draw (`applicable: false`) never arms it.
+    // Someone labels optimistically, or the ticket turns out backend-only, and
+    // a mislabelled ticket should cost a re-read of one artifact rather than a
+    // person — the same posture `bugReproduction` takes on 'inconclusive'.
+    const design = prior.design ?? null;
+    const designNeedsSignoff = design !== null && (design as { applicable?: unknown }).applicable !== false;
+    if (phase.name === 'plan' && phaseSucceeded(iid, 'design')
+      && designGateApplies(ticket.labels) && designNeedsSignoff && !j.designApproval?.approved) {
+      const gate = await checkApprovalGate({
+        iid,
+        gate: 'design',
+        requestBody: designApprovalRequestBody(design),
+        attachments: designAttachments(iid, design),
+        onApproved: async () => { await addIssueNote(iid, designApprovedRecordBody(design)); },
+      });
+      j = readJournal(iid) ?? j;
+      if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
+      if (gate.verdict === 'pending') {
+        return finish(j, 'parked',
+          'awaiting design approval — a dev reviewer comments `approved` on the ticket to continue, '
+          + 'or comments there what to change to have the design redrawn');
+      }
+      if (gate.verdict === 'feedback') {
+        const designIdx = list.findIndex((p) => p.name === 'design');
+        if (designIdx !== -1) {
+          forced.add('design');
+          i = designIdx;
+          continue;
+        }
+      }
+      // 'approved' (or 'design' somehow absent from the list) — fall through
+      // into 'plan' below, which now reads design.json as its specification.
     }
 
     // The Review label's plan-approval gate — opt-in, additive, and checked

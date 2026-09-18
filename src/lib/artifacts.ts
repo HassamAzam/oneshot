@@ -115,8 +115,8 @@ export interface RunJournal {
   createdAt: number;
   /**
    * 'parked' is an opt-in-only, human-caused wait — the Review label's three
-   * pause points (plan approval, test-case approval, merge) and nothing
-   * else ever produces it. Unlike 'blocked' it swaps no label and alerts
+   * pause points (plan approval, test-case approval, merge), the Design
+   * label's design-approval pause, and nothing else ever produces it. Unlike 'blocked' it swaps no label and alerts
    * nobody: the ticket keeps carrying the entry label throughout, so the next
    * tick's scan re-claims it and re-checks for a reply exactly like an
    * ordinary resumption. See src/conductor/reviewgate.ts.
@@ -132,6 +132,14 @@ export interface RunJournal {
    */
   reviewMode?: boolean;
   /** Plan-approval gate state (Review label, between `plan` and `implement`). */
+  /**
+   * Design approval gate state (the `Design` label, between `design` and
+   * `plan`). Unlike the two above, this gate is armed by its OWN label rather
+   * than by `Review`/`reviewAllRuns`/guarded paths: a ticket asking for a
+   * design round is asking for exactly this pause, and it should get it
+   * whatever the code-review posture happens to be.
+   */
+  designApproval?: ReviewGateState;
   planApproval?: ReviewGateState;
   /** Test-case approval gate state (Review label, between `testcases` and `review`). */
   testcasesApproval?: ReviewGateState;
