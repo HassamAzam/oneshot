@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { codePhaseStatus, mergePollWait, nextIndex } from './runner.js';
+import { codePhaseStatus, mergePollWait, nextIndex, testcaseGateRoute } from './runner.js';
 import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
 
 function phase(name: string, n: number, group?: string): PhaseConfig {
@@ -115,4 +115,34 @@ test('nothing holds a run that is not waiting on a human merge', () => {
   assert.equal(poll({ dryRun: true }), null);
   assert.equal(poll({ mergeSucceeded: true }), null, 'a later park must not wait behind a finished merge');
   assert.equal(poll({ lastCheckAt: undefined }), null, 'never asked GitLab yet: ask now');
+});
+
+// workstreamai#87: the reviewer wrote "TC-05 is removed and replaced by the
+// three separate cases below". Appending that produced a case reading `Verify
+// that TC-05 is removed and replaced by...`, left TC-05 in place, and took the
+// list from 20 cases to 44. A revision has to reach a model, and the only way
+// to a model on this path is to cycle the phase.
+test('a revision request cycles the testcases phase instead of appending', () => {
+  assert.equal(testcaseGateRoute('feedback', true), 'revise');
+});
+
+test('a sign-off proceeds, and the append it may carry is the approved path', () => {
+  // `approved` never routes to 'revise': a comment followed by `approved` is one
+  // more case on a list the reviewer accepted, which append expresses exactly.
+  assert.equal(testcaseGateRoute('approved', true), 'proceed');
+  assert.equal(testcaseGateRoute('approved', false), 'proceed');
+});
+
+test('an unanswered gate parks, as it always has', () => {
+  assert.equal(testcaseGateRoute('pending', true), 'park');
+});
+
+test('an empty reviewer list blocks rather than parking forever', () => {
+  assert.equal(testcaseGateRoute('unavailable', true), 'blocked');
+});
+
+test('a revision with no testcases phase to cycle parks, never silently proceeds', () => {
+  // Treating a revision as an approval because the board is misconfigured would
+  // turn a reviewer asking for changes into a sign-off they never gave.
+  assert.equal(testcaseGateRoute('feedback', false), 'park');
 });
