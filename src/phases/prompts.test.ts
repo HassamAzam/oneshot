@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
-import { phaseByName, type PhaseConfig } from '../lib/config.js';
+import { phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Ticket } from './types.js';
 
 function ticket(over: Partial<Ticket> = {}): Ticket {
@@ -123,4 +125,76 @@ test('an unlabelled ticket is never told to bring the app up', () => {
   // driving the steps is what raised this phase to 180 turns.
   const without = promptFor(cfg('research'), ctx(ticket({ labels: [] })));
   assert.ok(!/app\.cjs ensure/.test(without));
+});
+
+// -------------------------------------- verify failures reach implement (#35)
+
+/**
+ * A verify failure is a measurement; a review finding is a reader's hypothesis
+ * about a diff. When a run cycles back to `implement` carrying both, the prompt
+ * used to render only the review findings — so #194 spent both of its cycle laps
+ * closing a rebase and a test-file move while a reproducible h3 duplication went
+ * untouched, and the run blocked on a defect nothing had ever shown it.
+ *
+ * These write into the reserved 990000+ iid band that `verify-fleet` already
+ * uses, because the prompt reads both artifacts off disk by iid.
+ */
+const FIXTURE_IID = 990101;
+
+function withArtifacts(
+  artifacts: Record<string, unknown>,
+  run: (c: PromptCtx) => void,
+): void {
+  const dir = runDir(FIXTURE_IID);
+  mkdirSync(dir, { recursive: true });
+  for (const [name, data] of Object.entries(artifacts)) {
+    writeFileSync(join(dir, name), JSON.stringify(data));
+  }
+  try {
+    run(ctx(ticket({ iid: FIXTURE_IID }), {}));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const VERIFY_FAILED = {
+  results: [
+    { id: 'TC-06', result: 'fail', evidence: 'h3Count=32 not 27', screenshot: 'TC-06-fail.png' },
+    { id: 'TC-10', result: 'pass', evidence: 'ok', screenshot: '' },
+  ],
+};
+
+const REVIEW_CHANGES = {
+  verdict: 'changes-requested',
+  findings: [{ id: 'F-02', severity: 'major', file: 'a.js', line: 1, what: 'w', why: 'y', fix: 'f' }],
+};
+
+test('a verify failure reaches implement even when review also has findings', () => {
+  withArtifacts({ 'verify.json': VERIFY_FAILED, 'findings.json': REVIEW_CHANGES }, (c) => {
+    const p = promptFor(cfg('implement'), c);
+    assert.match(p, /## Verify failed these cases/, 'the verify block must render');
+    assert.match(p, /## Review findings to fix/, 'the review block must still render');
+    assert.match(p, /TC-06/, "the failing case's id must be named");
+    assert.match(p, /h3Count=32 not 27/, 'the measured evidence must be carried, not just the expectation');
+  });
+});
+
+test('verify failures are stated before review findings', () => {
+  withArtifacts({ 'verify.json': VERIFY_FAILED, 'findings.json': REVIEW_CHANGES }, (c) => {
+    const p = promptFor(cfg('implement'), c);
+    assert.ok(
+      p.indexOf('## Verify failed these cases') < p.indexOf('## Review findings to fix'),
+      'whichever block leads frames the lap, so the measurement must lead',
+    );
+    assert.match(p, /the measurement wins/, 'precedence must be stated, not merely implied by order');
+  });
+});
+
+test('a passing verify contributes no failure block', () => {
+  const allPass = { results: [{ id: 'TC-01', result: 'pass', evidence: 'ok', screenshot: '' }] };
+  withArtifacts({ 'verify.json': allPass, 'findings.json': REVIEW_CHANGES }, (c) => {
+    const p = promptFor(cfg('implement'), c);
+    assert.doesNotMatch(p, /## Verify failed these cases/);
+    assert.match(p, /## Review findings to fix/);
+  });
 });
