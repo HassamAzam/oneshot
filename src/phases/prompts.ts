@@ -804,6 +804,70 @@ fail without reading the code.
 Read whatever you need to. Do not run the app and do not change a line of code — you are
 authoring the list, not executing it and not fixing what it finds.
 
+## Writing cases that can only fail because of the change
+
+A case that fails for a reason the ticket did not cause is worse than no case:
+it burns the run's cycle budget, sends \`implement\` after work it cannot do, and
+blocks the merge gate on something no diff can fix. Five rules, each learned from
+a case that did exactly that.
+
+### 1. Assert only what the diff can change
+
+Scope every assertion to the component, page or endpoint the ticket touches.
+Never assert a global property unless the ticket *is* that property.
+
+- **Bad:** "Zero console errors on the page." The app emits 23 app-wide warnings
+  (MUI \`styles\`, \`Grid2 item\`, JSS, \`createRoot\`) that predate the ticket. The
+  case fails forever and names the innocent diff.
+- **Good:** "No console error originating from the files this ticket changed."
+- **Better still:** measure the baseline on the base branch first and assert
+  **no new** errors, quoting the baseline count in \`expected\`.
+
+### 2. Never assert through tooling that is known not to run
+
+Check the tool actually executes in this repo before writing a case around it.
+
+- **Bad:** "Run \`npm test -- --testPathPattern=home_page\`; 5 tests pass."
+  This repo's Jest is rotted (Babel/enzyme/ESM drift) and CI never runs it, so
+  the case is unpassable by construction — it failed identically on three
+  separate laps.
+- **Good:** assert through a runner that works — Playwright for the browser,
+  ESLint for lint, pytest for backend — and say which.
+
+### 3. One case, one subject
+
+Do not bundle a behavioural assertion with an environmental one. A bundled case
+reports \`fail\` even when the behaviour under test passed.
+
+- **Bad:** "The logged-in user is redirected off \`/\` **and** no JavaScript error
+  appears in the console." The redirect worked perfectly; the case failed on 39
+  console errors belonging to the authenticated page it redirected *to*.
+- **Good:** one case for the redirect, a separate one for console output —
+  scoped per rule 1.
+
+### 4. Derive \`expected\` from measured reality, not the ticket's prose
+
+The ticket describes intent. The page describes fact. Where they disagree, find
+out which is right *before* writing the case.
+
+- **Bad:** "Send is leftmost, Cancel is rightmost" — taken from the ticket text.
+  A pre-existing shared \`float:right\` rule has always rendered Cancel left. The
+  case failed on behaviour the ticket never asked anyone to change.
+- **Good:** either scope the case to what the ticket does change, or state the
+  pre-existing behaviour in \`expected\` and raise the discrepancy as its own
+  ticket.
+
+### 5. A case that needs a baseline must carry it
+
+"No layout shift versus the pre-change screenshots" is unrunnable if no
+pre-change screenshots exist. Either capture the baseline as a pre-condition, or
+assert something measurable instead (computed values, element counts, geometry).
+
+### The check before you submit a case list
+
+For each case ask: **if this fails, is the ticket's diff necessarily at fault?**
+If the honest answer is "not necessarily", rewrite it or drop it.
+
 ## Turn economy — this phase has died at its cap, so it is a protocol, not advice
 
 Reading is not the deliverable and cannot be salvaged; cases can. So:
