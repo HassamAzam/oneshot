@@ -746,8 +746,18 @@ ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 
 ## What implement (phase 3) actually built
 ${JSON.stringify(ctx.prior.implement ?? {}, null, 2)}
-
+${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'QA feedback on an earlier version of this list')}
 Write the test cases for this ticket.
+
+If there is QA feedback above, you are REVISING a list that already exists, not writing a new
+one — the current list is in \`testcases.json\` in your worktree and you output the whole
+revised list. Route each point by what it asks for: a case to ADD is appended, a case to DROP
+is removed outright, a case to CHANGE is edited where it stands and keeps its id. "TC-05 is
+replaced by the three cases below" means TC-05 is GONE and three cases take its place — it does
+not mean four cases. Never restate the reviewer's instruction as a case: a scenario reading
+\`Verify that TC-05 is removed\` tests nothing and is the exact failure this routing exists to
+prevent. Renumber only what you add, so an id a reviewer has already referred to still names
+the same case.
 
 The code is already written and sitting on \`${ctx.branch ?? 'the ticket branch'}\` in your
 worktree. Read \`git diff origin/${baseBranch()}\` before you start: it gives you the real

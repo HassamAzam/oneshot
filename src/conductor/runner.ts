@@ -453,6 +453,37 @@ function logStopDetail(journal: RunJournal, headline: string): void {
  * arithmetic can be single-stepped in a test without standing up a run — it
  * decides which phases re-run, which is the one thing here worth proving.
  */
+/**
+ * What a test-case gate round means, once its verdict is known.
+ *
+ * The same reviewer text means two different things depending on how the round
+ * ended, which is why this cannot be decided when the text arrives. A comment
+ * followed by `approved` is an ADDITION to a list the reviewer accepted — one
+ * more case, appended, no session spent. The same comment with no sign-off is a
+ * REVISION request, and append is the one verb that cannot express "TC-05 is
+ * replaced by the three below": it leaves TC-05 in place and files the sentence
+ * itself as a case. That is how workstreamai#87 reached 44 cases from 20.
+ *
+ * `revise` therefore cycles the `testcases` phase, the way the plan gate has
+ * always cycled `plan` — a model re-reads the list with the reviewer's words in
+ * its prompt, and the editing rules in erp-ticket-test-plan finally have a
+ * reader.
+ */
+export type TestcaseGateRoute = 'blocked' | 'revise' | 'proceed' | 'park';
+
+export function testcaseGateRoute(
+  verdict: 'approved' | 'feedback' | 'pending' | 'unavailable',
+  canCycle: boolean,
+): TestcaseGateRoute {
+  if (verdict === 'unavailable') return 'blocked';
+  if (verdict === 'approved') return 'proceed';
+  // A board with no `testcases` phase configured cannot cycle one. Parking is
+  // the honest answer: the reviewer's revision is recorded and a person can
+  // act on it, which beats silently treating a revision as an approval.
+  if (verdict === 'feedback' && canCycle) return 'revise';
+  return 'park';
+}
+
 export function nextIndex(
   control: Exclude<Control, { kind: 'stop' }>,
   current: number,
@@ -892,12 +923,23 @@ export async function runTicket(
     }
 
     // The Review label's test-case gate, sitting after phase 4 (`testcases`)
-    // and before phase 5 (`review`). Unlike the plan gate, a non-`approved`
-    // reply here never cycles a phase: it is read as edge case(s) to fold into
-    // the test-case list, appended in place by `appendEdgeCases` (mechanical,
-    // no model), and the SAME gate asks again on the SAME ticket with the
-    // updated list. The run just stays parked between rounds; only `approved`
-    // moves the index.
+    // and before phase 5 (`review`).
+    //
+    // A reply is routed by what it ASKS FOR, and the two answers need different
+    // machinery. A reviewer who signs off while naming one more case is asking
+    // for an APPEND, and `appendEdgeCases` is exactly right for it: the list
+    // they approved plus the case they added, no session, no cost. A reviewer
+    // who replies instead of approving is asking for a REVISION — "TC-05 is
+    // removed and replaced by the three cases below" — and append is the one
+    // verb that cannot express it. Appending that sentence produced a case
+    // reading `Verify that TC-05 is removed and replaced by...` while TC-05
+    // itself stayed, and took workstreamai#87 from 20 cases to 44.
+    //
+    // So feedback cycles the phase, the way the plan gate already does: the
+    // `testcases` session re-enters with the reviewer's words in its prompt and
+    // its skill loaded, and re-authors the list. The editing rules live in
+    // erp-ticket-test-plan, which is instruction for a MODEL — and until the
+    // phase re-ran there was no model on this path to read them.
     //
     // Placed here rather than after `qa` so that approval still has leverage:
     // everything a reviewer adds is carried into `review`, the MR and the `qa`
@@ -913,6 +955,7 @@ export async function runTicket(
         log.warn('review gates armed by guarded paths, not by the label', { iid, hits: caseGate.hits });
       }
 
+      let roundFeedback = '';
       const gate = await checkApprovalGate({
         iid,
         gate: 'testcases',
@@ -922,21 +965,42 @@ export async function runTicket(
         // not, and always before onApproved — a reviewer who lists an edge
         // case and signs off in the same breath gets the case recorded and
         // the audit note built from the list that now contains it.
-        onFeedback: async (feedback) => {
-          const updated = appendEdgeCases(iid, feedback);
-          if (updated) prior.testcases = { ...(prior.testcases ?? {}), cases: updated };
-        },
+        // Recorded, not applied: which of the two routes this round takes is
+        // not knowable until the verdict is, because an `approved` later in
+        // the same round turns the very same text from a revision request
+        // into an addition.
+        onFeedback: async (feedback) => { roundFeedback = feedback; },
         onApproved: async () => {
+          // Signed off WITH a case named in the same breath — the append case,
+          // and it must land before the audit note so the record shows the
+          // list that was actually approved.
+          if (roundFeedback) {
+            const updated = appendEdgeCases(iid, roundFeedback);
+            if (updated) prior.testcases = { ...(prior.testcases ?? {}), cases: updated };
+          }
           const finalCases = (readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases) ?? cases;
           await addIssueNote(iid, testcasesApprovedRecordBody(finalCases));
         },
       });
       j = readJournal(iid) ?? j;
-      if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
-      if (gate.verdict !== 'approved') {
+      const casesIdx = list.findIndex((p) => p.name === 'testcases');
+      const route = testcaseGateRoute(gate.verdict, casesIdx !== -1);
+      if (route === 'blocked') return finish(j, 'blocked', GATE_UNAVAILABLE);
+      if (route === 'revise') {
+        forced.add('testcases');
+        // The revised list must be republished: the first list already holds
+        // the 'testcases' key in `published`, so publishPending would never
+        // post the revision the reviewer asked for. Same reasoning, and the
+        // same two lines, as the plan gate above.
+        const withoutCases = (j.published ?? []).filter((k) => k !== 'testcases');
+        j = updateJournal(iid, { published: withoutCases }) ?? j;
+        i = casesIdx;
+        continue;
+      }
+      if (route === 'park') {
         return finish(j, 'parked',
           'awaiting test-case approval — a QA reviewer comments `approved` on the ticket to ' +
-          'continue to `review`, or comments edge case(s) there to add to the test list');
+          'continue to `review`, or comments changes to have the list revised');
       }
       // gate.verdict === 'approved' — fall through into 'review' below.
     }
