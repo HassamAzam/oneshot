@@ -250,8 +250,13 @@ function assertPortFreeOrOurs(port, wt, what) {
 /* ------------------------------------------------------------------ patches */
 
 /**
- * Both files are TRACKED. Patch, then mark --skip-worktree so a phase's `git add -A`
- * cannot commit a machine-local port into the branch.
+ * Patch, then mark --skip-worktree so a phase's `git add -A` cannot commit a
+ * machine-local port into the branch.
+ *
+ * That guard is load-bearing for localPaths.js, which IS tracked. It is a no-op for
+ * constants/config.js, which the app repo gitignores: update-index fails on a path it
+ * does not track, and the result is deliberately not checked, because an ignored file
+ * was never at risk of being committed in the first place.
  */
 function patchFile(wt, rel, re, replacement, code) {
   const abs = path.join(wt, rel);
@@ -272,8 +277,16 @@ function applyPatches(wt, bePort, fePort) {
   const a = patchFile(wt, 'frontend/config/localPaths.js',
     /const LOCAL_PUBLIC_URL = '[^']*';/,
     `const LOCAL_PUBLIC_URL = 'http://localhost:${fePort}';`, 'localPaths');
+  // EITHER quote style, unlike localPaths.js above. That file is tracked, so its
+  // formatting is this repo's to assume; this one is gitignored in the app repo and
+  // arrives by verbatim copy from whatever checkout ONESHOT_SEED_COPIES points at,
+  // so its quote style belongs to a developer's machine and not to us. Requiring
+  // single quotes made a seed written with double quotes — the one in use since
+  // 22 Jun — throw E_PATCH_FAILED on every worktree, which meant no app for verify,
+  // ui-evidence, qa or reproduction. `--fresh` could not help: it re-copies the same
+  // file. The value was already correct; only the quote character was not.
   const b = patchFile(wt, 'frontend/src/constants/config.js',
-    /export const apiUrl = '[^']*';/,
+    /export const apiUrl = ['"][^'"]*['"];/,
     `export const apiUrl = 'http://localhost:${bePort}/';`, 'apiUrl');
   return { localPaths: a, apiUrl: b };
 }
