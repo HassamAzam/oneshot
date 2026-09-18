@@ -20,7 +20,7 @@ Read these skills and rules once and follow them throughout:
 5. **`.claude/rules/backend-python.md`** — pylint conventions and Python style for this repo
 6. **`.claude/rules/solid.md`** — SOLID applied to Django (SRP is the most common violation here)
 7. **`.claude/rules/security.md`** — secrets, input validation, permissions, PII handling
-8. **`code-optimization`** *(when available)* — advanced performance patterns
+8. **`django-query-optimisation`** skill — N+1 red-flags, bulk-lookup map, context passing, `annotate`/`Prefetch`, cache key constants. Read it whenever a task touches serializers, model properties, loops, or list endpoints.
 
 ## Workflow
 
