@@ -1,5 +1,5 @@
 ---
-name: mr-changelog-generator
+name: mr-change-logger
 description: This skill MUST be applied whenever a user wants to generate a changelog for an MR, document what changed between two branches, or attach a QA guide to a GitLab MR or ticket. Triggers on "changelog", "change log", "QA guide for MR", "document my MR", "what changed between branches", "add changelog to MR", or when the user provides a GitLab MR URL and wants it documented.
 version: 1.0.0
 ---
