@@ -44,6 +44,7 @@ const MIME: Record<string, string> = {
   '.mp4': 'video/mp4',
   '.webm': 'video/webm',
   '.md': 'text/markdown',
+  '.pdf': 'application/pdf',
   '.csv': 'text/csv',
   '.json': 'application/json',
   '.txt': 'text/plain',
@@ -242,6 +243,34 @@ const SPECS: Spec[] = [
         mime: 'text/markdown',
       }],
     }),
+  },
+  {
+    // Posted before the plan-approval gate asks, so the product owner approves
+    // the mockups the code will be built to, not a description of them.
+    key: 'design',
+    artifact: 'design.json',
+    target: 'ticket',
+    build: (data, ctx) => {
+      const dir = artifactDir(ctx.iid);
+      const files = ((data.files as string[]) ?? [])
+        .sort((a, b) => Number(b.endsWith('.pdf')) - Number(a.endsWith('.pdf')));
+      const attachments: Attachment[] = [];
+      for (const f of files.slice(0, 10)) {
+        const p = join(dir, f);
+        if (!existsSync(p)) continue;
+        const content = readFileSync(p);
+        if (content.length > MAX_UPLOAD_BYTES) continue;
+        attachments.push({ name: f.split('/').pop()!, content, mime: mimeFor(f) });
+      }
+      if (!attachments.length) return null;
+      const questions = (data.openQuestions as string[]) ?? [];
+      return {
+        body: `**Design** — ${(data.screens as unknown[] ?? []).length} screen(s), light and dark. ` +
+          'The change is built to these mockups once the plan is approved.' +
+          (questions.length ? `\n\n**Open questions**\n${questions.map((q) => `- ${mdText(q)}`).join('\n')}` : ''),
+        attachments,
+      };
+    },
   },
   {
     key: 'testcases',

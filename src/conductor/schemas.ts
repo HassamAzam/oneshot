@@ -425,10 +425,29 @@ export const REMEDIATE_SCHEMA = phaseSchema({
 /** Triage of MR review threads — the on-demand `mr-feedback` phase. See src/mrfeedback. */
 export const MR_FEEDBACK_SCHEMA = phaseSchema(MR_FEEDBACK_PROPS, ['items']);
 
+/** The design-agent report, shaped like the one its Slack driver already asks for. */
+export const DESIGN_SCHEMA = phaseSchema({
+  files: strArr('Every PNG and the PDF, as paths RELATIVE to the artifacts directory, e.g. design/01-default.png.'),
+  screens: {
+    type: 'array',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { file: str('Relative PNG path'), name: str('Screen name'), shows: str('What it shows') },
+      required: ['file', 'name', 'shows'],
+    },
+  },
+  encoding: strArr('How each distinct meaning is visually encoded (never colour alone).'),
+  groundedIn: strArr('Real component and theme file paths read before designing.'),
+  assumptions: strArr('Decisions the ticket did not specify.'),
+  openQuestions: strArr('Up to three things the approver should decide.'),
+}, ['files', 'screens', 'encoding', 'groundedIn', 'assumptions', 'openQuestions']);
+
 export const SCHEMAS: Record<string, JsonSchema> = {
   recall: RECALL_SCHEMA,
   research: RESEARCH_SCHEMA,
   plan: PLAN_SCHEMA,
+  design: DESIGN_SCHEMA,
   testcases: TESTCASES_SCHEMA,
   implement: IMPLEMENT_SCHEMA,
   review: FINDINGS_SCHEMA,
