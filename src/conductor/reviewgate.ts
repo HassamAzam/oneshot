@@ -75,7 +75,7 @@ import {
 import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/slack.js';
 import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
-import { codeSpan, mdText } from '../lib/gitlabmd.js';
+import { codeSpan, mdText, tableCell } from '../lib/gitlabmd.js';
 import type { TestCase } from '../phases/types.js';
 import { parseEdgeCases } from './edgecases.js';
 
@@ -740,12 +740,20 @@ export function planApprovedRecordBody(): string {
 
 function renderCasesForTicket(cases: TestCase[]): string {
   if (!cases.length) return '_(no test cases)_';
-  // `scenario`/`expected` are model-authored prose and routinely carry bare
-  // tags or error strings in angle brackets — same GitLab HTML-block hazard as
-  // the plan fields, so run them through mdText too. `blast` is a fixed enum.
-  return cases
-    .map((c) => `- **${mdText(c.id)}** [${c.blast}] ${mdText(c.scenario)}\n  - _expects:_ ${mdText(c.expected)}`)
-    .join('\n');
+  // A table, not a bullet list. A reviewer's job at this gate is to scan thirty
+  // or more cases and find the ones that are wrong, and a list of two-line
+  // bullets makes the ids — the thing they have to quote back to ask for a
+  // change — the hardest part to find. Columns put every id in one place and
+  // every oracle in another.
+  //
+  // `tableCell`, not `mdText`: the prose here is model-authored and routinely
+  // carries error strings, angle-bracketed tags and — fatally for a table —
+  // pipes. tableCell runs mdText first, then escapes `|` and folds newlines to
+  // `<br>`, which is the order that works (see gitlabmd.ts).
+  const rows = cases.map(
+    (c) => `| **${tableCell(c.id)}** | ${tableCell(c.blast)} | ${tableCell(c.scenario)} | ${tableCell(c.expected)} |`,
+  );
+  return ['| Case | Blast | Scenario | Expects |', '| --- | --- | --- | --- |', ...rows].join('\n');
 }
 
 /**
@@ -761,21 +769,29 @@ export function testcasesApprovalRequestBody(cases: TestCase[], why: string): st
   return `**Oneshot pauses here** — ${why}\n\n` +
     `**Test cases to be verified** (${cases.length})\n${renderCasesForTicket(cases)}\n\n---\n\n` +
     `${approverLine('testcases')}\n\n` +
-    'Comment the single word **`approved`** to continue to `review`. To add edge cases, comment ' +
-    'them one per line as bullets (`- Verify that …`), optionally with `— expects: …` for the ' +
-    'pass condition. Only bullet lines, or lines starting with Verify / Check / Ensure / Confirm / ' +
-    'Test, become cases; other text in the comment is ignored. They are appended to ' +
-    '`testcases.json` and this gate asks again with the updated list. There ' +
-    'is no limit on how many rounds this can take. Anything added here is tested by THIS run, ' +
-    'before the MR is opened. Comments from anyone else are ignored by this gate.';
+    'Comment the single word **`approved`** to continue to `review`.\n\n' +
+    'Anything else is a REVISION request, and the list is rewritten to match it — so say what you ' +
+    'want in plain words, naming the case by its id:\n\n' +
+    '- **Add** — "Also check that an expired token is rejected."\n' +
+    '- **Change** — "TC-07 should expect a 403, not a 401."\n' +
+    '- **Remove** — "Drop TC-12, it duplicates TC-04."\n' +
+    '- **Replace** — "TC-05 is too broad; split it into one case per announcement."\n\n' +
+    'A case you ask to remove is removed, a case you ask to change is edited where it stands and ' +
+    'keeps its id, and only genuinely new cases get new ids — so an id you quote today still names ' +
+    'the same case in the next round. There is no limit on how many rounds this takes, and ' +
+    'everything agreed here is tested by THIS run, before the MR is opened.\n\n' +
+    'One exception to the plain-words rule: if you want to sign off AND add a case in the same ' +
+    'comment, write the addition as a bullet (`- Verify that …`, optionally `— expects: …`). That ' +
+    'round is appended to the approved list rather than rewriting it, which is why it needs the ' +
+    'stricter shape.\n\n' +
+    'Comments from anyone else are ignored by this gate.';
 }
 
 /** The ticket's record of the final, approved test-case list — audit only. */
 export function testcasesApprovedRecordBody(cases: TestCase[]): string {
-  const lines = cases.map((c) => `- **${mdText(c.id)}** [${c.blast}] ${mdText(c.scenario)} — _expects:_ ${mdText(c.expected)}`);
   return 'Oneshot record: the test-case list below was approved on this ticket — ' +
     'proceeding to `review`.\n\n' +
-    `**Approved test cases** (${cases.length}):\n${lines.join('\n') || '_(none recorded)_'}`;
+    `**Approved test cases** (${cases.length}):\n${renderCasesForTicket(cases)}`;
 }
 
 interface TestcasesArtifact {
