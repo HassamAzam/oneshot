@@ -31,12 +31,12 @@ Run 1→2 automatically; then hold at each gate. Never assume a server, never en
 ## Shared environment & credentials (used across all phases)
 
 - **GitLab:** `https://gitlab.arbisoft.com`, project `arbisoft/erp` (URL-encoded `arbisoft%2Ferp`, numeric id `304`).
-  - Token: read `GITLAB_PERSONAL_ACCESS_TOKEN` from `~/.claude/.mcp.json` (never hardcode/echo it in anything shared).
+  - Token: read `GITLAB_PERSONAL_ACCESS_TOKEN` from the environment (never hardcode it in a skill, a command, a permission rule, or anything else shared, and never echo it).
   - API header: `PRIVATE-TOKEN: <token>`.
 - **Servers:** dev = `https://dev-workstream.arbisoft.com` · stage = `https://workstream-staging.arbisoft.com`.
 - **Django webshell:** `/admin/webshell/script/<id>/change/` — runs Python in the app context (paste script into `source`).
 - **API auth:** DRF token — header `Authorization: Token <token>` (NOT `Bearer`).
-- **Local repo (read for code review):** `/Users/anosha.saeed/Documents/erp`.
+- **Local repo (read for code review):** `$ERP_REPO`. If unset, resolve it once — `git -C . rev-parse --show-toplevel` when already inside the checkout, otherwise ask the user for the path. Never hardcode a machine-specific path here.
 - **VPN:** if any GitLab/server call returns empty/HTML/unparseable, STOP and remind the user to check VPN before continuing.
 
 ## Critical testing principles (cross-cutting — apply in every phase)
