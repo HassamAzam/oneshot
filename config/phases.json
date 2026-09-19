@@ -33,6 +33,15 @@
       "artifact": "plan.json"
     },
     {
+      "name": "design", "n": 2.5, "kind": "session", "tier": "heavy",
+      "cwd": "worktree", "maxTurns": 120, "timeoutMin": 45,
+      "writes": ["run", "artifacts"], "onFail": "retry", "maxRetries": 1,
+      "requiresLabel": "Design",
+      "skills": ["design-agent"],
+      "artifact": "design.json",
+      "_why": "HARD REQUIREMENT: a ticket labelled `Design` on the AI board never reaches implement without a design. `requiresLabel` makes the runner — not a prompt — decide that this phase runs, and the runner overrules a success whose PNGs and PDF are not on disk. After plan so the design follows the approach; before implement so the plan-approval gate (on for every run while reviewAllRuns is true) is where the product owner signs off plan AND mockups together, which is design-agent's own rule: nothing is implemented until he approves. The PDF and mockups are posted to the ticket before that gate asks. onFail retry → blocked: a Design ticket with no design stops for a person rather than being built blind."
+    },
+    {
       "name": "implement", "n": 3, "kind": "session", "tier": "standard",
       "cwd": "worktree", "maxTurns": 220, "timeoutMin": 90,
       "writes": ["worktree", "run"], "onFail": "retry", "maxRetries": 2,

@@ -206,6 +206,12 @@ export interface PhaseConfig {
    * at all is what lets ONESHOT_SKIP_PHASES switch it off exactly like the rest.
    */
   onDemand?: boolean;
+  /**
+   * The phase runs ONLY on a ticket carrying this label, and always runs on one.
+   * Decided in the runner, not the prompt, so a label that makes a phase a hard
+   * requirement cannot be talked out of it by the session that would skip it.
+   */
+  requiresLabel?: string;
 }
 
 export interface BudgetConfig {

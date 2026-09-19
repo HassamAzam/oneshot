@@ -88,6 +88,7 @@ import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import { mergePhase } from './codephases.js';
+import { missingDesignDeliverables } from './design.js';
 import {
   appendEdgeCases, checkApprovalGate, declaredFiles, gatesApply, planApprovalRequestBody,
   planApprovedRecordBody, reviewAllRuns, reviewLabelPresent, testcasesApprovalRequestBody,
@@ -209,7 +210,9 @@ function cardLines(j: RunJournal, running: string[]): PhaseLine[] {
     // An on-demand phase is not part of the sequence, so showing it 'pending'
     // on every card would advertise a step that is never coming. It appears the
     // moment it has actually run — which is the moment it is worth seeing.
-    .filter((p) => !p.onDemand || j.phases.some((r) => r.phase === p.name) || live.has(p.name))
+    // A label-gated phase is the same: absent from a ticket without the label.
+    .filter((p) => !(p.onDemand || p.requiresLabel)
+      || j.phases.some((r) => r.phase === p.name) || live.has(p.name))
     .map((p): PhaseLine => {
       const recs = j.phases.filter((r) => r.phase === p.name);
       const last = recs[recs.length - 1];
@@ -845,6 +848,15 @@ export async function runTicket(
       continue;
     }
 
+    // Code, not the session, decides a label-gated phase: with the label it
+    // always runs, without it it never does. Label names are matched as typed
+    // by hand — case-insensitively, like labelSkills.
+    if (phase.requiresLabel
+      && !ticket.labels.some((l) => l.toLowerCase() === phase.requiresLabel!.toLowerCase())) {
+      i += 1;
+      continue;
+    }
+
     // A phase with no implementation STOPS the run — including 'code' phases.
     // Skipping them would let a run reach the end without merging or deploying
     // and still be labelled Ready For Deployment, which is the worst possible
@@ -1140,6 +1152,19 @@ export async function runTicket(
             'demo-server QA gate alone is acceptable for this ticket.';
           r.out.error = r.hardStop;
           log.error(`verify overruled — ${r.hardStop}`);
+        }
+      }
+
+      // The Design label's hard requirement is judged by what is on disk, not
+      // by what the session says: no rendered mockup and no PDF is no design,
+      // and implement must never start a Design ticket without one.
+      if (r.cfg.name === 'design' && r.out.ok) {
+        const missing = missingDesignDeliverables(iid, r.out.data);
+        if (missing) {
+          r.out.ok = false;
+          r.out.error = `design overruled — ${missing}`;
+          overruled.add(r);
+          log.error(r.out.error);
         }
       }
 

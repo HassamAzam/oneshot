@@ -19,6 +19,7 @@
  *    one of those from a model's recollection is a phase whose report cannot be
  *    attributed to this ticket.
  */
+import { join } from 'node:path';
 import {
   STATE, artifactDir, bugReproductionEnabled, envOr, phaseByName, phases, projectConfig, runDir,
   type PhaseConfig,
@@ -286,6 +287,22 @@ function priorArt(ctx: PromptCtx): string {
  * the journal is already ground truth for run-scoped facts (branch, MR,
  * merged SHA) and every phase already receives it.
  */
+/** The approved design a `Design` ticket is built to; empty for every other ticket. */
+function designBlock(ctx: PromptCtx): string {
+  const d = ctx.prior.design as {
+    screens?: Array<{ file: string; name: string; shows: string }>; assumptions?: string[];
+  } | null | undefined;
+  if (!d?.screens?.length) return '';
+  const dir = artifactDir(ctx.ticket.iid);
+  return `
+## Design (approved with the plan) — build to these mockups
+Open each PNG with the Read tool before writing the UI it covers. Where the code and the mockup
+disagree, the mockup wins unless it contradicts an acceptance criterion; say so in \`summary\`.
+${d.screens.map((s) => `  - ${s.name}: ${join(dir, s.file)} — ${s.shows}`).join('\n')}
+Design assumptions: ${(d.assumptions ?? []).join('; ') || '(none)'}
+`;
+}
+
 function reviewGateFeedbackBlock(rounds: string[] | undefined, heading: string): string {
   if (!rounds?.length) return '';
   return `\n## ${heading}\nThis ticket carries **Review**: a human read an earlier version of this and replied ` +
@@ -736,6 +753,52 @@ Produce an implementation plan an engineer could follow without re-deriving the 
 
 Do not write or modify any code.`,
 
+  design: (ctx) => {
+    const dir = join(artifactDir(ctx.ticket.iid), 'design');
+    return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
+
+## Research (phase 1)
+${JSON.stringify(ctx.prior.research ?? {}, null, 2)}
+
+## Plan (phase 2)
+${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
+
+This ticket carries **Design**. Produce the hi-fi design it will be built to — nothing is
+implemented until the product owner has approved it, and he approves it from what you leave here.
+
+FIRST ACTION: invoke the \`design-agent\` skill with the Skill tool and follow it. It grounds the
+design in the real ERP design system. Do not skip it, and do not design from memory.
+
+Work autonomously. The skill's "show the plan and get sign-off before drawing" step is served by
+this pipeline instead: the plan above is the plan, and the plan-approval gate that follows this
+phase is where the product owner signs off plan and mockups together. Do not ask questions —
+make reasonable assumptions and record them in \`assumptions\`.
+
+## Grounding (before designing)
+Your worktree is the ERP checkout. Read the theme tokens (\`frontend/src/jss/Theme.js\`,
+\`frontend/src/jss/style.js\`, \`frontend/src/scss/_variables.scss\`), find and read the existing
+component this ticket changes so you modify OUR screen, and note how dark mode is implemented.
+List every file you read in \`groundedIn\`.
+
+## What to design
+The screens and states the acceptance criteria and the plan call for. Always include the default
+view, dark mode, any permission-restricted variant the ticket implies, and the empty/error states
+the change needs to be legible. Never encode meaning by colour alone; use colour plus shape,
+label or badge. Design for the real density of the screen, not a three-row demo.
+
+## Deliverables — exactly this directory: ${dir}
+1. One PNG per screen, numbered in reading order (\`01-default.png\`, \`02-dark-mode.png\`, …),
+   rendered with headless Chrome as the skill describes. Look at each PNG before you finish.
+2. One PDF, \`design-${ctx.ticket.iid}.pdf\`: a flow map / legend page first, then one screen per
+   page with a short caption. It is attached to the ticket and must stand alone.
+Keep the HTML sources in the same directory — revisions are the norm. Nothing outside it: do not
+edit, commit or branch in the worktree.
+
+In \`files\`, give every PNG and the PDF as paths relative to ${artifactDir(ctx.ticket.iid)}
+(e.g. \`design/01-default.png\`). The conductor checks each one is on disk and non-empty, and a
+design phase that reports a file it did not write is failed.`;
+  },
+
   testcases: (ctx) => `${ticketBlock(ctx.ticket)}
 
 ## Research (phase 1)
@@ -941,7 +1004,7 @@ ${implementFeedbackBlock(ctx.journal.mrFeedback)}
 ${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'Test-case gate reviewer feedback')}
 ## Plan (phase 2) — this is your specification
 ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
-
+${designBlock(ctx)}
 ## From research (phase 1)
 Acceptance criteria:
 ${(r.acceptanceCriteria ?? []).map((a) => `  - ${a}`).join('\n') || '  (none recorded)'}
