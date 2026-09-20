@@ -256,6 +256,79 @@ execute_from_command_line(sys.argv)
   return true;
 }
 
+/**
+ * Which integrations this environment cannot exercise, asked of the app's own settings.
+ *
+ * A phase that has to reproduce a bug needs to know what it cannot reach BEFORE it
+ * starts, not after. On ticket 256 research spent 14 of its 123 turns — 12% of the
+ * input and 37% of everything it wrote — establishing that the local environment has
+ * no Odoo, which is the same answer on every run, for every ticket, on every machine.
+ * Reading it from settings costs one interpreter start.
+ *
+ * DERIVED, never a list maintained here. Naming integrations in this file would make
+ * it a place where facts about one app go stale; the app already states them:
+ *
+ *   - `USE_<NAME>` is False, and `<NAME>_*` settings exist. The second half is what
+ *     separates an integration from Django's own booleans — USE_TZ, USE_I18N and
+ *     USE_X_FORWARDED_HOST own no namespace, so they never appear.
+ *   - `<NAME>_URL|HOST|ENDPOINT|DSN|API_KEY|TOKEN` is empty, equals its own setting
+ *     name, contains it (`ODOO_URL = "ODOO_URL_WITH_XMLRPC"`), or reads as a
+ *     placeholder. A credential nobody filled in is an integration nobody can reach.
+ *
+ * Advisory, never a blocker: any failure here returns [] and the run proceeds exactly
+ * as it did before this existed. Not being sure what is disabled is not a reason to
+ * stop a healthy app from coming up.
+ */
+function disabledIntegrations(wt) {
+  const r = py(wt, `
+import json, re, django
+django.setup()
+from django.conf import settings
+
+PLACEHOLDER = re.compile(r'REPLACE_ME|CHANGE_?ME|<[a-z-]+>|your-.*-here', re.I)
+ENDPOINT = re.compile(r'^([A-Z0-9]+)_(URL|HOST|ENDPOINT|DSN|API_KEY|TOKEN)$')
+FLAG = re.compile(r'^USE_([A-Z0-9]+(?:_[A-Z0-9]+)*)$')
+
+names = [n for n in dir(settings) if n.isupper()]
+
+def value(n):
+    try:
+        return getattr(settings, n)
+    except Exception:
+        return None
+
+def unset(n, v):
+    if v == '':
+        return 'empty'
+    if isinstance(v, str) and (v == n or n in v or PLACEHOLDER.search(v)):
+        return 'a placeholder'
+    return None
+
+found = {}
+for n in names:
+    m = FLAG.match(n)
+    if m and value(n) is False:
+        who = m.group(1)
+        if any(o != n and o.startswith(who + '_') for o in names):
+            found[who] = n + ' is False'
+for n in names:
+    m = ENDPOINT.match(n)
+    if m:
+        reason = unset(n, value(n))
+        if reason:
+            found.setdefault(m.group(1), n + ' is ' + reason)
+
+out = [{"name": k, "why": v} for k, v in sorted(found.items())]
+print("ONESHOT_INTEGRATIONS " + json.dumps(out))
+`, { timeout: 120000 });
+  const line = String(r.stdout || '').split('\n').find((l) => l.startsWith('ONESHOT_INTEGRATIONS '));
+  if (!line) {
+    log('could not read integration status; continuing without it');
+    return [];
+  }
+  try { return JSON.parse(line.slice('ONESHOT_INTEGRATIONS '.length)); } catch { return []; }
+}
+
 function checkDb(wt) {
   const r = py(wt, `
 import django; django.setup()
@@ -680,6 +753,9 @@ async function describeEnv(wt, bePort, fePort, bundleUrl) {
     bePort, fePort, worktree: wt,
     bundleUrl: bundleUrl || await assertBundleReachable(bePort).catch(() => null),
     credentialEnv: 'ONESHOT_TEST_LOGIN',
+    // What this environment CANNOT do, stated up front. A phase that needs one of
+    // these can say so in one turn instead of discovering it in fourteen.
+    disabledIntegrations: disabledIntegrations(wt),
     patchedFiles: ['frontend/config/localPaths.js', 'frontend/src/constants/config.js'],
     startedAt: new Date().toISOString(),
     logs: { django: p.django(), webpack: p.webpack() },
@@ -942,7 +1018,8 @@ const API = {
    * Exporting rather than re-implementing keeps every hard-won fact above — the ASGI
    * wedge, CI=true, the stats-file readiness, the two pinned files — in ONE place.
    */
-  preflight, checkDb, applyPatches, composeConfigJs, needsCollectstatic, collectStatic,
+  preflight, checkDb, disabledIntegrations, applyPatches, composeConfigJs,
+  needsCollectstatic, collectStatic,
   startDjango, startWebpack, waitDjango, waitWebpack,
   assertBundleReachable, describeEnv, listenerPid, pidCwd, alive, httpStatus,
 };
