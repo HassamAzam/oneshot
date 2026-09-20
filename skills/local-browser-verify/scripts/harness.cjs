@@ -31,8 +31,12 @@
  *   - frontend/src/constants/config.js pins `apiUrl` to `http://localhost:8000/`. The
  *     SPA calls the API at that absolute URL, so it must name the Django port we lease.
  *
- * BOTH PATCHES ARE MANDATORY AND BOTH FILES ARE TRACKED. They are marked
- * --skip-worktree so a stray `git add -A` in a phase cannot commit a local port.
+ * BOTH FILES ARE MANDATORY, but they are handled differently because they belong to
+ * different owners. localPaths.js is TRACKED, so it is patched in place and marked
+ * --skip-worktree, which is what stops a stray `git add -A` in a phase from committing
+ * a machine-local port. constants/config.js is GITIGNORED and seed-copied from a
+ * developer's checkout, so it is composed from the repo's own config.example.js
+ * instead - see composeConfigJs().
  *
  *   - Django serves templates through ManifestStaticFilesStorage with DEBUG off, so
  *     staticfiles/staticfiles.json must exist before the first request or every route
@@ -324,21 +328,76 @@ function patchFile(wt, rel, re, replacement, code) {
   return before !== after;
 }
 
+const EXPORT_RE = /^export const ([A-Za-z_$][\w$]*)\s*=/;
+
+/**
+ * config.js is COMPOSED from the app repo's committed template, not patched in place.
+ *
+ * This file is gitignored in the app repo and arrives by verbatim copy from whatever
+ * checkout ONESHOT_SEED_COPIES points at, so its contents belong to a developer's
+ * machine and not to us. Patching one line of it meant every other line was accepted
+ * on trust — including lines that were not there at all. A seed missing
+ * `export const SENTRY_DSN` (frontend/src/sentryConfig.js:4 imports it) produced a
+ * correct apiUrl, a healthy Django, and a frontend that never compiled.
+ *
+ * Widening the apiUrl regex to accept either quote style fixed the formatting of one
+ * line and left that whole class open. config.example.js is TRACKED, sits at the repo
+ * root, and is the file the app's own README points a new developer at, so it follows
+ * what the code imports. Composing from it makes every key present by construction and
+ * makes apiUrl something we WRITE rather than something we hope to match — which
+ * retires the regex, and with it E_PATCH_FAILED on this file.
+ *
+ * The developer's values are still honoured: any key their copy defines wins over the
+ * template's placeholder, so a real googleApiClientId or USE_CALENDAR_API survives.
+ * Only keys they are missing come from the template, and only apiUrl is forced.
+ */
+function composeConfigJs(wt, bePort) {
+  const rel = 'frontend/src/constants/config.js';
+  const abs = path.join(wt, rel);
+  const template = path.join(wt, 'config.example.js');
+  const apiUrlLine = `export const apiUrl = 'http://localhost:${bePort}/';`;
+
+  // An app repo without the template is not this repo; fall back to the old in-place
+  // patch rather than inventing a config.js for a checkout we do not understand.
+  if (!fs.existsSync(template)) {
+    return patchFile(wt, rel, /export const apiUrl = ['"][^'"]*['"];/, apiUrlLine, 'apiUrl');
+  }
+
+  const before = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : '';
+  const local = new Map();
+  for (const line of before.split('\n')) {
+    const m = line.match(EXPORT_RE);
+    if (m) local.set(m[1], line);
+  }
+
+  const lines = fs.readFileSync(template, 'utf8').split('\n');
+  if (!lines.some((l) => (l.match(EXPORT_RE) || [])[1] === 'apiUrl')) {
+    throw new HarnessError('E_PATCH_FAILED',
+      'config.example.js declares no apiUrl export',
+      'apiUrl — the template\'s shape changed; the harness will not guess.');
+  }
+  const after = `${lines.map((line) => {
+    const key = (line.match(EXPORT_RE) || [])[1];
+    if (!key) return line;
+    if (key === 'apiUrl') return apiUrlLine;
+    return local.has(key) ? local.get(key) : line;
+  }).join('\n').replace(/\n+$/, '')}\n`;
+
+  if (after !== before) {
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, after);
+  }
+  // A no-op on this path — the app repo ignores the file — but harmless, and it keeps
+  // the two patched files symmetrical if the app repo ever tracks it.
+  spawnSync('git', ['update-index', '--skip-worktree', rel], { cwd: wt });
+  return after !== before;
+}
+
 function applyPatches(wt, bePort, fePort) {
   const a = patchFile(wt, 'frontend/config/localPaths.js',
     /const LOCAL_PUBLIC_URL = '[^']*';/,
     `const LOCAL_PUBLIC_URL = 'http://localhost:${fePort}';`, 'localPaths');
-  // EITHER quote style, unlike localPaths.js above. That file is tracked, so its
-  // formatting is this repo's to assume; this one is gitignored in the app repo and
-  // arrives by verbatim copy from whatever checkout ONESHOT_SEED_COPIES points at,
-  // so its quote style belongs to a developer's machine and not to us. Requiring
-  // single quotes made a seed written with double quotes — the one in use since
-  // 22 Jun — throw E_PATCH_FAILED on every worktree, which meant no app for verify,
-  // ui-evidence, qa or reproduction. `--fresh` could not help: it re-copies the same
-  // file. The value was already correct; only the quote character was not.
-  const b = patchFile(wt, 'frontend/src/constants/config.js',
-    /export const apiUrl = ['"][^'"]*['"];/,
-    `export const apiUrl = 'http://localhost:${bePort}/';`, 'apiUrl');
+  const b = composeConfigJs(wt, bePort);
   return { localPaths: a, apiUrl: b };
 }
 
@@ -853,7 +912,7 @@ const API = {
    * Exporting rather than re-implementing keeps every hard-won fact above — the ASGI
    * wedge, CI=true, the stats-file readiness, the two pinned files — in ONE place.
    */
-  preflight, checkDb, applyPatches, needsCollectstatic, collectStatic,
+  preflight, checkDb, applyPatches, composeConfigJs, needsCollectstatic, collectStatic,
   startDjango, startWebpack, waitDjango, waitWebpack,
   assertBundleReachable, describeEnv, listenerPid, pidCwd, alive, httpStatus,
 };
