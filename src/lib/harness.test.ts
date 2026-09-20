@@ -16,7 +16,10 @@ import { ROOT } from './config.js';
 const require = createRequire(import.meta.url);
 const harness = require(
   join(ROOT, 'skills/local-browser-verify/scripts/harness.cjs'),
-) as { applyPatches: (wt: string, bePort: number, fePort: number) => unknown };
+) as {
+  applyPatches: (wt: string, bePort: number, fePort: number) => unknown;
+  needsCollectstatic: (wt: string) => boolean;
+};
 
 /** A worktree with just the two files applyPatches pins. */
 function seeded(apiUrlLine: string): string {
@@ -62,4 +65,16 @@ test('a file whose shape really did change is still refused', () => {
   // patchFile into something that guesses.
   const wt = seeded('export const apiUrl = buildUrl(port);');
   assert.throws(() => harness.applyPatches(wt, 8001, 3001), /E_PATCH_FAILED|expected exactly 1/);
+});
+
+/* ------------------------------------------------------------ staticfiles */
+
+test('a worktree without a manifest needs collectstatic', () => {
+  // staticfiles/ is gitignored in the app repo, so a fresh worktree never has one
+  // and every {% static %} template 500s until it does.
+  const wt = seeded("export const apiUrl = 'http://localhost:8000/';");
+  assert.equal(harness.needsCollectstatic(wt), true);
+  mkdirSync(join(wt, 'staticfiles'), { recursive: true });
+  writeFileSync(join(wt, 'staticfiles/staticfiles.json'), '{"paths":{}}');
+  assert.equal(harness.needsCollectstatic(wt), false);
 });
