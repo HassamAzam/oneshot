@@ -58,7 +58,7 @@ import {
 import { collectTicketDocs } from '../lib/ticketdocs.js';
 import {
   archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
-  phaseSucceeded, readArtifact,
+  phaseSucceeded, phaseSettled, readArtifact,
   readJournal, recordPhase, recordRemediation, reapScratch, updateJournal, writeArtifact,
   writeJournal,
   type PhaseRecord, type Remediation, type RunJournal,
@@ -1396,8 +1396,19 @@ export async function runTicket(
 
   // ------------------------------------------------------------- run helpers
 
+  /**
+   * phaseSettled, not phaseSucceeded: 'skipped' is a settled decision.
+   *
+   * A phase configured `onFail: 'skip'` that fails is recorded 'skipped' by
+   * statusForFailure(), and KEPT_STATUSES already calls that "a decision the run
+   * already made rather than a failure to retry". Asking phaseSucceeded() here
+   * contradicted that — it reports only 'ok'/'warned', so a skipped phase read as
+   * still-owed and ran again on the next pass through the list.
+   *
+   * A cycle can still force it: `forced` short-circuits ahead of the check.
+   */
   function shouldSkip(p: PhaseConfig): boolean {
-    return !forced.has(p.name) && phaseSucceeded(iid, p.name);
+    return !forced.has(p.name) && phaseSettled(iid, p.name);
   }
 
   /**
