@@ -14,6 +14,16 @@ Covers three mandatory outputs for every changelog request:
 
 ---
 
+## When the GitLab tools are absent
+
+If the GitLab MCP tools are not in your toolset, the changelog is still worth every
+step below: produce the full Markdown in your output and say it could not be posted.
+Someone else — a person, or Oneshot's conductor, which opens the MR in code when the
+tools are missing — attaches it. Do not abandon the changelog because the last step
+cannot run.
+
+---
+
 ## Step 1 — Collect inputs
 
 The user provides either **(A) a GitLab MR URL** or **(B) branch names**.

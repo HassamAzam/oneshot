@@ -22,6 +22,36 @@ these make an argument.
 Nothing else. A pack of thirty screenshots is read as carefully as a pack of
 zero.
 
+## Getting a real "before"
+
+The "after" is the app you already have. The "before" is the base branch — and the
+one way NOT to get it is by moving files in this checkout. The git guard refuses
+`checkout`, `restore`, `stash` and `reset` from this phase, and anything left altered
+here is what `mr` pushes: one run left a staged revert of its own fix behind that way,
+and the fix would have been silently undone if it had been committed.
+
+Bring up a SECOND app on the base branch instead. It is a different instance on its
+own port (`ONESHOT_APP_PORTS`, 8010-8012), so it cannot disturb the run's app:
+
+```
+env -u ONESHOT_WORKTREE -u ONESHOT_PORT \
+  node $ONESHOT_HOME/scripts/app.cjs ensure --ref <base branch>
+```
+
+Clearing `ONESHOT_WORKTREE` is the part to get right: with a worktree pinned, `ensure`
+answers for THAT checkout and ignores `--ref` entirely (scripts/app.cjs, the pinned
+branch of `ensure`) — you would photograph the change twice and call it a pair. The
+command prints the same `app-env.json`; navigate to its `baseUrl` for the "before"
+shot, then take the "after" on your own instance.
+
+- Same viewport, same data, same path in both shots, or the pair proves nothing.
+- Leave that instance running. It is shared, and the next run reuses it.
+- If it will not come up (`E_NO_PORTS`, `E_REF_UNRESOLVED`, or a cold seed that would
+  eat your budget), say so in the caption and ship the "after" alone. Never present an
+  unchanged region of this branch as a "before".
+- A value that is not in the viewport does not need any of this: read it from source
+  with `git show origin/<base>:<path>` and record it in `observations`.
+
 ## Changes a screenshot cannot show
 
 A page title, an `aria-*`, `alt` or `lang` value, a meta tag, focus order, a
