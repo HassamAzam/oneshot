@@ -413,6 +413,61 @@ function failedCases(name: string, data: Record<string, unknown> | null | undefi
 }
 
 /**
+ * Refuse a UI-evidence pack that reports success and proves nothing.
+ *
+ * `UI_EVIDENCE_SCHEMA` requires `screenshots` and `observations` to be PRESENT,
+ * and an empty array satisfies that. So a session can return both empty, record
+ * ok, and publish nothing at all: `publish.ts` returns null for a pack with no
+ * attachments, no observations and no conformance rows, which is silent by
+ * design — there is genuinely nothing to say. The hole is that nothing says it
+ * to anyone. The reviewer gets an MR with no evidence comment and the journal
+ * says the phase passed.
+ *
+ * Two shapes are refused, and only these two:
+ *
+ *   - nothing at all. Either kind of evidence on its own is complete: the
+ *     prompt promises a non-visual change that zero screenshots and a full
+ *     table is a whole pack, and that promise has to hold here too.
+ *   - an observation table in which no value moved. A row proving something
+ *     did NOT regress is legitimate, so one unchanged row among changed ones
+ *     is a control, not a defect. A table where NOTHING moved is the defect:
+ *     it is published as the evidence for a change it does not show.
+ *
+ * What this does NOT ask is whether the evidence is honest. A value painted
+ * onto the page before the capture, or a base read from a checkout the session
+ * altered to produce it, both yield packs that pass here — those are guarded at
+ * the Bash surface in `git-guard.cjs` and in the phase prompt. This answers the
+ * cheaper question underneath: is there any evidence at all.
+ *
+ * ui-evidence is `onFail: warn`, so a refusal flags the pack and lets the run
+ * carry on to the MR. Evidence quality should not hold a correct fix.
+ */
+export function uiEvidenceRefusal(
+  data: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!data) return null;
+  const arr = (k: string): unknown[] => (Array.isArray(data[k]) ? data[k] as unknown[] : []);
+  const shots = arr('screenshots');
+  const observations = arr('observations') as Array<{ before?: string; after?: string }>;
+  const conformance = arr('designConformance');
+
+  if (shots.length === 0 && observations.length === 0 && conformance.length === 0) {
+    return 'ui-evidence produced no screenshots, no observations and no design comparison.'
+      + ' The phase reported success and there is nothing for a reviewer to look at,'
+      + ' so the MR carries no evidence comment at all.';
+  }
+
+  const moved = observations
+    .filter((o) => String(o.before ?? '').trim() !== String(o.after ?? '').trim());
+  if (observations.length > 0 && moved.length === 0) {
+    return `ui-evidence published ${observations.length} measured value(s) and every one is`
+      + ' unchanged between the base and this branch. A table in which nothing moved is not'
+      + ' evidence of a change.';
+  }
+  return null;
+}
+
+/**
  * The one-screen account of a run that did not finish.
  *
  * A stopped run previously said only what went wrong, on a single line that
@@ -1308,7 +1363,14 @@ export async function runTicket(
       const deliverableFail = r.out.ok && r.cfg.name === 'design'
         ? designDeliverableRefusal(iid, r.out.data as Record<string, unknown> | null)
         : null;
-      const phaseOk = r.out.ok && caseFail === null && deliverableFail === null;
+      // And again for `ui-evidence`, whose empty arrays satisfy its schema and
+      // publish as nothing. warn-on-fail, so this names a hollow pack without
+      // holding the MR behind it.
+      const evidenceFail = r.out.ok && r.cfg.name === 'ui-evidence'
+        ? uiEvidenceRefusal(r.out.data as Record<string, unknown> | null)
+        : null;
+      const phaseOk = r.out.ok && caseFail === null && deliverableFail === null
+        && evidenceFail === null;
       const accountAction = phaseOk ? undefined : r.out.accountAction;
 
       recordPhase(iid, {
@@ -1328,7 +1390,8 @@ export async function runTicket(
         // adding one means touching infraAttemptsOf, the dashboard and unblock
         // for no decision any of them make differently), so this text is the
         // only thing in the journal that tells the two apart.
-        error: accountAction ?? r.out.error ?? r.out.blocked ?? caseFail ?? deliverableFail ?? undefined,
+        error: accountAction ?? r.out.error ?? r.out.blocked
+          ?? caseFail ?? deliverableFail ?? evidenceFail ?? undefined,
       });
       j = readJournal(iid) ?? j;
 
