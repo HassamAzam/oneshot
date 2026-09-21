@@ -36,7 +36,7 @@
  * --skip-worktree, which is what stops a stray `git add -A` in a phase from committing
  * a machine-local port. constants/config.js is GITIGNORED and seed-copied from a
  * developer's checkout, so it is composed from the repo's own config.example.js
- * instead - see composeConfigJs().
+ * instead — see composeConfigJs().
  *
  *   - Django serves templates through ManifestStaticFilesStorage with DEBUG off, so
  *     staticfiles/staticfiles.json must exist before the first request or every route
@@ -61,7 +61,7 @@ const ONESHOT_HOME = process.env.ONESHOT_HOME || path.resolve(__dirname, '../../
 const CODES = [
   'E_NO_WORKTREE', 'E_NO_VENV', 'E_NO_NODE_MODULES', 'E_NO_SEED_COPIES',
   'E_DOTENV_SHADOW', 'E_DB_UNREACHABLE', 'E_PORT_BUSY_FOREIGN', 'E_PORT_DRIFT',
-  'E_PATCH_FAILED', 'E_DJANGO_DEAD', 'E_COLLECTSTATIC',
+  'E_PATCH_FAILED', 'E_DJANGO_DEAD', 'E_DJANGO_5XX', 'E_COLLECTSTATIC',
   'E_WEBPACK_DEAD', 'E_BUNDLE_UNREACHABLE',
   'E_NO_CREDENTIALS', 'E_LOGIN_FAILED', 'E_LOGIN_2FA', 'E_TRIAL_EXPIRED',
   'E_MODULE_UNKNOWN', 'E_MODULE_TIMEOUT', 'E_NOT_UP', 'E_PLAYWRIGHT_MISSING',
@@ -472,19 +472,49 @@ async function httpStatus(url, timeoutMs = 5000) {
  * which is minutes. The admin login page is plain Django templating and answers as soon
  * as the process is actually serving, which is the thing this check is for.
  */
+/**
+ * A 500 is not a corpse, and calling it one costs a whole phase.
+ *
+ * This loop used to accept only 200 and report every other outcome as
+ * E_DJANGO_DEAD / "Django did not answer". A process answering 500 on every route is
+ * the opposite of not answering: it is up, reachable, and telling you what is wrong in
+ * a traceback sitting in django.log. Reported as dead, it invites the phase to retry
+ * the bring-up — which cannot help, because nothing about it was transient — and then
+ * to go looking for a cause somewhere else entirely. On ticket 256 that turned a
+ * one-line missing-manifest error into an inconclusive reproduction and a hunt through
+ * an unrelated dependency.
+ *
+ * Three consecutive 5xx is the cutoff, not one: the first request can land in the
+ * gap between the socket binding and the app being ready. Nothing that answers 5xx
+ * three times over six seconds recovers on its own — runserver has no lazy
+ * initialisation left to do by then.
+ */
+const DJANGO_5XX_STRIKES = 3;
+
 async function waitDjango(port, pid, budgetMs) {
   const url = `http://localhost:${port}/admin/login/`;
   const deadline = Date.now() + budgetMs;
+  let last = 0;
+  let strikes = 0;
   while (Date.now() < deadline) {
     if (!alive(pid)) {
       throw new HarnessError('E_DJANGO_DEAD', 'the Django process exited during startup',
         `Last lines of ${p.django()}: ${tail(p.django(), 6)}`);
     }
-    if (await httpStatus(url) === 200) return true;
+    last = await httpStatus(url);
+    if (last === 200) return true;
+    strikes = last >= 500 ? strikes + 1 : 0;
+    if (strikes >= DJANGO_5XX_STRIKES) {
+      throw new HarnessError('E_DJANGO_5XX',
+        `Django is up on ${port} but answers ${last} on ${url}`,
+        `The process is alive and serving — this is an application error, not a startup `
+        + `failure, so retrying the bring-up will not help. ${p.django()}: ${tail(p.django(), 12)}`);
+    }
     await sleep(2000);
   }
   throw new HarnessError('E_DJANGO_DEAD',
-    `Django did not answer on ${port} within ${Math.round(budgetMs / 1000)}s`, tail(p.django(), 6));
+    `Django did not answer on ${port} within ${Math.round(budgetMs / 1000)}s`
+    + `${last ? ` (last status ${last})` : ''}`, tail(p.django(), 6));
 }
 
 /**

@@ -8,6 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { createServer, type Server } from 'node:http';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +20,7 @@ const harness = require(
 ) as {
   applyPatches: (wt: string, bePort: number, fePort: number) => { apiUrl: boolean };
   needsCollectstatic: (wt: string) => boolean;
+  waitDjango: (port: number, pid: number, budgetMs: number) => Promise<boolean>;
 };
 
 /**
@@ -152,4 +154,50 @@ test('a worktree without a manifest needs collectstatic', () => {
   mkdirSync(join(wt, 'staticfiles'), { recursive: true });
   writeFileSync(join(wt, 'staticfiles/staticfiles.json'), '{"paths":{}}');
   assert.equal(harness.needsCollectstatic(wt), false);
+});
+
+/* -------------------------------------------------------------- waitDjango */
+
+/** A server that answers `status` on every request, on an OS-assigned port. */
+async function serving(status: number): Promise<{ port: number; close: () => void }> {
+  const server: Server = createServer((_req, res) => { res.writeHead(status); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  return { port, close: () => server.close() };
+}
+
+test('a process answering 500 is reported as 5xx, not as dead', async () => {
+  // The misreport that cost ticket 256 its reproduction: waitDjango accepted only
+  // 200, so a live process serving a missing-manifest traceback read as "Django did
+  // not answer" and the phase retried a bring-up that could never succeed.
+  const s = await serving(500);
+  try {
+    await assert.rejects(
+      () => harness.waitDjango(s.port, process.pid, 30000),
+      (e: { code: string; message: string }) => {
+        assert.equal(e.code, 'E_DJANGO_5XX');
+        assert.match(e.message, /answers 500/);
+        return true;
+      },
+    );
+  } finally { s.close(); }
+});
+
+test('a 200 still passes', async () => {
+  const s = await serving(200);
+  try {
+    assert.equal(await harness.waitDjango(s.port, process.pid, 30000), true);
+  } finally { s.close(); }
+});
+
+test('nothing listening is still reported as dead, not as 5xx', async () => {
+  // A closed port yields status 0, which must not be mistaken for an application
+  // error — that distinction is the entire value of the new code.
+  const s = await serving(200);
+  const { port } = s;
+  s.close();
+  await assert.rejects(
+    () => harness.waitDjango(port, process.pid, 3000),
+    (e: { code: string }) => e.code === 'E_DJANGO_DEAD',
+  );
 });
