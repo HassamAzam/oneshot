@@ -65,6 +65,42 @@ export interface Finding {
   fix: string;
 }
 
+export interface DesignScreen {
+  id: string;
+  name: string;
+  purpose: string;
+  states: string[];
+  /** Mockup HTML, relative to the run's artifact dir. */
+  mockupHtml: string;
+  /** Render of that mockup, relative to the artifact dir. */
+  screenshot: string;
+  /** The same screen as it looks today, or empty when the screen is new. */
+  before: string;
+  /** The one design decision on this screen worth a reviewer's attention. */
+  note: string;
+}
+
+export interface DesignArtifact {
+  /**
+   * False when the ticket has no UI surface to design — someone labelled
+   * optimistically, or it turned out backend-only. The gate then never arms
+   * and the run carries on to `plan`, the same way an inconclusive bug
+   * reproduction carries on rather than blocking. A mislabelled ticket should
+   * not cost a person.
+   */
+  applicable: boolean;
+  rationale: string;
+  /** More than one screen, or a new step in an existing journey. */
+  flowChange: boolean;
+  tokensFile: string;
+  screens: DesignScreen[];
+  /** Present only when `flowChange`; both paths are artifact-relative. */
+  decisions: string[];
+  /** Anything not already in the design system, surfaced rather than smuggled in. */
+  newPatterns: string[];
+  openQuestions: Array<{ q: string; recommendation: string }>;
+}
+
 export interface Screenshot {
   file: string;
   caption: string;
