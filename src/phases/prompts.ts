@@ -816,23 +816,28 @@ a case that did exactly that.
 Scope every assertion to the component, page or endpoint the ticket touches.
 Never assert a global property unless the ticket *is* that property.
 
-- **Bad:** "Zero console errors on the page." The app emits 23 app-wide warnings
-  (MUI \`styles\`, \`Grid2 item\`, JSS, \`createRoot\`) that predate the ticket. The
-  case fails forever and names the innocent diff.
+- **Bad:** "Zero console errors on the page." This app emits app-wide warnings
+  that predate the ticket, so the case fails forever and names the innocent diff.
 - **Good:** "No console error originating from the files this ticket changed."
-- **Better still:** measure the baseline on the base branch first and assert
-  **no new** errors, quoting the baseline count in \`expected\`.
+- **If a baseline already exists, use it:** a prior artifact in this run may
+  record one, and you may then assert **no new** errors against it, citing in
+  \`expected\` where the figure came from. You are not running the app to
+  establish one — so a baseline you cannot point at is a baseline you do not
+  have, and the scoped assertion above is the case to write instead.
 
 ### 2. Never assert through tooling that is known not to run
 
-Check the tool actually executes in this repo before writing a case around it.
+You cannot run the tool to find out, but you do not have to: \`implement\`'s
+artifact is above, and its \`testsRun\` field records the commands that actually
+ran on this branch and what they returned. Read it before writing a case around
+any runner.
 
-- **Bad:** "Run \`npm test -- --testPathPattern=home_page\`; 5 tests pass."
-  This repo's Jest is rotted (Babel/enzyme/ESM drift) and CI never runs it, so
-  the case is unpassable by construction — it failed identically on three
-  separate laps.
-- **Good:** assert through a runner that works — Playwright for the browser,
-  ESLint for lint, pytest for backend — and say which.
+- **Bad:** a case built on this repo's Jest — it has rotted (Babel/enzyme/ESM
+  drift) and CI never runs it, so the case is unpassable by construction. One
+  such case failed identically on three separate laps.
+- **Good:** assert through a runner \`testsRun\` shows working, or one this
+  pipeline itself uses — Playwright for the browser, pytest and flake8 for the
+  backend — and name it in \`steps\`.
 
 ### 3. One case, one subject
 
@@ -840,7 +845,7 @@ Do not bundle a behavioural assertion with an environmental one. A bundled case
 reports \`fail\` even when the behaviour under test passed.
 
 - **Bad:** "The logged-in user is redirected off \`/\` **and** no JavaScript error
-  appears in the console." The redirect worked perfectly; the case failed on 39
+  appears in the console." The redirect worked perfectly; the case failed on
   console errors belonging to the authenticated page it redirected *to*.
 - **Good:** one case for the redirect, a separate one for console output —
   scoped per rule 1.
@@ -851,8 +856,8 @@ The ticket describes intent. The page describes fact. Where they disagree, find
 out which is right *before* writing the case.
 
 - **Bad:** "Send is leftmost, Cancel is rightmost" — taken from the ticket text.
-  A pre-existing shared \`float:right\` rule has always rendered Cancel left. The
-  case failed on behaviour the ticket never asked anyone to change.
+  A pre-existing shared style rule has always rendered them the other way round.
+  The case failed on behaviour the ticket never asked anyone to change.
 - **Good:** either scope the case to what the ticket does change, or state the
   pre-existing behaviour in \`expected\` and raise the discrepancy as its own
   ticket.
