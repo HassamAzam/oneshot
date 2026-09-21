@@ -20,6 +20,7 @@ const harness = require(
 ) as {
   applyPatches: (wt: string, bePort: number, fePort: number) => { apiUrl: boolean };
   needsCollectstatic: (wt: string) => boolean;
+  disabledIntegrations: (wt: string) => Array<{ name: string; why: string }>;
   waitDjango: (port: number, pid: number, budgetMs: number) => Promise<boolean>;
 };
 
@@ -200,4 +201,15 @@ test('nothing listening is still reported as dead, not as 5xx', async () => {
     () => harness.waitDjango(port, process.pid, 3000),
     (e: { code: string }) => e.code === 'E_DJANGO_DEAD',
   );
+});
+
+/* ------------------------------------------------- disabled integrations */
+
+test('an environment it cannot interrogate reports nothing, and does not throw', () => {
+  // Advisory, never a blocker. There is no venv in this temp worktree, so the
+  // interpreter cannot run - and not knowing which integrations are off is not a
+  // reason to stop an app that is otherwise healthy from coming up. The same
+  // rule testlogin.ts states: a pre-check must never be the thing that fails a run.
+  const wt = seeded();
+  assert.deepEqual(harness.disabledIntegrations(wt), []);
 });
