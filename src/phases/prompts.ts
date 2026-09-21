@@ -876,8 +876,18 @@ ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 
 ## What implement (phase 3) actually built
 ${JSON.stringify(ctx.prior.implement ?? {}, null, 2)}
-
+${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'QA feedback on an earlier version of this list')}
 Write the test cases for this ticket.
+
+If there is QA feedback above, you are REVISING a list that already exists, not writing a new
+one — the current list is in \`testcases.json\` in your worktree and you output the whole
+revised list. Route each point by what it asks for: a case to ADD is appended, a case to DROP
+is removed outright, a case to CHANGE is edited where it stands and keeps its id. "TC-05 is
+replaced by the three cases below" means TC-05 is GONE and three cases take its place — it does
+not mean four cases. Never restate the reviewer's instruction as a case: a scenario reading
+\`Verify that TC-05 is removed\` tests nothing and is the exact failure this routing exists to
+prevent. Renumber only what you add, so an id a reviewer has already referred to still names
+the same case.
 
 The code is already written and sitting on \`${ctx.branch ?? 'the ticket branch'}\` in your
 worktree. Read \`git diff origin/${baseBranch()}\` before you start: it gives you the real
@@ -934,6 +944,75 @@ fail without reading the code.
 Read whatever you need to. Do not run the app and do not change a line of code — you are
 authoring the list, not executing it and not fixing what it finds.
 
+## Writing cases that can only fail because of the change
+
+A case that fails for a reason the ticket did not cause is worse than no case:
+it burns the run's cycle budget, sends \`implement\` after work it cannot do, and
+blocks the merge gate on something no diff can fix. Five rules, each learned from
+a case that did exactly that.
+
+### 1. Assert only what the diff can change
+
+Scope every assertion to the component, page or endpoint the ticket touches.
+Never assert a global property unless the ticket *is* that property.
+
+- **Bad:** "Zero console errors on the page." This app emits app-wide warnings
+  that predate the ticket, so the case fails forever and names the innocent diff.
+- **Good:** "No console error originating from the files this ticket changed."
+- **If a baseline already exists, use it:** a prior artifact in this run may
+  record one, and you may then assert **no new** errors against it, citing in
+  \`expected\` where the figure came from. You are not running the app to
+  establish one — so a baseline you cannot point at is a baseline you do not
+  have, and the scoped assertion above is the case to write instead.
+
+### 2. Never assert through tooling that is known not to run
+
+You cannot run the tool to find out, but you do not have to: \`implement\`'s
+artifact is above, and its \`testsRun\` field records the commands that actually
+ran on this branch and what they returned. Read it before writing a case around
+any runner.
+
+- **Bad:** a case built on this repo's Jest — it has rotted (Babel/enzyme/ESM
+  drift) and CI never runs it, so the case is unpassable by construction. One
+  such case failed identically on three separate laps.
+- **Good:** assert through a runner \`testsRun\` shows working, or one this
+  pipeline itself uses — Playwright for the browser, pytest and flake8 for the
+  backend — and name it in \`steps\`.
+
+### 3. One case, one subject
+
+Do not bundle a behavioural assertion with an environmental one. A bundled case
+reports \`fail\` even when the behaviour under test passed.
+
+- **Bad:** "The logged-in user is redirected off \`/\` **and** no JavaScript error
+  appears in the console." The redirect worked perfectly; the case failed on
+  console errors belonging to the authenticated page it redirected *to*.
+- **Good:** one case for the redirect, a separate one for console output —
+  scoped per rule 1.
+
+### 4. Derive \`expected\` from measured reality, not the ticket's prose
+
+The ticket describes intent. The page describes fact. Where they disagree, find
+out which is right *before* writing the case.
+
+- **Bad:** "Send is leftmost, Cancel is rightmost" — taken from the ticket text.
+  A pre-existing shared style rule has always rendered them the other way round.
+  The case failed on behaviour the ticket never asked anyone to change.
+- **Good:** either scope the case to what the ticket does change, or state the
+  pre-existing behaviour in \`expected\` and raise the discrepancy as its own
+  ticket.
+
+### 5. A case that needs a baseline must carry it
+
+"No layout shift versus the pre-change screenshots" is unrunnable if no
+pre-change screenshots exist. Either capture the baseline as a pre-condition, or
+assert something measurable instead (computed values, element counts, geometry).
+
+### The check before you submit a case list
+
+For each case ask: **if this fails, is the ticket's diff necessarily at fault?**
+If the honest answer is "not necessarily", rewrite it or drop it.
+
 ## Turn economy — this phase has died at its cap, so it is a protocol, not advice
 
 Reading is not the deliverable and cannot be salvaged; cases can. So:
@@ -959,7 +1038,13 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
     };
     const cases = testCases(ctx);
     const findings = findingsOf(ctx);
-    const verifyFailures = findings.length ? [] : verifyFailuresOf(ctx);
+    // Both can be non-empty at once, and when they are the verify failures are
+    // the ones that matter: a review finding is a reader's hypothesis about a
+    // diff, a verify failure is a measurement taken against a running build.
+    // This used to discard the failures whenever review had anything to say, so
+    // #194 spent both cycle laps closing a rebase and a test-file move while a
+    // reproducible h3 duplication — observed, with evidence — went untouched.
+    const verifyFailures = verifyFailuresOf(ctx);
 
     // Named from the plan's forecast, phrased as a default rather than a
     // permission. The conductor cannot enforce this — `agents` in phases.json
@@ -984,7 +1069,18 @@ reviewed against.${unplanned}`;
     // A review lap and a retry lap are different jobs and must not read the
     // same: one has a defect list to close, the other has an unknown amount of
     // its own half-finished work already committed on the branch.
-    const lapBlock = findings.length
+    const verifyBlock = verifyFailures.length
+      ? `## Verify failed these cases — fix them (lap ${ctx.lap})
+\`verify\` ran the case list against a real build of the previous lap and reported these as
+failing. These are observed defects, not a hypothesis: fix the code so each one passes, do not
+argue with the verdict. Commits from the lap verify tested may already be on the branch — run
+\`git log --oneline origin/${baseBranch()}..HEAD\` and read the diff before writing anything.
+
+${verifyFailures.map((c) => `- ${c.id}: ${c.evidence}`).join('\n')}
+`
+      : '';
+
+    const reviewBlock = findings.length
       ? `## Review findings to fix (lap ${ctx.lap})
 The previous lap was reviewed and sent back. Fix every blocker and major. Address minors and
 suggestions unless doing so contradicts the plan — say which you left and why in \`summary\`.
@@ -1003,22 +1099,29 @@ checked yourself.
 
 ${findings.map((f) => `- ${f.id} [${f.severity}] ${f.file}:${f.line}\n    ${f.what}\n    fix: ${f.fix}`).join('\n')}
 `
-      : verifyFailures.length
-        ? `## Verify failed these cases — fix them (lap ${ctx.lap})
-\`verify\` ran the case list against a real build of the previous lap and reported these as
-failing. These are observed defects, not a hypothesis: fix the code so each one passes, do not
-argue with the verdict. Commits from the lap verify tested may already be on the branch — run
-\`git log --oneline origin/${baseBranch()}..HEAD\` and read the diff before writing anything.
+      : '';
 
-${verifyFailures.map((c) => `- ${c.id}: ${c.evidence}`).join('\n')}
+    // Verify first when both are present: the review block opens by telling this
+    // phase what its job is, and whichever block leads is the one that frames the
+    // lap. A caller that fixes the measured failures and then reads the review is
+    // doing them in the right order.
+    const bothBlock = verifyFailures.length && findings.length
+      ? `Both a verify failure list and a review finding list are present below. The verify
+failures come first and are not optional: they were observed against a running build. Treat
+review's findings as secondary to them, and if the two disagree, the measurement wins.
+
 `
-        : ctx.lap > 0
-          ? `## This is lap ${ctx.lap}
+      : '';
+
+    const lapBlock = verifyFailures.length || findings.length
+      ? `${bothBlock}${verifyBlock}${reviewBlock}`
+      : ctx.lap > 0
+        ? `## This is lap ${ctx.lap}
 A previous attempt at this phase did not finish. Its commits may already be on the branch.
 Run \`git log --oneline origin/${baseBranch()}..HEAD\` and read the diff
 BEFORE writing anything, and continue from there rather than redoing work that landed.
 `
-          : '';
+        : '';
 
     // Empty on lap 0 — testcases runs AFTER this phase. On a review or verify
     // cycle lap it exists, and then it is the sharpest statement of what the

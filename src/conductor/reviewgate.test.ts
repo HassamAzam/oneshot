@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planApprovalRequestBody } from './reviewgate.js';
+import { planApprovalRequestBody, testcasesApprovalRequestBody, testcasesApprovedRecordBody } from './reviewgate.js';
 import { renderPlanMd } from '../lib/publish.js';
 
 const oldPlan = {
@@ -143,4 +143,50 @@ test('a feedback entry missing its response renders instead of throwing', () => 
 test('non-string coverage fields render instead of throwing', () => {
   const odd = { ...newPlan, acceptanceCoverage: [{ criterion: 'Contrast', coveredBy: 2, note: 3 }] };
   assert.match(planApprovalRequestBody(odd, 'why'), /- • Contrast — 2 _\(3\)_/);
+});
+
+const tcase = (over: Record<string, unknown> = {}) => ({
+  id: 'TC-01',
+  scenario: 'The filter menu closes on Escape',
+  precondition: '',
+  steps: ['Open the menu', 'Press Escape'],
+  expected: 'The menu closes and focus returns to the trigger',
+  pass: ['happy'],
+  blast: 'medium' as const,
+  ...over,
+});
+
+test('the gate posts the case list as a table a reviewer can scan', () => {
+  const md = testcasesApprovalRequestBody([tcase()], 'gates are on for every run');
+  assert.ok(md.includes('| Case | Blast | Scenario | Expects |'), 'has a header row');
+  assert.ok(md.includes('| --- | --- | --- | --- |'), 'has the delimiter row');
+  assert.ok(md.includes('| **TC-01** |'), 'the id is its own column');
+});
+
+test('a pipe in model-authored prose cannot break the table open', () => {
+  // scenario/expected are model prose and routinely carry shell snippets and
+  // union types. One unescaped pipe ends the row and spills every case after
+  // it into the surrounding text — the whole list becomes unreadable at the
+  // one moment a reviewer needs to read it.
+  const md = testcasesApprovalRequestBody(
+    [tcase({ scenario: 'a | b', expected: 'status is 401 | 403' })], 'why',
+  );
+  assert.ok(md.includes('a \\| b'), 'the scenario pipe is escaped');
+  assert.ok(md.includes('401 \\| 403'), 'the expected pipe is escaped');
+});
+
+test('the reviewer is told a reply revises the list, not that it appends', () => {
+  // The old text said replies "are appended to testcases.json", which is what
+  // taught reviewers to write append-shaped comments — and is no longer true.
+  const md = testcasesApprovalRequestBody([tcase()], 'why');
+  assert.ok(/REVISION request/.test(md), 'says a reply revises');
+  assert.ok(/\*\*Remove\*\*/.test(md), 'offers remove as an action');
+  assert.ok(/\*\*Change\*\*/.test(md), 'offers change as an action');
+  assert.ok(!/They are appended to/.test(md), 'the append-only instruction is gone');
+});
+
+test('the approved record uses the same table, so both comments read alike', () => {
+  const md = testcasesApprovedRecordBody([tcase()]);
+  assert.ok(md.includes('| Case | Blast | Scenario | Expects |'));
+  assert.ok(md.includes('**Approved test cases** (1)'));
 });
