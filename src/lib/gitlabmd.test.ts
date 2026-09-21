@@ -39,7 +39,7 @@ test('hex inside words, URLs, anchors, entities and existing code is untouched',
   assert.equal(mdText('already `#535353`'), 'already `#535353`');
 });
 
-// Adversarial cases from review on #51. Each was reproduced against the first version.
+// Adversarial cases raised in review. Each was reproduced against the first version.
 
 test('a backtick pair across a blank line is not a code span, so what lies between is escaped', () => {
   assert.equal(

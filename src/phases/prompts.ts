@@ -491,8 +491,8 @@ function findingsOf(ctx: PromptCtx): Finding[] {
   if (fromPrior) return fromPrior;
   // On a resumed run `implement` is built before `review` is reached, so
   // prior.review is not loaded yet and a review that sent the work back is
-  // invisible to the lap meant to fix it (#179: two implement laps finished in
-  // a minute with nothing to do). Read it off disk, as verifyFailuresOf does —
+  // invisible to the lap meant to fix it (observed: two implement laps finished
+  // in a minute with nothing to do). Read it off disk, as verifyFailuresOf does —
   // only when it asked for changes, so an approved review's minor notes never
   // turn an ordinary lap into a fix lap.
   const onDisk = readArtifact<{ verdict?: string; findings?: Finding[] }>(ctx.ticket.iid, 'findings.json');
@@ -1029,7 +1029,7 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
     // the ones that matter: a review finding is a reader's hypothesis about a
     // diff, a verify failure is a measurement taken against a running build.
     // This used to discard the failures whenever review had anything to say, so
-    // #194 spent both cycle laps closing a rebase and a test-file move while a
+    // a run spent both cycle laps closing a rebase and a test-file move while a
     // reproducible h3 duplication — observed, with evidence — went untouched.
     const verifyFailures = verifyFailuresOf(ctx);
 

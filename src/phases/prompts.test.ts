@@ -132,7 +132,7 @@ test('an unlabelled ticket is never told to bring the app up', () => {
 /**
  * A verify failure is a measurement; a review finding is a reader's hypothesis
  * about a diff. When a run cycles back to `implement` carrying both, the prompt
- * used to render only the review findings — so #194 spent both of its cycle laps
+ * used to render only the review findings — so a run spent both of its cycle laps
  * closing a rebase and a test-file move while a reproducible h3 duplication went
  * untouched, and the run blocked on a defect nothing had ever shown it.
  *

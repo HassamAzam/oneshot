@@ -638,7 +638,7 @@ async function mentionOrName(username: string): Promise<string> {
  * Slack reserves `&`, `<` and `>` in message text, and `|` additionally
  * terminates the label inside a link — so a ticket called
  * "Payroll | increments not applied" would render as a link reading
- * "#42 Payroll" with the rest spilled out, and one containing `<` can break
+ * "#123 Payroll" with the rest spilled out, and one containing `<` can break
  * the link outright. Titles are written by whoever opened the issue, so this
  * is data, not a constant, and the gate ask is the one message that puts a
  * title inside a link label rather than beside one.

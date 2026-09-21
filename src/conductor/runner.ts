@@ -463,7 +463,7 @@ function logStopDetail(journal: RunJournal, headline: string): void {
  * more case, appended, no session spent. The same comment with no sign-off is a
  * REVISION request, and append is the one verb that cannot express "TC-05 is
  * replaced by the three below": it leaves TC-05 in place and files the sentence
- * itself as a case. That is how workstreamai#87 reached 44 cases from 20.
+ * itself as a case. That is how one list reached 44 cases from 20.
  *
  * `revise` therefore cycles the `testcases` phase, the way the plan gate has
  * always cycled `plan` — a model re-reads the list with the reviewer's words in
@@ -982,7 +982,7 @@ export async function runTicket(
     // removed and replaced by the three cases below" — and append is the one
     // verb that cannot express it. Appending that sentence produced a case
     // reading `Verify that TC-05 is removed and replaced by...` while TC-05
-    // itself stayed, and took workstreamai#87 from 20 cases to 44.
+    // itself stayed, and took the list from 20 cases to 44.
     //
     // So feedback cycles the phase, the way the plan gate already does: the
     // `testcases` session re-enters with the reviewer's words in its prompt and
@@ -1648,7 +1648,7 @@ export async function runTicket(
     // policy, which was worse than stopping: failedLapsOf() does not count
     // infra records, so a phase that kept hanging never used up maxLaps or
     // maxRetries, and every further death cycled back to implement — a lap
-    // that cannot fix a dead connection — forever. Seen on #179: four verify
+    // that cannot fix a dead connection — forever. Seen live: four verify
     // hangs, 12h, and implement re-run with nothing to change.
     if (infra && p.onFail !== 'skip' && p.onFail !== 'warn') {
       const spent = infraAttemptsOf(iid, p.name);

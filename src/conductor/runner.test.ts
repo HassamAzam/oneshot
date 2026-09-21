@@ -117,7 +117,7 @@ test('nothing holds a run that is not waiting on a human merge', () => {
   assert.equal(poll({ lastCheckAt: undefined }), null, 'never asked GitLab yet: ask now');
 });
 
-// workstreamai#87: the reviewer wrote "TC-05 is removed and replaced by the
+// The case: the reviewer wrote "TC-05 is removed and replaced by the
 // three separate cases below". Appending that produced a case reading `Verify
 // that TC-05 is removed and replaced by...`, left TC-05 in place, and took the
 // list from 20 cases to 44. A revision has to reach a model, and the only way
