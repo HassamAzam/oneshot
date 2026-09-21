@@ -496,7 +496,7 @@ export function nextIndex(
     // A retry means "run it again", and runOne() has already taken the phase
     // out of `forced` at its start. Without putting it back, a phase that
     // succeeded on an EARLIER lap reads as done and shouldSkip() passes the
-    // retry by: #168's re-plan against reviewer feedback died of infra, was
+    // retry by: a re-plan against reviewer feedback died of infra, was
     // skipped, and the old plan was re-published for approval as though it
     // were the revision. The same hole skips an implement retry inside a
     // review cycle, and an infra re-attempt of any phase that had passed.
@@ -1154,7 +1154,7 @@ export async function runTicket(
       //
       // Except when it executed nothing. A list that is ALL 'skipped' is not a
       // verdict on the environment or the change — it is a session that spent
-      // its budget before the first case (ticket #189: the whole lap went on
+      // its budget before the first case (observed: the whole lap went on
       // server bring-up, and the block said the change was "broken end to end"
       // when the servers it left behind were answering correctly). That is the
       // shape of an infra death, so it takes the free re-attempt, and only a

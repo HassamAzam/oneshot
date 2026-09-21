@@ -20,7 +20,7 @@
       "writes": ["run"], "onFail": "abort",
       "skills": [],
       "labelSkills": { "Bug": "bug-reproduction" },
-      "_why_skills": "Reproduction is the `Bug` label's job, the same way `frontend-accessibility` is the `Accessibility` label's at plan — see that phase's `_why_skills`. It was an every-ticket skill until #91, an accessibility ticket carrying no Bug label, spent 57 turns and 528k weighted tokens failing to bring the app up for a verdict of 'inconclusive': asking a session to decide bug-vs-feature from the ticket's prose costs the app bring-up whether or not the answer is yes, and triage already knows. An absent label is the answer, not a missing signal. Moving this line back into `skills` restores the old behaviour, prose included — src/phases/prompts.ts gates the instructions on this same resolved list.",
+      "_why_skills": "Reproduction is the `Bug` label's job, the same way `frontend-accessibility` is the `Accessibility` label's at plan — see that phase's `_why_skills`. It was an every-ticket skill until an accessibility ticket carrying no Bug label spent 57 turns and 528k weighted tokens failing to bring the app up for a verdict of 'inconclusive': asking a session to decide bug-vs-feature from the ticket's prose costs the app bring-up whether or not the answer is yes, and triage already knows. An absent label is the answer, not a missing signal. Moving this line back into `skills` restores the old behaviour, prose included — src/phases/prompts.ts gates the instructions on this same resolved list.",
       "artifact": "research.json"
     },
     {

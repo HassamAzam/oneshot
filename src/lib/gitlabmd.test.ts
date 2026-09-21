@@ -28,7 +28,7 @@ test('bare hex colours become chip-rendering code spans', () => {
 });
 
 test('short hex only when it has a letter, so issue and MR refs stay links', () => {
-  assert.equal(mdText('see #161 and #168, colour #fff and #0af'), 'see #161 and #168, colour `#fff` and `#0af`');
+  assert.equal(mdText('see #123 and #456, colour #fff and #0af'), 'see #123 and #456, colour `#fff` and `#0af`');
   assert.equal(mdText('#1234 is an issue'), '#1234 is an issue');
 });
 
@@ -52,7 +52,7 @@ test('a backtick pair across a blank line is not a code span, so what lies betwe
 });
 
 test('all-digit refs of any length stay issue links; the cost is no chip for #000000', () => {
-  assert.equal(mdText('fixes #123456 and #161'), 'fixes #123456 and #161');
+  assert.equal(mdText('fixes #123456 and #123'), 'fixes #123456 and #123');
   assert.equal(mdText('see #12345678'), 'see #12345678');
   assert.equal(mdText('black #000000, grey #535353'), 'black #000000, grey #535353');
 });

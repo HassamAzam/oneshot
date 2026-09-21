@@ -102,8 +102,8 @@ test('the bug label puts the reproduction skill in front of research', () => {
 });
 
 test('without the bug label research is not offered the reproduction skill', () => {
-  // #91 is the case: an accessibility ticket carrying no labels at all spent 57
-  // turns failing to bring the app up, for a verdict of 'inconclusive'.
+  // The case that forced this: an accessibility ticket carrying no labels at all
+  // spent 57 turns failing to bring the app up, for a verdict of 'inconclusive'.
   const prompt = systemPromptFor(cfg('research'), ctx(ticket({ labels: ['Loop'] })));
   assert.ok(!names(prompt).includes('bug-reproduction'));
 });
@@ -127,7 +127,7 @@ test('an unlabelled ticket is never told to bring the app up', () => {
   assert.ok(!/app\.cjs ensure/.test(without));
 });
 
-// -------------------------------------- verify failures reach implement (#35)
+// ------------------------------------------- verify failures reach implement
 
 /**
  * A verify failure is a measurement; a review finding is a reader's hypothesis

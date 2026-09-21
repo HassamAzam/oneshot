@@ -1570,8 +1570,8 @@ ${conformance}
 
 - Do not inject anything into the page before a screenshot: no overlay, banner, label, style or
   script. \`page.evaluate\` may READ the DOM, never write it. A caption painted onto the page is
-  text you wrote, presented as something the app rendered — and on #189 it covered the very
-  header a reviewer would check. Say it in \`caption\` instead.
+  text you wrote, presented as something the app rendered — and a banner drawn over the layout
+  hides the very header a reviewer would check. Say it in \`caption\` instead.
 - Do not change the worktree to produce a 'before'. You have no write access to it, and the git
   guard refuses \`checkout\`/\`restore\`/\`stash\`/\`reset\` from this phase: the files on disk are the
   change under review, and anything left altered there is what \`mr\` pushes.

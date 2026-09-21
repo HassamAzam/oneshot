@@ -28,14 +28,14 @@ const skips = (forced: Set<string>, succeeded: string[], name: string): boolean 
 
 test('a retry re-runs a phase that already succeeded on an earlier lap', () => {
   const forced = new Set<string>();
-  // #168: plan passed, the run cycled back, and the re-plan against reviewer
+  // The case: plan passed, the run cycled back, and the re-plan against reviewer
   // feedback died of infra. afterFailure() returns a retry at plan's index —
   // which reached a phase with a succeeded record on it.
   const i = nextIndex({ kind: 'retry', at: at('plan') }, at('plan'), at('plan'), LIST, forced);
 
   assert.equal(i, at('plan'));
   assert.equal(skips(forced, ['research', 'plan'], 'plan'), false,
-    'the retried phase was skipped as already-done — this is the #168 defect');
+    'the retried phase was skipped as already-done — this is the defect');
 });
 
 test('a retry forces only the retried phase, so a grouped retry runs solo', () => {
