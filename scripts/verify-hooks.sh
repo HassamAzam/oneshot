@@ -163,24 +163,10 @@ expect_deny  "phase with no scopes at all" \
                                        write-scope.cjs "$(write_payload "$ONESHOT_WORKTREE/apps/leaves/models.py")"
 export ONESHOT_WRITE_SCOPES="$SAVED_SCOPES"
 
-# The symlink case: a worktree's .claude points into the context repo, so a
-# prefix-only check would accept this and let a phase rewrite its own skills.
+# The symlink case: composition links each skill from a worktree's .claude into
+# this repo's vendored context/, so a prefix-only check would accept a write
+# through that link and let a phase rewrite its own governing skills.
 if command -v ln >/dev/null 2>&1; then
-    rm -rf "$ONESHOT_WORKTREE/.claude"
-    if [ -d "$CONTEXT_REPO/.claude" ]; then
-        ln -s "$CONTEXT_REPO/.claude" "$ONESHOT_WORKTREE/.claude" 2>/dev/null
-        expect_deny "symlinked .claude/skills (realpath escape)" \
-            write-scope.cjs "$(write_payload "$ONESHOT_WORKTREE/.claude/skills/erp-code-review/SKILL.md")"
-    else
-        # A silent skip here is worse than a failure: this is the test for the
-        # one escape that lets a phase rewrite its own governing skills.
-        red "  FAIL  symlink test could not run — $CONTEXT_REPO/.claude not present"
-        FAIL=$((FAIL+1))
-    fi
-
-    # The real composition now links each skill into this repo's vendored
-    # context/, not the context repo. A per-skill symlink must not become a
-    # write path into context/ either — same escape, different source.
     rm -rf "$ONESHOT_WORKTREE/.claude"
     if [ -d "$ROOT/context/skills" ]; then
         mkdir -p "$ONESHOT_WORKTREE/.claude/skills"
@@ -189,6 +175,8 @@ if command -v ln >/dev/null 2>&1; then
         expect_deny "symlinked skill into vendored context/ (realpath escape)" \
             write-scope.cjs "$(write_payload "$ONESHOT_WORKTREE/.claude/skills/erp-code-review/SKILL.md")"
     else
+        # A silent skip here is worse than a failure: this is the test for the
+        # one escape that lets a phase rewrite its own governing skills.
         red "  FAIL  vendored-context symlink test could not run — $ROOT/context/skills not present"
         FAIL=$((FAIL+1))
     fi
