@@ -43,7 +43,7 @@
  * continues from the phase remediation says to resume at.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, rmSync, statSync } from 'node:fs';
 import { promisify } from 'node:util';
 import {
   DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, modelFor,
@@ -399,6 +399,42 @@ export function mergePollWait(o: {
  * stays where it is as a backstop: it re-derives the same fact deterministically
  * at the merge, and a check that only runs early is a check a resumed run skips.
  */
+/** A finding as review-partial.json carries it — only `severity` is read here. */
+export interface PartialFinding { severity?: string; [k: string]: unknown }
+
+/**
+ * What a dead review session's partial file is worth, if anything.
+ *
+ * Only a blocker or a major is salvaged into a verdict, and the asymmetry is
+ * the whole point: 'approve' asserts that the entire diff was read, which a
+ * session that died cannot assert about the dimensions that never reported,
+ * while a recorded blocker is a fact about the code that an unfinished review
+ * does not make less true. So a partial holding one blocker becomes a
+ * 'changes-requested' the next implement lap can act on, and a partial holding
+ * only minors is left alone — the infra re-attempt it would otherwise pre-empt
+ * is the better answer there.
+ *
+ * Every finding is carried into the artifact, not just the serious ones: the
+ * verdict is decided by the serious ones, but a minor the session had already
+ * written down is still review output and implement reads the whole list.
+ */
+export function salvagedReview(
+  findings: PartialFinding[], error: string | null,
+): { summary: string; blocked: null; verdict: string; findings: PartialFinding[] } | null {
+  const serious = findings.filter((f) => f.severity === 'blocker' || f.severity === 'major');
+  if (!serious.length) return null;
+  const ids = serious.map((f) => `${String(f.id ?? '?')} [${String(f.severity)}]`).join(', ');
+  return {
+    summary: `Salvaged from review-partial.json: ${findings.length} finding(s) recorded before `
+      + `the session died (${error ?? 'no error text'}), including ${serious.length} `
+      + `blocker/major: ${ids}. The review is PARTIAL — a dimension that never reported is `
+      + 'unreviewed, not clean.',
+    blocked: null,
+    verdict: 'changes-requested',
+    findings,
+  };
+}
+
 function failedCases(name: string, data: Record<string, unknown> | null | undefined): string | null {
   if (name !== 'verify') return null;
   const results = (data as { results?: Array<{ id?: string; result?: string }> } | null)?.results;
@@ -1223,6 +1259,35 @@ export async function runTicket(
           r.out.ok = true;
           writeArtifact(iid, r.cfg.artifact ?? 'testcases.json', r.out.data);
           log.warn(`testcases salvaged from partial results — ${cases.length} case(s) recorded`);
+        }
+      }
+
+      // The same bargain again for the phase that overruns most. A review that
+      // dies returns no verdict, the death is infra so no lap is spent, and the
+      // conductor re-attempts the identical fan-out until MAX_INFRA_ATTEMPTS is
+      // gone and the run blocks — thirteen of those are on this machine's
+      // ledger and not one produced a finding. Its prompt now rewrites
+      // review-partial.json as each agent lands, so what the session had
+      // already established survives it; salvagedReview() decides what that is
+      // worth.
+      //
+      // The mtime guard is the same hazard verify's salvage names above: a
+      // partial from an EARLIER lap is still on disk when the cleanup did not
+      // run, and reading it as this session's would hand back findings this lap
+      // never made. Written before this session started means it is not this
+      // session's.
+      if (r.cfg.name === 'review' && !r.out.ok && !r.out.blocked) {
+        const path = artifactPath(iid, 'review-partial.json');
+        const fresh = existsSync(path) && statSync(path).mtimeMs >= r.startedAt;
+        const partial = fresh
+          ? readArtifact<{ findings?: PartialFinding[] }>(iid, 'review-partial.json')
+          : null;
+        const salvaged = salvagedReview(partial?.findings ?? [], r.out.error ?? null);
+        if (salvaged) {
+          r.out.data = salvaged;
+          r.out.ok = true;
+          writeArtifact(iid, r.cfg.artifact ?? 'findings.json', salvaged);
+          log.warn(`review salvaged from partial findings — ${salvaged.findings.length} recorded`);
         }
       }
     }

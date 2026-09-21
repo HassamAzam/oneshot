@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { codePhaseStatus, mergePollWait, nextIndex, testcaseGateRoute } from './runner.js';
+import {
+  codePhaseStatus, mergePollWait, nextIndex, salvagedReview, testcaseGateRoute,
+} from './runner.js';
 import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
 
 function phase(name: string, n: number, group?: string): PhaseConfig {
@@ -145,4 +147,30 @@ test('a revision with no testcases phase to cycle parks, never silently proceeds
   // Treating a revision as an approval because the board is misconfigured would
   // turn a reviewer asking for changes into a sign-off they never gave.
   assert.equal(testcaseGateRoute('feedback', false), 'park');
+});
+
+const finding = (id: string, severity: string) => ({
+  id, severity, file: 'apps/payroll/views.py', line: 10, what: 'w', why: 'y', fix: 'f',
+});
+
+test('a dead review with a blocker on record comes back as changes-requested', () => {
+  const out = salvagedReview([finding('F-01', 'blocker'), finding('F-02', 'minor')], 'timed out');
+  assert.equal(out?.verdict, 'changes-requested');
+  // The minor rides along: the verdict is decided by the serious findings, but
+  // implement reads the whole list and a written-down minor is still output.
+  assert.equal(out?.findings.length, 2);
+  assert.match(out!.summary, /PARTIAL/);
+  assert.match(out!.summary, /F-01 \[blocker\]/);
+});
+
+test('a major is salvageable too — the bar is blocker OR major', () => {
+  assert.equal(salvagedReview([finding('F-01', 'major')], null)?.verdict, 'changes-requested');
+});
+
+test('minors and suggestions alone are not a verdict, so the infra re-attempt stands', () => {
+  assert.equal(salvagedReview([finding('F-01', 'minor'), finding('F-02', 'suggestion')], 'x'), null);
+});
+
+test('an empty partial salvages nothing', () => {
+  assert.equal(salvagedReview([], 'timed out'), null);
 });

@@ -309,6 +309,11 @@ function budgetMin(phase: string, fallback: number): number {
   return phaseByName(phase)?.timeoutMin ?? fallback;
 }
 
+/** Same contract as budgetMin() for the turn cap: quoted from config, never typed in. */
+function budgetTurns(phase: string, fallback: number): number {
+  return phaseByName(phase)?.maxTurns ?? fallback;
+}
+
 function testCases(ctx: PromptCtx): TestCase[] {
   return artifact<{ cases: TestCase[] }>(ctx, 'testcases').cases ?? [];
 }
@@ -992,6 +997,9 @@ them. Do not edit anything outside your worktree.`;
     const prev = findingsOf(ctx);
     const files = i.filesChanged ?? [];
     const layers = layersOf(files);
+    const mins = budgetMin('review', 30);
+    const turns = budgetTurns('review', 70);
+    const landAt = Math.round(mins * 0.7);
 
     const agents = [
       layers.backend ? '`backend-reviewer-agent`' : '',
@@ -1001,17 +1009,48 @@ them. Do not edit anything outside your worktree.`;
       '`spec-conformance-agent`',
     ].filter(Boolean);
 
-    // Both layers changed is the case worth spelling out: three sequential
-    // Task calls is three times the wall clock for exactly the same signal,
-    // and this phase's cap is the tightest of any that dispatches subagents.
+    // Parallel was never the hard part — UNABANDONABLE was. A blocking Task
+    // call hands this phase's whole clock to its slowest child and cannot take
+    // it back, and that is how review became the pipeline's most reliable way
+    // to produce nothing: thirteen recorded overruns, several sitting at
+    // 71–122 minutes against a 30-minute budget with the session's last frame a
+    // dispatch it never returned from. No findings, no verdict, an infra
+    // re-attempt, and the same fan-out again. Backgrounded children invert the
+    // ownership: the session holds the clock, collects what has landed when the
+    // deadline arrives, and names what did not in `summary` instead of dying
+    // with it. `dead-code-sweep` is deliberately NOT a sixth child — the skill
+    // tells an interactive caller to dispatch it through general-purpose, which
+    // inside this budget is one more process competing for the same minutes.
     const agentBlock = `Delegate to ${agents.join(', ')} — they carry the standards this repo is
-reviewed against and they resolve from your worktree's \`.claude/agents\`. Dispatch ALL OF THEM
-IN ONE MESSAGE so they run in parallel; issuing them one at a time multiplies your wall clock
-for identical output. If the Task tool cannot resolve one of them, review that layer yourself
-against \`.claude/rules/\` and say in \`summary\` which agent was unavailable.
+reviewed against and they resolve from your worktree's \`.claude/agents\`.
+
+Dispatch ALL OF THEM IN ONE MESSAGE, each with \`run_in_background: true\`. One message because
+issuing them one at a time multiplies your wall clock for identical output; backgrounded because
+a blocking dispatch gives your budget away to the slowest child and you cannot get it back —
+that is what kills this phase more often than anything it reviews.
+
+Then collect them with \`TaskOutput\`, \`block: true\`, and a \`timeout\` you can actually afford:
+the time left to your landing mark for the first, whatever remains for each one after it. An
+agent still running when the mark arrives is not waited for a second time — record that
+dimension as NOT REVIEWED in \`summary\`, naming the agent, and aggregate what did land.
+
 Give \`spec-conformance-agent\` the ticket's title, description and acceptance criteria from
 above as its \`ticket_context\`: it is the one agent that says whether the change — and each
-thing a finding asks for — is inside this ticket's scope.`;
+thing a finding asks for — is inside this ticket's scope.
+
+\`util-reuse-agent\` earns a child only if this diff ADDS a helper-shaped function — a formatter,
+validator, sorter, calculator, API wrapper, permission check. If it does not, skip it and say so
+in one line: a dispatch with nothing to find still costs you the wait.
+
+\`dead-code-sweep\` is a skill, not an agent. Run it YOURSELF in review-only mode over the diff
+you have already read — detection and findings only, no deletions, no re-lint, no commit. Do not
+dispatch it as another child. Where \`erp-code-review\` tells you to send it through
+\`general-purpose\`, this phase overrides that deliberately: that skill is written for an
+interactive session with no deadline, and a sixth process competing for ${mins} minutes has
+already cost this phase a whole lap.
+
+If the Task tool cannot resolve one of them, review that layer yourself against
+\`.claude/rules/\` and say in \`summary\` which agent was unavailable.`;
 
     const lapBlock = ctx.lap > 0 && prev.length
       ? `## This is review lap ${ctx.lap}
@@ -1096,6 +1135,23 @@ approve or send back.
   a finding.
 
 ${agentBlock}
+
+## Your clock — this phase overruns more than any other, so it is a protocol, not advice
+
+Your budget is ${mins} minutes and ${turns} turns. A session that overruns returns NO findings
+and NO verdict: the conductor reads it as an infrastructure death, re-attempts the same fan-out,
+and the ticket pays another ${mins} minutes for the same nothing.
+
+- LAND THE PLANE at ~${landAt} minutes. Stop collecting, aggregate what you have, write the
+  verdict. A review that is missing one dimension and says which is worth more than three laps
+  that each said nothing at all.
+- WRITE AS YOU GO — the backstop for everything above. Each time an agent lands, and after each
+  pass of your own, rewrite \`${runDir(ctx.ticket.iid)}/review-partial.json\` as
+  \`{"findings": [<Finding so far>]}\` — the same shape as your final \`findings\` field. If this
+  session dies anyway, the conductor salvages a recorded blocker or major out of that file
+  instead of throwing the lap away, so a session that kept it current has already succeeded.
+- Do not re-derive what you were handed. The diff, implement's file list and the case list above
+  are your inputs; a survey of the repo is not, and it is the other way this phase runs out.
 
 \`verdict\` is 'changes-requested' if ANY finding is a blocker or a major; otherwise 'approve'.
 Minors and suggestions alone do not send a change back — the run has a lap cap, and spending it
