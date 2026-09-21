@@ -90,7 +90,7 @@ import { schemaFor } from './schemas.js';
 import { mergePhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, declaredFiles, designApprovalRequestBody,
-  designApprovedRecordBody, designAttachments, designGateApplies, gatesApply,
+  designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
@@ -1302,7 +1302,13 @@ export async function runTicket(
       // written, so a case list that failed is a failed phase rather than a
       // successful one whose artifact happens to say otherwise.
       const caseFail = r.out.ok ? failedCases(r.cfg.name, r.out.data) : null;
-      const phaseOk = r.out.ok && caseFail === null;
+      // Same shape, different artifact: `design` reports its own success and
+      // nothing else reads its screens back off disk, so a session that says it
+      // drew five screens and rendered none arms a gate over an empty comment.
+      const deliverableFail = r.out.ok && r.cfg.name === 'design'
+        ? designDeliverableRefusal(iid, r.out.data as Record<string, unknown> | null)
+        : null;
+      const phaseOk = r.out.ok && caseFail === null && deliverableFail === null;
       const accountAction = phaseOk ? undefined : r.out.accountAction;
 
       recordPhase(iid, {
@@ -1322,7 +1328,7 @@ export async function runTicket(
         // adding one means touching infraAttemptsOf, the dashboard and unblock
         // for no decision any of them make differently), so this text is the
         // only thing in the journal that tells the two apart.
-        error: accountAction ?? r.out.error ?? r.out.blocked ?? caseFail ?? undefined,
+        error: accountAction ?? r.out.error ?? r.out.blocked ?? caseFail ?? deliverableFail ?? undefined,
       });
       j = readJournal(iid) ?? j;
 
@@ -1381,10 +1387,10 @@ export async function runTicket(
           claim(
             afterFailure(
               r.cfg, r.index,
-              caseFail ?? r.out.blocked ?? r.out.error ?? 'phase failed',
+              caseFail ?? deliverableFail ?? r.out.blocked ?? r.out.error ?? 'phase failed',
               // A recorded case failure is a verdict about the work, never an
               // infra death: the session ran to completion and said so.
-              caseFail ? false : r.out.infra,
+              (caseFail || deliverableFail) ? false : r.out.infra,
             ),
             r.cfg.name,
           );

@@ -602,7 +602,6 @@ judgement disagree, the design won the argument already — if it is genuinely w
 rather than quietly improving it, because the reviewer approved what they saw.
 
 ${screens}
-${d.prototype ? `\nThe full flow is prototyped at \`${join(dir, d.prototype.entry)}\`.` : ''}
 ${d.newPatterns?.length ? `\nApproved as NEW to the design system: ${d.newPatterns.join('; ')}.` : ''}
 `;
 }
@@ -811,24 +810,12 @@ Render each at 1280x800 and screenshot it. Then look at your own screenshots onc
 misaligned edges, doubled borders, overflow, contrast. Fix what you find. A flaw you could have
 caught yourself spends the reviewer's round on your typo instead of on your design.
 
-## If the flow changes, make it clickable and record it
+## Multi-screen flows
 
-\`flowChange\` is true when the change spans more than one screen or adds a step to an existing
-journey. Then, additionally:
-
-- Build \`prototype/index.html\`: one self-contained file, hash routing, vanilla JS, the same
-  \`tokens.css\`. Buttons navigate, forms accept input and carry values forward, submit -> pending
-  -> approved actually plays out. Include one unhappy branch. Seed it with data so it is
-  demonstrable with no setup.
-- Record a SILENT annotated walkthrough of the happy path with Playwright's \`recordVideo\`
-  (\`.webm\`, which GitLab renders inline in a comment). No narration and no audio track — ever.
-  The annotations ARE the narration: before each click, inject a small absolutely-positioned
-  overlay with an arrow and a short caption pointing at the control you are about to use, hold it
-  ~1.5s, then click. Keep it under 60 seconds and to one flow.
-
-Annotating is right HERE and wrong in \`ui-evidence\`, and the difference is worth holding on to:
-this video argues for a design, so labelling it helps; that phase's screenshots are evidence that
-a case ran, so drawing on them would be painting the result onto the page.
+Set \`flowChange\` when the change spans more than one screen or adds a step to an existing
+journey, and draw each state of that flow as its own screen so the mockups read in order. Do not
+build a clickable prototype and do not record a walkthrough — those follow in a later change,
+once real runs have measured what this phase's budget actually is.
 
 ${artifactsBlock(ctx)}
 

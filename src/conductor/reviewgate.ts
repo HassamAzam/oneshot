@@ -348,7 +348,7 @@ export interface CheckGateOpts {
    * Files uploaded with the request comment, every time this gate arms.
    *
    * The `design` gate is the reason this exists: what it asks a reviewer to
-   * approve is pictures, a walkthrough and a clickable file, none of which
+   * approve is pictures, none of which
    * survive being described in a string. They are re-uploaded on every round
    * rather than cached, which is not waste — a round exists precisely because
    * the screens changed, and a request carrying the PREVIOUS round's
@@ -984,7 +984,6 @@ function designOf(design: Record<string, unknown> | null): DesignArtifact {
     flowChange: d.flowChange === true,
     tokensFile: typeof d.tokensFile === 'string' ? d.tokensFile : '',
     screens: Array.isArray(d.screens) ? d.screens : [],
-    prototype: d.prototype && typeof d.prototype === 'object' ? d.prototype : null,
     decisions: Array.isArray(d.decisions) ? d.decisions.map(String) : [],
     newPatterns: Array.isArray(d.newPatterns) ? d.newPatterns.map(String) : [],
     openQuestions: Array.isArray(d.openQuestions) ? d.openQuestions : [],
@@ -998,7 +997,7 @@ function designOf(design: Record<string, unknown> | null): DesignArtifact {
  * Order is the argument, exactly as it is in the ui-evidence pack: for each
  * screen the current state first and the proposal second, so a reviewer
  * scrolling the comment reads before→after per screen rather than a block of
- * one followed by a block of the other. The walkthrough follows the screens,
+ * one followed by a block of the other. Ordering follows the screens,
  * and the clickable file last — it is the thing you open if the pictures left
  * you with a question.
  *
@@ -1037,11 +1036,37 @@ export function designAttachments(iid: number, design: Record<string, unknown> |
     push(s.before);
     push(s.screenshot);
   }
-  if (d.prototype) {
-    push(d.prototype.video);
-    push(d.prototype.entry);
-  }
   return out;
+}
+
+/**
+ * Refuse a design that reports screens it never rendered.
+ *
+ * `designAttachments` drops a file disk does not have, deliberately and
+ * silently: a gate that refuses to arm over one missing screenshot parks the
+ * run in silence, which is the worse failure. But that tolerance applied to
+ * EVERY screen produces a gate comment naming five screens with no images under
+ * it, and a reviewer parked in front of nothing — reachable today, because the
+ * phase reports its own success and nothing checks the artifact against disk.
+ *
+ * So the per-file tolerance stays where it is and the check moves up a level.
+ * A design claiming screens must have rendered them. Returns null when there is
+ * nothing to refuse: `applicable: false`, or no screens, is a complete answer.
+ */
+export function designDeliverableRefusal(
+  iid: number, design: Record<string, unknown> | null,
+): string | null {
+  const d = designOf(design);
+  if (!d.applicable || d.screens.length === 0) return null;
+  const dir = artifactDir(iid);
+  const missing = d.screens
+    .filter((sc) => !sc.screenshot || !existsSync(join(dir, sc.screenshot)))
+    .map((sc) => sc.id || sc.name || '(unnamed)');
+  if (missing.length === 0) return null;
+  const all = missing.length === d.screens.length;
+  return `design reported ${d.screens.length} screen(s) and ${all ? 'none' : `${missing.length}`}`
+    + ` of their renders are on disk: ${missing.join(', ')}.`
+    + ' A design gate armed on screens nobody can see asks a reviewer to approve nothing.';
 }
 
 /**
@@ -1075,10 +1100,9 @@ function renderDesignForTicket(design: Record<string, unknown> | null): string {
       : ''}`
     + `${questions ? `**Open questions** — answer in a comment, or the recommendation is used\n${questions}\n\n` : ''}`
     + (d.flowChange
-      ? 'The flow changes, so a silent walkthrough is attached below, and the clickable '
-        + 'prototype with it — download it and open it in a browser to click through the whole '
-        + 'journey yourself.\n'
-      : 'Single screen, no flow change, so there is no prototype to click through.\n');
+      ? 'The flow spans more than one screen, so the mockups below are its states in order. '
+        + 'A clickable prototype and a recorded walkthrough follow in a later change.\n'
+      : 'Single screen, no flow change.\n');
 }
 
 /** Posted as a ticket comment when the design gate first arms, or re-arms after feedback. */

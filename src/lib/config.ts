@@ -195,9 +195,11 @@ export interface PhaseConfig {
    * either way.
    *
    * Applied by FILTERING the phase out of the run's list, not by skipping it
-   * inside the loop. A phase that is skipped in place still occupies an index,
-   * and `nextIndex`, `cycleTo` and group batching all do arithmetic on those —
-   * so a phase nobody is running must not be in the list they walk.
+   * inside the loop. Not for an arithmetic reason: `cycleTo` resolves by name
+   * and a gated phase need not carry a group, so skipping one in place breaks
+   * nothing today. Filtering is the honest representation — the list a run
+   * walks is the list of phases that ran, and nobody reading a journal later
+   * has to work out which entries were inert.
    *
    * Not `onDemand`: that means "never scheduled, invoked out of band by the
    * conductor when something needs it" (remediate, mr-feedback). This one is

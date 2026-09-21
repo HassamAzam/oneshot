@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  designApprovalRequestBody, designApprovedRecordBody, designAttachments, designGateApplies,
+  designApprovalRequestBody, designApprovedRecordBody, designAttachments,
+  designDeliverableRefusal, designGateApplies,
 } from './reviewgate.js';
 import { artifactDir, phases } from '../lib/config.js';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -24,7 +25,6 @@ const design = {
   flowChange: true,
   tokensFile: 'design/tokens.css',
   screens: [screen],
-  prototype: { entry: 'design/prototype/index.html', video: 'design/walkthrough.webm' },
   decisions: ['Bulk approve is one confirm, not per row'],
   newPatterns: ['A compact status chip the product does not have'],
   openQuestions: [{ q: 'Can a lead approve their own?', recommendation: 'No' }],
@@ -62,11 +62,14 @@ test('the request renders screens, decisions, new patterns and open questions', 
   assert.match(body, /Only DEV may sign this off/);
 });
 
-test('a flow change offers the prototype and a single screen does not', () => {
-  assert.match(designApprovalRequestBody(design), /clickable\s+prototype/);
-  const flat = designApprovalRequestBody({ ...design, flowChange: false, prototype: null });
-  assert.match(flat, /no flow change, so there is no prototype/);
-  assert.doesNotMatch(flat, /download it and open it/);
+test('a flow change says the mockups are its states, and a single screen says so', () => {
+  // The prototype and the recorded walkthrough follow in a later change, so a
+  // flow change must not promise a reviewer something that is not attached.
+  const flow = designApprovalRequestBody(design);
+  assert.match(flow, /states in order/);
+  assert.match(flow, /follow in a later change/);
+  assert.doesNotMatch(flow, /download it and open it/);
+  assert.match(designApprovalRequestBody({ ...design, flowChange: false }), /Single screen, no flow change/);
 });
 
 test('an empty or absent design does not throw and renders nothing invented', () => {
@@ -117,22 +120,16 @@ test('attachments read before-then-after per screen, and keep colliding names ap
         { ...screen, before: 'design/a/shot.png', screenshot: 'design/b/shot.png' },
         { ...screen, id: 'second', before: '', screenshot: 'design/second.png' },
       ],
-      prototype: { entry: 'design/prototype/index.html', video: 'design/walk.webm' },
     };
-    ['design/a/shot.png', 'design/b/shot.png', 'design/second.png',
-      'design/prototype/index.html', 'design/walk.webm'].forEach(write);
+    ['design/a/shot.png', 'design/b/shot.png', 'design/second.png'].forEach(write);
 
     const got = designAttachments(TMP_IID, two);
-    // Order IS the argument: today's screen then the proposal, per screen,
-    // then the walkthrough, then the clickable file last.
+    // Order IS the argument: today's screen then the proposal, per screen.
     assert.deepEqual(got.map((a) => a.name), [
-      'shot.png', 'design-b-shot.png', 'second.png', 'walk.webm', 'index.html',
+      'shot.png', 'design-b-shot.png', 'second.png',
     ]);
     assert.equal(new Set(got.map((a) => a.name)).size, got.length);
-    assert.deepEqual(
-      got.map((a) => a.mime),
-      ['image/png', 'image/png', 'image/png', 'video/webm', 'text/html'],
-    );
+    assert.deepEqual(got.map((a) => a.mime), ['image/png', 'image/png', 'image/png']);
   } finally {
     rmSync(join(dir, '..'), { recursive: true, force: true });
   }
@@ -145,11 +142,64 @@ test('a screen with no "before" contributes only its proposal', () => {
     writeFileSync(join(dir, 'design/only.png'), 'x');
     const got = designAttachments(TMP_IID, {
       ...design,
-      prototype: null,
       screens: [{ ...screen, before: '', screenshot: 'design/only.png' }],
     });
     assert.deepEqual(got.map((a) => a.name), ['only.png']);
   } finally {
     rmSync(join(dir, '..'), { recursive: true, force: true });
   }
+});
+
+// The gate arms on what the phase SAYS it drew, and `designAttachments` drops a
+// file disk does not have without a word. Together that is a gate comment
+// naming five screens with no images under it — a reviewer parked in front of
+// nothing. These cover the check that refuses that before the gate arms.
+test('a design whose renders are not on disk is refused, not armed', () => {
+  const dir = artifactDir(TMP_IID);
+  try {
+    mkdirSync(join(dir, 'design'), { recursive: true });
+    const refusal = designDeliverableRefusal(TMP_IID, design);
+    assert.ok(refusal, 'a design reporting a screen it never rendered must be refused');
+    assert.match(refusal ?? '', /none of their renders are on disk/);
+    assert.match(refusal ?? '', /approvals-inbox/);
+  } finally {
+    rmSync(join(dir, '..'), { recursive: true, force: true });
+  }
+});
+
+test('a design whose renders ARE on disk passes', () => {
+  const dir = artifactDir(TMP_IID);
+  try {
+    mkdirSync(join(dir, 'design'), { recursive: true });
+    writeFileSync(join(dir, screen.screenshot), 'x');
+    assert.equal(designDeliverableRefusal(TMP_IID, design), null);
+  } finally {
+    rmSync(join(dir, '..'), { recursive: true, force: true });
+  }
+});
+
+test('a partial render is still refused, and names only the screens that are missing', () => {
+  const dir = artifactDir(TMP_IID);
+  try {
+    mkdirSync(join(dir, 'design'), { recursive: true });
+    writeFileSync(join(dir, screen.screenshot), 'x');
+    const two = {
+      ...design,
+      screens: [screen, { ...screen, id: 'second', screenshot: 'design/second.png' }],
+    };
+    const refusal = designDeliverableRefusal(TMP_IID, two);
+    assert.match(refusal ?? '', /1 of their renders/);
+    assert.match(refusal ?? '', /second/);
+    assert.doesNotMatch(refusal ?? '', /approvals-inbox/);
+  } finally {
+    rmSync(join(dir, '..'), { recursive: true, force: true });
+  }
+});
+
+test('nothing to deliver is not a refusal — applicable:false and an empty list both pass', () => {
+  // A design that correctly found no UI to draw is a complete answer, and
+  // refusing it would block exactly the runs the phase is meant to wave through.
+  assert.equal(designDeliverableRefusal(TMP_IID, { ...design, applicable: false }), null);
+  assert.equal(designDeliverableRefusal(TMP_IID, { ...design, screens: [] }), null);
+  assert.equal(designDeliverableRefusal(TMP_IID, null), null);
 });

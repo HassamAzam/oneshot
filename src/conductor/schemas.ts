@@ -332,7 +332,7 @@ export const DESIGN_SCHEMA = phaseSchema({
     type: 'boolean',
     description:
       'True when the change spans more than one screen, or adds a step to an existing journey. ' +
-      'True means you also build the clickable prototype and record the walkthrough.',
+      'Recorded so a later change can decide whether a multi-screen flow needs a prototype; it does not ask you to build one.',
   },
   tokensFile: str('Artifact-relative path of the tokens.css distilled from the real frontend.'),
   screens: {
@@ -357,16 +357,6 @@ export const DESIGN_SCHEMA = phaseSchema({
       },
       required: ['id', 'name', 'purpose', 'states', 'mockupHtml', 'screenshot', 'before', 'note'],
     },
-  },
-  prototype: {
-    type: ['object', 'null'],
-    additionalProperties: false,
-    description: 'Set when flowChange is true, null otherwise.',
-    properties: {
-      entry: str('Artifact-relative path of the prototype index.html'),
-      video: str('Artifact-relative path of the silent annotated walkthrough (.webm)'),
-    },
-    required: ['entry', 'video'],
   },
   decisions: strArr(
     'The choices you made on the reviewer\'s behalf that they would want to know about. ' +

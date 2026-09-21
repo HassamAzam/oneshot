@@ -95,7 +95,6 @@ export interface DesignArtifact {
   tokensFile: string;
   screens: DesignScreen[];
   /** Present only when `flowChange`; both paths are artifact-relative. */
-  prototype: { entry: string; video: string } | null;
   decisions: string[];
   /** Anything not already in the design system, surfaced rather than smuggled in. */
   newPatterns: string[];

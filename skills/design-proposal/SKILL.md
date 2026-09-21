@@ -1,6 +1,6 @@
 ---
 name: design-proposal
-description: Draw what a ticket's UI should look like, before anyone plans or builds it, and hand a human something they can approve — mockups grounded in the real product's tokens, before/after captures, and for a flow change a clickable prototype plus a silent annotated walkthrough. Use when asked to "design this before we build it", "what should this look like", "mock this up for sign-off", or when Oneshot's design phase runs on a ticket labelled Design. Draws only; never implements, never edits application code.
+description: Draw what a ticket's UI should look like, before anyone plans or builds it, and hand a human something they can approve — mockups grounded in the real product's tokens, before/after captures, and for a flow change each state of that journey drawn as its own screen. Use when asked to "design this before we build it", "what should this look like", "mock this up for sign-off", or when Oneshot's design phase runs on a ticket labelled Design. Draws only; never implements, never edits application code.
 ---
 
 # Design Proposal
@@ -71,32 +71,15 @@ scripts, no external fonts, no remote images: inline everything.
   you find — a flaw you could have caught yourself spends the reviewer's
   attention on your typo instead of on your design.
 
-## 4. A flow change gets a prototype and a walkthrough
+## 4. A flow change is drawn as states, not prototyped
 
-`flowChange` is true when the change spans more than one screen, or adds a step
-to an existing journey. Then, additionally:
+When the change spans more than one screen or adds a step to an existing journey, set
+`flowChange` and draw each state of that flow as its own screen, in order, so the reviewer
+can read the journey off the mockups.
 
-**`prototype/index.html`** — one self-contained file, hash routing, vanilla JS,
-the same `tokens.css`. Buttons navigate. Forms accept typing and carry values
-forward, so the confirmation screen shows what was actually typed. Submit →
-pending → approved plays out. Include one unhappy branch. Seed it with data so
-it is demonstrable with no setup. Drive the whole happy path yourself before you
-call it done; a prototype that dead-ends on click two burns the reviewer's
-session.
-
-**A silent annotated walkthrough** — Playwright `recordVideo`, `.webm`, which
-GitLab renders inline in a comment. Under 60 seconds, one flow.
-
-- **No audio track, ever.** Not narration, not TTS, not music. The annotations
-  are the narration.
-- Annotate by injecting a small absolutely-positioned overlay before each click:
-  an arrow and a short caption naming what is about to happen. Hold it ~1.5s,
-  then click, then remove it.
-
-Annotating is right here and forbidden in `ui-evidence`, and the difference is
-worth holding on to. This video argues for a design, so labelling it helps. That
-phase's screenshots are evidence that a case really ran, so drawing on them
-would be painting the result onto the page.
+Do **not** build a clickable prototype and do **not** record a walkthrough. Both follow in
+their own change, once real runs have measured what this phase actually costs — they are
+the most expensive and most breakable part of an estimated budget.
 
 ## 5. Give the reviewer the decisions, not a changelog
 
@@ -120,7 +103,7 @@ turns into a loop.
 ## Output
 
 `applicable`, `rationale`, `flowChange`, `tokensFile`, `screens[]`,
-`prototype`, `decisions[]`, `newPatterns[]`, `openQuestions[]`. Every file path
+`decisions[]`, `newPatterns[]`, `openQuestions[]`. Every file path
 is **artifact-relative and a bare filename where the schema says so** — a path
 in a filename field breaks the gate that attaches it.
 
