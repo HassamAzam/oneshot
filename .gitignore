@@ -1,5 +1,8 @@
 node_modules/
 state/
+# DRY_RUN gives a run its own home so a refused write cannot corrupt the real
+# state/ — src/lib/config.ts. `npm run score` sets it, so this appears locally.
+state-dry/
 logs/
 .env
 .env.*
