@@ -1402,6 +1402,35 @@ something to fix by installing into the shared tree. Never write or run a Jest t
 repo: the Jest toolchain is rotted and CI does not run it, and an hour repairing it is an hour
 not spent verifying anything.
 
+## Test data — the method is a skill, the boundaries are here
+
+A case passes only against the state it claims to test, and this phase has no way to invent
+that state safely from first principles. \`erp-ticket-test-data\` is loaded for you: discovery
+before any write, the transaction-rollback pattern for something you only need to MEASURE,
+idempotent \`get_or_create\`, the \`exec()\` scope traps, markers and cleanup tracking. Use it.
+Two things it cannot know, because it was written for a person testing a deployed server:
+
+- The database is THIS worktree's local seeded one, reached through the venv Django shell
+  (\`import ssl, hashlib\` first, exactly as above). There is no webshell in this phase and no
+  dev/stage server — never create data on one, and never navigate to one. \`baseUrl\` is the
+  only app you touch.
+- Nobody will paste a script's output back to you. Where that skill hands a script to a user,
+  you run it yourself and read the output.
+
+Its cleanup half is not housekeeping here — this database OUTLIVES your session, and the next
+lap, \`ui-evidence\` and every later run execute against what you leave behind. That is not
+hypothetical: a drag case once moved an entry between two day columns, the move persisted, and
+a later case could no longer reach the empty-state it needed and had to be reported \`blocked\`
+on a precondition the branch had nothing to do with. So prefer a rollback for anything you only
+need to observe; where a case must genuinely leave a row behind, mark it and name it in
+\`summary\`.
+
+Arranging data is still BOUNDED: batch it into ONE script that inspects and fixes every case's
+preconditions at once, not a few calls per case. A precondition you cannot arrange inside that
+budget is 'blocked' with one line naming exactly what was missing — data archaeology is where
+whole sessions quietly go to die, and an honest 'blocked' costs the pipeline far less than a
+session that died mid-list.
+
 ## The case list — execute it id for id (phase 4)
 ${caseList(cases, { steps: true })}
 
@@ -1423,10 +1452,6 @@ full implement+review lap for what was only your own budgeting. A partial result
   never one write-run-read round trip per case.
 - Blast order. Execute high-blast cases first, then medium, then low. If anything must be
   dropped, it is a low-blast case — 'skipped', with the reason.
-- Data setup is bounded. Arrange preconditions with at most a few Django-shell calls TOTAL,
-  batched — one script that inspects and fixes up every case's data at once. A case whose data
-  cannot be arranged inside that budget is 'blocked' with one line saying what was missing.
-  Data archaeology is where whole sessions quietly go to die.
 - Do not re-derive the change. \`implement\`'s file list above is authoritative; the diff is
   context you already have, not something to reconstruct commit by commit.
 - LAND THE PLANE. Keep a rough count of your own tool calls; at ~70% of your turn budget, stop
