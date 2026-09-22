@@ -69,7 +69,7 @@ import {
 } from '../lib/worktrees.js';
 import {
   addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
-  allIssueNotes, issueUrl, swapLabel, type Issue,
+  allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
 import { checkQuota } from '../lib/quota.js';
@@ -87,7 +87,7 @@ import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
-import { mergePhase } from './codephases.js';
+import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, declaredFiles, designApprovalRequestBody,
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
@@ -198,6 +198,7 @@ export const CODE_PHASES: Record<
     feedback?: MrFeedbackSignal;
   }>) | undefined
 > = {
+  'mr-open': mrOpenPhase,
   merge: mergePhase,
 };
 
@@ -2078,12 +2079,23 @@ export async function runTicket(
     const existing = await findMergeRequests({ sourceBranch: branch, state: 'opened' });
     const found = existing.ok ? (existing.data ?? [])[0] : undefined;
     if (found) {
+      // `mr-open` opens this as a Draft so the gates have a diff to read. A
+      // draft cannot be merged, and this is the path taken when the mr SESSION
+      // did not run or produced nothing — so the marker has to come off here
+      // too, or the run reaches `merge` and parks on an MR it opened itself.
+      let title = found.title;
+      if (title.startsWith('Draft:')) {
+        const undrafted = title.replace(/^Draft:\s*/, '');
+        const patched = await updateMergeRequest(found.iid, { title: undrafted });
+        if (patched.ok) title = undrafted;
+        else log.warn('could not take the Draft marker off the merge request', { mrIid: found.iid });
+      }
       return {
         summary: `Reused the merge request already open for ${branch}.`,
         blocked: null,
         mrIid: found.iid,
         mrUrl: found.web_url,
-        title: found.title,
+        title,
         targetBranch: found.target_branch,
       };
     }
