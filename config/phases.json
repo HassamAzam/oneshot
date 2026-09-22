@@ -73,20 +73,20 @@
       "kind": "session",
       "tier": "heavy",
       "cwd": "worktree",
-      "maxTurns": 50,
-      "timeoutMin": 20,
+      "maxTurns": 70,
+      "timeoutMin": 25,
       "writes": [
         "run"
       ],
       "onFail": "abort",
       "skills": [
-        "planning-methodology",
-        "util-reuse-methodology"
+        "change-scoping"
       ],
       "labelSkills": {
         "Accessibility": "frontend-accessibility"
       },
-      "_why_skills": "`skills` is this phase's method, loaded for every ticket. `labelSkills` is the domain knowledge a particular ticket calls for, keyed by the label triage puts on it \u2014 reuse and approach are decided here, so an accessibility ticket needs that standard at plan time and not first at implement. One line adds the next pair; nothing in code changes.",
+      "_why_skills": "`skills` is this phase's method, loaded for every ticket. `labelSkills` is the domain knowledge a particular ticket calls for, keyed by the label triage puts on it \u2014 reuse and approach are decided here, so an accessibility ticket needs that standard at plan time and not first at implement. One line adds the next pair; nothing in code changes. `change-scoping` replaced `planning-methodology` and `util-reuse-methodology`, which are vendored ERP skills written for `planner-agent` and `util-reuse-agent`: one fetches a ticket this phase is already handed and prescribes a markdown template that contradicts PLAN_SCHEMA, the other scores already-written helpers from a candidate list that does not exist until `implement`. Both also ranked behaviour search last, after several guesses at what a helper might be named \u2014 the search order that lets a zero-hit grep pass for proof that nothing exists.",
+      "_why_turns": "Raised from 50 with this skill, because 50 was already the binding constraint before it. Measured on the 50-turn budget: a plan lap used 38 turns live, 45 on one eval ticket and 50 \u2014 the cap itself \u2014 on the other, and a separate experiment that added a verification step died at max_turns with no plan at all. `onFail` here is `abort`, so a plan that runs out of turns does not degrade, it ends the run. change-scoping asks for searches the old pair did not, so leaving the cap where it already bit would be choosing the failure. 70 is roughly half again the highest uncensored measurement; the skill's own turn-economy section is what keeps it a ceiling rather than a target.",
       "artifact": "plan.json"
     },
     {

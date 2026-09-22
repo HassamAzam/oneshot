@@ -75,8 +75,7 @@ test('the mapping is config, so any label can carry any skill', () => {
 
 test('plan always gets the skills that are its method', () => {
   const prompt = systemPromptFor(cfg('plan'), ctx(ticket()));
-  assert.ok(names(prompt).includes('planning-methodology'));
-  assert.ok(names(prompt).includes('util-reuse-methodology'));
+  assert.ok(names(prompt).includes('change-scoping'));
 });
 
 // ------------------------------------------------ recall has a method now
