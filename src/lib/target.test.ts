@@ -17,22 +17,29 @@ const VAR = 'ONESHOT_PROJECT';
  * Each case re-imports config.js under a fresh module registry: PROJECT_TARGET
  * and WORK_REPO are module-level constants read at load, so a cache-busting
  * query string is the only way to observe a different environment.
+ *
+ * The empty string, never `delete`, is how "no target" is expressed. config.js
+ * calls dotenv at module load, and dotenv fills in any key NOT already present
+ * in process.env — so deleting the variable does not produce an unconfigured
+ * run, it hands the decision to whatever `.env` the developer happens to have.
+ * This suite went red the moment a real ONESHOT_PROJECT=erp was added to one.
+ * An empty value is present, so dotenv leaves it alone, and it is what the
+ * selector already treats as no target.
  */
-async function loadWith(value: string | undefined): Promise<Record<string, unknown>> {
+async function loadWith(value: string): Promise<Record<string, unknown>> {
   const had = Object.prototype.hasOwnProperty.call(process.env, VAR);
   const before = process.env[VAR];
-  if (value === undefined) delete process.env[VAR];
-  else process.env[VAR] = value;
+  process.env[VAR] = value;
   try {
-    return await import(`./config.js?target=${encodeURIComponent(String(value))}-${Date.now()}`);
+    return await import(`./config.js?target=${encodeURIComponent(value)}-${Date.now()}`);
   } finally {
     if (had) process.env[VAR] = before;
     else delete process.env[VAR];
   }
 }
 
-test('unset selects no target and leaves the default project in place', async () => {
-  const m = await loadWith(undefined);
+test('no target selected leaves the default project in place', async () => {
+  const m = await loadWith('');
   assert.equal(m.PROJECT_TARGET, '');
   assert.equal((m.activeTarget as () => unknown)(), null);
   const cfg = (m.projectConfig as () => { gitlab: { project: string; projectId: number } })();
