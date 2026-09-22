@@ -1616,7 +1616,11 @@ regressions found: ${(v.regressions ?? []).join('; ') || 'none'}
 Push this run's branch and open the merge request.
 
 1. LOOK FOR AN EXISTING MR for source branch \`${ctx.branch ?? '(unleased)'}\` before you create
-   anything. This run may be a resumption${ctx.journal.mrIid ? ` — the journal already records !${ctx.journal.mrIid}` : ''}, and a second MR for one branch is a mess
+   anything. There will USUALLY be one: \`mr-open\` opened a **Draft** the moment the code
+   existed, so the gates before you had a diff to read. Updating it is the normal path and
+   creating a second one is the mistake. Two things you own that it could not:
+   the real description, and taking the \`Draft:\` prefix off the title — a draft cannot be
+   merged, so leaving it is how this run ends parked at \`merge\`. This run may be a resumption${ctx.journal.mrIid ? ` — the journal already records !${ctx.journal.mrIid}` : ''}, and a second MR for one branch is a mess
    a human has to clean up. If one exists, you are updating it, not opening another: return ITS
    iid and url and say so in \`summary\`.
 

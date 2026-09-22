@@ -25,7 +25,7 @@ import {
 import { dirname, join } from 'node:path';
 import { ensureClaudeDir } from './claudedir.js';
 import {
-  CONTEXT_REPO, WORK_REPO, WT_ROOT, envOr, expandPath, portPool, projectConfig,
+  CONTEXT_REPO, WORK_REPO, WT_ROOT, envOr, expandPath, portPool, projectConfig, seedFrom,
 } from './config.js';
 import { db } from './db.js';
 import { retryRefLockRace } from './gitfetch.js';
@@ -224,7 +224,7 @@ export function seedWorktree(worktree: string): void {
   detachTrackedClaude(worktree);
   excluded.push(...ensureClaudeDir(worktree));
 
-  const from = expandPath(envOr('ONESHOT_SEED_FROM', ''));
+  const from = seedFrom();
   if (!from || !existsSync(from)) {
     log.warn('no seed repo — the worktree cannot run the app without npm ci / venv setup', {
       fix: 'set ONESHOT_SEED_FROM to an already-installed clone',
