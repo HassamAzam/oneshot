@@ -15,7 +15,10 @@
         "run"
       ],
       "onFail": "skip",
-      "skills": [],
+      "_why_skills": "This phase was the last one whose whole method lived in a prompt string, and the method it held was the scoring ladder \u2014 file-path overlap, then module, then label, then title token \u2014 stated once, in four lines, with no room for what makes each rung worth its place. prior-art-recall carries it properly: that the ladder is ORDERED rather than summed (one shared file beats a label-plus-title match), that a title match alone is never enough because ERP titles repeat the same nouns across unrelated modules, that a card is read for its gotcha and its what-NOT-to-reuse rather than its summary (a later phase can re-derive what changed from the diff and can never re-derive what the last run abandoned), and that the brief is pasted VERBATIM into research, plan and implement, so its length is paid three times. It also states the one thing nothing else did: the index and the card store can disagree \u2014 this machine's memory has more cards under tickets/ than lines in index.jsonl \u2014 and the phase handles both directions without exploring. The prompt keeps the full short form, so a session that cannot resolve the skill still runs correctly; that is the same split reproductionBlock uses for bug-reproduction.",
+      "skills": [
+        "prior-art-recall"
+      ],
       "artifact": "recall.json"
     },
     {
