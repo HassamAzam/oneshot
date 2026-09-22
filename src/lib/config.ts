@@ -295,6 +295,43 @@ export function phaseByName(name: string): PhaseConfig | undefined {
   return phases().find((p) => p.name === name);
 }
 
+export interface RequiredLabel { name: string; why: string }
+
+/**
+ * Every label this harness acts on by name, with what depends on it.
+ *
+ * Pure and fully parameterised so the SELECTION can be tested: checking the
+ * result against a live project only proves the labels it happened to list
+ * exist, never that the right ones were collected. An optional label that is
+ * unset is not required — an empty string is "this gate is off", not a label
+ * called "". `notABug` is required only while reproduction is on, for the same
+ * reason.
+ */
+export function requiredLabels(
+  labels: ProjectConfig['labels'],
+  phaseList: Pick<PhaseConfig, 'name' | 'labelSkills'>[],
+  bugReproduction: boolean,
+): RequiredLabel[] {
+  const out = new Map<string, string>();
+  const need = (name: string | undefined, why: string): void => {
+    if (name && !out.has(name)) out.set(name, why);
+  };
+  need(labels.entry, 'entry — nothing is picked up without it');
+  need(labels.exit, 'exit — set when the run merges');
+  need(labels.blocked, 'blocked — set when a run stops for a human');
+  need(labels.review, 'review gate');
+  need(labels.testcaseReview, 'testcase QA gate');
+  need(labels.designReview, 'design gate');
+  need(labels.inReview, 'in-review marker');
+  if (bugReproduction) need(labels.notABug, 'bug reproduction verdict');
+  for (const ph of phaseList) {
+    for (const [label, skill] of Object.entries(ph.labelSkills ?? {})) {
+      need(label, `routes '${skill}' to ${ph.name}`);
+    }
+  }
+  return [...out].map(([name, why]) => ({ name, why }));
+}
+
 let _budgets: BudgetConfig | null = null;
 export function budgetConfig(): BudgetConfig {
   if (!_budgets) {
