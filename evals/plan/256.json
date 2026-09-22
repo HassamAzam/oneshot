@@ -1,0 +1,48 @@
+{
+  "iid": 256,
+  "title": "Tax certificate shows wrong taxable income for an employee who moved to contractual mid-year",
+  "baseSha": "db6b1f8",
+  "_source": "Derived from a merge request a senior engineer opened for this ticket BEFORE seeing any plan for it (ERP branch haider/8614, 6 files, +567/-72), cross-read against run r-mu9w7b8y-c6c5e6's plan. Unlike 161 and 168 this checklist is not an audit of Oneshot's own output: the answer key was written independently, so items here are facts a competent engineer reached unaided rather than gaps somebody noticed afterwards. NOTE ON USE: the harness change in #116 was designed while reading this run's transcript, so a score here cannot validate that change — it is a regression floor, not evidence. Paths are repo-relative in the ERP repo.",
+  "items": [
+    {
+      "id": "256-1",
+      "gap": "The certificate's serial number and filename must not move",
+      "expect": "The printed period end and the fiscal year are separate values. `year` (api_utils.py, `get_person_tax_certificate`) feeds BOTH `serial_number` (`f\"{year}/{person.person_id}\"`) and the PDF filename (`f\"Salary Tax certificate {year} {full_name}.pdf\"`). Caught if the plan truncates the displayed period while keeping `year` derived from `fiscal_year_end` — or explicitly raises the identifier change as a decision for a human. Missed if it re-derives `end_date` from the payslip period and lets `year` follow, with no mention of the serial or the filename: this is a document filed with a tax authority and its identifier would silently change year for a mid-year leaver. Partial if it notices the filename but not the serial, or vice versa."
+    },
+    {
+      "id": "256-2",
+      "gap": "The sibling helper for employment-type history is found",
+      "expect": "`apps/core/utils/person.py` already contains `get_employment_change_date(person, fiscal_start, fiscal_end, histories=None)` — the mirror of what this ticket needs, reading `PersonEmploymentTypeHistory` across a fiscal window with the same signature shape. Caught if the plan names it and reuses, mirrors or extracts from it, OR states why it does not apply. Missed if the plan proposes reading employment history without ever naming it. Also missed if the plan's reuse list names only payroll-side helpers. Partial if it names `apps/core/managers.py` employment-type methods (`get_employment_types_in_duration` :701, `get_employment_type_start_in_duration` :732) but not the `person.py` helper — those are real and adjacent, and finding them is where an earlier plan stopped searching."
+    },
+    {
+      "id": "256-3",
+      "gap": "The change is gated to the population the ticket names",
+      "expect": "Stripping the projected remainder unconditionally also changes figures for final-settlement payslips (resigned/terminated leavers), where `change_remaining_salary` injects a FULL month's remaining salary against a PRORATED gross. Caught if the plan gates the truncation on the Employee-to-Contract/Sub-contractor transition the ticket describes, and offers the unconditional version as an open question. Also caught if it defaults to gated for any equivalent reason. Missed if it applies truncation to every certificate and defaults to changing leaver certificates too — EVEN IF the consequence is disclosed in `risks` or raised in `openQuestions`. Disclosure is not the test; which version the steps implement is."
+    },
+    {
+      "id": "256-4",
+      "gap": "The per-person lookup does not become an N+1 in the bulk path",
+      "expect": "`email_tax_certificates` loops `for person in people` and calls the certificate builder per person. Caught if a plan whose approach needs employment history states where that data is prefetched (a `prefetch_related` on the queryset, histories passed into the builder, or equivalent) so the loop does not issue a query per person. Not applicable — score caught — if the chosen approach needs no per-person lookup at all, PROVIDED the plan says so. Missed if the plan adds a per-person lookup reachable from the bulk path and never mentions the query cost."
+    },
+    {
+      "id": "256-5",
+      "gap": "The pre-2024 salary-rule code pair is handled",
+      "expect": "Fiscal years before `REMOTE_WORK_EXPENSE_REIMBURSEMENT_START_DATE` carry `REMAINING_SALARY`/`GROSS` rather than `REMAINING_TAXABLE_SALARY`/`TAXABLE_GROSS`, and `add_non_taxable_lines` returns early for those months so `TAXABLE_GROSS` is absent entirely. Caught if the plan branches on the fiscal year exactly as `get_taxable_income_details_of_payslips` already does. Missed if it reads the taxable-specific codes unconditionally — that silently strips a whole month from every historic certificate."
+    },
+    {
+      "id": "256-6",
+      "gap": "Tax withheld is left alone",
+      "expect": "`tax_amount` sums `INCOME_TAX` and `TAX_PAID`, both of which are actuals through the last generated payslip — no future payslip is ever generated. Caught if the plan explicitly leaves it unchanged and says why. Missed if it applies the same truncation arithmetic to the tax figure, or silently changes it."
+    },
+    {
+      "id": "256-7",
+      "gap": "The fix lands in one place, not two",
+      "expect": "`GenerateTaxCertificateView.get` duplicates the certificate build that `get_person_tax_certificate` already performs, and carries a `# todo: refactor to use 'get_person_tax_certificate'`. The individual download and the bulk email path would otherwise need the same fix twice. Caught if the plan collapses the view onto the shared helper (keeping the audit row, the temp-file cleanup and the force-download response in the view) before or as part of the fix. Partial if it notices the duplication but patches both copies. Missed if it patches only one path — the bug then persists in the other."
+    },
+    {
+      "id": "256-8",
+      "gap": "The Odoo salary rule is not the place to fix this",
+      "expect": "`TAXABLE_INCOME` is `TAXABLE_SALARY_PAID + REMAINING_TAXABLE_SALARY`, and the rule source is pushed to Odoo and re-evaluated for every person on every payslip. Caught if the plan corrects the READ on the Django side and states why editing the rule (or widening the `change_remaining_salary` gate) is excluded — it would change monthly withholding company-wide, feed through to costing, and still not repair certificates already issued. Partial if it picks the Django-side fix without saying why the alternative was rejected. Missed if it proposes changing the salary rule or the payslip generation inputs."
+    }
+  ]
+}
