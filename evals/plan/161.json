@@ -1,0 +1,48 @@
+{
+  "iid": 161,
+  "title": "WCAG 1.4.11 non-text contrast, Project Logs",
+  "baseSha": "7a21bb0",
+  "_source": "Gaps found by hand-auditing run r-mu29qyx6-3fb5a1's plan (lap 0 and the feedback-driven lap 1). Each item is something a plan should state unaided. Paths are under frontend/src.",
+  "items": [
+    {
+      "id": "161-1",
+      "gap": "Opacity cannot be reset by a child",
+      "expect": "The weekend class `classes.weekendStyle` (jss/components/commonStyles.js ~3046, opacity 0.5) wraps the inactive-day dot. The plan recognises a descendant cannot undo an ancestor's opacity and makes the fix structural (move the dot out from under the faded element, or dim only the text) rather than setting opacity: 1 on the dot."
+    },
+    {
+      "id": "161-2",
+      "gap": "Contrast measured on the real surface",
+      "expect": "In the task-wise view the dot renders on `logsHoursSummary` (commonStyles.js ~6428, background `collapseHoverd !important`): about #535353 in dark mode, #fafafa in light. The plan resolves that surface (e.g. #f57c00 on #535353 is 2.84:1, failing) and has tests or checks assert per real surface and theme mode, not only against `bgwhite`/the default background."
+    },
+    {
+      "id": "161-3",
+      "gap": "Auto-save status dot",
+      "expect": "The plan inventories the auto-save status dot: components/utils/StatusTag.js:22-28, `activeStatus` = theme.colors.green (~2.61:1), rendered only at ProjectLogsUpdating.js ~1086 (the CompetencyStepperFormBase usage is commented out). It must not confuse it with a different StatusTag component."
+    },
+    {
+      "id": "161-4",
+      "gap": "Scope decisions raised as open questions",
+      "expect": "Scope the ticket does not settle is surfaced as open questions with a stated default (or explicit out-of-scope items), not silently decided: Project Logs V2 (LogsVersionRoute.js); approver legend dots (TeamLogsApproverTableActions.js ~133/140, #FF9800 ~2.16:1); `checkIcon` (TeamLogsDataTable ~363, PersonAllLogsTable ~153); dark-mode intent; and that no automated tool satisfies AC #2 as written. Score partial when some but not most are raised."
+    },
+    {
+      "id": "161-5",
+      "gap": "Focus indicators checked explicitly",
+      "expect": "The plan checks focus indicators as part of 1.4.11 and notes the week row `ListItem` (ProjectLogsRow.js ~58-66) is mouse-only — a 2.1.1 keyboard issue — raised as out of scope or an open question."
+    },
+    {
+      "id": "161-6",
+      "gap": "Snapshot blast radius",
+      "expect": "The plan's snapshot claim comes from a search of every render site and .snap file: a structural DOM change moves about six snapshot files (including DayHoursInput, DayHoursTaskInput and ProjectTasks snaps), not three."
+    },
+    {
+      "id": "161-7",
+      "gap": "Reused component screens",
+      "expect": "The plan names other screens that render the changed components: ProjectTasks also renders in PersonWeekDetail.js ~201 (approver dialog) and PersonLogsConfiguration.js ~311, and says how they are affected or verified."
+    },
+    {
+      "id": "161-8",
+      "gap": "Minor facts correct",
+      "expect": "Facts the plan states are right where it states them: ProjectLogsRow snapshot class suffix -4413; the isWeekend ternary at DayHoursTaskInput.js ~512; DayHoursInput sits under WeekWiseTask and DayHoursTaskInput under DayWiseTask; there is no ESLint max-lines rule (the repo CLAUDE.md claim is stale). Score missed only when the plan states one of these WRONGLY; score partial when it relies on the stale max-lines claim or on unverified line numbers; caught when what it states is right."
+    }
+  ]
+}

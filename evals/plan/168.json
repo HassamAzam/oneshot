@@ -1,0 +1,43 @@
+{
+  "iid": 168,
+  "title": "WCAG 2.4.5 Multiple Ways, alternative navigation",
+  "baseSha": "7a21bb0",
+  "_source": "Gaps found by hand-auditing run r-mu29r90i-04a34e's plan (lap 0 and the feedback-driven lap 2). Each item is something a plan should state unaided. Paths are under frontend/src.",
+  "items": [
+    {
+      "id": "168-1",
+      "gap": "Announcement silenced by the dialog",
+      "expect": "If the plan announces results through `announceToScreenReader`/LiveRegionAnnouncer, it recognises that announcer is mounted inside the app root (ThemedApp.js ~105), which MUI's modal sets aria-hidden while a Dialog is open — so it adds a role=\"status\"/aria-live region INSIDE the dialog. Score caught if the plan's live region is inside the dialog for that reason; missed if it relies on the app-root announcer."
+    },
+    {
+      "id": "168-2",
+      "gap": "2.4.5 scope is the set of routes, not the sidebar",
+      "expect": "The plan diffs the route table against navigation mechanisms and handles standalone routes missing from the sidebar — ANNOUNCEMENTS, PROJECT_LOGS_CONFIG, PAYROLL_PAYSLIPS/INVOICES, STOCKS_*, PERSON_COMPETENCY_HISTORY, COMPETENCY_PERSON_REQUESTS, TRAININGS_LIST, NEW_JOINER_FORM — each included in the new mechanism or given a stated exemption. Partial when it acknowledges routes outside the sidebar without an itemised list."
+    },
+    {
+      "id": "168-3",
+      "gap": "Test ids resolve to aria-label",
+      "expect": "Planned tests do not rely on `data-testid` with `getByTestId`: frontend/config/setupTests.js:12 sets testIdAttribute to 'aria-label'. Caught if the plan says so or queries by role/label; missed if it plans data-testid + getByTestId."
+    },
+    {
+      "id": "168-4",
+      "gap": "Tests need a Router",
+      "expect": "The plan's tests wrap components that use <Link>/useHistory in MemoryRouter (or StaticRouter), because customRender/StoreThemeWrapper provides no Router."
+    },
+    {
+      "id": "168-5",
+      "gap": "Sidebar fallback preserved",
+      "expect": "If the plan extracts or reuses sidebar link data, it keeps the branch where an unmet childPermission still renders the parent as a single link (Sidebar.js ~205, 273-298), and notes `ADMIN_SIDEBAR.competency.route` is undefined."
+    },
+    {
+      "id": "168-6",
+      "gap": "Visual order vs DOM order",
+      "expect": "Where the plan places the new trigger in the header, it accounts for ObjectNavHolder being `row-reverse` (components/header/StyledComponent.js ~343-349): first in the DOM is visually last, so focus order and visual order would disagree."
+    },
+    {
+      "id": "168-7",
+      "gap": "Reuse and repo conventions",
+      "expect": "The plan reuses MaterialModal/DialogHeading for the dialog, puts styles under styles/<module>Styles.js, uses a named constant for any debounce, and uses <Link> (which already navigates) rather than hand-rolled history pushes. Partial when it gets some of these."
+    }
+  ]
+}
