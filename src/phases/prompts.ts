@@ -467,6 +467,11 @@ Load the \`bug-reproduction\` skill and follow it. In short:
   Worktree ${ctx.worktree ?? '(none leased)'}, port ${ctx.port ?? '(none leased)'} (also
   \`$ONESHOT_PORT\`). Reach it with \`node $ONESHOT_HOME/scripts/app.cjs ensure\` — no
   arguments, never \`--ref\` — and log in with the harness exactly as the skill says.
+- That \`ensure\` also reports \`disabledIntegrations\`: the things this environment
+  cannot reach, read from the app's own settings. If the behaviour the ticket describes
+  depends on one of them, you cannot run it here — record 'inconclusive', name the
+  integration, and go back to the trace. Do not spend turns proving it is unreachable;
+  that answer is the same on every run and is already in front of you.
 - Follow the ticket's steps, measure what the bug is about, screenshot into the run's
   artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`.
 
