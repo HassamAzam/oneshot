@@ -132,3 +132,89 @@ export function scoreTable(evals: EvalSet, card: Scorecard): string {
   const rows = card.items.map((i) => `  ${i.verdict.padEnd(7)} ${i.id.padEnd(6)} ${gap.get(i.id) ?? ''}`);
   return `${rows.join('\n')}\n  score   ${p}/${max}`;
 }
+
+/** One checklist item's verdict across repeated judgements of the same plan. */
+export interface ConsensusItem extends ItemScore {
+  /** How many runs returned the verdict above. */
+  agreement: number;
+  /** How many runs there were, so agreement reads as a fraction without arithmetic. */
+  runs: number;
+  /** The verdicts the other runs gave, each listed once. */
+  dissent: Verdict[];
+}
+
+export interface Consensus {
+  items: ConsensusItem[];
+  runs: number;
+  /** Each run's total, in the order judged. */
+  scores: number[];
+  mean: number;
+  /** Highest total minus lowest. The number that says whether a result is a result. */
+  spread: number;
+  max: number;
+}
+
+/** Worst first: a tie is broken toward not claiming credit. */
+const SEVERITY: Verdict[] = ['missed', 'partial', 'caught'];
+
+/**
+ * Judge the same plan N times and report what survived repetition.
+ *
+ * A single judgement cannot tell a verdict the evidence forces from one the
+ * judge could have gone either way on, and those are not rare: scored three
+ * times, the same plan came back 5.5, 4.0 and 4.5 out of 8. Every point of that
+ * spread sat in two items that offer a second route to `caught`; the other six
+ * were identical every time. Reporting only a total hides which kind of item
+ * produced it.
+ *
+ * So the per-item verdict is the majority one, ties broken toward the worst
+ * rather than the most flattering, and `agreement` travels with it. `spread` is
+ * the honest headline: where it is wider than the effect being measured, no
+ * number of reps makes that comparison mean anything, and the checklist is what
+ * needs fixing rather than the sample size.
+ */
+export function consensus(cards: Scorecard[]): Consensus {
+  if (!cards.length) throw new Error('consensus needs at least one scorecard');
+  const first = cards[0]!;
+  const items: ConsensusItem[] = first.items.map((item, n) => {
+    const verdicts = cards.map((c) => c.items[n]?.verdict ?? 'missed');
+    const tally = new Map<Verdict, number>();
+    for (const v of verdicts) tally.set(v, (tally.get(v) ?? 0) + 1);
+    const winner = [...tally.entries()].sort(
+      (a, b) => b[1] - a[1] || SEVERITY.indexOf(a[0]) - SEVERITY.indexOf(b[0]),
+    )[0]!;
+    return {
+      id: item.id,
+      verdict: winner[0],
+      // The evidence from a run that agreed with the consensus, so the quote
+      // shown is one that supports the verdict printed beside it.
+      evidence: cards.find((c) => c.items[n]?.verdict === winner[0])?.items[n]?.evidence ?? '',
+      agreement: winner[1],
+      runs: cards.length,
+      dissent: [...tally.keys()].filter((v) => v !== winner[0]),
+    };
+  });
+  const scores = cards.map((c) => points(c).points);
+  return {
+    items,
+    runs: cards.length,
+    scores,
+    mean: Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 100) / 100,
+    spread: Math.max(...scores) - Math.min(...scores),
+    max: first.items.length,
+  };
+}
+
+/** The consensus table: verdict, agreement, and the spread that qualifies it. */
+export function consensusTable(evals: EvalSet, c: Consensus): string {
+  const gap = new Map(evals.items.map((i) => [i.id, i.gap]));
+  const rows = c.items.map((i) => {
+    const split = i.dissent.length ? `  (also ${i.dissent.join(', ')})` : '';
+    return `  ${i.verdict.padEnd(7)} ${i.id.padEnd(6)} ${(gap.get(i.id) ?? '').padEnd(52)}`
+      + ` ${i.agreement}/${i.runs}${split}`;
+  });
+  const consensusPoints = c.items.reduce((s, i) => s + (POINTS[i.verdict] ?? 0), 0);
+  return `${rows.join('\n')}\n`
+    + `  score   ${consensusPoints}/${c.max} by consensus of ${c.runs}`
+    + `  ·  runs ${c.scores.join(', ')}  ·  mean ${c.mean}  ·  spread ${c.spread}`;
+}
