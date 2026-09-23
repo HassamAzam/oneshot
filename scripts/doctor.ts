@@ -8,7 +8,8 @@ import { existsSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
-  CONTEXT_REPO, PROJECT_TARGET, SKILLS_ROOT, WORK_REPO, WT_ROOT, seedFrom, targetOverrides,
+  CONTEXT_REPO, PROJECT_TARGET, SKILLS_ROOT, WORK_REPO, WT_ROOT, scopedEnvName, seedFrom,
+  targetOverrides,
   auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, phases, portPool,
   projectConfig, reviewersConfig, slackConfig,
 } from '../src/lib/config.js';
@@ -120,8 +121,11 @@ async function main(): Promise<void> {
   // label: SKILLS_ROOT is overridden by ONESHOT_SKILLS_ROOT. Reporting the
   // path alone leaves the reader guessing which knob moves it, and the
   // defaults below are one machine's layout, so a fresh clone hits all three.
+  // Under a target, plain WORK_REPO is ignored (targetPath), so naming it here
+  // would send a machine whose checkout is elsewhere to set a variable that
+  // cannot move the path. The scoped name is the one that works.
   for (const [label, p, required, envVar] of [
-    ['WORK_REPO', WORK_REPO, true, 'WORK_REPO'],
+    ['WORK_REPO', WORK_REPO, true, PROJECT_TARGET ? scopedEnvName('WORK_REPO') : 'WORK_REPO'],
     ['CONTEXT_REPO', CONTEXT_REPO, false, 'CONTEXT_REPO'],
     ['SKILLS_ROOT', SKILLS_ROOT, false, 'ONESHOT_SKILLS_ROOT'],
   ] as Array<[string, string, boolean, string]>) {

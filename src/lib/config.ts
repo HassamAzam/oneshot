@@ -322,16 +322,43 @@ export function activeTarget(): TargetConfig | null {
 }
 
 /**
- * A path a target owns, resolved against the target first.
+ * The per-machine escape hatch for a path a target pins: `ONESHOT_<TARGET>_<VAR>`.
  *
- * Deliberately NOT `envOr` order. Everywhere else in this file the environment
- * wins, and here it must not: the switch exists so that ONE line in .env moves
- * the conductor to another project, and a machine that has been working on the
- * default has WORK_REPO and ONESHOT_SEED_FROM already spelled out — leaving
- * those in charge would make the switch look broken on exactly the machines it
- * is for. `doctor` names every variable this overrode, so it is never silent.
+ * A target's paths are checked-in, so they are one machine's directory layout
+ * committed to the repo. `ONESHOT_ERP_WORK_REPO` is how a checkout somewhere
+ * other than `~/Documents/erp` says so without editing a tracked file — an edit
+ * that would otherwise sit in `git status` forever, one `git commit -a` away
+ * from repointing everybody else.
+ *
+ * A leading `ONESHOT_` is stripped before scoping so `ONESHOT_SEED_FROM` scopes
+ * to `ONESHOT_ERP_SEED_FROM` rather than `ONESHOT_ERP_ONESHOT_SEED_FROM`.
+ */
+export function scopedEnvName(envName: string): string {
+  const slug = PROJECT_TARGET.replace(/[^a-z0-9]+/gi, '_').toUpperCase();
+  return `ONESHOT_${slug}_${envName.replace(/^ONESHOT_/, '')}`;
+}
+
+/**
+ * A path a target owns: scoped env, then the target, then the plain env.
+ *
+ * The middle step is deliberately NOT `envOr` order. Everywhere else in this
+ * file the environment wins, and there it must not: the switch exists so that
+ * ONE line in .env moves the conductor to another project, and a machine that
+ * has been working on the default has WORK_REPO and ONESHOT_SEED_FROM already
+ * spelled out — leaving those in charge would make the switch look broken on
+ * exactly the machines it is for.
+ *
+ * The scoped name sits ABOVE the target because it cannot be stale in the way
+ * the plain one can: nothing sets `ONESHOT_ERP_WORK_REPO` except someone who
+ * has already chosen the erp target and means that path for it. It buys back
+ * the per-machine override without reopening the hole. `doctor` names every
+ * variable in force, so neither step is silent.
  */
 function targetPath(fromTarget: string | undefined, envName: string, fallback: string): string {
+  if (PROJECT_TARGET) {
+    const scoped = envOr(scopedEnvName(envName));
+    if (scoped) return expandPath(scoped);
+  }
   if (fromTarget) return expandPath(fromTarget);
   return expandPath(envOr(envName, fallback));
 }
@@ -345,9 +372,12 @@ export function targetOverrides(): Array<{ name: string; ignored: string; using:
   ];
   return pairs.flatMap(([value, name]) => {
     const set = envOr(name);
-    return value && set && expandPath(set) !== expandPath(value)
-      ? [{ name, ignored: expandPath(set), using: expandPath(value) }]
-      : [];
+    if (!value || !set) return [];
+    // What is actually in force, which is the scoped override when there is
+    // one — reporting the target's pinned path there would name a directory
+    // the conductor is not using.
+    const using = targetPath(value, name, '');
+    return expandPath(set) !== using ? [{ name, ignored: expandPath(set), using }] : [];
   });
 }
 
@@ -625,8 +655,7 @@ export const WT_ROOT = targetPath(activeTarget()?.wtRoot, 'WT_ROOT', '~/Document
  * quietly becoming WORK_REPO.
  */
 export function seedFrom(): string {
-  const t = activeTarget();
-  return t?.seedFrom ? expandPath(t.seedFrom) : expandPath(envOr('ONESHOT_SEED_FROM', ''));
+  return targetPath(activeTarget()?.seedFrom, 'ONESHOT_SEED_FROM', '');
 }
 
 export function runDir(iid: number): string { return join(RUNS, String(iid)); }
