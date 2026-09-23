@@ -33,6 +33,10 @@
  *
  * BOTH PATCHES ARE MANDATORY AND BOTH FILES ARE TRACKED. They are marked
  * --skip-worktree so a stray `git add -A` in a phase cannot commit a local port.
+ *
+ *   - Django serves templates through ManifestStaticFilesStorage with DEBUG off, so
+ *     staticfiles/staticfiles.json must exist before the first request or every route
+ *     answers 500. See collectStatic().
  */
 'use strict';
 
@@ -53,7 +57,8 @@ const ONESHOT_HOME = process.env.ONESHOT_HOME || path.resolve(__dirname, '../../
 const CODES = [
   'E_NO_WORKTREE', 'E_NO_VENV', 'E_NO_NODE_MODULES', 'E_NO_SEED_COPIES',
   'E_DOTENV_SHADOW', 'E_DB_UNREACHABLE', 'E_PORT_BUSY_FOREIGN', 'E_PORT_DRIFT',
-  'E_PATCH_FAILED', 'E_DJANGO_DEAD', 'E_WEBPACK_DEAD', 'E_BUNDLE_UNREACHABLE',
+  'E_PATCH_FAILED', 'E_DJANGO_DEAD', 'E_COLLECTSTATIC',
+  'E_WEBPACK_DEAD', 'E_BUNDLE_UNREACHABLE',
   'E_NO_CREDENTIALS', 'E_LOGIN_FAILED', 'E_LOGIN_2FA', 'E_TRIAL_EXPIRED',
   'E_MODULE_UNKNOWN', 'E_MODULE_TIMEOUT', 'E_NOT_UP', 'E_PLAYWRIGHT_MISSING',
 ];
@@ -199,6 +204,52 @@ function py(wt, src, opts = {}) {
     cwd: wt, encoding: 'utf8', timeout: opts.timeout || 60000,
     env: { ...process.env, DJANGO_SETTINGS_MODULE: 'hrdb.settings', PYTHONUNBUFFERED: '1' },
   });
+}
+
+/**
+ * The staticfiles manifest has to exist before Django serves its first template.
+ *
+ * hrdb/config.py sets DEBUG = False and hrdb/settings.py installs
+ * ManifestStaticFilesStorage UNCONDITIONALLY — it is not gated on DEBUG — so every
+ * `{% static %}` tag resolves through staticfiles.json. Without that file Django
+ * raises `ValueError: Missing staticfiles manifest entry`, which it serves as a bare
+ * 500 on EVERY route including /admin/login/. The process is perfectly healthy; it
+ * just cannot render anything.
+ *
+ * `staticfiles/` is gitignored (.gitignore:110), so a fresh worktree never inherits
+ * one, and this harness starts Django with `runserver` directly — skipping the
+ * collectstatic that the app repo's own app-entrypoint.sh:5 runs before gunicorn.
+ * The result was a bring-up that could not succeed on any machine, reported as
+ * E_DJANGO_DEAD because waitDjango could not tell a 500 from a corpse.
+ *
+ * seedWorktree() carries a warning that names `staticfiles` and this exact symptom,
+ * but ONESHOT_SEED_LINKS does not list it and a seed repo has no staticfiles/ of its
+ * own to link, so nothing ever provisioned it. Collecting per worktree is what the
+ * app itself does and is self-maintaining: a branch that adds a static asset gets a
+ * manifest containing it, which a symlink to one shared directory could not give.
+ */
+function needsCollectstatic(wt) {
+  return !fs.existsSync(path.join(wt, 'staticfiles/staticfiles.json'));
+}
+
+/**
+ * Collect once per worktree. It is ~900 files and tens of seconds, so re-running it
+ * on every `ensure` would tax every phase for a file that does not change.
+ */
+function collectStatic(wt) {
+  if (!needsCollectstatic(wt)) return false;
+  const r = py(wt, `
+from django.core.management import execute_from_command_line
+sys.argv = ['manage.py', 'collectstatic', '--noinput', '--verbosity', '0']
+execute_from_command_line(sys.argv)
+`, { timeout: 300000 });
+  if (r.status !== 0 || needsCollectstatic(wt)) {
+    throw new HarnessError('E_COLLECTSTATIC',
+      'collectstatic did not produce staticfiles/staticfiles.json',
+      String(r.stderr || r.stdout || '').trim().slice(-400)
+        || 'Django would 500 on every template that uses {% static %}.');
+  }
+  return true;
 }
 
 function checkDb(wt) {
@@ -502,6 +553,10 @@ async function up(opts = {}) {
   ensure(H());
   for (const f of [p.django(), p.webpack()]) fs.writeFileSync(f, '');
 
+  // Before the first request, not after: a manifest that appears late does not help a
+  // process that has already cached an empty one at storage init.
+  if (collectStatic(wt)) log('collected staticfiles');
+
   const djangoPid = startDjango(wt, bePort);
   const webpackPid = startWebpack(wt, fePort);
   writeJson(p.servers(), { djangoPid, webpackPid, bePort, fePort, worktree: wt, startedAt: Date.now() });
@@ -798,7 +853,8 @@ const API = {
    * Exporting rather than re-implementing keeps every hard-won fact above — the ASGI
    * wedge, CI=true, the stats-file readiness, the two pinned files — in ONE place.
    */
-  preflight, checkDb, applyPatches, startDjango, startWebpack, waitDjango, waitWebpack,
+  preflight, checkDb, applyPatches, needsCollectstatic, collectStatic,
+  startDjango, startWebpack, waitDjango, waitWebpack,
   assertBundleReachable, describeEnv, listenerPid, pidCwd, alive, httpStatus,
 };
 module.exports = API;

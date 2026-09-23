@@ -112,6 +112,7 @@ export interface ProjectConfig {
      * approved. See src/conductor/reviewgate.ts.
      */
     testcaseReview: string;
+    designReview: string;
     /**
      * Put on a ticket whose reported defect `research` could not reproduce on the
      * base branch, in place of the entry label. Must exist on the project; unset
@@ -155,6 +156,26 @@ export interface ProjectConfig {
   branches: { base: string; protected: string[]; prefix: string; pattern: string };
   promotions: Array<{ from: string; to: string; auto: boolean }>;
   concurrency: number;
+  /**
+   * Named overlays selected by ONESHOT_PROJECT. Absent or unselected, nothing
+   * here is read and every field above stands as written.
+   */
+  targets?: Record<string, TargetConfig>;
+}
+
+/**
+ * One named target: which project Oneshot works on, and where that project
+ * lives on this machine. Every field is optional — a target overrides only
+ * what it names, so a target that differs from the default in one respect
+ * says one thing.
+ */
+export interface TargetConfig {
+  gitlab?: { project?: string; projectId?: number };
+  workRepo?: string;
+  seedFrom?: string;
+  wtRoot?: string;
+  branches?: { base?: string };
+  labels?: Partial<ProjectConfig['labels']>;
 }
 
 export interface PhaseConfig {
@@ -185,6 +206,26 @@ export interface PhaseConfig {
    * without reading TypeScript.
    */
   labelSkills?: Record<string, string>;
+  /**
+   * A phase that runs ONLY when the ticket carries this label.
+   *
+   * Read case-insensitively, for the reason `labelSkills` already gives: a
+   * label is typed by hand, and `design` versus `Design` must not be the
+   * difference between a phase running and not when the failure is silent
+   * either way.
+   *
+   * Applied by FILTERING the phase out of the run's list, not by skipping it
+   * inside the loop. Not for an arithmetic reason: `cycleTo` resolves by name
+   * and a gated phase need not carry a group, so skipping one in place breaks
+   * nothing today. Filtering is the honest representation — the list a run
+   * walks is the list of phases that ran, and nobody reading a journal later
+   * has to work out which entries were inert.
+   *
+   * Not `onDemand`: that means "never scheduled, invoked out of band by the
+   * conductor when something needs it" (remediate, mr-feedback). This one is
+   * scheduled, in order, for the tickets it applies to.
+   */
+  labelGated?: string;
   agents?: string[];
   artifact?: string;
   /**
@@ -239,10 +280,90 @@ export interface SlackConfig {
   requireMention: boolean;
 }
 
+/**
+ * Which project this conductor works on, from ONESHOT_PROJECT in .env.
+ *
+ * Empty is the whole backwards-compatibility story: no target is selected, no
+ * overlay is applied, and every path and label resolves exactly as it did
+ * before targets existed. The variable is read once and lower-cased so `ERP`,
+ * `erp` and `Erp` are one target rather than three misses.
+ */
+export const PROJECT_TARGET: string = envOr('ONESHOT_PROJECT').trim().toLowerCase();
+
+/**
+ * The selected overlay, or null when none is selected.
+ *
+ * An UNKNOWN name throws rather than falling back. A typo that silently left
+ * the conductor pointed at the default project would be the worst possible
+ * failure of a switch whose entire job is to move it: tickets would be claimed,
+ * branches cut and MRs opened against a project nobody meant to touch, and
+ * nothing in the logs would look wrong.
+ */
+let _target: TargetConfig | null | undefined;
+export function activeTarget(): TargetConfig | null {
+  if (_target === undefined) {
+    if (!PROJECT_TARGET) {
+      _target = null;
+    } else {
+      const targets = loadJson<ProjectConfig>('project.json').targets ?? {};
+      const found = targets[PROJECT_TARGET];
+      if (!found) {
+        const known = Object.keys(targets);
+        throw new Error(
+          `ONESHOT_PROJECT='${PROJECT_TARGET}' is not a target in config/project.json. `
+          + (known.length ? `Known targets: ${known.join(', ')}. ` : 'No targets are defined. ')
+          + 'Unset it to work on the default project.',
+        );
+      }
+      _target = found;
+    }
+  }
+  return _target;
+}
+
+/**
+ * A path a target owns, resolved against the target first.
+ *
+ * Deliberately NOT `envOr` order. Everywhere else in this file the environment
+ * wins, and here it must not: the switch exists so that ONE line in .env moves
+ * the conductor to another project, and a machine that has been working on the
+ * default has WORK_REPO and ONESHOT_SEED_FROM already spelled out — leaving
+ * those in charge would make the switch look broken on exactly the machines it
+ * is for. `doctor` names every variable this overrode, so it is never silent.
+ */
+function targetPath(fromTarget: string | undefined, envName: string, fallback: string): string {
+  if (fromTarget) return expandPath(fromTarget);
+  return expandPath(envOr(envName, fallback));
+}
+
+/** Env vars a selected target is overriding, for `doctor` to report. */
+export function targetOverrides(): Array<{ name: string; ignored: string; using: string }> {
+  const t = activeTarget();
+  if (!t) return [];
+  const pairs: Array<[string | undefined, string]> = [
+    [t.workRepo, 'WORK_REPO'], [t.seedFrom, 'ONESHOT_SEED_FROM'], [t.wtRoot, 'WT_ROOT'],
+  ];
+  return pairs.flatMap(([value, name]) => {
+    const set = envOr(name);
+    return value && set && expandPath(set) !== expandPath(value)
+      ? [{ name, ignored: expandPath(set), using: expandPath(value) }]
+      : [];
+  });
+}
+
 let _project: ProjectConfig | null = null;
 export function projectConfig(): ProjectConfig {
   if (!_project) {
     const c = loadJson<ProjectConfig>('project.json');
+    const t = activeTarget();
+    if (t) {
+      if (t.gitlab?.project) c.gitlab.project = t.gitlab.project;
+      if (typeof t.gitlab?.projectId === 'number') c.gitlab.projectId = t.gitlab.projectId;
+      if (t.branches?.base) c.branches.base = t.branches.base;
+      // Object.assign, so a target that names no label changes none, and a
+      // label set to '' is the documented way to switch an optional one off.
+      if (t.labels) Object.assign(c.labels, t.labels);
+    }
     c.gitlab.apiUrl = envOr('ONESHOT_GITLAB_API', c.gitlab.apiUrl);
     c.gitlab.project = envOr('ONESHOT_GITLAB_PROJECT', c.gitlab.project);
     const idOverride = envOr('ONESHOT_PROJECT_ID');
@@ -483,7 +604,9 @@ export const PAUSE_QUOTA = join(STATE, 'PAUSE-QUOTA');
 export const PAUSE_NETWORK = join(STATE, 'PAUSE-NETWORK');
 export const DB_PATH = join(STATE, 'oneshot.db');
 
-export const WORK_REPO = expandPath(envOr('WORK_REPO', '~/Documents/workstreamai'));
+export const WORK_REPO = targetPath(
+  activeTarget()?.workRepo, 'WORK_REPO', '~/Documents/workstreamai',
+);
 export const CONTEXT_REPO = expandPath(envOr('CONTEXT_REPO', '~/Documents/erp'));
 // Skills, agents and rules are vendored into this repo under `context/` (a
 // committed snapshot of the ERP context repo's `.claude`, which also stays in
@@ -493,7 +616,18 @@ export const CONTEXT_REPO = expandPath(envOr('CONTEXT_REPO', '~/Documents/erp'))
 // (e.g. `~/Documents/erp/.claude`) when a machine's interactive edits should
 // win over the vendored copy.
 export const SKILLS_ROOT = expandPath(envOr('ONESHOT_SKILLS_ROOT', join(ROOT, 'context')));
-export const WT_ROOT = expandPath(envOr('WT_ROOT', '~/Documents/oneshot-wt'));
+export const WT_ROOT = targetPath(activeTarget()?.wtRoot, 'WT_ROOT', '~/Documents/oneshot-wt');
+
+/**
+ * The installed clone a leased worktree borrows node_modules, venv and
+ * staticfiles from. Empty means seeding is switched off, which costs `npm ci`
+ * minutes per worktree — so it stays a function with no default rather than
+ * quietly becoming WORK_REPO.
+ */
+export function seedFrom(): string {
+  const t = activeTarget();
+  return t?.seedFrom ? expandPath(t.seedFrom) : expandPath(envOr('ONESHOT_SEED_FROM', ''));
+}
 
 export function runDir(iid: number): string { return join(RUNS, String(iid)); }
 export function artifactDir(iid: number): string { return join(runDir(iid), 'artifacts'); }

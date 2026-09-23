@@ -58,7 +58,7 @@ import {
 import { collectTicketDocs } from '../lib/ticketdocs.js';
 import {
   archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
-  phaseSucceeded, readArtifact,
+  phaseSucceeded, phaseSettled, readArtifact,
   readJournal, recordPhase, recordRemediation, reapScratch, updateJournal, writeArtifact,
   writeJournal,
   type PhaseRecord, type Remediation, type RunJournal,
@@ -69,7 +69,7 @@ import {
 } from '../lib/worktrees.js';
 import {
   addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
-  allIssueNotes, issueUrl, swapLabel, type Issue,
+  allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
 import { checkQuota } from '../lib/quota.js';
@@ -87,11 +87,12 @@ import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
-import { mergePhase } from './codephases.js';
+import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
-  appendEdgeCases, checkApprovalGate, declaredFiles, gatesApply, planApprovalRequestBody,
-  planApprovedRecordBody, reviewAllRuns, reviewLabelPresent, testcasesApprovalRequestBody,
-  testcasesApprovedRecordBody, triggerLine,
+  appendEdgeCases, checkApprovalGate, declaredFiles, designApprovalRequestBody,
+  designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
+  planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
+  testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { Ticket, TestCase } from '../phases/types.js';
@@ -197,6 +198,7 @@ export const CODE_PHASES: Record<
     feedback?: MrFeedbackSignal;
   }>) | undefined
 > = {
+  'mr-open': mrOpenPhase,
   merge: mergePhase,
 };
 
@@ -563,7 +565,12 @@ export async function runTicket(
 ): Promise<RunOutcome> {
   const cfg = projectConfig();
   const iid = issue.iid;
-  const list = phases();
+  // Label-gated phases are FILTERED OUT, not skipped in place. A phase skipped
+  // in place still occupies an index, and `nextIndex`, `cycleTo` and the group
+  // batching all do arithmetic on those — so a phase nobody is running must
+  // not be in the list they walk. See `labelGated` in src/lib/config.ts.
+  const carried = new Set(issue.labels.map((l) => l.toLowerCase()));
+  const list = phases().filter((p) => !p.labelGated || carried.has(p.labelGated.toLowerCase()));
   const owner = opts.conductor;
 
   if (issue.assignees.length > 0) {
@@ -873,6 +880,49 @@ export async function runTicket(
       log.info(`skip ${phase.name} — already succeeded this run`);
       i += 1;
       continue;
+    }
+
+    // The Design label's design-approval gate — between `design` and `plan`.
+    //
+    // It sits BEFORE `plan` rather than after it for the same reason the
+    // test-case gate sits before `review`: this is the last point at which
+    // approving still changes everything downstream. A design agreed here is
+    // what `plan` plans and `implement` builds; the same approval taken after
+    // the plan existed would be approving a picture of something already
+    // decided.
+    //
+    // A design that found no UI to draw (`applicable: false`) never arms it.
+    // Someone labels optimistically, or the ticket turns out backend-only, and
+    // a mislabelled ticket should cost a re-read of one artifact rather than a
+    // person — the same posture `bugReproduction` takes on 'inconclusive'.
+    const design = prior.design ?? null;
+    const designNeedsSignoff = design !== null && (design as { applicable?: unknown }).applicable !== false;
+    if (phase.name === 'plan' && phaseSucceeded(iid, 'design')
+      && designGateApplies(ticket.labels) && designNeedsSignoff && !j.designApproval?.approved) {
+      const gate = await checkApprovalGate({
+        iid,
+        gate: 'design',
+        requestBody: designApprovalRequestBody(design),
+        attachments: designAttachments(iid, design),
+        onApproved: async () => { await addIssueNote(iid, designApprovedRecordBody(design)); },
+      });
+      j = readJournal(iid) ?? j;
+      if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
+      if (gate.verdict === 'pending') {
+        return finish(j, 'parked',
+          'awaiting design approval — a dev reviewer comments `approved` on the ticket to continue, '
+          + 'or comments there what to change to have the design redrawn');
+      }
+      if (gate.verdict === 'feedback') {
+        const designIdx = list.findIndex((p) => p.name === 'design');
+        if (designIdx !== -1) {
+          forced.add('design');
+          i = designIdx;
+          continue;
+        }
+      }
+      // 'approved' (or 'design' somehow absent from the list) — fall through
+      // into 'plan' below, which now reads design.json as its specification.
     }
 
     // The Review label's plan-approval gate — opt-in, additive, and checked
@@ -1253,7 +1303,13 @@ export async function runTicket(
       // written, so a case list that failed is a failed phase rather than a
       // successful one whose artifact happens to say otherwise.
       const caseFail = r.out.ok ? failedCases(r.cfg.name, r.out.data) : null;
-      const phaseOk = r.out.ok && caseFail === null;
+      // Same shape, different artifact: `design` reports its own success and
+      // nothing else reads its screens back off disk, so a session that says it
+      // drew five screens and rendered none arms a gate over an empty comment.
+      const deliverableFail = r.out.ok && r.cfg.name === 'design'
+        ? designDeliverableRefusal(iid, r.out.data as Record<string, unknown> | null)
+        : null;
+      const phaseOk = r.out.ok && caseFail === null && deliverableFail === null;
       const accountAction = phaseOk ? undefined : r.out.accountAction;
 
       recordPhase(iid, {
@@ -1273,7 +1329,7 @@ export async function runTicket(
         // adding one means touching infraAttemptsOf, the dashboard and unblock
         // for no decision any of them make differently), so this text is the
         // only thing in the journal that tells the two apart.
-        error: accountAction ?? r.out.error ?? r.out.blocked ?? caseFail ?? undefined,
+        error: accountAction ?? r.out.error ?? r.out.blocked ?? caseFail ?? deliverableFail ?? undefined,
       });
       j = readJournal(iid) ?? j;
 
@@ -1332,10 +1388,10 @@ export async function runTicket(
           claim(
             afterFailure(
               r.cfg, r.index,
-              caseFail ?? r.out.blocked ?? r.out.error ?? 'phase failed',
+              caseFail ?? deliverableFail ?? r.out.blocked ?? r.out.error ?? 'phase failed',
               // A recorded case failure is a verdict about the work, never an
               // infra death: the session ran to completion and said so.
-              caseFail ? false : r.out.infra,
+              (caseFail || deliverableFail) ? false : r.out.infra,
             ),
             r.cfg.name,
           );
@@ -1396,8 +1452,19 @@ export async function runTicket(
 
   // ------------------------------------------------------------- run helpers
 
+  /**
+   * phaseSettled, not phaseSucceeded: 'skipped' is a settled decision.
+   *
+   * A phase configured `onFail: 'skip'` that fails is recorded 'skipped' by
+   * statusForFailure(), and KEPT_STATUSES already calls that "a decision the run
+   * already made rather than a failure to retry". Asking phaseSucceeded() here
+   * contradicted that — it reports only 'ok'/'warned', so a skipped phase read as
+   * still-owed and ran again on the next pass through the list.
+   *
+   * A cycle can still force it: `forced` short-circuits ahead of the check.
+   */
   function shouldSkip(p: PhaseConfig): boolean {
-    return !forced.has(p.name) && phaseSucceeded(iid, p.name);
+    return !forced.has(p.name) && phaseSettled(iid, p.name);
   }
 
   /**
@@ -2023,12 +2090,23 @@ export async function runTicket(
     const existing = await findMergeRequests({ sourceBranch: branch, state: 'opened' });
     const found = existing.ok ? (existing.data ?? [])[0] : undefined;
     if (found) {
+      // `mr-open` opens this as a Draft so the gates have a diff to read. A
+      // draft cannot be merged, and this is the path taken when the mr SESSION
+      // did not run or produced nothing — so the marker has to come off here
+      // too, or the run reaches `merge` and parks on an MR it opened itself.
+      let title = found.title;
+      if (title.startsWith('Draft:')) {
+        const undrafted = title.replace(/^Draft:\s*/, '');
+        const patched = await updateMergeRequest(found.iid, { title: undrafted });
+        if (patched.ok) title = undrafted;
+        else log.warn('could not take the Draft marker off the merge request', { mrIid: found.iid });
+      }
       return {
         summary: `Reused the merge request already open for ${branch}.`,
         blocked: null,
         mrIid: found.iid,
         mrUrl: found.web_url,
-        title: found.title,
+        title,
         targetBranch: found.target_branch,
       };
     }

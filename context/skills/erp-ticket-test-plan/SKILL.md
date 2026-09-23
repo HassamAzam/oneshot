@@ -2,7 +2,7 @@
 name: erp-ticket-test-plan
 description: >-
   Phase 2 of ERP ticket testing — turn a ticket's requirements into a concrete list of test scenarios,
-  WAIT for the user's go-ahead, and extend the list when feedback comes back instead of a go-ahead.
+  WAIT for the user's go-ahead, and revise the list when feedback comes back instead of a go-ahead.
   Use standalone when the user says "plan test cases for this ticket", "what scenarios should we test",
   "make a test plan", "add these edge cases to the plan", "update the test plan with my feedback",
   "revise the scenarios", or as the second step invoked by the test-erp-ticket orchestrator. Covers
@@ -39,7 +39,11 @@ Also surface here: which scenarios are UI-driven vs API/webshell, and which **pe
 When the reply to the GATE is anything other than a go-ahead, read the whole reply first and work out what the reviewer is actually asking for. The reply is raw material, not a list of lines to paste in. Classify each line by intent (rule 1), then route it: a genuinely new scenario becomes a proper case and is appended (rules 2–4, intent 1); a line acting on an existing case edits/deletes/re-prioritizes/reclassifies/reorders/merges/splits that case in place (rule 5, intents 2–8); a verdict, question, ambiguous or meta note is answered, held or discarded, never made a case (rule 6, intents 9–12). Only newly appended cases get new ids — every untouched existing case keeps its id and wording.
 
 **1. Classify every line by INTENT before acting on any of it.**
-Read the whole reply, then decide what each line *intends*. The intent picks the route — and **only intent 1 ever appends a new case.** Decide intent in this order:
+Read the whole reply, then decide what each line *intends*. The intent picks the route — and **only intent 1 ever appends a new case.**
+
+> **More than one round in front of you? Only the LAST one is live.** Feedback accumulates: a re-run of this phase is shown every round so far, oldest first. The earlier rounds acted on a list that has since changed, so their TC numbers may now name a different case or none at all — replaying them re-applies work already done and re-adds cases already dropped. Route the LAST round against the list you actually hold; read the earlier ones for context only.
+
+Decide intent in this order:
 
 - A line that **names an existing TC number, or clearly restates a case already in the list, is an action on that case** — intents 2–8 (delete / edit / re-prioritize / reclassify / reorder / merge / split). It is *never* a new case, even when it is phrased like one. `TC-22: record its exact casing…` edits TC-22's Expected; `TC-22 and TC-23 should be [high]` changes their severity; `TC-21 is junk, delete it` deletes TC-21. Appending any of these leaves the named case untouched and adds a junk twin.
 - A line that is a **process word or commentary about the list** — a verdict, a heading, a "suggested expectations:" lead-in, a "N things to fix by hand" note, a sign-off — is intent 9–11. Proceed or discard; never a case.
@@ -101,7 +105,7 @@ Added scenarios are not exempt from the labelling the original plan carries: ass
 
 Anything that would invalidate other scenarios if it failed — wrong server, wrong page version, wrong permission group, defect not reproducible pre-fix — is a side-effects / regression scenario that must run FIRST, not last.
 
-This labelling holds for the plan you present in chat. It does **not** survive an append-only external gate, which tags every case it creates `boundary` / `medium` blast uniformly, on the reasoning that free text cannot safely imply either. So if a Type matters downstream, say it inside the scenario line's own words — the structured field will read `boundary` no matter what you intended.
+This labelling holds for every case you author, including the ones you rewrite after feedback. The single exception is the gate's approve-and-add round (rule 7): cases appended there are tagged `boundary` / `medium` uniformly, on the reasoning that free text cannot safely imply either. So for a case added that way, if a Type matters downstream, say it inside the scenario line's own words — the structured field will read `boundary` no matter what you intended.
 
 **5. Intents 2–8 change a case in place — never appended.**
 Delete (2), edit text/Expected (3), re-prioritize (4), reclassify Type (5), reorder (6), merge/dedupe (7), split (8) all *mutate* the list rather than extend it — this is the "drop/modify" the GATE promises. **Where the plan is under your own control, you must apply them, not append them:**
@@ -116,7 +120,9 @@ Delete (2), edit text/Expected (3), re-prioritize (4), reclassify Type (5), reor
 
 Leave every other id untouched. **Never satisfy a delete, edit, or re-prioritize by appending anything** — the named case must actually change.
 
-Where the list lives behind an **append-only external gate** you cannot do any of this — appending is the only operation a comment has, and a comment asking for a deletion or an edit only creates another case. Say so plainly, list the intents 2–8 you could not apply, and hand them to the run owner, who re-runs the phase with them. Do not pretend a deletion or an edit happened.
+**Where you own the list you must apply them — and in the Oneshot `testcases` phase you do.** A reply that is not a sign-off cycles this phase: the reviewer's words arrive in your prompt, `testcases.json` is in your worktree, and you output the whole revised list. A delete is a case you do not write out; an edit is a case you write out changed. Nothing is handed back to anybody, and a request to delete must never return as a case reading `Verify that TC-N is deleted` — that leaves the named case alive and adds a junk twin beside it.
+
+The one exception is a round where the reviewer wrote `approved` AND named a case in the same comment. That round takes the gate's append path (rule 7), which has no delete or edit verb. Only there: say so plainly, list the intents 2–8 you could not apply, and hand them to the run owner. Do not pretend a deletion or an edit happened.
 
 **Worked example — the same reviewer comment, mis-routed vs routed:**
 
@@ -155,6 +161,6 @@ The remaining intents change nothing structurally — they are answered, acted o
 **7. Re-confirm with a diff, then re-gate.**
 Show: count before → after; the ids added and what each one came from (intent 1); the ids changed or retired under rule 5 (intents 2–8), each with the line that did it; every line answered or discarded under rule 6 (intents 9–12) and why; and confirmation that no other existing case was touched. Then run the GATE again.
 
-> **If the plan feeds an append-only external gate** (e.g. a Oneshot "Test cases to be verified" list): every non-empty line of a comment becomes a case verbatim — instructions and verdict words included — and the Expected field cannot be set by comment at all, because the gate always overwrites it with a restatement of the line. So compose the reply as bare scenario lines only: no verdict word, no instructions, no bullets, no sign-off, with the Expected carried inside each line's own text. Deletions and corrections go to the run owner directly; a comment asking for one only creates another case.
+> **The approve-and-add round is the only append-only path left.** When a reviewer signs off AND names a case in the same comment, the gate appends that case mechanically rather than cycling this phase: only bullet lines (`- Verify that …`) and lines opening with a test verb are read, every other line is dropped, and each appended case is tagged `boundary` / `medium` with `Matches the QA-reported edge case: …` as its Expected unless the line carries its own `expects:` clause. Every other reply cycles this phase, where you rewrite the list yourself under rules 1–6.
 
 Next in the pipeline: `erp-ticket-test-data`.

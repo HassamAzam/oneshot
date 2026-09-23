@@ -8,7 +8,7 @@ import { existsSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
-  CONTEXT_REPO, SKILLS_ROOT, WORK_REPO, WT_ROOT,
+  CONTEXT_REPO, PROJECT_TARGET, SKILLS_ROOT, WORK_REPO, WT_ROOT, seedFrom, targetOverrides,
   auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, phases, portPool,
   projectConfig, reviewersConfig, slackConfig,
 } from '../src/lib/config.js';
@@ -102,6 +102,20 @@ async function main(): Promise<void> {
 
   // ---------------------------------------------------------------- paths
   section('Paths');
+  // Which project this conductor is pointed at, before any path is judged. A
+  // target moves WORK_REPO, the seed and the worktree root at once, so a
+  // reader looking at a surprising path below needs this line first.
+  if (PROJECT_TARGET) {
+    pass('target', `${PROJECT_TARGET} -> ${cfg.gitlab.project} (${cfg.gitlab.projectId}), base ${cfg.branches.base}`);
+    // The one deliberate break from "env wins" in this repo, so it is stated
+    // rather than left for someone to discover from a path they did not expect.
+    for (const o of targetOverrides()) {
+      warn(`${o.name} is set but the '${PROJECT_TARGET}' target overrides it`,
+        `using ${o.using}, ignoring ${o.ignored} — remove ${o.name} from .env to silence this`);
+    }
+  } else {
+    pass('target', `none (ONESHOT_PROJECT unset) -> ${cfg.gitlab.project} (${cfg.gitlab.projectId})`);
+  }
   // The env var is printed with the failure because it is not always the
   // label: SKILLS_ROOT is overridden by ONESHOT_SKILLS_ROOT. Reporting the
   // path alone leaves the reader guessing which knob moves it, and the
@@ -139,19 +153,19 @@ async function main(): Promise<void> {
   // one is silent until phase 3 and only *hurts* at phase 6, where `verify`
   // needs a runnable app. That is exactly the "confusing failure three phases
   // in" this script exists to pull forward.
-  const seedFrom = expandPath(envOr('ONESHOT_SEED_FROM', ''));
-  if (!seedFrom) {
+  const seed = seedFrom();
+  if (!seed) {
     warn('no seed repo configured', 'set ONESHOT_SEED_FROM — without it a leased worktree has '
       + 'no node_modules/venv, so `verify` cannot run the app');
-  } else if (!existsSync(seedFrom)) {
-    warn('seed repo does not exist', `${seedFrom} — set ONESHOT_SEED_FROM to a repo that is `
+  } else if (!existsSync(seed)) {
+    warn('seed repo does not exist', `${seed} — set ONESHOT_SEED_FROM to a repo that is `
       + 'already installed (node_modules, venv)');
   } else {
     const links = envOr('ONESHOT_SEED_LINKS', '').split(',').map((s) => s.trim()).filter(Boolean);
     const copies = envOr('ONESHOT_SEED_COPIES', '').split(',').map((s) => s.trim()).filter(Boolean);
-    const missing = [...links, ...copies].filter((rel) => !existsSync(join(seedFrom, rel)));
+    const missing = [...links, ...copies].filter((rel) => !existsSync(join(seed, rel)));
     if (missing.length) warn('seed entries missing from the seed repo', missing.join(', '));
-    else pass('seed repo', `${seedFrom} (${links.length} linked, ${copies.length} copied)`);
+    else pass('seed repo', `${seed} (${links.length} linked, ${copies.length} copied)`);
   }
 
   const ports = portPool();

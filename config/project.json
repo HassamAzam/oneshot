@@ -6,13 +6,13 @@
     "project": "arbisoft/workstreamai",
     "projectId": 1491
   },
-  "_comment_context": "Read-only. Oneshot reads this repo for prior art and conventions; it NEVER writes to it, and hooks/write-scope.js denies every write under contextRepo for every phase. See docs/HOOKS.md 4.1. Skills/agents/rules are no longer sourced live from here: they are vendored into this repo's context/ (a committed snapshot of erp/.claude that also stays in GitLab), and SKILLS_ROOT (ONESHOT_SKILLS_ROOT) defaults to that vendored copy. skillsRoot below is informational only — nothing reads it — and records where the upstream skills live for a human syncing the snapshot.",
+  "_comment_context": "Read-only. Oneshot reads this repo for prior art and conventions; it NEVER writes to it, and hooks/write-scope.js denies every write under contextRepo for every phase. See docs/HOOKS.md 4.1. Skills/agents/rules are no longer sourced live from here: they are vendored into this repo's context/ (a committed snapshot of erp/.claude that also stays in GitLab), and SKILLS_ROOT (ONESHOT_SKILLS_ROOT) defaults to that vendored copy. skillsRoot below is informational only \u2014 nothing reads it \u2014 and records where the upstream skills live for a human syncing the snapshot.",
   "contextRepo": {
     "path": "~/Documents/erp",
     "gitlabProject": "arbisoft/erp",
     "skillsRoot": "~/Documents/erp/.claude"
   },
-  "_comment_labels": "ONE label in, one label out. The exit label is 'merged': the pipeline now ends at the merge, so 'Ready For Deployment' would be a claim about a deploy nobody performed. exitId is null because this label's id has NOT been verified against project 1491 — harmless, because every label check here is by NAME, but the label must already EXIST on the project: Oneshot never creates one, and a swap naming a label that is not there silently drops it. There is no intermediate state machine \u2014 progress lives in the Slack card and the run journal, not on the board. All three ids below already exist on project 1491; Oneshot never creates, renames or deletes a label. 'review' is a FOURTH, OPTIONAL label, never required and never swapped by Oneshot: a ticket carrying it alongside 'Loop' gets three extra human sign-off pauses (see README's 'Optional human review gates'). Its id is not yet verified against the live project (create the label there before relying on it) \u2014 the code only ever checks label MEMBERSHIP by name, never the id, so an unverified id costs nothing.",
+  "_comment_labels": "ONE label in, one label out. The exit label is 'merged': the pipeline now ends at the merge, so 'Ready For Deployment' would be a claim about a deploy nobody performed. exitId is null because this label's id has NOT been verified against project 1491 \u2014 harmless, because every label check here is by NAME, but the label must already EXIST on the project: Oneshot never creates one, and a swap naming a label that is not there silently drops it. There is no intermediate state machine \u2014 progress lives in the Slack card and the run journal, not on the board. All three ids below already exist on project 1491; Oneshot never creates, renames or deletes a label. 'review' is a FOURTH, OPTIONAL label, never required and never swapped by Oneshot: a ticket carrying it alongside 'Loop' gets three extra human sign-off pauses (see README's 'Optional human review gates'). Its id is not yet verified against the live project (create the label there before relying on it) \u2014 the code only ever checks label MEMBERSHIP by name, never the id, so an unverified id costs nothing.",
   "labels": {
     "entry": "Loop",
     "entryId": 1308,
@@ -22,10 +22,12 @@
     "blockedId": 1310,
     "review": "Review",
     "testcaseReview": "TestCase Review",
+    "designReview": "",
     "notABug": "Not a Bug",
     "inReview": "In Review"
   },
   "_comment_inReview": "Added while a ticket's MR waits for a person to merge it, removed when the run finishes (merged) or blocks. Not the same as `review`, which is what makes a ticket need human sign-off. Empty or absent disables it.",
+  "_comment_designReview": "A SIXTH, OPTIONAL, board-only label, EMPTY (off) by default \u2014 set it to an existing project label to switch it on. Exactly the testcaseReview mechanism, for the design gate: added when that gate first posts its request, removed when it resolves, gating nothing itself. It is empty rather than pre-filled because no such label exists on project 1491 today, and a swap naming a label that is not there is silently dropped \u2014 so a default of 'Design Review' would look configured and do nothing. Note it is NOT the 'Design' label: that one is what puts a ticket through the design phase at all and is listed under preserveLabels.",
   "_comment_testcaseReview": "A FIFTH, OPTIONAL, board-only label. swapLabel adds it the moment the testcases gate first posts its request comment (a QA sign-off is now pending) and removes it the moment that gate is approved -- see src/conductor/reviewgate.ts. It never gates anything itself and is never required alongside 'Loop'; its only job is letting a board view tell 'parked at testcases QA review' apart from every other parked/blocked reason. Empty string turns it off, same as leaving 'review' unset. Must exist on the project before relying on it, same rule as every other label here.",
   "_comment_reviewAllRuns": "TRUE = the review gates apply to EVERY run, not only tickets carrying the Review label or touching highScrutinyPaths. This is a deliberate change of posture: with it on, every run pauses after `plan` and after `testcases` for a human, and never merges its own MR. The label and the path list still work and are still worth keeping \u2014 they are what makes a gate survive this being switched back off. Requires channels:history (or groups:history) on the Slack bot token; without it every gate sits 'pending' forever and every run parks, which is why doctor FAILS rather than warns while this is true.",
   "reviewAllRuns": true,
@@ -71,5 +73,27 @@
     }
   ],
   "_comment_concurrency": "In-flight TICKET cap. The old MUST-STAY-1 constraint is now carried by the promotion mutex (src/lib/promotion.ts): the deploy script ships the TIP of dev, so exactly one run may occupy the merge\u2192deploy\u2192qa window at a time \u2014 that is where attribution lives, and the mutex enforces it while every other phase pipelines freely. Residual cap reasons: worktrees symlink ONE shared node_modules/venv (a second webpack build during another run's verify contends on the babel cache), and the port pool (PORT_POOL, default 3) bounds server-holding phases. Raise toward the pool size once shared-cache contention is observed to be tolerable. Set to 1 deliberately: the operator runs one ticket per loop and scales by starting more conductors, so the fleet-wide ceiling is PORT_POOL and each process holds exactly one run \u2014 which also keeps the shared node_modules/venv contention this comment warns about at one build per conductor.",
-  "concurrency": 1
+  "concurrency": 1,
+  "_comment_targets": "A NAMED TARGET selected by ONESHOT_PROJECT in .env. Absent, nothing here applies and every value above stands exactly as written -- which is what keeps a machine that sets nothing pointed at workstreamai. Set ONESHOT_PROJECT=erp and the block below is laid over the config: the GitLab project Oneshot claims tickets from, the checkout worktrees are cut from, the seed they are installed from, and the base branch MRs target. These OVERRIDE the matching env vars (WORK_REPO, ONESHOT_SEED_FROM, WT_ROOT) rather than defaulting under them, because the point of the switch is that ONE line moves everything -- an existing WORK_REPO=~/Documents/workstreamai must not silently defeat it. `npm run doctor` prints the target in force and names any env var it overrode. An unknown value is a hard error at boot, never a silent fall back to workstreamai. wtRoot is separate per target on purpose: worktrees are named by ticket iid, so one root shared by two projects would collide issue 100 with issue 100. LABELS: ids here are informational -- every check is by NAME, and the name must already EXIST on the target project, because Oneshot never creates a label. Verified against project 304 on 2026-09-22: 'Merged' (707) and 'In Review' (563) already existed; 'Loop' (1336) and 'Needs Human' (1337) were created there on the same date, so the required pair is now present. review/testcaseReview/notABug are empty because ERP has no such label -- empty is the documented way to switch an optional label off.",
+  "targets": {
+    "erp": {
+      "gitlab": {
+        "project": "arbisoft/erp",
+        "projectId": 304
+      },
+      "workRepo": "~/Documents/erp",
+      "seedFrom": "~/Documents/erp",
+      "wtRoot": "~/Documents/erp-wt",
+      "branches": {
+        "base": "dev"
+      },
+      "labels": {
+        "exit": "Merged",
+        "inReview": "In Review",
+        "review": "",
+        "testcaseReview": "",
+        "notABug": ""
+      }
+    }
+  }
 }

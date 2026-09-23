@@ -58,6 +58,34 @@ one.
 - Redact anything that reads as real personal data, even on a demo instance.
   Salary figures, national IDs, personal emails.
 
+## When the ticket had an approved design
+
+A ticket that went through the design gate had its screens approved by a human
+*before* the code existed. The reviewer's question on the MR is therefore not
+"does this look reasonable" but "is this what I signed off", and that is a
+question only a pair can answer.
+
+- One `designConformance` row per approved screen: the approved render, your
+  capture of the same screen, and every way they differ.
+- **Capture at the size the mockup was drawn at** — 1280×800 unless the design
+  says otherwise. Two screens at different widths are not comparable and a pair
+  that is not comparable is worse than no pair, because it invites a conclusion
+  the pictures do not support.
+- **An empty `differences` is a claim, not a default.** It says these match. So
+  list the small departures too — a spacing change, a reworded label, a missing
+  empty state. Deciding on the reviewer's behalf which departures were fine is
+  the one thing this row must not do; they approved the design, so they are the
+  one who gets to say a difference does not matter.
+- A screen you genuinely cannot reach — the route needs data or a role you
+  cannot make — gets an empty `builtShot` and the reason as its single
+  difference. Never pair a screenshot of a different screen.
+- Put both files in `screenshots` as well, approved first and built immediately
+  after. Order is the argument here as everywhere else in this pack.
+
+The approved renders are already in the artifact directory; you do not
+re-create them, and you must not re-render them from the mockup HTML — the file
+that was approved is the file that gets shown.
+
 ## Attaching to GitLab
 
 `upload_markdown` **rejects absolute paths and any path outside the project

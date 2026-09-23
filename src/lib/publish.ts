@@ -33,7 +33,7 @@ import { log } from './log.js';
 import { mdText, tableCell } from './gitlabmd.js';
 
 /** GitLab rejects very large attachments; skip them with a note rather than failing. */
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 const MIME: Record<string, string> = {
   '.png': 'image/png',
@@ -43,13 +43,14 @@ const MIME: Record<string, string> = {
   '.webp': 'image/webp',
   '.mp4': 'video/mp4',
   '.webm': 'video/webm',
+  '.html': 'text/html',
   '.md': 'text/markdown',
   '.csv': 'text/csv',
   '.json': 'application/json',
   '.txt': 'text/plain',
 };
 
-function mimeFor(name: string): string {
+export function mimeFor(name: string): string {
   return MIME[extname(name).toLowerCase()] ?? 'application/octet-stream';
 }
 
@@ -164,16 +165,49 @@ interface Observation { what: string; before: string; after: string; how: string
  * is shown as empty rather than as a dash: for #189 the empty base-branch title
  * WAS the bug, and a dash reads as "not recorded".
  */
-function observationTable(rows: Observation[]): string {
-  const code = (v: string): string => {
-    const s = String(v ?? '').replace(/\n/g, ' ').slice(0, 160);
-    return s ? `\`${s.replace(/`/g, "'").replace(/\|/g, '\\|')}\`` : '_(empty)_';
-  };
-  const text = (v: string): string => String(v ?? '').replace(/\n/g, ' ').slice(0, 160)
+/** One table cell as a code span, or an explicit `_(empty)_` — see `observationTable`. */
+function code(v: string): string {
+  const s = String(v ?? '').replace(/\n/g, ' ').slice(0, 160);
+  return s ? `\`${s.replace(/`/g, "'").replace(/\|/g, '\\|')}\`` : '_(empty)_';
+}
+
+/** One table cell as prose: entity-escaped, single-line, pipe-safe. */
+function text(v: string): string {
+  return String(v ?? '').replace(/\n/g, ' ').slice(0, 160)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\|/g, '\\|');
+}
+
+function observationTable(rows: Observation[]): string {
   return ['| What | Before (base) | After (this branch) | Measured by | Case |', '|---|---|---|---|---|',
     ...rows.slice(0, 30).map((o) =>
       `| ${text(o.what)} | ${code(o.before)} | ${code(o.after)} | ${text(o.how)} | ${o.caseId || ''} |`),
+  ].join('\n');
+}
+
+interface DesignPair {
+  screenId: string; designShot: string; builtShot: string; differences: string[];
+}
+
+/**
+ * Approved design versus what shipped, one row per screen.
+ *
+ * The differences column, not the check mark, is the content: a reviewer who
+ * approved these screens is asking "did I get what I signed off", and a row
+ * that says only "yes" is an assertion where a list would be evidence. An
+ * empty list renders as the claim it is — "no departures recorded" — rather
+ * than as a tick that could equally mean nobody looked.
+ */
+function conformanceTable(rows: DesignPair[]): string {
+  return [
+    '**Approved design vs. shipped**',
+    '',
+    '| Screen | Approved | Built | Departures |',
+    '|---|---|---|---|',
+    ...rows.slice(0, 20).map((r) => `| ${text(r.screenId)} | ${code(r.designShot)} | `
+      + `${r.builtShot ? code(r.builtShot) : '_not reached_'} | `
+      + `${(r.differences ?? []).length
+        ? (r.differences).map((d) => tableCell(String(d))).join('<br>')
+        : '_none recorded_'} |`),
   ].join('\n');
 }
 
@@ -297,7 +331,8 @@ const SPECS: Spec[] = [
         if (content.length > MAX_UPLOAD_BYTES) continue;
         attachments.push({ name: s.file, content, mime: mimeFor(s.file) });
       }
-      if (!attachments.length && !observations.length) return null;
+      const conformance = (data.designConformance as DesignPair[] | undefined) ?? [];
+      if (!attachments.length && !observations.length && !conformance.length) return null;
       const parts = [`**UI evidence** — ${[
         attachments.length ? `${attachments.length} screenshot(s)` : '',
         observations.length ? `${observations.length} measured value(s)` : '',
@@ -310,6 +345,7 @@ const SPECS: Spec[] = [
         parts.push(shots.slice(0, 12)
           .map((s) => `- \`${s.file}\`${s.caseId ? ` (${s.caseId})` : ''} — ${s.caption}`).join('\n'));
       }
+      if (conformance.length) parts.push(conformanceTable(conformance));
       return { body: parts.join('\n\n'), attachments };
     },
   },

@@ -115,8 +115,8 @@ export interface RunJournal {
   createdAt: number;
   /**
    * 'parked' is an opt-in-only, human-caused wait — the Review label's three
-   * pause points (plan approval, test-case approval, merge) and nothing
-   * else ever produces it. Unlike 'blocked' it swaps no label and alerts
+   * pause points (plan approval, test-case approval, merge), the Design
+   * label's design-approval pause, and nothing else ever produces it. Unlike 'blocked' it swaps no label and alerts
    * nobody: the ticket keeps carrying the entry label throughout, so the next
    * tick's scan re-claims it and re-checks for a reply exactly like an
    * ordinary resumption. See src/conductor/reviewgate.ts.
@@ -132,6 +132,14 @@ export interface RunJournal {
    */
   reviewMode?: boolean;
   /** Plan-approval gate state (Review label, between `plan` and `implement`). */
+  /**
+   * Design approval gate state (the `Design` label, between `design` and
+   * `plan`). Unlike the two above, this gate is armed by its OWN label rather
+   * than by `Review`/`reviewAllRuns`/guarded paths: a ticket asking for a
+   * design round is asking for exactly this pause, and it should get it
+   * whatever the code-review posture happens to be.
+   */
+  designApproval?: ReviewGateState;
   planApproval?: ReviewGateState;
   /** Test-case approval gate state (Review label, between `testcases` and `review`). */
   testcasesApproval?: ReviewGateState;
@@ -306,6 +314,34 @@ export function phaseSucceeded(iid: number, phase: string): boolean {
   const j = readJournal(iid);
   if (!j) return false;
   return j.phases.some((p) => p.phase === phase && (p.status === 'ok' || p.status === 'warned'));
+}
+
+/**
+ * Is this phase DONE WITH — succeeded, or settled some other way?
+ *
+ * Distinct from phaseSucceeded() on purpose, and the distinction is the whole
+ * point of having two. A gate asking "did plan actually produce a plan" must
+ * never accept 'skipped'; the run loop asking "do I still owe this phase a turn"
+ * must, because 'skipped' is the answer a phase's own `onFail: 'skip'` policy
+ * already gave. runner.ts's KEPT_STATUSES says so outright — "a decision the run
+ * already made rather than a failure to retry" — and then shouldSkip() consulted
+ * phaseSucceeded(), which reports 'skipped' as not-yet-done. The two disagreed,
+ * and the loop believed the second one.
+ *
+ * Observed on ticket 256: `recall` (onFail 'skip', maxTurns 20) hit its cap and
+ * was recorded 'skipped'. The run carried on, research and plan both finished,
+ * the run PARKED at the plan gate — and then recall ran again at lap 1, after
+ * the two phases that consume its artifact, and rewrote recall.json with a
+ * summary of this run's own plan. A phase whose job is to bring PRIOR context
+ * into a run had recorded the run's own output as prior context.
+ */
+export function phaseSettled(iid: number, phase: string): boolean {
+  const j = readJournal(iid);
+  if (!j) return false;
+  return j.phases.some(
+    (p) => p.phase === phase
+      && (p.status === 'ok' || p.status === 'warned' || p.status === 'skipped'),
+  );
 }
 
 /**
