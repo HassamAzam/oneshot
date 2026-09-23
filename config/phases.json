@@ -123,7 +123,10 @@
       "timeoutMin": 5,
       "onFail": "warn",
       "artifact": "mr-open.json",
-      "_why": "Opens the MR the moment `implement` has produced code, so every gate that follows has a readable diff. The test-case gate asks a person to approve scenarios at phase 4; before this existed the MR was not opened until phase 8, so that person was asked to approve test cases for a change they could not see. Code, not a session: pushing a branch and posting an MR is deterministic, and paying a model for it would add tokens, latency and a way to get it wrong. DRAFT, because nothing here has been reviewed, verified or evidenced yet -- `mr` takes the marker off once it has written the real description, which is also what stops `merge` meeting a draft it cannot merge. onFail is warn on purpose: an early MR is a convenience for the humans reading the gates, `mr` still opens one at phase 8 if this could not, and a run must not die because a courtesy push failed."
+      "targets": [
+        "erp"
+      ],
+      "_why": "Opens the MR the moment `implement` has produced code, so every gate that follows has a readable diff. The test-case gate asks a person to approve scenarios at phase 4; before this existed the MR was not opened until phase 8, so that person was asked to approve test cases for a change they could not see. Code, not a session: pushing a branch and posting an MR is deterministic, and paying a model for it would add tokens, latency and a way to get it wrong. DRAFT, because nothing here has been reviewed, verified or evidenced yet -- `mr` takes the marker off once it has written the real description, which is also what stops `merge` meeting a draft it cannot merge. onFail is warn on purpose: an early MR is a convenience for the humans reading the gates, `mr` still opens one at phase 8 if this could not, and a run must not die because a courtesy push failed. SCOPED to the erp target. The MR-before-the-gates ordering was asked for while moving to that project, and an ungated phase would have changed the pipeline for every conductor on every project the moment it pulled -- including leaving a draft MR behind on runs that abort between here and `mr`, which those runs did not do before. With no ONESHOT_PROJECT set this phase does not exist, and the sequence is exactly what it was."
     },
     {
       "name": "testcases",
