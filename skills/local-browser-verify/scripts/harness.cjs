@@ -31,8 +31,12 @@
  *   - frontend/src/constants/config.js pins `apiUrl` to `http://localhost:8000/`. The
  *     SPA calls the API at that absolute URL, so it must name the Django port we lease.
  *
- * BOTH PATCHES ARE MANDATORY AND BOTH FILES ARE TRACKED. They are marked
- * --skip-worktree so a stray `git add -A` in a phase cannot commit a local port.
+ * BOTH FILES ARE MANDATORY, but they are handled differently because they belong to
+ * different owners. localPaths.js is TRACKED, so it is patched in place and marked
+ * --skip-worktree, which is what stops a stray `git add -A` in a phase from committing
+ * a machine-local port. constants/config.js is GITIGNORED and seed-copied from a
+ * developer's checkout, so it is composed from the repo's own config.example.js
+ * instead — see composeConfigJs().
  *
  *   - Django serves templates through ManifestStaticFilesStorage with DEBUG off, so
  *     staticfiles/staticfiles.json must exist before the first request or every route
@@ -57,7 +61,7 @@ const ONESHOT_HOME = process.env.ONESHOT_HOME || path.resolve(__dirname, '../../
 const CODES = [
   'E_NO_WORKTREE', 'E_NO_VENV', 'E_NO_NODE_MODULES', 'E_NO_SEED_COPIES',
   'E_DOTENV_SHADOW', 'E_DB_UNREACHABLE', 'E_PORT_BUSY_FOREIGN', 'E_PORT_DRIFT',
-  'E_PATCH_FAILED', 'E_DJANGO_DEAD', 'E_COLLECTSTATIC',
+  'E_PATCH_FAILED', 'E_DJANGO_DEAD', 'E_DJANGO_5XX', 'E_COLLECTSTATIC',
   'E_WEBPACK_DEAD', 'E_BUNDLE_UNREACHABLE',
   'E_NO_CREDENTIALS', 'E_LOGIN_FAILED', 'E_LOGIN_2FA', 'E_TRIAL_EXPIRED',
   'E_MODULE_UNKNOWN', 'E_MODULE_TIMEOUT', 'E_NOT_UP', 'E_PLAYWRIGHT_MISSING',
@@ -252,6 +256,79 @@ execute_from_command_line(sys.argv)
   return true;
 }
 
+/**
+ * Which integrations this environment cannot exercise, asked of the app's own settings.
+ *
+ * A phase that has to reproduce a bug needs to know what it cannot reach BEFORE it
+ * starts, not after. On ticket 256 research spent 14 of its 123 turns — 12% of the
+ * input and 37% of everything it wrote — establishing that the local environment has
+ * no Odoo, which is the same answer on every run, for every ticket, on every machine.
+ * Reading it from settings costs one interpreter start.
+ *
+ * DERIVED, never a list maintained here. Naming integrations in this file would make
+ * it a place where facts about one app go stale; the app already states them:
+ *
+ *   - `USE_<NAME>` is False, and `<NAME>_*` settings exist. The second half is what
+ *     separates an integration from Django's own booleans — USE_TZ, USE_I18N and
+ *     USE_X_FORWARDED_HOST own no namespace, so they never appear.
+ *   - `<NAME>_URL|HOST|ENDPOINT|DSN|API_KEY|TOKEN` is empty, equals its own setting
+ *     name, contains it (`ODOO_URL = "ODOO_URL_WITH_XMLRPC"`), or reads as a
+ *     placeholder. A credential nobody filled in is an integration nobody can reach.
+ *
+ * Advisory, never a blocker: any failure here returns [] and the run proceeds exactly
+ * as it did before this existed. Not being sure what is disabled is not a reason to
+ * stop a healthy app from coming up.
+ */
+function disabledIntegrations(wt) {
+  const r = py(wt, `
+import json, re, django
+django.setup()
+from django.conf import settings
+
+PLACEHOLDER = re.compile(r'REPLACE_ME|CHANGE_?ME|<[a-z-]+>|your-.*-here', re.I)
+ENDPOINT = re.compile(r'^([A-Z0-9]+)_(URL|HOST|ENDPOINT|DSN|API_KEY|TOKEN)$')
+FLAG = re.compile(r'^USE_([A-Z0-9]+(?:_[A-Z0-9]+)*)$')
+
+names = [n for n in dir(settings) if n.isupper()]
+
+def value(n):
+    try:
+        return getattr(settings, n)
+    except Exception:
+        return None
+
+def unset(n, v):
+    if v == '':
+        return 'empty'
+    if isinstance(v, str) and (v == n or n in v or PLACEHOLDER.search(v)):
+        return 'a placeholder'
+    return None
+
+found = {}
+for n in names:
+    m = FLAG.match(n)
+    if m and value(n) is False:
+        who = m.group(1)
+        if any(o != n and o.startswith(who + '_') for o in names):
+            found[who] = n + ' is False'
+for n in names:
+    m = ENDPOINT.match(n)
+    if m:
+        reason = unset(n, value(n))
+        if reason:
+            found.setdefault(m.group(1), n + ' is ' + reason)
+
+out = [{"name": k, "why": v} for k, v in sorted(found.items())]
+print("ONESHOT_INTEGRATIONS " + json.dumps(out))
+`, { timeout: 120000 });
+  const line = String(r.stdout || '').split('\n').find((l) => l.startsWith('ONESHOT_INTEGRATIONS '));
+  if (!line) {
+    log('could not read integration status; continuing without it');
+    return [];
+  }
+  try { return JSON.parse(line.slice('ONESHOT_INTEGRATIONS '.length)); } catch { return []; }
+}
+
 function checkDb(wt) {
   const r = py(wt, `
 import django; django.setup()
@@ -324,21 +401,76 @@ function patchFile(wt, rel, re, replacement, code) {
   return before !== after;
 }
 
+const EXPORT_RE = /^export const ([A-Za-z_$][\w$]*)\s*=/;
+
+/**
+ * config.js is COMPOSED from the app repo's committed template, not patched in place.
+ *
+ * This file is gitignored in the app repo and arrives by verbatim copy from whatever
+ * checkout ONESHOT_SEED_COPIES points at, so its contents belong to a developer's
+ * machine and not to us. Patching one line of it meant every other line was accepted
+ * on trust — including lines that were not there at all. A seed missing
+ * `export const SENTRY_DSN` (frontend/src/sentryConfig.js:4 imports it) produced a
+ * correct apiUrl, a healthy Django, and a frontend that never compiled.
+ *
+ * Widening the apiUrl regex to accept either quote style fixed the formatting of one
+ * line and left that whole class open. config.example.js is TRACKED, sits at the repo
+ * root, and is the file the app's own README points a new developer at, so it follows
+ * what the code imports. Composing from it makes every key present by construction and
+ * makes apiUrl something we WRITE rather than something we hope to match — which
+ * retires the regex, and with it E_PATCH_FAILED on this file.
+ *
+ * The developer's values are still honoured: any key their copy defines wins over the
+ * template's placeholder, so a real googleApiClientId or USE_CALENDAR_API survives.
+ * Only keys they are missing come from the template, and only apiUrl is forced.
+ */
+function composeConfigJs(wt, bePort) {
+  const rel = 'frontend/src/constants/config.js';
+  const abs = path.join(wt, rel);
+  const template = path.join(wt, 'config.example.js');
+  const apiUrlLine = `export const apiUrl = 'http://localhost:${bePort}/';`;
+
+  // An app repo without the template is not this repo; fall back to the old in-place
+  // patch rather than inventing a config.js for a checkout we do not understand.
+  if (!fs.existsSync(template)) {
+    return patchFile(wt, rel, /export const apiUrl = ['"][^'"]*['"];/, apiUrlLine, 'apiUrl');
+  }
+
+  const before = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : '';
+  const local = new Map();
+  for (const line of before.split('\n')) {
+    const m = line.match(EXPORT_RE);
+    if (m) local.set(m[1], line);
+  }
+
+  const lines = fs.readFileSync(template, 'utf8').split('\n');
+  if (!lines.some((l) => (l.match(EXPORT_RE) || [])[1] === 'apiUrl')) {
+    throw new HarnessError('E_PATCH_FAILED',
+      'config.example.js declares no apiUrl export',
+      'apiUrl — the template\'s shape changed; the harness will not guess.');
+  }
+  const after = `${lines.map((line) => {
+    const key = (line.match(EXPORT_RE) || [])[1];
+    if (!key) return line;
+    if (key === 'apiUrl') return apiUrlLine;
+    return local.has(key) ? local.get(key) : line;
+  }).join('\n').replace(/\n+$/, '')}\n`;
+
+  if (after !== before) {
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, after);
+  }
+  // A no-op on this path — the app repo ignores the file — but harmless, and it keeps
+  // the two patched files symmetrical if the app repo ever tracks it.
+  spawnSync('git', ['update-index', '--skip-worktree', rel], { cwd: wt });
+  return after !== before;
+}
+
 function applyPatches(wt, bePort, fePort) {
   const a = patchFile(wt, 'frontend/config/localPaths.js',
     /const LOCAL_PUBLIC_URL = '[^']*';/,
     `const LOCAL_PUBLIC_URL = 'http://localhost:${fePort}';`, 'localPaths');
-  // EITHER quote style, unlike localPaths.js above. That file is tracked, so its
-  // formatting is this repo's to assume; this one is gitignored in the app repo and
-  // arrives by verbatim copy from whatever checkout ONESHOT_SEED_COPIES points at,
-  // so its quote style belongs to a developer's machine and not to us. Requiring
-  // single quotes made a seed written with double quotes — the one in use since
-  // 22 Jun — throw E_PATCH_FAILED on every worktree, which meant no app for verify,
-  // ui-evidence, qa or reproduction. `--fresh` could not help: it re-copies the same
-  // file. The value was already correct; only the quote character was not.
-  const b = patchFile(wt, 'frontend/src/constants/config.js',
-    /export const apiUrl = ['"][^'"]*['"];/,
-    `export const apiUrl = 'http://localhost:${bePort}/';`, 'apiUrl');
+  const b = composeConfigJs(wt, bePort);
   return { localPaths: a, apiUrl: b };
 }
 
@@ -413,19 +545,49 @@ async function httpStatus(url, timeoutMs = 5000) {
  * which is minutes. The admin login page is plain Django templating and answers as soon
  * as the process is actually serving, which is the thing this check is for.
  */
+/**
+ * A 500 is not a corpse, and calling it one costs a whole phase.
+ *
+ * This loop used to accept only 200 and report every other outcome as
+ * E_DJANGO_DEAD / "Django did not answer". A process answering 500 on every route is
+ * the opposite of not answering: it is up, reachable, and telling you what is wrong in
+ * a traceback sitting in django.log. Reported as dead, it invites the phase to retry
+ * the bring-up — which cannot help, because nothing about it was transient — and then
+ * to go looking for a cause somewhere else entirely. On ticket 256 that turned a
+ * one-line missing-manifest error into an inconclusive reproduction and a hunt through
+ * an unrelated dependency.
+ *
+ * Three consecutive 5xx is the cutoff, not one: the first request can land in the
+ * gap between the socket binding and the app being ready. Nothing that answers 5xx
+ * three times over six seconds recovers on its own — runserver has no lazy
+ * initialisation left to do by then.
+ */
+const DJANGO_5XX_STRIKES = 3;
+
 async function waitDjango(port, pid, budgetMs) {
   const url = `http://localhost:${port}/admin/login/`;
   const deadline = Date.now() + budgetMs;
+  let last = 0;
+  let strikes = 0;
   while (Date.now() < deadline) {
     if (!alive(pid)) {
       throw new HarnessError('E_DJANGO_DEAD', 'the Django process exited during startup',
         `Last lines of ${p.django()}: ${tail(p.django(), 6)}`);
     }
-    if (await httpStatus(url) === 200) return true;
+    last = await httpStatus(url);
+    if (last === 200) return true;
+    strikes = last >= 500 ? strikes + 1 : 0;
+    if (strikes >= DJANGO_5XX_STRIKES) {
+      throw new HarnessError('E_DJANGO_5XX',
+        `Django is up on ${port} but answers ${last} on ${url}`,
+        `The process is alive and serving — this is an application error, not a startup `
+        + `failure, so retrying the bring-up will not help. ${p.django()}: ${tail(p.django(), 12)}`);
+    }
     await sleep(2000);
   }
   throw new HarnessError('E_DJANGO_DEAD',
-    `Django did not answer on ${port} within ${Math.round(budgetMs / 1000)}s`, tail(p.django(), 6));
+    `Django did not answer on ${port} within ${Math.round(budgetMs / 1000)}s`
+    + `${last ? ` (last status ${last})` : ''}`, tail(p.django(), 6));
 }
 
 /**
@@ -591,6 +753,9 @@ async function describeEnv(wt, bePort, fePort, bundleUrl) {
     bePort, fePort, worktree: wt,
     bundleUrl: bundleUrl || await assertBundleReachable(bePort).catch(() => null),
     credentialEnv: 'ONESHOT_TEST_LOGIN',
+    // What this environment CANNOT do, stated up front. A phase that needs one of
+    // these can say so in one turn instead of discovering it in fourteen.
+    disabledIntegrations: disabledIntegrations(wt),
     patchedFiles: ['frontend/config/localPaths.js', 'frontend/src/constants/config.js'],
     startedAt: new Date().toISOString(),
     logs: { django: p.django(), webpack: p.webpack() },
@@ -853,7 +1018,8 @@ const API = {
    * Exporting rather than re-implementing keeps every hard-won fact above — the ASGI
    * wedge, CI=true, the stats-file readiness, the two pinned files — in ONE place.
    */
-  preflight, checkDb, applyPatches, needsCollectstatic, collectStatic,
+  preflight, checkDb, disabledIntegrations, applyPatches, composeConfigJs,
+  needsCollectstatic, collectStatic,
   startDjango, startWebpack, waitDjango, waitWebpack,
   assertBundleReachable, describeEnv, listenerPid, pidCwd, alive, httpStatus,
 };
