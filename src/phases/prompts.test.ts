@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
-import { phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { ROOT, phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Ticket } from './types.js';
 
@@ -76,6 +76,34 @@ test('plan always gets the skills that are its method', () => {
   const prompt = systemPromptFor(cfg('plan'), ctx(ticket()));
   assert.ok(names(prompt).includes('planning-methodology'));
   assert.ok(names(prompt).includes('util-reuse-methodology'));
+});
+
+// ------------------------------------------------ recall has a method now
+
+test('recall is given a method, not just a prompt', () => {
+  // Phase 0 was the last session phase carrying its whole method inline. The
+  // scoring ladder in particular was four lines of prompt with no room to say
+  // why each rung outranks the next.
+  assert.deepEqual(names(systemPromptFor(cfg('recall'), ctx(ticket()))), ['prior-art-recall']);
+});
+
+test('the skill recall declares actually ships in this repo', () => {
+  // recall runs at cwd 'conductor', so it resolves skills from the .claude that
+  // ensureClaudeDir composes at the Oneshot root. A name in config with no
+  // directory behind it fails silently — the phase just runs without it.
+  assert.ok(existsSync(join(ROOT, 'skills', 'prior-art-recall', 'SKILL.md')));
+});
+
+test('the recall prompt still stands alone if the skill does not resolve', () => {
+  // Skills are an upgrade, never a dependency (see SKILL_LINE): the prompt has
+  // to carry enough to run correctly by itself. The empty-memory stop is the
+  // part that must survive — without it the phase explores a filesystem that
+  // has nothing to find, on the tightest budget in the pipeline.
+  const p = promptFor(cfg('recall'), ctx(ticket()));
+  assert.match(p, /prior-art-recall/, 'the prompt must name the skill');
+  assert.match(p, /STOP IMMEDIATELY and return an empty list and an empty brief/);
+  assert.match(p, /file-path overlap first/, 'the ladder must survive in the short form');
+  assert.match(p, /then module, then label, then\s+title-token overlap/);
 });
 
 // --------------------------------------------- implement's gating is unchanged
