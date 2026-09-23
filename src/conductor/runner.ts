@@ -69,7 +69,7 @@ import {
 } from '../lib/worktrees.js';
 import {
   addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
-  allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue,
+  allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue, type IssueNote,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
 import { checkQuota } from '../lib/quota.js';
@@ -242,23 +242,41 @@ function cardState(j: RunJournal, running: string[] = []): CardState {
 
 // ------------------------------------------------------------------ the ticket
 
-async function fetchTicket(iid: number): Promise<Ticket | null> {
+/**
+ * The comments a phase is allowed to read, oldest first.
+ *
+ * Every human comment and unbounded: requirements are amended and documents
+ * attached anywhere in a thread, and a window drops them silently. GitLab's
+ * system notes (label swaps, assignments, "mentioned in") are not comments and
+ * would only crowd the prompt. This system's own notes are dropped too — by
+ * marker, and by the older 'Oneshot ' prefix — because feeding its plan and
+ * test cases back in as ticket requirements is how a phase ends up working on
+ * a summary of itself.
+ *
+ * `before` (epoch ms) additionally keeps only what was posted earlier than
+ * that instant. Nothing in a live run passes it: a run reads its ticket whole.
+ * It exists for scripts that re-run a finished phase, which have to see the
+ * ticket as it stood when that phase first ran — everything posted afterwards
+ * being the output under examination, or a reviewer's answer to it.
+ */
+export function ticketComments(notes: IssueNote[], before?: number): string[] {
+  return notes
+    .filter((n) => !n.system && n.body && !isMachineNote(n.body) && !n.body.startsWith('Oneshot '))
+    // An undated note cannot be shown to predate the cutoff, and the one it
+    // might be is the artifact being re-derived. Unprovable order is excluded
+    // rather than assumed.
+    .filter((n) => before === undefined || (!!n.created_at && Date.parse(n.created_at) < before))
+    .map((n) => n.body);
+}
+
+export async function fetchTicket(
+  iid: number, opts: { notesBefore?: number } = {},
+): Promise<Ticket | null> {
   const res = await getIssue(iid);
   if (!res.ok || !res.data) return null;
   const notes = await allIssueNotes(iid);
   if (!notes.ok) log.warn(`#${iid}: could not read the ticket's comments; phases see the description only`, { error: notes.error });
-  // Every human comment, oldest first and unbounded: requirements are amended
-  // and documents attached anywhere in a thread, and a window drops them
-  // silently. GitLab's system notes (label swaps, assignments, "mentioned in")
-  // are not comments and would only crowd the prompt. This system's own notes
-  // are dropped too — by marker, and by the older 'Oneshot ' prefix — because
-  // feeding its plan and test cases back in as ticket requirements is how a
-  // phase ends up working on a summary of itself.
-  const comments = notes.ok && notes.data
-    ? notes.data
-      .filter((n) => !n.system && n.body && !isMachineNote(n.body) && !n.body.startsWith('Oneshot '))
-      .map((n) => n.body)
-    : [];
+  const comments = notes.ok && notes.data ? ticketComments(notes.data, opts.notesBefore) : [];
   const docs = await collectTicketDocs(iid, [
     { where: 'description', body: res.data.description ?? '' },
     ...comments.map((body, i) => ({ where: `comment ${i + 1}`, body })),
