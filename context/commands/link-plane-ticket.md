@@ -49,9 +49,13 @@ If an MR has no Plane reference, skip it (report it as skipped, don't error).
 
 ## Step 3 — Read the Plane ticket via MCP
 
+Requires PyPI `plane-mcp-server` >= 0.3.0, where every resource is dispatched by an `action`
+parameter; the deprecated npm `@makeplane/plane-mcp-server` (0.1.5) still exposes the old
+`get_issue_using_readable_identifier` / `get_state` and will not answer these calls.
+
 ```
 mcp__plane__workitem(
-    action="retrieve_by_identifier", workitem_identifier="<group 1>-<group 2>")
+    action="retrieve_by_identifier", workitem_identifier="<KEY>")
 ```
 
 From the result keep: `name` (→ issue title), `description_html`, `priority`, `project` (UUID),
