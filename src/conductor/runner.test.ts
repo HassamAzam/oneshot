@@ -22,9 +22,13 @@ const at = (name: string): number => LIST.findIndex((p) => p.name === name);
  * runner.ts's shouldSkip(), which is what decides whether a phase the index
  * lands on is actually RUN. Asserting on this rather than on the `forced` set
  * is the point: the defect below was invisible from the set alone.
+ *
+ * `settled`, not `succeeded`: shouldSkip() consults phaseSettled(), so a phase
+ * recorded 'skipped' by its own `onFail: 'skip'` policy counts here too. See
+ * lib/phase-settled.test.ts for that distinction on its own.
  */
-const skips = (forced: Set<string>, succeeded: string[], name: string): boolean =>
-  !forced.has(name) && succeeded.includes(name);
+const skips = (forced: Set<string>, settled: string[], name: string): boolean =>
+  !forced.has(name) && settled.includes(name);
 
 test('a retry re-runs a phase that already succeeded on an earlier lap', () => {
   const forced = new Set<string>();

@@ -55,10 +55,39 @@ const cfg = (k, d) => {
 };
 const list = (k, d) => cfg(k, d).split(',').map((s) => s.trim()).filter(Boolean);
 
-const WORK_REPO = path.resolve(expand(cfg('WORK_REPO', '~/Documents/workstreamai')));
-const SEED_FROM = path.resolve(expand(cfg('ONESHOT_SEED_FROM', WORK_REPO)));
-const WT_ROOT = path.resolve(expand(cfg('WT_ROOT', '~/Documents/oneshot-wt')));
-const BASE_BRANCH = cfg('ONESHOT_BASE_BRANCH', 'dev');
+/**
+ * The named target from ONESHOT_PROJECT, resolved the same way src/lib/config.ts
+ * resolves it — read here rather than imported because this script is CommonJS
+ * and runs standalone as `npm run app`, with no conductor to inherit from.
+ *
+ * A target WINS over the matching env var, matching the TypeScript side: the
+ * switch exists so one line in .env moves everything, and a machine that has
+ * been working on the default already spells WORK_REPO out. An unknown name
+ * throws rather than silently working on the default project.
+ */
+const TARGET_NAME = String(process.env.ONESHOT_PROJECT || '').trim().toLowerCase();
+const TARGET = (() => {
+  if (!TARGET_NAME) return {};
+  const cfgPath = path.join(ONESHOT_HOME, 'config', 'project.json');
+  let targets = {};
+  try { targets = (JSON.parse(fs.readFileSync(cfgPath, 'utf8')) || {}).targets || {}; }
+  catch { throw new Error(`ONESHOT_PROJECT='${TARGET_NAME}' set but ${cfgPath} is unreadable`); }
+  const found = targets[TARGET_NAME];
+  if (!found) {
+    const known = Object.keys(targets).join(', ') || 'none defined';
+    throw new Error(`ONESHOT_PROJECT='${TARGET_NAME}' is not a target in config/project.json (known: ${known})`);
+  }
+  return found;
+})();
+
+/** Target first, then the env var, then the built-in default. */
+const targetPath = (fromTarget, key, dflt) =>
+  path.resolve(expand(fromTarget || cfg(key, dflt)));
+
+const WORK_REPO = targetPath(TARGET.workRepo, 'WORK_REPO', '~/Documents/workstreamai');
+const SEED_FROM = targetPath(TARGET.seedFrom, 'ONESHOT_SEED_FROM', WORK_REPO);
+const WT_ROOT = targetPath(TARGET.wtRoot, 'WT_ROOT', '~/Documents/oneshot-wt');
+const BASE_BRANCH = (TARGET.branches && TARGET.branches.base) || cfg('ONESHOT_BASE_BRANCH', 'dev');
 
 /**
  * `staticfiles` is in this list for a reason worth keeping.

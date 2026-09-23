@@ -1,125 +1,287 @@
 {
-  "_comment": "Per-phase execution policy. 'kind' is the important field: 'code' phases are plain TypeScript in the conductor and never spawn a model — that is WHY no hook is needed to stop a model merging (docs/HOOKS.md §1). 'session' phases get one fresh Agent SDK query() that is never resumed.",
-
+  "_comment": "Per-phase execution policy. 'kind' is the important field: 'code' phases are plain TypeScript in the conductor and never spawn a model \u2014 that is WHY no hook is needed to stop a model merging (docs/HOOKS.md \u00a71). 'session' phases get one fresh Agent SDK query() that is never resumed.",
   "_comment_cwd": "'worktree' = the leased git worktree for this ticket. 'conductor' = the Oneshot repo root, used by phases that must not see repo files at all.",
-
   "_comment_writes": "Filesystem scopes handed to hooks/write-scope.js via ONESHOT_WRITE_SCOPES. Anything outside is denied. 'run' expands to state/runs/<iid>/, 'artifacts' to state/runs/<iid>/artifacts/, 'memory' to state/memory/.",
-
   "phases": [
     {
-      "name": "recall", "n": 0, "kind": "session", "tier": "light",
-      "cwd": "conductor", "maxTurns": 20, "timeoutMin": 6,
-      "writes": ["run"], "onFail": "skip",
+      "name": "recall",
+      "n": 0,
+      "kind": "session",
+      "tier": "light",
+      "cwd": "conductor",
+      "maxTurns": 20,
+      "timeoutMin": 6,
+      "writes": [
+        "run"
+      ],
+      "onFail": "skip",
       "skills": [],
       "artifact": "recall.json"
     },
     {
-      "name": "research", "n": 1, "kind": "session", "tier": "heavy",
-      "cwd": "worktree", "maxTurns": 180, "timeoutMin": 70,
+      "name": "research",
+      "n": 1,
+      "kind": "session",
+      "tier": "heavy",
+      "cwd": "worktree",
+      "maxTurns": 180,
+      "timeoutMin": 70,
       "_why_budget": "Raised from 120 turns / 45m when research began reproducing reported bugs in the real app: bring-up of a warm app is seconds but a cold one is ~2m, the login is a handful of turns, and driving the steps costs ~12 turns per step-set, as it does for verify.",
-      "writes": ["run"], "onFail": "abort",
+      "writes": [
+        "run"
+      ],
+      "onFail": "abort",
       "skills": [],
-      "labelSkills": { "Bug": "bug-reproduction" },
-      "_why_skills": "Reproduction is the `Bug` label's job, the same way `frontend-accessibility` is the `Accessibility` label's at plan — see that phase's `_why_skills`. It was an every-ticket skill until an accessibility ticket carrying no Bug label spent 57 turns and 528k weighted tokens failing to bring the app up for a verdict of 'inconclusive': asking a session to decide bug-vs-feature from the ticket's prose costs the app bring-up whether or not the answer is yes, and triage already knows. An absent label is the answer, not a missing signal. Moving this line back into `skills` restores the old behaviour, prose included — src/phases/prompts.ts gates the instructions on this same resolved list.",
+      "labelSkills": {
+        "Bug": "bug-reproduction"
+      },
+      "_why_skills": "Reproduction is the `Bug` label's job, the same way `frontend-accessibility` is the `Accessibility` label's at plan \u2014 see that phase's `_why_skills`. It was an every-ticket skill until an accessibility ticket carrying no Bug label spent 57 turns and 528k weighted tokens failing to bring the app up for a verdict of 'inconclusive': asking a session to decide bug-vs-feature from the ticket's prose costs the app bring-up whether or not the answer is yes, and triage already knows. An absent label is the answer, not a missing signal. Moving this line back into `skills` restores the old behaviour, prose included \u2014 src/phases/prompts.ts gates the instructions on this same resolved list.",
       "artifact": "research.json"
     },
     {
-      "name": "design", "n": 1.5, "kind": "session", "tier": "heavy",
-      "cwd": "worktree", "maxTurns": 115, "timeoutMin": 45,
-      "writes": ["run", "artifacts"], "onFail": "retry", "maxRetries": 1,
+      "name": "design",
+      "n": 1.5,
+      "kind": "session",
+      "tier": "heavy",
+      "cwd": "worktree",
+      "maxTurns": 115,
+      "timeoutMin": 45,
+      "writes": [
+        "run",
+        "artifacts"
+      ],
+      "onFail": "retry",
+      "maxRetries": 1,
       "needsPort": true,
       "labelGated": "Design",
-      "skills": ["design-proposal"],
+      "skills": [
+        "design-proposal"
+      ],
       "artifact": "design.json",
-      "_why": "The Design label asks for the UI to be AGREED before it is built, so this sits between research (which has just traced where the UI lives) and plan (which would otherwise decide the shape itself). It produces mockups and screenshots; the conductor posts them to the ticket and the design gate parks the run until a dev approves. HEAVY because the job is making a mockup read as OUR app with the feature in it rather than a generic dashboard, which is exactly the judgement a cheaper model does badly — it reaches for a plausible-looking default. onFail 'retry' with one retry, then block. abort would match research and plan, but those abort on budgets we have MEASURED and this one is an estimate — a session hitting an unmeasured cap and killing the run is a worse trade than retrying once and stopping for a person. Revisit once real runs have corrected the number. Either way a Design ticket never reaches plan without a design, which is what the label exists to guarantee.",
-      "_why_n": "1.5, not 2, and the fraction is load-bearing. `n` is read in exactly one place — the numeric sort in config.ts — but phase NUMBERS are quoted in fifteen model-facing prompt headings ('## Plan (phase 2) — this is your specification'). Renumbering to insert an integer here would rewrite every one of those strings, and they are read by models as ground truth. A fraction sorts correctly and leaves them all true.",
-      "_why_cwd_port": "cwd 'worktree' because the tokens have to come from the real frontend (Theme.js, style.js, _variables.scss) rather than from taste, and research.json is read from the run. needsPort because the phase screenshots the CURRENT screens off the running base branch: that is the 'before' half of every pair, and it is also how a mockup inherits the real shell instead of inventing one. It costs no wall clock — the app is already warming from the worktree lease — the flag only makes an empty pool fail here rather than halfway through.",
+      "_why": "The Design label asks for the UI to be AGREED before it is built, so this sits between research (which has just traced where the UI lives) and plan (which would otherwise decide the shape itself). It produces mockups and screenshots; the conductor posts them to the ticket and the design gate parks the run until a dev approves. HEAVY because the job is making a mockup read as OUR app with the feature in it rather than a generic dashboard, which is exactly the judgement a cheaper model does badly \u2014 it reaches for a plausible-looking default. onFail 'retry' with one retry, then block. abort would match research and plan, but those abort on budgets we have MEASURED and this one is an estimate \u2014 a session hitting an unmeasured cap and killing the run is a worse trade than retrying once and stopping for a person. Revisit once real runs have corrected the number. Either way a Design ticket never reaches plan without a design, which is what the label exists to guarantee.",
+      "_why_n": "1.5, not 2, and the fraction is load-bearing. `n` is read in exactly one place \u2014 the numeric sort in config.ts \u2014 but phase NUMBERS are quoted in fifteen model-facing prompt headings ('## Plan (phase 2) \u2014 this is your specification'). Renumbering to insert an integer here would rewrite every one of those strings, and they are read by models as ground truth. A fraction sorts correctly and leaves them all true.",
+      "_why_cwd_port": "cwd 'worktree' because the tokens have to come from the real frontend (Theme.js, style.js, _variables.scss) rather than from taste, and research.json is read from the run. needsPort because the phase screenshots the CURRENT screens off the running base branch: that is the 'before' half of every pair, and it is also how a mockup inherits the real shell instead of inventing one. It costs no wall clock \u2014 the app is already warming from the worktree lease \u2014 the flag only makes an empty pool fail here rather than halfway through.",
       "_why_writes": "'artifacts', NOT 'worktree'. Mockup HTML committed to the ticket branch would land in the MR diff, and six HTML files inside a 200-line review is a worse review. Keeping them in state/runs/<iid>/artifacts/design/ also means a second design round after feedback does not dirty the branch.",
-      "_why_turns": "115 is an ESTIMATE, not a measurement — the first real runs should correct it, the way verify went 200->300->450 and research 60->120. Derived from verify's measured ~12 turns per browser interaction: ~15 to capture the current screens, ~10 for tokens, ~8 per mockup across ~5 screens, plus headroom. The prototype (~25) and the walkthrough recording (~20) are deliberately NOT in this number: they are the most expensive and most breakable part of the guess, so they follow in their own change once a few real runs have said what the base number actually is."
+      "_why_turns": "115 is an ESTIMATE, not a measurement \u2014 the first real runs should correct it, the way verify went 200->300->450 and research 60->120. Derived from verify's measured ~12 turns per browser interaction: ~15 to capture the current screens, ~10 for tokens, ~8 per mockup across ~5 screens, plus headroom. The prototype (~25) and the walkthrough recording (~20) are deliberately NOT in this number: they are the most expensive and most breakable part of the guess, so they follow in their own change once a few real runs have said what the base number actually is."
     },
     {
-      "name": "plan", "n": 2, "kind": "session", "tier": "heavy",
-      "cwd": "worktree", "maxTurns": 50, "timeoutMin": 20,
-      "writes": ["run"], "onFail": "abort",
-      "skills": ["planning-methodology", "util-reuse-methodology"],
-      "labelSkills": { "Accessibility": "frontend-accessibility" },
-      "_why_skills": "`skills` is this phase's method, loaded for every ticket. `labelSkills` is the domain knowledge a particular ticket calls for, keyed by the label triage puts on it — reuse and approach are decided here, so an accessibility ticket needs that standard at plan time and not first at implement. One line adds the next pair; nothing in code changes.",
+      "name": "plan",
+      "n": 2,
+      "kind": "session",
+      "tier": "heavy",
+      "cwd": "worktree",
+      "maxTurns": 50,
+      "timeoutMin": 20,
+      "writes": [
+        "run"
+      ],
+      "onFail": "abort",
+      "skills": [
+        "planning-methodology",
+        "util-reuse-methodology"
+      ],
+      "labelSkills": {
+        "Accessibility": "frontend-accessibility"
+      },
+      "_why_skills": "`skills` is this phase's method, loaded for every ticket. `labelSkills` is the domain knowledge a particular ticket calls for, keyed by the label triage puts on it \u2014 reuse and approach are decided here, so an accessibility ticket needs that standard at plan time and not first at implement. One line adds the next pair; nothing in code changes.",
       "artifact": "plan.json"
     },
     {
-      "name": "implement", "n": 3, "kind": "session", "tier": "standard",
-      "cwd": "worktree", "maxTurns": 220, "timeoutMin": 90,
-      "writes": ["worktree", "run"], "onFail": "retry", "maxRetries": 2,
+      "name": "implement",
+      "n": 3,
+      "kind": "session",
+      "tier": "standard",
+      "cwd": "worktree",
+      "maxTurns": 220,
+      "timeoutMin": 90,
+      "writes": [
+        "worktree",
+        "run"
+      ],
+      "onFail": "retry",
+      "maxRetries": 2,
       "coding": true,
-      "skills": ["ponytail", "django-backend-standards", "django-migration-standards", "react-frontend-standards", "django-query-optimisation", "python-linting", "script-writing-standards"],
-      "agents": ["backend-agent", "frontend-agent"],
+      "skills": [
+        "ponytail",
+        "django-backend-standards",
+        "django-migration-standards",
+        "react-frontend-standards",
+        "django-query-optimisation",
+        "python-linting",
+        "script-writing-standards"
+      ],
+      "agents": [
+        "backend-agent",
+        "frontend-agent"
+      ],
       "artifact": "implement.json"
     },
     {
-      "name": "testcases", "n": 4, "kind": "session", "tier": "heavy",
-      "cwd": "worktree", "maxTurns": 110, "timeoutMin": 30,
-      "writes": ["run"], "onFail": "abort", "group": "check",
-      "_why_skills": "The phase authors the list a QA reviewer signs off on and the list `verify` later executes, and until now it was the only session phase declaring no method at all \u2014 it wrote cases from the prompt alone while `plan` had planning-methodology and `verify` had local-browser-verify. erp-ticket-test-plan is where the scenario taxonomy (happy / negative / edge / boundary / side-effects) and the expected-value-from-business-logic rule live, so declaring it makes the authored list answerable to the same standard a person would apply. It is also where the feedback-intent routing added in PR #78 lives \u2014 the rule that a correction edits a case in place instead of being appended as a new one. That rule had no reader on this path: the skill was reachable in the worktree but nothing required it, so the phase never consulted it.",
-    "skills": [
-      "erp-ticket-test-plan"
-    ],
-      "artifact": "testcases.json",
-      "_why": "Opus, and its own phase: the list is written once, reviewed as a list, and executed by verify against a real browser — which is what makes 'the change passes its own cases' a claim about something a person could re-run rather than about whatever the verifying session happened to think of. It runs AFTER implement so the cases can name the real symbols and routes the change actually produced — the cost of that is a list authored with the implementation in view, so the prompt makes the acceptance criteria, not the diff, the source of truth.",
-      "_why_turns": "40 was never sized for this job — it is the number this phase was born with in 37f3978, when testcases was n:3 and ran BEFORE implement, authoring from the ticket and the plan with nothing to read. 0d64e2d moved the block to n:4 verbatim while the prompt gained implement's artifact, 'read git diff before you start' and 'read whatever you need to'. The job doubled; the budget did not move, and unlike verify (200->300->450) and research (60->120) it never got a measured raise. Run 237 (r-mtvacbt9-7a23b5) is where that came due: 40 turns spent entirely on context-gathering, 11,719 output tokens, not one case written, and onFail abort blocked the run. The driver is NOT diff size — that diff was 9 files and 211 insertions. It is whether the diff carries the UI vocabulary the cases need: run 8 changed loginTestIds.js and displayText.js and finished in 26 turns, run 19 was backend-only and finished in 18, and run 237 was a date-math fix behind a browser modal, so the routes, the permission gate and the PL_* labels all had to be excavated from files the diff never touched. research.uiPath now supplies that vocabulary, which is what makes 110 a real ceiling rather than a bigger number in front of an unbounded search. 30 minutes because the 15 was equally inherited, and this phase has already died on the CLOCK once (r-mtfu7ph1-e56363, 119 stream messages, no result)."
+      "name": "mr-open",
+      "n": 3.5,
+      "kind": "code",
+      "timeoutMin": 5,
+      "onFail": "warn",
+      "artifact": "mr-open.json",
+      "_why": "Opens the MR the moment `implement` has produced code, so every gate that follows has a readable diff. The test-case gate asks a person to approve scenarios at phase 4; before this existed the MR was not opened until phase 8, so that person was asked to approve test cases for a change they could not see. Code, not a session: pushing a branch and posting an MR is deterministic, and paying a model for it would add tokens, latency and a way to get it wrong. DRAFT, because nothing here has been reviewed, verified or evidenced yet -- `mr` takes the marker off once it has written the real description, which is also what stops `merge` meeting a draft it cannot merge. onFail is warn on purpose: an early MR is a convenience for the humans reading the gates, `mr` still opens one at phase 8 if this could not, and a run must not die because a courtesy push failed."
     },
     {
-      "name": "review", "n": 5, "kind": "session", "tier": "heavy",
-      "cwd": "worktree", "maxTurns": 70, "timeoutMin": 30,
-      "writes": ["run"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 3, "group": "check",
-      "_why_group": "testcases and review both consume only implement's output and neither reads the other's artifact, so they run concurrently. The one interaction — a review cycle lap re-entering implement — leaves testcases pinned (the case list is written once), so the group simply degrades to review alone on later laps. A pending test-case approval gate (src/conductor/reviewgate.ts) is a second exception: the runner holds review back out of the batch so the gate gets a solo iteration to check it, rather than the two running concurrently and the gate never firing.",
-      "skills": ["erp-code-review", "dead-code-sweep", "ponytail-review"],
-      "agents": ["backend-reviewer-agent", "frontend-reviewer-agent", "accessibility-reviewer-agent", "util-reuse-agent"],
+      "name": "testcases",
+      "n": 4,
+      "kind": "session",
+      "tier": "heavy",
+      "cwd": "worktree",
+      "maxTurns": 110,
+      "timeoutMin": 30,
+      "writes": [
+        "run"
+      ],
+      "onFail": "abort",
+      "group": "check",
+      "_why_skills": "The phase authors the list a QA reviewer signs off on and the list `verify` later executes, and until now it was the only session phase declaring no method at all \u2014 it wrote cases from the prompt alone while `plan` had planning-methodology and `verify` had local-browser-verify. erp-ticket-test-plan is where the scenario taxonomy (happy / negative / edge / boundary / side-effects) and the expected-value-from-business-logic rule live, so declaring it makes the authored list answerable to the same standard a person would apply. It is also where the feedback-intent routing lives \u2014 the rule that a correction edits a case in place instead of being appended as a new one. That rule had no reader on this path: the skill was reachable in the worktree but nothing required it, so the phase never consulted it.",
+      "skills": [
+        "erp-ticket-test-plan"
+      ],
+      "artifact": "testcases.json",
+      "_why": "Opus, and its own phase: the list is written once, reviewed as a list, and executed by verify against a real browser \u2014 which is what makes 'the change passes its own cases' a claim about something a person could re-run rather than about whatever the verifying session happened to think of. It runs AFTER implement so the cases can name the real symbols and routes the change actually produced \u2014 the cost of that is a list authored with the implementation in view, so the prompt makes the acceptance criteria, not the diff, the source of truth.",
+      "_why_turns": "40 was never sized for this job \u2014 it is the number this phase was born with in 37f3978, when testcases was n:3 and ran BEFORE implement, authoring from the ticket and the plan with nothing to read. 0d64e2d moved the block to n:4 verbatim while the prompt gained implement's artifact, 'read git diff before you start' and 'read whatever you need to'. The job doubled; the budget did not move, and unlike verify (200->300->450) and research (60->120) it never got a measured raise. Run 237 (r-mtvacbt9-7a23b5) is where that came due: 40 turns spent entirely on context-gathering, 11,719 output tokens, not one case written, and onFail abort blocked the run. The driver is NOT diff size \u2014 that diff was 9 files and 211 insertions. It is whether the diff carries the UI vocabulary the cases need: run 8 changed loginTestIds.js and displayText.js and finished in 26 turns, run 19 was backend-only and finished in 18, and run 237 was a date-math fix behind a browser modal, so the routes, the permission gate and the PL_* labels all had to be excavated from files the diff never touched. research.uiPath now supplies that vocabulary, which is what makes 110 a real ceiling rather than a bigger number in front of an unbounded search. 30 minutes because the 15 was equally inherited, and this phase has already died on the CLOCK once (r-mtfu7ph1-e56363, 119 stream messages, no result)."
+    },
+    {
+      "name": "review",
+      "n": 5,
+      "kind": "session",
+      "tier": "heavy",
+      "cwd": "worktree",
+      "maxTurns": 70,
+      "timeoutMin": 30,
+      "writes": [
+        "run"
+      ],
+      "onFail": "cycle",
+      "cycleTo": "implement",
+      "maxLaps": 3,
+      "group": "check",
+      "_why_group": "testcases and review both consume only implement's output and neither reads the other's artifact, so they run concurrently. The one interaction \u2014 a review cycle lap re-entering implement \u2014 leaves testcases pinned (the case list is written once), so the group simply degrades to review alone on later laps. A pending test-case approval gate (src/conductor/reviewgate.ts) is a second exception: the runner holds review back out of the batch so the gate gets a solo iteration to check it, rather than the two running concurrently and the gate never firing.",
+      "skills": [
+        "erp-code-review",
+        "dead-code-sweep",
+        "ponytail-review"
+      ],
+      "agents": [
+        "backend-reviewer-agent",
+        "frontend-reviewer-agent",
+        "accessibility-reviewer-agent",
+        "util-reuse-agent"
+      ],
       "artifact": "findings.json"
     },
     {
-      "name": "verify", "n": 6, "kind": "session", "tier": "standard",
-      "cwd": "worktree", "maxTurns": 450, "timeoutMin": 150,
-      "_why_turns": "Measured live: driving webpack + the real login form through Bash-run Playwright costs ~12 turns per case, so the cap must scale with the list. A 20-case list (run #6) exhausted a 200-turn cap at case 17 and was salvaged from partial — an incomplete verdict that still gates the merge. 300 turns / 120 min fits a 20-case list with headroom; a verify that dies at max_turns produces a partial artifact, and the cycle it triggers re-pays implement and review for what was only a budget problem.",
-      "writes": ["worktree", "run", "artifacts"], "onFail": "cycle", "cycleTo": "implement", "maxLaps": 2,
-      "coding": true, "needsPort": true,
-      "skills": ["local-browser-verify"],
+      "name": "verify",
+      "n": 6,
+      "kind": "session",
+      "tier": "standard",
+      "cwd": "worktree",
+      "maxTurns": 450,
+      "timeoutMin": 150,
+      "_why_turns": "Measured live: driving webpack + the real login form through Bash-run Playwright costs ~12 turns per case, so the cap must scale with the list. A 20-case list (run #6) exhausted a 200-turn cap at case 17 and was salvaged from partial \u2014 an incomplete verdict that still gates the merge. 300 turns / 120 min fits a 20-case list with headroom; a verify that dies at max_turns produces a partial artifact, and the cycle it triggers re-pays implement and review for what was only a budget problem.",
+      "writes": [
+        "worktree",
+        "run",
+        "artifacts"
+      ],
+      "onFail": "cycle",
+      "cycleTo": "implement",
+      "maxLaps": 2,
+      "coding": true,
+      "needsPort": true,
+      "skills": [
+        "local-browser-verify"
+      ],
       "artifact": "verify.json"
     },
     {
-      "name": "ui-evidence", "n": 7, "kind": "session", "tier": "standard",
-      "cwd": "worktree", "maxTurns": 80, "timeoutMin": 40,
-      "writes": ["run", "artifacts"], "onFail": "warn", "needsPort": true, "group": "package",
-      "skills": ["ui-evidence-pack"],
+      "name": "ui-evidence",
+      "n": 7,
+      "kind": "session",
+      "tier": "standard",
+      "cwd": "worktree",
+      "maxTurns": 80,
+      "timeoutMin": 40,
+      "writes": [
+        "run",
+        "artifacts"
+      ],
+      "onFail": "warn",
+      "needsPort": true,
+      "group": "package",
+      "skills": [
+        "ui-evidence-pack"
+      ],
       "artifact": "ui-evidence.json"
     },
     {
-      "name": "mr", "n": 8, "kind": "session", "tier": "standard",
-      "cwd": "worktree", "maxTurns": 40, "timeoutMin": 15,
-      "writes": ["run"], "onFail": "abort", "group": "package",
-      "_why_group": "ui-evidence drives the browser on the leased port while mr pushes the branch and writes the MR — disjoint tools, disjoint writes, both read-only on the diff. Running them together hides the screenshot pass inside the MR pass's wall clock.",
-      "skills": ["mr-metadata", "mr-change-logger"],
+      "name": "mr",
+      "n": 8,
+      "kind": "session",
+      "tier": "standard",
+      "cwd": "worktree",
+      "maxTurns": 40,
+      "timeoutMin": 15,
+      "writes": [
+        "run"
+      ],
+      "onFail": "abort",
+      "group": "package",
+      "_why_group": "ui-evidence drives the browser on the leased port while mr pushes the branch and writes the MR \u2014 disjoint tools, disjoint writes, both read-only on the diff. Running them together hides the screenshot pass inside the MR pass's wall clock.",
+      "skills": [
+        "mr-metadata",
+        "mr-change-logger"
+      ],
       "artifact": "mr.json"
     },
     {
-      "name": "merge", "n": 9, "kind": "code",
-      "timeoutMin": 10, "onFail": "blocked",
-      "_why": "Code, not a session, and now the LAST phase. No model holds a merge tool, so v1's label-guard approval check has nothing to guard — and with deploy, qa, demo, memorize and document removed, the pipeline's definition of done is 'merged into the base branch'. The success notes this phase posts to the ticket and the MR are therefore the run's only durable record besides the MR itself; the exit label swap still happens in finish(), which is where every terminal status has always been decided."
+      "name": "merge",
+      "n": 9,
+      "kind": "code",
+      "timeoutMin": 10,
+      "onFail": "blocked",
+      "_why": "Code, not a session, and now the LAST phase. No model holds a merge tool, so v1's label-guard approval check has nothing to guard \u2014 and with deploy, qa, demo, memorize and document removed, the pipeline's definition of done is 'merged into the base branch'. The success notes this phase posts to the ticket and the MR are therefore the run's only durable record besides the MR itself; the exit label swap still happens in finish(), which is where every terminal status has always been decided."
     },
     {
-      "name": "remediate", "n": 10, "kind": "session", "tier": "heavy",
-      "cwd": "conductor", "maxTurns": 60, "timeoutMin": 30,
-      "writes": ["run"], "onFail": "warn", "onDemand": true,
+      "name": "remediate",
+      "n": 10,
+      "kind": "session",
+      "tier": "heavy",
+      "cwd": "conductor",
+      "maxTurns": 60,
+      "timeoutMin": 30,
+      "writes": [
+        "run"
+      ],
+      "onFail": "warn",
+      "onDemand": true,
       "artifact": "remediate.json",
-      "skills": ["self-remediation"],
-      "_why": "ON DEMAND, and that field is the design: the main loop never schedules this phase, the conductor invokes it when another phase blocks. It exists because nearly every block this pipeline has produced was ENVIRONMENTAL and not a defect — a credential the demo snapshot does not carry, an account missing the group a feature is gated behind, a wedged MCP spawn that left a session with no tools at all, a turn cap that fitted the work when it was written. Those are diagnosable without a person, and the alternative is a watcher logging 'blocked cooldown' once a minute until someone runs an unblock command by hand. HEAVY tier because this is diagnosis from indirect evidence — a turn count, an absent artifact, a reason line — which is precisely the job a cheaper model does badly: it pattern-matches to the last failure it saw. cwd 'conductor' because the cause is almost never inside the ticket's worktree, and a phase that cannot see the diff cannot be tempted to fix it. writes 'run' only, so its repairs are ACTIONS on the environment rather than edits to this repo; config/ and src/ are denied to every phase by the write-scope hook in any case, which is why a too-small turn cap comes back as humanNeeded rather than as a patch. onFail 'warn' because a remediation that fails leaves the run exactly as blocked as it already was — making that an abort would give the recovery path teeth the thing it recovers from does not have."
+      "skills": [
+        "self-remediation"
+      ],
+      "_why": "ON DEMAND, and that field is the design: the main loop never schedules this phase, the conductor invokes it when another phase blocks. It exists because nearly every block this pipeline has produced was ENVIRONMENTAL and not a defect \u2014 a credential the demo snapshot does not carry, an account missing the group a feature is gated behind, a wedged MCP spawn that left a session with no tools at all, a turn cap that fitted the work when it was written. Those are diagnosable without a person, and the alternative is a watcher logging 'blocked cooldown' once a minute until someone runs an unblock command by hand. HEAVY tier because this is diagnosis from indirect evidence \u2014 a turn count, an absent artifact, a reason line \u2014 which is precisely the job a cheaper model does badly: it pattern-matches to the last failure it saw. cwd 'conductor' because the cause is almost never inside the ticket's worktree, and a phase that cannot see the diff cannot be tempted to fix it. writes 'run' only, so its repairs are ACTIONS on the environment rather than edits to this repo; config/ and src/ are denied to every phase by the write-scope hook in any case, which is why a too-small turn cap comes back as humanNeeded rather than as a patch. onFail 'warn' because a remediation that fails leaves the run exactly as blocked as it already was \u2014 making that an abort would give the recovery path teeth the thing it recovers from does not have."
     },
     {
-      "name": "mr-feedback", "n": 11, "kind": "session", "tier": "heavy",
-      "cwd": "worktree", "maxTurns": 60, "timeoutMin": 25,
-      "writes": ["run"], "onFail": "blocked", "onDemand": true,
+      "name": "mr-feedback",
+      "n": 11,
+      "kind": "session",
+      "tier": "heavy",
+      "cwd": "worktree",
+      "maxTurns": 60,
+      "timeoutMin": 25,
+      "writes": [
+        "run"
+      ],
+      "onFail": "blocked",
+      "onDemand": true,
       "skills": [],
       "artifact": "mr-feedback.json",
-      "_why": "ON DEMAND: the merge phase finds new review threads on the run's MR and the runner invokes this to decide what each one needs — fix, already-done, question or decline. HEAVY because declining a reviewer or answering a question from the code is judgement, and a wrong 'fix' costs a full implement→verify lap. cwd 'worktree' so it reads the actual diff; writes 'run' only and no GitLab write tools (phase.ts), so it can neither change the code nor post — the conductor replies after the fixes are verified. onFail 'blocked' because an untriaged comment is a reviewer nobody answered; infra deaths still retry for free, since re-entering merge re-detects the same threads. See src/mrfeedback and config/mr-feedback.json."
+      "_why": "ON DEMAND: the merge phase finds new review threads on the run's MR and the runner invokes this to decide what each one needs \u2014 fix, already-done, question or decline. HEAVY because declining a reviewer or answering a question from the code is judgement, and a wrong 'fix' costs a full implement\u2192verify lap. cwd 'worktree' so it reads the actual diff; writes 'run' only and no GitLab write tools (phase.ts), so it can neither change the code nor post \u2014 the conductor replies after the fixes are verified. onFail 'blocked' because an untriaged comment is a reviewer nobody answered; infra deaths still retry for free, since re-entering merge re-detects the same threads. See src/mrfeedback and config/mr-feedback.json."
     }
   ]
 }

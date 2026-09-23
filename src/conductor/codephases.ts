@@ -1214,3 +1214,101 @@ async function recordSuccess(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<voi
     }, { runId: ctx.runId });
   });
 }
+
+/**
+ * Open the merge request as soon as the code exists, not at the end.
+ *
+ * The test-case gate asks a person to approve a list of scenarios, and until
+ * this phase existed it asked at phase 4 while the MR was not opened until
+ * phase 8. The reviewer was therefore asked to approve test cases for a change
+ * they had no way to read: the code was a commit in a worktree on one laptop.
+ * Opening here puts a real diff in front of them for every gate that follows.
+ *
+ * DRAFT, deliberately. At this point the change has not been reviewed, verified
+ * in a browser, or evidenced — an ordinary MR would be an invitation to merge
+ * exactly the code the remaining phases exist to check. `mr` (phase 8) takes the
+ * draft status off once it has written the real description, which is also what
+ * keeps `merge` from meeting a draft it cannot merge.
+ *
+ * Idempotent by recheck, like every other code phase: an MR already open for
+ * this branch is reused and its iid returned, so a resumed run cannot produce a
+ * second MR for one branch.
+ *
+ * Failure here is a WARN, not an abort. An early MR is a convenience for the
+ * humans reading the gates; `mr` still opens one at phase 8 if this could not.
+ * A run must not die because a courtesy push failed.
+ */
+export async function mrOpenPhase(
+  ctx: CodePhaseCtx,
+): Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }> {
+  const journal = readJournal(ctx.iid) ?? ctx.journal;
+  const branch = journal.branch;
+  const worktree = journal.worktree;
+  if (!branch || !worktree) {
+    return { ok: false, error: 'no leased branch or worktree — nothing to open an MR from' };
+  }
+
+  const base = projectConfig().branches.base;
+
+  try {
+    execFileSync('git', ['-C', worktree, 'push', '-u', 'origin', branch], {
+      encoding: 'utf8', stdio: 'pipe', timeout: 120_000,
+    });
+  } catch (err) {
+    return { ok: false, error: `could not push ${branch}: ${(err as Error).message.slice(0, 200)}` };
+  }
+
+  const existing = await findMergeRequests({ sourceBranch: branch, state: 'opened' });
+  const found = existing.ok ? (existing.data ?? [])[0] : undefined;
+  if (found) {
+    updateJournal(ctx.iid, { mrIid: found.iid, mrUrl: found.web_url });
+    updateRun(ctx.runId, { mr_iid: found.iid });
+    return {
+      ok: true,
+      data: {
+        mrIid: found.iid,
+        mrUrl: found.web_url,
+        draft: found.title.startsWith('Draft:'),
+        summary: `Reused the merge request already open for ${branch}.`,
+      },
+    };
+  }
+
+  const impl = readArtifact<{ filesChanged?: string[] }>(ctx.iid, 'implement.json');
+  const files = impl?.filesChanged ?? [];
+  const made = await createMergeRequest({
+    sourceBranch: branch,
+    targetBranch: base,
+    // GitLab's own marker. `mr` removes this prefix when the change is ready.
+    title: `Draft: ${journal.title ?? `#${ctx.iid}`}`,
+    description: [
+      `Closes #${ctx.iid}.`,
+      '',
+      'Opened early, while the run is still working, so the change can be read during the',
+      'test-case and review gates. The description below is a placeholder — the `mr` phase',
+      'replaces it with the engineering record and takes the Draft marker off.',
+      '',
+      `Files changed so far: ${files.length}`,
+      ...files.map((f) => `- \`${f}\``),
+    ].join('\n'),
+  });
+
+  if (!made.ok) {
+    return { ok: false, error: `createMergeRequest failed: ${made.error?.slice(0, 200) ?? made.status}` };
+  }
+  // DRY_RUN returns ok with no data: there is no MR, and nothing should be
+  // written to the journal as though there were.
+  if (!made.data) return { ok: true, data: { summary: '[dry-run] would have opened the MR' } };
+
+  updateJournal(ctx.iid, { mrIid: made.data.iid, mrUrl: made.data.web_url });
+  updateRun(ctx.runId, { mr_iid: made.data.iid });
+  return {
+    ok: true,
+    data: {
+      mrIid: made.data.iid,
+      mrUrl: made.data.web_url,
+      draft: true,
+      summary: `Opened draft !${made.data.iid} from ${branch} into ${base}.`,
+    },
+  };
+}

@@ -234,6 +234,31 @@ function mcpServers(): Record<string, unknown> {
   };
 }
 
+/**
+ * The managed app login, for the phases that can actually reach an app.
+ *
+ * The harness logs the app in ITSELF, reading this variable directly
+ * (harness.cjs:150). A phase's environment is an allowlist, and this variable was
+ * in none of its sources — not BASE_ENV, not phaseEnv() — so it reached no phase at
+ * all and every harness login raised E_NO_CREDENTIALS however good the account was.
+ *
+ * That is not a session failing to find a workaround. The reproduction prompt tells
+ * the agent to "log in with the harness exactly as the skill says" and never renders
+ * a password, so the instruction could not be followed by any route. Reproduction
+ * then took its documented way out — record 'inconclusive' when login keeps failing
+ * — so every ticket labelled for reproduction came back inconclusive with an empty
+ * `account`, which reads like a model giving up rather than a variable never passed.
+ *
+ * WORKTREE phases only: the app it unlocks exists nowhere else. And deliberately not
+ * rendered into a prompt the way `verify`'s block does — the harness needs the value,
+ * the session does not, and a prompt is transcribed. envOr() screens placeholders, so
+ * an unedited `.env.example` line stays unset rather than arriving as a fake login.
+ */
+export function testLoginEnv(worktree?: string): Record<string, string> {
+  const raw = envOr('ONESHOT_TEST_LOGIN');
+  return worktree && raw ? { ONESHOT_TEST_LOGIN: raw } : {};
+}
+
 export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   const { cfg, iid, runId, lap } = input;
   const model = modelFor(cfg);
@@ -261,6 +286,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     // it, and conductor phases run at ROOT where a bare `node -e` still needs
     // the path. NODE_PATH is Node's documented fallback for exactly this.
     NODE_PATH: join(ROOT, 'node_modules'),
+    ...testLoginEnv(input.worktree),
   };
 
   // Two ways a phase ends early, and they are not the same failure. The timer
