@@ -148,7 +148,9 @@ export interface ProjectConfig {
    * Repo-relative path fragments whose modules are too consequential to ship
    * unwatched. A run whose plan or diff touches one gets the `Review` label's
    * gates whether or not anybody remembered to apply the label — see
-   * `highScrutinyHits()` in src/conductor/reviewgate.ts. Empty disables it.
+   * `highScrutinyHits()` in src/conductor/reviewgate.ts. Derived at load from the
+   * `paths` of every module in config/risk-modules.json, so emptying this array
+   * disables nothing — drop a module's `paths` there instead.
    */
   highScrutinyPaths: string[];
   preserveLabels: string[];
@@ -248,8 +250,8 @@ export function projectConfig(): ProjectConfig {
     const idOverride = envOr('ONESHOT_PROJECT_ID');
     if (idOverride) c.gitlab.projectId = Number(idOverride);
     // Shared with the Plane triage router, so the gates and the routing can never disagree.
-    const risk = loadJson<{ modules: Array<{ paths: string[] }> }>('risk-modules.json');
-    c.highScrutinyPaths = [...new Set([...(c.highScrutinyPaths ?? []), ...risk.modules.flatMap((m) => m.paths)])];
+    const risk = loadJson<{ modules: Array<{ paths?: string[] }> }>('risk-modules.json');
+    c.highScrutinyPaths = [...new Set([...(c.highScrutinyPaths ?? []), ...risk.modules.flatMap((m) => m.paths ?? [])])];
     _project = c;
   }
   return _project;

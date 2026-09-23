@@ -188,9 +188,10 @@ notification and never a verdict.
    must not bury the merge refusals that are.
 **The label is not the only trigger.** A person applies it, so it is forgettable — and the
 tickets most worth pausing on are exactly the ones nobody remembers to label. So the gates also
-arm themselves when a run *touches* anything in `highScrutinyPaths` (config/project.json):
-`apps/auth/`, `apps/payroll/`, `apps/leaves/`, `apps/project_logs/`, `common/permissions.py` —
-the same paths the ERP's own `security.md` marks "escalate immediately".
+arm themselves when a run *touches* anything in `highScrutinyPaths`: the `paths` of every module
+in `config/risk-modules.json`. That list now reaches past the paths the ERP's own `security.md`
+marks "escalate immediately" — `apps/invoices/` and `apps/costing/` are gated without being named
+there, and the widening is the point.
 
 The check runs against what the run has declared it will touch: the `files` on each plan step at
 the plan gate, plus `implement`'s reported `filesChanged` by the test-case gate. Evaluating it
@@ -198,7 +199,8 @@ twice is deliberate — a plan that swore off payroll and a diff that edited it 
 the case worth catching, and only the second evaluation sees it. When paths arm the gates,
 `reviewMode` is persisted on the journal so the pure-code `merge` phase honours a pause no label
 ever asked for, and the request says which path armed it rather than claiming a label that is not
-there. Empty the array to switch the behaviour off.
+there. To disarm a module's trigger, remove its `paths` in `config/risk-modules.json` — emptying
+`highScrutinyPaths` in config/project.json does nothing, the module paths are merged in at load.
 
 **Comment `approved`** (that exact word, case-insensitive, trimmed — not a substring of a longer
 reply) **on the ticket** to release a pause. It only counts from an account in that gate's own

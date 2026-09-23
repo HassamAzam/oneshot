@@ -122,8 +122,9 @@ export function reviewAllRuns(): boolean {
  *
  * Substring matching against repo-relative paths, deliberately: `apps/payroll/`
  * should catch everything beneath it, and a pattern list is easier to audit
- * than a set of regexes nobody can read. Configured per project, and an empty
- * list turns the whole behaviour off.
+ * than a set of regexes nobody can read. Configured per project, and derived at
+ * load from the `paths` of every module in config/risk-modules.json — dropping a
+ * module's `paths` there is what disarms it.
  */
 export function highScrutinyHits(files: string[]): string[] {
   const guarded = projectConfig().highScrutinyPaths ?? [];

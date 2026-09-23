@@ -91,10 +91,9 @@ function will duplicate. The `planning-methodology` and `util-reuse-methodology`
 carry the search patterns.
 
 The plan is a handful of steps naming real files and real symbols. If it needs a schema
-migration, or it touches `apps/auth/`, `apps/payroll/`, `apps/leaves/`,
-`common/permissions.py` or the login components, **stop and confirm before implementing**
-— those are the high-scrutiny paths and the ticket most worth pausing on is the one
-nobody remembered to label.
+migration, or it touches any path listed in `config/risk-modules.json`, **stop and confirm
+before implementing** — those are the high-scrutiny paths and the ticket most worth pausing
+on is the one nobody remembered to label.
 
 ## 3. Implement — through the agents, with the standards loaded
 
