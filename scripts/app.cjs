@@ -62,8 +62,10 @@ const list = (k, d) => cfg(k, d).split(',').map((s) => s.trim()).filter(Boolean)
  *
  * A target WINS over the matching env var, matching the TypeScript side: the
  * switch exists so one line in .env moves everything, and a machine that has
- * been working on the default already spells WORK_REPO out. An unknown name
- * throws rather than silently working on the default project.
+ * been working on the default already spells WORK_REPO out. The target-scoped
+ * ONESHOT_<TARGET>_<VAR> wins over BOTH, which is how a checkout that is not
+ * where config/project.json says says so. An unknown name throws rather than
+ * silently working on the default project.
  */
 const TARGET_NAME = String(process.env.ONESHOT_PROJECT || '').trim().toLowerCase();
 const TARGET = (() => {
@@ -80,9 +82,20 @@ const TARGET = (() => {
   return found;
 })();
 
-/** Target first, then the env var, then the built-in default. */
-const targetPath = (fromTarget, key, dflt) =>
-  path.resolve(expand(fromTarget || cfg(key, dflt)));
+/**
+ * The per-machine escape hatch for a path a target pins, mirroring
+ * scopedEnvName() in src/lib/config.ts. A leading ONESHOT_ is stripped before
+ * scoping, so ONESHOT_SEED_FROM scopes to ONESHOT_ERP_SEED_FROM.
+ */
+const scopedEnvName = (key) =>
+  `ONESHOT_${TARGET_NAME.replace(/[^a-z0-9]+/gi, '_').toUpperCase()}`
+  + `_${key.replace(/^ONESHOT_/, '')}`;
+
+/** Scoped env first, then the target, then the plain env, then the default. */
+const targetPath = (fromTarget, key, dflt) => {
+  const scoped = TARGET_NAME ? cfg(scopedEnvName(key), '') : '';
+  return path.resolve(expand(scoped || fromTarget || cfg(key, dflt)));
+};
 
 const WORK_REPO = targetPath(TARGET.workRepo, 'WORK_REPO', '~/Documents/workstreamai');
 const SEED_FROM = targetPath(TARGET.seedFrom, 'ONESHOT_SEED_FROM', WORK_REPO);
@@ -1024,7 +1037,8 @@ async function main() {
   gc [--all] [--kill]  find orphaned servers; --kill actually stops them (dry-run default)
   down --all | --worktree <path>
 
-Environment: WORK_REPO, ONESHOT_SEED_FROM, WT_ROOT, ONESHOT_APP_PORTS,
+Environment: ONESHOT_PROJECT, WORK_REPO, ONESHOT_SEED_FROM, WT_ROOT, ONESHOT_APP_PORTS,
+             ONESHOT_<TARGET>_WORK_REPO|_SEED_FROM|_WT_ROOT  (per-machine, beats the target)
              ONESHOT_SEED_LINKS, ONESHOT_SEED_COPIES, ONESHOT_RUN_DIR|ONESHOT_IID`);
     }
   } catch (err) {
