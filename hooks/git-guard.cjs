@@ -164,10 +164,10 @@ const TREE_WRITES = new Set([
  * A phase that stands in the worktree without the right to write to it —
  * research, plan, testcases, review, ui-evidence, mr — must not reach the
  * files through git either. write-scope.cjs refuses its Edit/Write, and until
- * this check Bash was the way round that: ticket #189's ui-evidence ran
- * `git checkout <parent> -- templates/...` in the ticket's own worktree to
- * stage a "before" screenshot, with the fix reverted on disk until it thought
- * to restore it. Had the session died in between, `mr` would have pushed the
+ * this check Bash was the way round that: a ui-evidence session ran
+ * `git checkout <parent> -- <paths>` in the ticket's own worktree to stage a
+ * "before" screenshot, with the fix reverted on disk until it thought to
+ * restore it. Had the session died in between, `mr` would have pushed the
  * revert. Push is not in the set: `mr` exists to push commits that implement
  * already made, and checkPush governs where they may go.
  */

@@ -61,9 +61,9 @@ test('the ticket comment carries the evidence and how to overrule', () => {
 
 test('the Slack post names the ticket, the commit and the label', () => {
   const repro = reproductionOf({ reproduction: complete })!;
-  const text = notABugSlackText(179, 'Keyboard focus obscured', repro, 'Not a Bug');
-  assert.match(text, /#179 Keyboard focus obscured/);
+  const text = notABugSlackText(123, 'Keyboard focus obscured', repro, 'Not a Bug');
+  assert.match(text, /#123 Keyboard focus obscured/);
   assert.match(text, /`7a21bb0c`/);
   assert.match(text, /labelled \*Not a Bug\*/);
-  assert.match(text, /issues\/179/);
+  assert.match(text, /issues\/123/);
 });

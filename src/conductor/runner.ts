@@ -464,7 +464,7 @@ function logStopDetail(journal: RunJournal, headline: string): void {
  * more case, appended, no session spent. The same comment with no sign-off is a
  * REVISION request, and append is the one verb that cannot express "TC-05 is
  * replaced by the three below": it leaves TC-05 in place and files the sentence
- * itself as a case. That is how workstreamai#87 reached 44 cases from 20.
+ * itself as a case. That is how one list reached 44 cases from 20.
  *
  * `revise` therefore cycles the `testcases` phase, the way the plan gate has
  * always cycled `plan` — a model re-reads the list with the reviewer's words in
@@ -497,7 +497,7 @@ export function nextIndex(
     // A retry means "run it again", and runOne() has already taken the phase
     // out of `forced` at its start. Without putting it back, a phase that
     // succeeded on an EARLIER lap reads as done and shouldSkip() passes the
-    // retry by: #168's re-plan against reviewer feedback died of infra, was
+    // retry by: a re-plan against reviewer feedback died of infra, was
     // skipped, and the old plan was re-published for approval as though it
     // were the revision. The same hole skips an implement retry inside a
     // review cycle, and an infra re-attempt of any phase that had passed.
@@ -983,7 +983,7 @@ export async function runTicket(
     // removed and replaced by the three cases below" — and append is the one
     // verb that cannot express it. Appending that sentence produced a case
     // reading `Verify that TC-05 is removed and replaced by...` while TC-05
-    // itself stayed, and took workstreamai#87 from 20 cases to 44.
+    // itself stayed, and took the list from 20 cases to 44.
     //
     // So feedback cycles the phase, the way the plan gate already does: the
     // `testcases` session re-enters with the reviewer's words in its prompt and
@@ -1155,7 +1155,7 @@ export async function runTicket(
       //
       // Except when it executed nothing. A list that is ALL 'skipped' is not a
       // verdict on the environment or the change — it is a session that spent
-      // its budget before the first case (ticket #189: the whole lap went on
+      // its budget before the first case (observed: the whole lap went on
       // server bring-up, and the block said the change was "broken end to end"
       // when the servers it left behind were answering correctly). That is the
       // shape of an infra death, so it takes the free re-attempt, and only a
@@ -1660,7 +1660,7 @@ export async function runTicket(
     // policy, which was worse than stopping: failedLapsOf() does not count
     // infra records, so a phase that kept hanging never used up maxLaps or
     // maxRetries, and every further death cycled back to implement — a lap
-    // that cannot fix a dead connection — forever. Seen on #179: four verify
+    // that cannot fix a dead connection — forever. Seen live: four verify
     // hangs, 12h, and implement re-run with nothing to change.
     if (infra && p.onFail !== 'skip' && p.onFail !== 'warn') {
       const spent = infraAttemptsOf(iid, p.name);

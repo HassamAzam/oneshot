@@ -92,7 +92,7 @@ const PROGRESS_EVERY_MS = 60_000;
 /**
  * No stream frame for this long means the session is stalled, not slow.
  *
- * Observed live on #179: a verify session's stream went silent mid-response —
+ * Observed live: a verify session's stream went silent mid-response —
  * one ESTABLISHED socket, 0% CPU, the API answering fresh requests in 0.1s —
  * and the phase waited out its whole 150m wall clock for a reply that was never
  * coming, four times in one night. The only legitimate frameless stretch is a
@@ -300,7 +300,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   // frames (a hung MCP call, a child that never returns), the consume loop
   // below never advances and the phase promise never settles — so the
   // conductor deadlocks forever awaiting a phase that cannot die (observed
-  // live: run #18 verify sat wedged 4h past its own 120m timeout). After ANY
+  // live: a verify session sat wedged 4h past its own 120m timeout). After ANY
   // abort we therefore arm a short grace timer that force-settles the phase
   // even when the stream refuses to unwind. The abandoned subprocess is reaped
   // separately; the invariant this restores is that the conductor always gets
@@ -436,9 +436,9 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       // `error_max_turns` — hiding the real cause and wasting the budget.
       //
       // `settled` is deliberately NOT flipped here. Leaving it false lets the
-      // post-loop "phase never reached a result frame" fallback introduced in
-      // #20 record the real turns this session already spent before the cap
-      // hit — otherwise a rate-limited phase would land in `quota_usage` as
+      // post-loop "phase never reached a result frame" fallback record the real
+      // turns this session already spent before the cap hit — otherwise a
+      // rate-limited phase would land in `quota_usage` as
       // weighted: 0 for the very tokens that got us rate-limited in the first
       // place. Later result frames can't clobber anything because we break out
       // of the iterator immediately below.

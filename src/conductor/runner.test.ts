@@ -32,14 +32,14 @@ const skips = (forced: Set<string>, settled: string[], name: string): boolean =>
 
 test('a retry re-runs a phase that already succeeded on an earlier lap', () => {
   const forced = new Set<string>();
-  // #168: plan passed, the run cycled back, and the re-plan against reviewer
+  // The case: plan passed, the run cycled back, and the re-plan against reviewer
   // feedback died of infra. afterFailure() returns a retry at plan's index —
   // which reached a phase with a succeeded record on it.
   const i = nextIndex({ kind: 'retry', at: at('plan') }, at('plan'), at('plan'), LIST, forced);
 
   assert.equal(i, at('plan'));
   assert.equal(skips(forced, ['research', 'plan'], 'plan'), false,
-    'the retried phase was skipped as already-done — this is the #168 defect');
+    'the retried phase was skipped as already-done — this is the defect');
 });
 
 test('a retry forces only the retried phase, so a grouped retry runs solo', () => {
@@ -121,7 +121,7 @@ test('nothing holds a run that is not waiting on a human merge', () => {
   assert.equal(poll({ lastCheckAt: undefined }), null, 'never asked GitLab yet: ask now');
 });
 
-// workstreamai#87: the reviewer wrote "TC-05 is removed and replaced by the
+// The case: the reviewer wrote "TC-05 is removed and replaced by the
 // three separate cases below". Appending that produced a case reading `Verify
 // that TC-05 is removed and replaced by...`, left TC-05 in place, and took the
 // list from 20 cases to 44. A revision has to reach a model, and the only way

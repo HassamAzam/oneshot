@@ -405,7 +405,7 @@ const summarize = (i) => ({
  * Resolve what the caller means by "this MR" into a sha that exists locally.
  *
  *   !123 / MR!123 / mr/123     GitLab merge request head
- *   #45  / PR#45               GitHub pull request head
+ *   #123 / PR#123              GitHub pull request head
  *   <branch> / <sha>           whatever it says
  *
  * Fetched into the SEED repo because every worktree shares its object database, so one
