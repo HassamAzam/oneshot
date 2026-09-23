@@ -34,7 +34,11 @@ export interface GitlabResult<T> {
  *
  * GITLAB_READ_TOKEN still wins for reads when set, because a read-only PAT is a
  * sensible thing to scope down and it changes no identity: the writes that
- * attribute work are what matter.
+ * attribute work are what matter. It does change VISIBILITY, which is the part
+ * this reasoning originally missed — a read token with no membership on the
+ * project reads an empty board rather than an error, and the desk then claims
+ * nothing while looking healthy. checkReadAccess() below refuses to start on
+ * exactly that.
  */
 function token(): string {
   const read = envOr('GITLAB_READ_TOKEN');
@@ -128,6 +132,65 @@ export async function issuesWithEntryLabel(): Promise<GitlabResult<Issue[]>> {
     'GET',
     `/projects/${projectId()}/issues?state=opened&labels=${label}&per_page=50&order_by=updated_at&sort=asc`,
   );
+}
+
+export interface ReadAccessCheck {
+  /** False only when the read token is provably a non-member of the project. */
+  ok: boolean;
+  /** Whether GITLAB_READ_TOKEN is set at all — nothing to check when it is not. */
+  scoped: boolean;
+  project: string;
+  reason?: string;
+}
+
+/**
+ * Verify that the token doing the READS can actually see this project's board.
+ *
+ * GITLAB_READ_TOKEN wins over the desk credential for every read. Scoping a
+ * read PAT down is sensible; scoping it out of the project entirely is not, and
+ * the two are indistinguishable from the conductor's side. GitLab answers a
+ * list endpoint for a non-member with 200 and an EMPTY ARRAY — never 403 — so
+ * `issuesWithEntryLabel()` comes back clean and empty, the watcher reports "no
+ * tickets carry the entry label", and the desk claims nothing while the banner
+ * prints the project and an identity resolved from a DIFFERENT token. Every
+ * line of that is green. This is the check that tells the two apart.
+ *
+ * `permissions.project_access` is the discriminator rather than the status
+ * code: an internal-visibility project answers 200 to a non-member, and both
+ * access fields come back null only when there is no membership behind the
+ * token.
+ *
+ * Deliberately NOT fatal on a network or auth failure. The conductor already
+ * survives an offline laptop, and refusing to boot because a VPN was down would
+ * trade a silent failure for a noisy one that is just as wrong.
+ */
+export async function checkReadAccess(): Promise<ReadAccessCheck> {
+  const project = projectConfig().gitlab.project;
+  if (!envOr('GITLAB_READ_TOKEN')) return { ok: true, scoped: false, project };
+
+  const res = await call<{
+    permissions?: { project_access?: unknown; group_access?: unknown };
+  }>('GET', `/projects/${projectId()}`);
+
+  if (!res.ok) {
+    return {
+      ok: true,
+      scoped: true,
+      project,
+      reason: `could not be verified (${res.kind}, HTTP ${res.status})`,
+    };
+  }
+
+  const perms = res.data?.permissions;
+  if (perms && (perms.project_access ?? perms.group_access) == null) {
+    return {
+      ok: false,
+      scoped: true,
+      project,
+      reason: 'the token has no membership on the project, so every board read returns empty',
+    };
+  }
+  return { ok: true, scoped: true, project };
 }
 
 export interface IssueNote {
