@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  judgePrompt, normaliseScorecard, points, skillsInvoked, transcriptResult, type EvalSet,
+  consensus, judgePrompt, normaliseScorecard, points, skillsInvoked, transcriptResult,
+  type EvalSet, type Scorecard, type Verdict,
 } from './score.js';
 
 const evals: EvalSet = {
@@ -49,4 +50,67 @@ test('the judge prompt carries every checklist item and the plan itself', () => 
   const p = judgePrompt(evals, { summary: 'move the dot' });
   for (const i of evals.items) assert.match(p, new RegExp(`### ${i.id}`));
   assert.match(p, /"summary": "move the dot"/);
+});
+
+// ------------------------------------------------- agreeing with itself
+
+/**
+ * Judging the same plan three times gave 5.5, 4.0 and 4.5 out of 8 — and every
+ * point of that spread came from two items, both of which offer the judge a
+ * second way to score caught. The other six were identical all three times. So
+ * the instability is a property of particular items, and a single run cannot
+ * tell a stable verdict from a coin flip. consensus() reports both.
+ */
+const card = (...verdicts: Verdict[]): Scorecard => ({
+  items: verdicts.map((v, n) => ({ id: `t-${n + 1}`, verdict: v, evidence: `e${n}` })),
+  notes: '',
+});
+
+test('an item every run agreed on is reported at full agreement', () => {
+  const c = consensus([card('caught'), card('caught'), card('caught')]);
+
+  assert.equal(c.items[0]!.verdict, 'caught');
+  assert.equal(c.items[0]!.agreement, 3);
+  assert.equal(c.items[0]!.runs, 3);
+  assert.deepEqual(c.items[0]!.dissent, []);
+});
+
+test('a split item takes the majority, and records what the others said', () => {
+  const c = consensus([card('missed'), card('caught'), card('missed')]);
+
+  assert.equal(c.items[0]!.verdict, 'missed');
+  assert.equal(c.items[0]!.agreement, 2);
+  assert.deepEqual(c.items[0]!.dissent, ['caught']);
+});
+
+test('a three-way split resolves to the worst verdict, never the flattering one', () => {
+  // Nothing breaks a tie on the evidence, so it breaks toward not claiming credit.
+  const c = consensus([card('caught'), card('partial'), card('missed')]);
+
+  assert.equal(c.items[0]!.verdict, 'missed');
+  assert.equal(c.items[0]!.agreement, 1);
+});
+
+test('the spread across runs is reported, because its width is the real result', () => {
+  const c = consensus([
+    card('caught', 'caught'), // 2.0
+    card('caught', 'missed'), // 1.0
+    card('caught', 'partial'), // 1.5
+  ]);
+
+  assert.equal(c.runs, 3);
+  assert.deepEqual(c.scores, [2, 1, 1.5]);
+  assert.equal(c.spread, 1);
+  assert.equal(c.mean, 1.5);
+});
+
+test('a single run still works, and claims agreement of one rather than certainty', () => {
+  const c = consensus([card('caught')]);
+
+  assert.equal(c.items[0]!.agreement, 1);
+  assert.equal(c.spread, 0);
+});
+
+test('consensus refuses an empty set rather than inventing a score of zero', () => {
+  assert.throws(() => consensus([]), /at least one/i);
 });
