@@ -10,9 +10,9 @@ import { join } from 'node:path';
 import {
   CONTEXT_REPO, PROJECT_TARGET, SKILLS_ROOT, WORK_REPO, WT_ROOT, seedFrom, targetOverrides,
   auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, phases, portPool,
-  projectConfig, reviewersConfig, slackConfig,
+  projectConfig, requiredLabels, reviewersConfig, slackConfig,
 } from '../src/lib/config.js';
-import { ping, listBranches } from '../src/lib/gitlab.js';
+import { ping, listBranches, listLabels } from '../src/lib/gitlab.js';
 import { slackEnabled, userIdForEmail, userIdForHandle } from '../src/lib/slack.js';
 import { checkIdentity } from '../src/lib/identity.js';
 import { otelStatus, promptTextExported } from '../src/lib/otel.js';
@@ -209,6 +209,27 @@ async function main(): Promise<void> {
           if (!found) { warn(`protected branch '${prot}' not found`, 'listed in config but absent'); continue; }
           if (!found.protected) fail(`'${prot}' is NOT protected on GitLab`, 'server-side protection is the real guarantee');
           else pass(`'${prot}' protected`);
+        }
+      }
+
+      // Every label this harness acts on, checked against the ones that exist.
+      //
+      // Each of these is matched by NAME and nothing raises when a name does
+      // not match: a swap writes a label the board never shows, and a
+      // `labelSkills` pair quietly stops routing, so the phase runs without
+      // the method it was configured to have. An absent label on a TICKET is
+      // an answer; a configured label absent from the PROJECT is a typo that
+      // no run will ever report.
+      const lb = await listLabels();
+      if (!lb.ok || !lb.data) {
+        warn('labels not verified', `could not list project labels (${lb.kind} HTTP ${lb.status})`);
+      } else {
+        const defined = new Set(lb.data.map((l) => l.name));
+        const needed = requiredLabels(cfg.labels, phases(), bugReproductionEnabled());
+        const absent = needed.filter((l) => !defined.has(l.name));
+        if (!absent.length) pass('every configured label exists on the project', `${needed.length} checked`);
+        for (const { name, why } of absent) {
+          fail(`label '${name}' does not exist on the project`, `${why} — it will never match, and nothing will say so`);
         }
       }
     } else if (p.kind === 'auth') {
