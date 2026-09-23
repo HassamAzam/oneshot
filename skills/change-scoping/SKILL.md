@@ -56,14 +56,26 @@ called. The helper's name you cannot.
   a failed guess.
 - Noun first, name second. Name searches are for confirming a candidate you
   already have, not for finding one.
-- Every candidate the sweep surfaced goes in `reuse` — the ones you rejected
-  too, with one line on why. A candidate found and silently dropped is
-  indistinguishable, to everyone downstream, from one you never found.
+- A candidate a reader would expect you to have used goes in `reuse` whether you
+  used it or not — the rejected ones with one line on why. A candidate found and
+  silently dropped is indistinguishable, to everyone downstream, from one you
+  never found. This is not a quota: it is the ones that would prompt "why didn't
+  you use X", not every file a grep touched.
 - Read what surrounds a hit. The function containing your identifier is the
   prior art, whatever it happens to be called.
 - Directory lists rot — in this file, in a prompt, in your memory of the repo.
   Locate a file by searching for what it must contain, not by where it should
   live.
+
+**What is not prior art.** An identifier sweep is densest exactly where it is
+worth least. Do not read, and do not record as candidates: migration history,
+vendored dependencies and lockfiles, build output and bundles, or fixtures and
+factories. Test helpers are not prior art for production code, nor the reverse.
+A framework or standard-library function is not a duplicate of the helper that
+wraps it.
+
+A field name appears in every historical migration that ever touched it, and
+none of them tells you what the code does today.
 
 ## 2. Prior art, before you write
 
@@ -114,8 +126,13 @@ decline it by answering a question rather than by rejecting the whole plan.
 
 ## 5. What your approach commits you to
 
-Two commitments that are cheap to make here and expensive to undo later:
+Three commitments that are cheap to make here and expensive to undo later:
 
+- **The tests that already cover this surface are the ones you extend.** Find
+  them the same way you found the prior art — search the identifiers, not a
+  directory — and name the files a step will touch. Extend them rather than
+  forking a parallel set beside them. If the surface has no test today, that is
+  itself a finding worth a line, not a silence.
 - **A lookup inside a loop is an N+1.** If narrowing a change requires
   per-record data, name where that data is prefetched and how it reaches the
   helper. A plan that adds a query to a bulk path without answering this has
@@ -123,6 +140,10 @@ Two commitments that are cheap to make here and expensive to undo later:
 - **A schema change is not a data change.** If the approach needs both, they are
   separate migrations. Say which you need, in which order, and whether each is
   reversible.
+
+Each of these applies only when the approach raises it: a change with no bulk
+path owes nothing on N+1, and one that touches no model owes nothing on
+migrations. State the ones that apply, not all three.
 
 ## 6. Where each finding lands
 
@@ -136,3 +157,27 @@ Two commitments that are cheap to make here and expensive to undo later:
 
 Nothing may be decided silently, and that includes what you discovered here
 rather than being handed by research.
+
+## 7. Turn economy
+
+This phase has a turn budget and it ends the run when it is spent — there is no
+partial plan. The sections above ask for searches, not for exhaustion, and the
+difference is the whole of this section.
+
+- **Batch the sweep.** One search covering several identifiers beats one search
+  each. You are looking for where a kind of logic lives, not building an index.
+- **Stop a line of search when it stops changing your answer.** Three files that
+  all say the same thing about a value have told you what the fourth says. The
+  sweep ends when the identifiers are covered, not when the repo is.
+- **Read a definition, not a file.** The function containing the hit is the
+  prior art; the other four hundred lines around it are not.
+- **Spend where being wrong is expensive.** A value an outside system receives,
+  a population the change silently widens, and a helper you are about to
+  duplicate are worth turns. Confirming something you already believe is not.
+- **An unknown recorded early is cheaper than a certainty bought late.** If a
+  question would cost more turns than it saves the approver, it belongs in
+  `openQuestions` with your assumed default, and you move on.
+
+A budget raised to cover this method is a ceiling, not a target. Finishing well
+under it with the identifiers covered is the phase working, not the phase
+cutting corners.
