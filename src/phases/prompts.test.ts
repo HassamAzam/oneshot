@@ -122,6 +122,23 @@ test('implement drops a plan-gated skill the plan rules out', () => {
   assert.ok(!got.includes('script-writing-standards'));
 });
 
+// ------------------------------------------- plan does not order frontend unit tests
+
+test('plan is told not to put a Jest or other frontend unit test in a step', () => {
+  // testcases and verify both already refuse Jest -- the toolchain has rotted and
+  // CI never runs it. plan did not, so it could still order one, and implement
+  // would then write code that nothing downstream will ever execute.
+  const prompt = promptFor(cfg('plan'), ctx(ticket()));
+  assert.match(prompt, /No step writes a Jest test, or any other frontend unit test/);
+});
+
+test('plan says where frontend behaviour is covered instead', () => {
+  // A prohibition with no alternative reads as "skip frontend coverage". It is
+  // Playwright, written by testcases against the real app.
+  const prompt = promptFor(cfg('plan'), ctx(ticket()));
+  assert.match(prompt, /Playwright cases/);
+});
+
 // ------------------------------------------- research's reproduction is gated
 
 test('the bug label puts the reproduction skill in front of research', () => {
