@@ -192,6 +192,76 @@ expect_allow "Read while paused"       pause-check.cjs '{"tool_name":"Read","too
 rm -f "$ROOT/state/PAUSE"
 expect_allow "Bash when not paused"    pause-check.cjs "$(bash_payload 'npm test')"
 
+# js-standards is PostToolUse, so it answers with {"decision":"block"} rather than a
+# permissionDecision — the allow/deny helpers above cannot read it.
+expect_block() {
+    local out; out="$(run "$2" "$3")"
+    if printf '%s' "$out" | grep -q '"decision":"block"'; then
+        green "  PASS  block: $1"; PASS=$((PASS+1))
+    else
+        red   "  FAIL  should have BLOCKED: $1"; FAIL=$((FAIL+1))
+    fi
+}
+
+expect_clean() {
+    local out; out="$(run "$2" "$3")"
+    if [ -z "$out" ] || ! printf '%s' "$out" | grep -q '"decision":"block"'; then
+        green "  PASS  clean: $1"; PASS=$((PASS+1))
+    else
+        red   "  FAIL  should have PASSED: $1"; FAIL=$((FAIL+1))
+    fi
+}
+
+echo
+echo "js-standards"
+mkdir -p "$ONESHOT_WORKTREE/common/utils" "$ONESHOT_WORKTREE/components/demo"
+
+cat > "$ONESHOT_WORKTREE/components/demo/Bad.js" <<'JSEOF'
+import axios from "axios";
+
+export const Row = () => <div style={{ marginLeft: 0 }}>hi</div>;
+JSEOF
+
+cat > "$ONESHOT_WORKTREE/components/demo/Dynamic.js" <<'JSEOF'
+import S from "./styles/demoStyles";
+
+export const Row = ({ statusColor, isActive }) => (
+    <div style={{ color: statusColor }}>
+        <span sx={{ ...S.tab, ...isActive ? S.tabActive : {} }} />
+    </div>
+);
+JSEOF
+
+cat > "$ONESHOT_WORKTREE/components/demo/Commented.js" <<'JSEOF'
+const note = "we do not import axios here";
+
+export const Row = () => <div>{note}</div>;
+JSEOF
+
+cat > "$ONESHOT_WORKTREE/components/demo/Schema.js" <<'JSEOF'
+import * as yup from "yup";
+
+export const schema = yup.object({ name: yup.string() });
+JSEOF
+
+cp "$ONESHOT_WORKTREE/components/demo/Schema.js" "$ONESHOT_WORKTREE/components/demo/formValidations.js"
+cat > "$ONESHOT_WORKTREE/common/utils/serverCalls.js" <<'JSEOF'
+import axios from "axios";
+
+export const apiGet = url => axios.get(url);
+JSEOF
+
+js_payload() {
+    printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":true}}' "$1"
+}
+
+expect_block "axios outside the allowlist"  js-standards.cjs "$(js_payload "$ONESHOT_WORKTREE/components/demo/Bad.js")"
+expect_block "yup outside formValidations"  js-standards.cjs "$(js_payload "$ONESHOT_WORKTREE/components/demo/Schema.js")"
+expect_clean "axios in serverCalls.js"      js-standards.cjs "$(js_payload "$ONESHOT_WORKTREE/common/utils/serverCalls.js")"
+expect_clean "yup in formValidations.js"    js-standards.cjs "$(js_payload "$ONESHOT_WORKTREE/components/demo/formValidations.js")"
+expect_clean "dynamic style and spread sx"  js-standards.cjs "$(js_payload "$ONESHOT_WORKTREE/components/demo/Dynamic.js")"
+expect_clean "axios named only in a string" js-standards.cjs "$(js_payload "$ONESHOT_WORKTREE/components/demo/Commented.js")"
+
 rm -rf "$ONESHOT_WORKTREE"
 
 echo

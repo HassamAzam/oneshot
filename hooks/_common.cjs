@@ -11,6 +11,9 @@
  *   - A PreToolUse deny is exit 0 + stdout JSON:
  *       {"hookSpecificOutput":{"hookEventName":"PreToolUse",
  *        "permissionDecision":"deny","permissionDecisionReason":"..."}}
+ *   - A PostToolUse block is exit 0 + stdout JSON:
+ *       {"decision":"block","reason":"..."}
+ *     The call already happened; `reason` is fed back to the model.
  *   - Hooks are FAIL-OPEN on internal errors, but the failure is logged to
  *     state/hook-errors.log. A guard that crashes closed would wedge every
  *     session on this machine, including Hassam's own.
@@ -91,6 +94,19 @@ function deny(reason) {
       permissionDecisionReason: reason,
     },
   });
+  process.exit(0);
+}
+
+/**
+ * Block a PostToolUse result: `reason` comes back to the model as the tool's
+ * outcome, so it reacts while the edit is still what it is thinking about.
+ *
+ * A different event name means a different output shape, and a shape the SDK
+ * does not recognise is indistinguishable from a guard that allowed — which is
+ * why this lives next to deny() rather than in the one hook that needs it.
+ */
+function postBlock(reason) {
+  emit({ decision: 'block', reason });
   process.exit(0);
 }
 
@@ -213,7 +229,7 @@ function envFile(key) {
 module.exports = {
   HOME, ONESHOT, STATE, PAUSE, PAUSE_QUOTA, PAUSE_NETWORK,
   phase, runId, ticket, bailIfNotOneshot,
-  readInput, emit, deny, allow, logFailure, event,
+  readInput, emit, deny, postBlock, allow, logFailure, event,
   isSideEffect, pauseFile, networkPaused,
   realish, isInside, expandTilde,
   loadConfig, envFile,
