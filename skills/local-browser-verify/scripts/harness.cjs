@@ -952,6 +952,97 @@ async function shot(session, name) {
 }
 
 /**
+ * Wait until an element's geometry stops moving, then return its box.
+ *
+ * Reading a box the same tick an overlay opens returns the PRE-transition value. MUI
+ * animates placement and opacity over 0.2–0.3s, so a popover measured on the tick of the
+ * click reports the position it was about to leave — the same class of error that read a
+ * real 2px focus ring back as `0px 0px 0px 0px` and cost run 181 six false failures.
+ *
+ * Stability, not a fixed sleep: poll until two consecutive samples agree to within a
+ * pixel and stay that way for `quiet`. A blind `sleep` is either too short on a cold
+ * machine or wasted budget on a warm one.
+ *
+ * Returns null when the element never resolves a box — absent, detached, or
+ * `display:none`. Null means "not measurable", never "measured as zero".
+ */
+async function settle(session, selector, opts = {}) {
+  const timeout = Number(opts.timeout || 5000);
+  const quiet = Number(opts.quiet || 250);
+  const loc = session.page.locator(selector).first();
+  const started = Date.now();
+  let last = null;
+  let stableSince = null;
+  while (Date.now() - started < timeout) {
+    const box = await loc.boundingBox().catch(() => null);
+    const steady = box && last
+      && Math.abs(box.x - last.x) < 1 && Math.abs(box.y - last.y) < 1
+      && Math.abs(box.width - last.width) < 1 && Math.abs(box.height - last.height) < 1;
+    if (steady) {
+      if (stableSince === null) stableSince = Date.now();
+      if (Date.now() - stableSince >= quiet) return box;
+    } else {
+      stableSince = null;
+    }
+    last = box;
+    await sleep(50);
+  }
+  return last;
+}
+
+function intersection(a, b) {
+  const width = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+  const height = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+  if (width <= 0 || height <= 0) return { width: 0, height: 0, px: 0 };
+  return { width: Math.round(width), height: Math.round(height), px: Math.round(width * height) };
+}
+
+/**
+ * Does `a` visually cover `b`? Answer in pixels.
+ *
+ * "Obscured", "overlapping" and "covers the field below" are the one bug class this
+ * harness could state a rule about but never measure: a screenshot proves it only to a
+ * human who happens to notice two things in the same place, and an absence-assertion
+ * over a popover passes identically whether dismissal works or is entirely broken.
+ *
+ * Both boxes are settled first, so the result describes where the overlay came to rest
+ * rather than where it started.
+ *
+ * `intersects: null` is NOT "no overlap" — it means one of the two could not be
+ * measured, and `missing` names which. Record that as a block, not a pass: a selector
+ * matching nothing is a question about the selector, and reading it as "nothing on top
+ * of the field" is how a working screen gets filed as a product bug.
+ *
+ * `outsideViewport` catches the other direction. CSS `zoom` and a short viewport have
+ * already put a real element at `top=1194px` in a 900px window, where it cannot overlap
+ * anything because it is not on screen at all — a green result that means nothing.
+ */
+async function overlap(session, a, b, opts = {}) {
+  const boxA = await settle(session, a, opts);
+  const boxB = await settle(session, b, opts);
+  const viewport = session.page.viewportSize() || null;
+  const missing = [];
+  if (!boxA) missing.push(a);
+  if (!boxB) missing.push(b);
+  if (missing.length) {
+    return { intersects: null, px: null, missing, a: boxA, b: boxB, viewport };
+  }
+  const hit = intersection(boxA, boxB);
+  const outsideViewport = viewport
+    ? [boxA, boxB].some((box) => box.y >= viewport.height || box.x >= viewport.width)
+    : false;
+  return {
+    intersects: hit.px > 0,
+    px: hit.px,
+    region: hit,
+    a: boxA,
+    b: boxB,
+    viewport,
+    outsideViewport,
+  };
+}
+
+/**
  * Run one case. NEVER throws.
  *
  * A 20-case list has to be one tool call that cannot abort halfway. An environment fault
@@ -1009,7 +1100,8 @@ async function smoke(keys) {
 /* ------------------------------------------------------------------ cli */
 
 const API = {
-  up, down, status, open, login, goto, shot, runCase, smoke, registry, HarnessError,
+  up, down, status, open, login, goto, shot, settle, overlap, runCase, smoke, registry,
+  HarnessError,
   /**
    * Internals, exported for scripts/app.cjs and nothing else.
    *

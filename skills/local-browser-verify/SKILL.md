@@ -154,6 +154,35 @@ pytest is unaffected and is fine to run.
   wrong column. Never sum a percentage or utilization column as if it were cost:
   a "drill-down total" that comes out near 200 is a utilization column adding to
   ~100% per head, not money — check the header before you compare it to a cell.
+- **Measure a visual bug after the interaction, not on the tick of it.** "Obscured",
+  "overlapping", "covers the field below" and "still open after selecting" are
+  claims about geometry, and geometry has a number. Drive the interaction, let
+  the overlay come to rest, then measure:
+
+  ```js
+  const h = require('<oneshot>/skills/local-browser-verify/scripts/harness.cjs');
+  await h.overlap(session, '.react-datepicker-popper', '[name="end_date"]');
+  // → { intersects: true, px: 10340, region: {...}, a: {...}, b: {...} }
+  ```
+
+  Three ways this reads green on a broken screen, all of them paid for already:
+
+  - **Reading the box the same tick the overlay opens** returns the value it was
+    about to leave: MUI animates placement over 0.2–0.3s. `overlap` settles both
+    boxes first; on a hand-rolled check, poll the box until it stops moving. A
+    fixed `sleep` is not a settle.
+  - **`intersects: null` is not "no overlap"** — it means one selector did not
+    resolve a box, and `missing` says which. That is a `blocked` with
+    `locator:`, never a pass. A popover absence-assertion passes identically
+    whether dismissal works or the popover never opened at all, so prove the
+    thing you expect to be there IS there before concluding the thing you expect
+    to be gone is gone.
+  - **An element off-screen cannot overlap anything.** CSS `zoom` and a short
+    viewport have put a real element at `top=1194px` in a 900px window. Check
+    `outsideViewport` before believing a zero.
+
+  Screenshot after the settle, not before — a shot timed one tick early omits the
+  defect, and then the disproof and the proof look identical in `artifacts/`.
 
 ## Record one result per case
 
