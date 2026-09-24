@@ -26,8 +26,9 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   CONTEXT_REPO, DRY_RUN, FOLLOW_TICK_MS, GITLAB_USERNAME, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT,
-  TICK_MS, WORK_REPO,
-  auditAuth, envOr, phases, portPool, projectConfig, slackConfig,
+  PROJECT_TARGET, TICK_MS, WORK_REPO,
+  auditAuth, envOr, findCheckout, phases, portPool, projectConfig, scopedEnvName,
+  slackConfig,
 } from './lib/config.js';
 import { activeRunsFleet, logEvent, reconcileForeignRuns } from './lib/db.js';
 import { ensureClaudeDir } from './lib/claudedir.js';
@@ -317,8 +318,26 @@ function preflight(): boolean {
   }
 
   if (!existsSync(WORK_REPO)) {
+    const project = projectConfig().gitlab.project;
     log.error(`WORK_REPO does not exist: ${WORK_REPO}`);
-    log.error(`  git clone git@gitlab.arbisoft.com:${projectConfig().gitlab.project}.git ${WORK_REPO}`);
+    // With a target selected the path came from configuration, not from a
+    // missing clone — so telling them to clone INTO it is advice for the wrong
+    // problem, and worse when the value is a documented example pasted as-is.
+    // Name the variable that set it, and the checkout they already have.
+    if (PROJECT_TARGET) {
+      const found = findCheckout(project);
+      if (found) {
+        log.error(`  your ${project} checkout looks like it is at: ${found}`);
+        log.error(`  set it in .env:  ${scopedEnvName('WORK_REPO')}=${found}`);
+        log.error(`  and the two beside it: ${scopedEnvName('ONESHOT_SEED_FROM')}, ${scopedEnvName('WT_ROOT')}`);
+      } else {
+        log.error(`  the '${PROJECT_TARGET}' target sets this path. Point it at your own checkout with`);
+        log.error(`  ${scopedEnvName('WORK_REPO')}=<path>, or clone:`);
+        log.error(`  git clone git@gitlab.arbisoft.com:${project}.git ${WORK_REPO}`);
+      }
+    } else {
+      log.error(`  git clone git@gitlab.arbisoft.com:${project}.git ${WORK_REPO}`);
+    }
     fatal = true;
   }
   if (!existsSync(CONTEXT_REPO)) {
