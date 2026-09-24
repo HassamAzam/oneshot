@@ -23,9 +23,11 @@
  * import it precisely because they cannot import config.ts (config.ts imports
  * them), and every function here reads the environment it is HANDED rather
  * than one it captured at load. The one function that touches anything outside
- * its arguments is readOrigin(), the git call behind the origin check, kept
+ * its arguments is readOrigin(), the git calls behind the origin check, kept
  * here so both runtimes read a remote the same way; the judgement of what it
- * read, judgeOrigin(), is pure.
+ * read, judgeOrigin(), is pure. So is the one override of that judgement,
+ * relaxRepoChecks(), which lives here for the same reason: boot, doctor and
+ * scripts/app.cjs must not disagree about whether a check is refusing.
  */
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -272,15 +274,33 @@ function localRemotePath(url, dir) {
 }
 
 /**
+ * Every remote of `dir` except origin, as `{ name, url }` with credentials
+ * already redacted — the answer judgeOrigin() needs to say WHICH remote is the
+ * project when origin is not. One `git config` call; a remote with several
+ * fetch URLs gives one entry each. [] when there is nothing to read.
+ */
+function otherRemotes(dir) {
+  const r = spawnSync('git', ['-C', dir, 'config', '--get-regexp', '^remote\\..*\\.url$'],
+    { encoding: 'utf8', timeout: 15000 });
+  if (r.error || r.status !== 0) return [];
+  return String(r.stdout || '').split('\n')
+    .map((line) => /^remote\.(.+)\.url\s+(.+)$/.exec(line.trim()))
+    .filter((m) => m && m[1] !== 'origin')
+    .map((m) => ({ name: m[1], url: redactUrl(m[2]) }));
+}
+
+/**
  * What `git remote` says about `dir`'s origin: the fetch URL and every push URL
  * (a `remote.origin.pushurl` sends pushes somewhere the fetch URL does not
- * mention). `{ error }` when there is nothing to read — not a directory, not a
- * repository, no origin, git missing. Never throws.
+ * mention), and the checkout's other remotes. `{ error }` when there is nothing
+ * to read — not a directory, not a repository, no origin, git missing. Never
+ * throws.
  *
  * An origin that is a LOCAL clone (a path, file://) is followed to that
  * clone's own origin, up to MAX_LOCAL_HOPS, because it would otherwise hide
  * which project the checkout is; `via` lists the local hops. A clone of a local
- * clone of group/project is a clone of group/project.
+ * clone of group/project is a clone of group/project. `remotes` stay the
+ * checkout's own: they are what a fix run in `dir` can rename.
  */
 function readOrigin(dir, hops = MAX_LOCAL_HOPS) {
   if (!dir || !fs.existsSync(dir)) return { error: `${dir || '(no path)'} does not exist` };
@@ -299,12 +319,14 @@ function readOrigin(dir, hops = MAX_LOCAL_HOPS) {
     ? String(p.stdout || '').split('\n').map((l) => l.trim()).filter((l) => l && l !== url)
     : [];
 
+  const remotes = otherRemotes(dir);
+
   const local = localRemotePath(url, dir);
   if (local && hops > 0) {
     const inner = readOrigin(local, hops - 1);
-    if (!('error' in inner)) return { url: inner.url, pushUrls, via: [url, ...(inner.via || [])] };
+    if (!('error' in inner)) return { url: inner.url, pushUrls, remotes, via: [url, ...(inner.via || [])] };
   }
-  return { url, pushUrls };
+  return { url, pushUrls, remotes };
 }
 
 /** parseRepoUrl()'s hostname and lower-cased path for `url`; null if unparseable. */
@@ -329,7 +351,13 @@ function repoParts(url) {
  * off for the conductor.
  *
  * A proven mismatch fails: the fetch URL or any push URL parses as a GitLab
- * project whose PATH is another project's. Anything that proves nothing either
+ * project whose PATH is another project's. That includes a FORK as origin with
+ * the project as another remote: Oneshot pushes ticket branches to origin and
+ * fetches the base from origin, so the branch would land on the fork while the
+ * MR is opened on GITLAB_REPO_URL's project, where it does not exist. The
+ * detail then names the remote that IS the project and the two renames that
+ * fix it; with no such remote it also gives the set-url for a project that was
+ * renamed or moved on GitLab. Anything that proves nothing either
  * way only warns: no origin, not a repository, an origin that is not a GitLab
  * URL at all (a local clone whose chain never reached one), or the same path on
  * a host that is not GITLAB_REPO_URL's — an ~/.ssh/config alias, or the
@@ -357,11 +385,35 @@ function judgeOrigin(subject, repoUrl, read) {
   };
   const wrong = want && judged.find((u) => u.parts && u.parts.path !== want.path);
   if (wrong) {
+    const base = `${where}${shown(wrong)}, but ${REPO_URL_VAR} is ${shownRepo}. `;
+    const remedy = originRemedy(subject, shownRepo, wrong.push);
+    if (wrong.push) return { level: 'fail', label: `${label} is a clone of another project`, detail: base + remedy };
+    const gitC = `git -C ${subject.dir || label}`;
+    const others = read.remotes || [];
+    const samePath = others.filter((r) => { const p = repoParts(r.url); return p && p.path === want.path; });
+    const project = samePath.find((r) => repoParts(r.url).host === want.host) || samePath[0];
+    if (project) {
+      const taken = new Set(others.map((r) => r.name));
+      let aside = 'fork';
+      for (let n = 2; taken.has(aside); n += 1) aside = `fork${n}`;
+      const host = repoParts(project.url).host;
+      const caveat = host === want.host ? ''
+        : ` — though on host '${host}', not '${want.host}': fine if that is an ssh alias or the instance's ssh `
+          + 'hostname, otherwise it is a copy on another GitLab and not the fix';
+      return {
+        level: 'fail',
+        label: `${label} origin is a fork or another project`,
+        detail: `${base}Its remote '${project.name}' (${redactUrl(project.url)}) is the project${caveat}. Oneshot pushes `
+          + 'ticket branches to origin and fetches the base branch from origin, so origin has to be the project '
+          + `itself. Fix: ${gitC} remote rename origin ${aside} && ${gitC} remote rename ${project.name} origin — `
+          + `or ${lowerFirst(remedy)}`,
+      };
+    }
     return {
       level: 'fail',
       label: `${label} is a clone of another project`,
-      detail: `${where}${shown(wrong)}, but ${REPO_URL_VAR} is ${shownRepo}. `
-        + `${originRemedy(subject, shownRepo, wrong.push)}`,
+      detail: `${base}${remedy} If the project was renamed or moved on GitLab, update the remote instead: `
+        + `${gitC} remote set-url origin ${cloneUrlLike(repoUrl, wrong.url)}`,
     };
   }
   const unknown = judged.find((u) => u.parts === null);
@@ -386,6 +438,32 @@ function judgeOrigin(subject, repoUrl, read) {
   }
   const via = read.via && read.via.length ? ` (via local clone ${redactUrl(read.via[0])})` : '';
   return { level: 'pass', label: `${label} origin`, detail: `${redactUrl(read.url)}${via}` };
+}
+
+function lowerFirst(s) { return s.charAt(0).toLowerCase() + s.slice(1); }
+
+/**
+ * The clone URL of GITLAB_REPO_URL's project in the form `like` uses, so a
+ * set-url keeps the transport the checkout already authenticates with.
+ *
+ * When `like` is on GITLAB_REPO_URL's host, or on an ssh host with no dot in
+ * it (an ~/.ssh/config alias), only its project path is swapped: the user,
+ * port and alias it authenticates with stay as they are. Any other host could
+ * be another GitLab entirely, so the URL is then GITLAB_REPO_URL's own — ssh
+ * for an ssh origin, https otherwise. Credentials are never echoed.
+ */
+function cloneUrlLike(repoUrl, like) {
+  const r = parseRepoUrl(repoUrl);
+  const http = /^https?:\/\//i.test(String(like));
+  const shown = redactUrl(like).replace(/\/+$/, '');
+  let old = null;
+  try { old = parseRepoUrl(shown); } catch { old = null; }
+  const alias = old && !http && !old.hostname.includes('.');
+  if (old && (old.hostname === r.hostname || alias)) {
+    const bare = shown.replace(/\.git$/i, '');
+    if (bare.endsWith(old.project)) return `${bare.slice(0, bare.length - old.project.length)}${r.project}.git`;
+  }
+  return http ? `${r.webUrl}.git` : r.sshUrl;
 }
 
 function originRemedy(subject, repoUrl, push) {
@@ -527,6 +605,49 @@ function legacySelectors(env, repo) {
   return out;
 }
 
+const SKIP_REPO_CHECK_VAR = 'ONESHOT_SKIP_REPO_CHECK';
+
+/**
+ * The spelling of ONESHOT_SKIP_REPO_CHECK that is switched on in `env`
+ * (either spelling, parsed as config.ts envFlag parses a flag), else null.
+ */
+function repoCheckOverride(env) {
+  const e = envEntry(env, SKIP_REPO_CHECK_VAR);
+  const on = e && ['1', 'true', 'on', 'yes'].includes(String(e.value).trim().toLowerCase());
+  return on ? e.key : null;
+}
+
+/**
+ * The line boot and doctor print EVERY time the override is on, whether or
+ * not anything was downgraded — an override nobody is reminded of outlives
+ * the problem it was set for. Null when it is off.
+ */
+function repoCheckOverrideNotice(env) {
+  const key = repoCheckOverride(env);
+  return key ? `repo checks downgraded by ${key} — remove it once fixed` : null;
+}
+
+/**
+ * The repo-check findings with every FAIL turned into a WARN when
+ * ONESHOT_SKIP_REPO_CHECK is on — the escape hatch for a check that is wrong
+ * about this machine, or right about something that has to wait. The finding
+ * keeps its full text behind a prefix naming the variable, so the danger is
+ * still stated, just not refused.
+ *
+ * A missing or invalid GITLAB_REPO_URL (label === GITLAB_REPO_URL) is never
+ * downgraded: there is then no project to work on at all, not a doubt about
+ * one. Every consumer that refuses on these findings — boot, doctor,
+ * preflight, unblock, scripts/app.cjs — runs them through here, so none of
+ * them refuses what another lets through.
+ */
+function relaxRepoChecks(findings, env) {
+  const key = repoCheckOverride(env);
+  if (!key) return findings;
+  return findings.map((f) => (f.level !== 'fail' || f.label === REPO_URL_VAR ? f : {
+    ...f, level: 'warn', detail: `${key} is set — not refusing: ${f.detail}`,
+  }));
+}
+
 module.exports = {
   REPO_URL_VAR,
   EXAMPLE_URL,
@@ -549,4 +670,8 @@ module.exports = {
   resolveTarget,
   LEGACY_SELECTOR_KEYS,
   legacySelectors,
+  SKIP_REPO_CHECK_VAR,
+  repoCheckOverride,
+  repoCheckOverrideNotice,
+  relaxRepoChecks,
 };

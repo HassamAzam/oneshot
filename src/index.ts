@@ -29,7 +29,9 @@ import {
   PROJECT_TARGET, TICK_MS, WORK_REPO, WT_ROOT,
   auditAuth, envOr, pathSources, phases, portPool, projectConfig, repoIdentity, seedFrom, slackConfig,
 } from './lib/config.js';
-import { checkoutFindings, identityFindings, wtRootFinding, type Finding } from './lib/repocheck.js';
+import {
+  checkoutFindings, identityFindings, relaxRepoChecks, repoCheckOverrideNotice, wtRootFinding, type Finding,
+} from './lib/repocheck.js';
 import { foreignJournalFinding } from './lib/journalproject.js';
 import { activeRunsFleet, logEvent, reconcileForeignRuns } from './lib/db.js';
 import { ensureClaudeDir } from './lib/claudedir.js';
@@ -319,12 +321,16 @@ function preflight(): boolean {
 
   // Which project, and whether anything left in .env still claims otherwise. A
   // legacy selector that disagrees with GITLAB_REPO_URL refuses boot rather
-  // than being ignored: whoever wrote it believes it is in force.
+  // than being ignored: whoever wrote it believes it is in force. Every repo
+  // check goes through relaxRepoChecks(), so ONESHOT_SKIP_REPO_CHECK turns
+  // these refusals into warnings — and is itself announced on every boot.
   const say = (f: Finding): void => {
     const line = `${f.label}: ${f.detail}`;
     if (f.level === 'fail') { log.error(line); fatal = true; } else if (f.level === 'warn') log.warn(line);
   };
-  for (const f of identityFindings()) say(f);
+  const override = repoCheckOverrideNotice();
+  if (override) log.warn(override);
+  for (const f of relaxRepoChecks(identityFindings())) say(f);
   const { repo } = repoIdentity();
 
   if (!envOr('GITLAB_TOKEN')) {
@@ -339,12 +345,13 @@ function preflight(): boolean {
   } else {
     // The stale-clone guard: a WORK_REPO or ONESHOT_SEED_FROM line left over
     // from another project would cut worktrees from, and warm the app on, that
-    // project's code. Unreadable only warns. A WT_ROOT shared with another clone,
-    // or moved by the overlay going away, fails too.
+    // project's code. Unreadable only warns. A WT_ROOT shared with another clone
+    // fails too, and so does one the overlay's removal moved away from worktrees
+    // still in the old root.
     const sources = pathSources();
-    for (const f of checkoutFindings({ workRepo: WORK_REPO, seed: seedFrom(), sources })) say(f);
     const wt = wtRootFinding(WT_ROOT, sources.WT_ROOT, PROJECT_TARGET, [WORK_REPO, seedFrom()]);
-    if (wt) say(wt);
+    const checks = [...checkoutFindings({ workRepo: WORK_REPO, seed: seedFrom(), sources }), ...(wt ? [wt] : [])];
+    for (const f of relaxRepoChecks(checks)) say(f);
     const foreignRuns = foreignJournalFinding();
     if (foreignRuns) say(foreignRuns);
   }

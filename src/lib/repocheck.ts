@@ -28,18 +28,30 @@
  * identityFindings() and checkoutFindings(), so the three cannot disagree about
  * what is wrong. The git call (which follows a local clone to its own origin)
  * is isolated in readOrigin() and the decision in judgeOrigin() is pure, which
- * is what the tests exercise.
+ * is what the tests exercise. Each consumer passes the findings through
+ * relaxRepoChecks() before refusing on them, so ONESHOT_SKIP_REPO_CHECK turns
+ * the same FAILs into WARNs everywhere, scripts/app.cjs included.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, realpathSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import {
   REPO_URL_VAR, defaultWtRoot, expandPath, judgeOrigin as judgeOriginCjs, legacySelectors, readOrigin as readOriginCjs,
-  redactUrl, repoFromEnv, spellings,
+  redactUrl, relaxRepoChecks as relaxRepoChecksCjs, repoCheckOverrideNotice as overrideNoticeCjs, repoFromEnv, spellings,
   type Finding, type OriginRead, type OriginSubject, type ResolvedPath,
 } from './repourl.cjs';
 
 export type { Finding } from './repourl.cjs';
+
+/** repourl.cjs relaxRepoChecks() over this process's environment by default. */
+export function relaxRepoChecks(findings: Finding[], env: NodeJS.ProcessEnv = process.env): Finding[] {
+  return relaxRepoChecksCjs(findings, env);
+}
+
+/** The standing ONESHOT_SKIP_REPO_CHECK reminder, or null when the override is off. */
+export function repoCheckOverrideNotice(env: NodeJS.ProcessEnv = process.env): string | null {
+  return overrideNoticeCjs(env);
+}
 
 /**
  * GITLAB_REPO_URL itself, then every legacy selector still set, from `env`.
@@ -186,29 +198,27 @@ export function worktreeOwners(wtRoot: string): WorktreeOwner[] {
  * one's: ticket worktrees are named by iid and the app pool by port, so the two
  * collide, and scripts/app.cjs refuses an app-<port> worktree of another clone.
  *
- * Two cases fail. A root that already holds worktrees of some other clone —
- * the same thing scripts/app.cjs refuses. And a plain WT_ROOT that differs from
- * the derived default while a legacy ONESHOT_PROJECT line (`overlayKey`) is
- * still set: under the old named-target overlay that line replaced WT_ROOT
- * with ~/Documents/<name>-wt, so the root has moved without anyone choosing
- * it. A root set by hand that is merely not named for the target only warns.
+ * A root that already holds worktrees of some other clone fails — the same
+ * thing scripts/app.cjs refuses. A plain WT_ROOT that differs from the derived
+ * default while a legacy ONESHOT_PROJECT line (`overlayKey`) is still set has
+ * moved without anyone choosing it: under the old named-target overlay that
+ * line replaced WT_ROOT with ~/Documents/<name>-wt. That fails only when the
+ * old root still holds worktrees (`abandoned`) — runs and app dirs the move
+ * would strand — and otherwise warns with the same advice, since a move that
+ * leaves nothing behind costs nothing. That warning never hides the
+ * other-clone failure: a root full of another project's worktrees is disk
+ * evidence whatever the legacy line says. A root set by hand that is merely not
+ * named for the target only warns.
  */
 export function judgeWtRoot(p: {
   wtRoot: string; from: ResolvedPath; name: string; clones: string[]; owners: WorktreeOwner[]; overlayKey?: string;
+  abandoned?: WorktreeOwner[];
 }): Finding | null {
+  const moved = overlayMove(p);
+  if (moved?.level === 'fail') return moved;
   const set = p.from.key ? ` (from ${p.from.key})` : '';
   const fix = `set WT_ROOT to a directory of its own${p.name ? ` — the default is ~/Documents/${p.name}-wt` : ''}`
     + (p.from.key ? `, which deleting the ${p.from.key} line gives` : '');
-  const derived = p.name ? expandPath(defaultWtRoot(p.name), '/') : '';
-  if (p.overlayKey && p.from.source === 'plain' && derived && p.wtRoot !== derived) {
-    return {
-      level: 'fail',
-      label: 'WT_ROOT moved when the project overlay went away',
-      detail: `${p.from.key}=${p.wtRoot} is in force, but with ${p.overlayKey} set the old overlay used `
-        + `~/Documents/${p.name}-wt instead. Delete the ${p.from.key} line from .env to go back to it, `
-        + `or delete the ${p.overlayKey} line (it selects nothing now) to keep ${p.wtRoot} on purpose.`,
-    };
-  }
   const foreign = p.clones.length ? p.owners.filter((o) => o.gitDir && !p.clones.includes(o.gitDir)) : [];
   if (foreign.length) {
     const from = [...new Set(foreign.map((o) => o.gitDir))].join(', ');
@@ -220,6 +230,7 @@ export function judgeWtRoot(p: {
         + `projects in one root collide: ${fix}, or remove those worktrees.`,
     };
   }
+  if (moved) return moved;
   if (p.from.source !== 'default' && p.name && !basename(p.wtRoot).toLowerCase().includes(p.name)) {
     return {
       level: 'warn',
@@ -231,23 +242,45 @@ export function judgeWtRoot(p: {
   return null;
 }
 
+/** The overlay-move finding of judgeWtRoot(), or null when WT_ROOT did not move. */
+function overlayMove(p: {
+  wtRoot: string; from: ResolvedPath; name: string; overlayKey?: string; abandoned?: WorktreeOwner[];
+}): Finding | null {
+  const derived = p.name ? expandPath(defaultWtRoot(p.name), '/') : '';
+  if (!p.overlayKey || p.from.source !== 'plain' || !derived || p.wtRoot === derived) return null;
+  const left = p.abandoned ?? [];
+  const advice = `Delete the ${p.from.key} line from .env to go back to it, `
+    + `or delete the ${p.overlayKey} line (it selects nothing now) to keep ${p.wtRoot} on purpose.`;
+  return {
+    level: left.length ? 'fail' : 'warn',
+    label: 'WT_ROOT moved when the project overlay went away',
+    detail: `${p.from.key}=${p.wtRoot} is in force, but with ${p.overlayKey} set the old overlay used `
+      + `~/Documents/${p.name}-wt instead`
+      + (left.length
+        ? `, which still holds ${left.length} worktree(s) this move would abandon (e.g. ${left[0]?.dir}). `
+        : ' (it holds no worktrees, so nothing is abandoned yet). ')
+      + advice,
+  };
+}
+
 /**
  * judgeWtRoot() against what is on disk; without the worktrees when WT_ROOT
  * does not exist yet. `clones` are WORK_REPO and the seed; one whose origin is
  * provably another project is failed on its own and does not count as this
  * project's here, or a stale seed would vouch for the stale root it shares with.
+ * The old overlay root is only listed when the overlay rule applies.
  */
 export function wtRootFinding(
   wtRoot: string, from: ResolvedPath, name: string, clones: string[], env: NodeJS.ProcessEnv = process.env,
+  list: (root: string) => WorktreeOwner[] = worktreeOwners,
 ): Finding | null {
   if (!wtRoot) return null;
   const overlayKey = legacySelectors(env, null).find((l) => spellings('ONESHOT_PROJECT').includes(l.key))?.key;
-  if (!existsSync(wtRoot)) {
-    const moved = judgeWtRoot({ wtRoot, from, name, clones: [], owners: [], overlayKey });
-    return moved?.level === 'fail' ? moved : null;
-  }
+  const oldRoot = name ? expandPath(defaultWtRoot(name), '/') : '';
+  const abandoned = overlayKey && from.source === 'plain' && oldRoot && oldRoot !== wtRoot ? list(oldRoot) : [];
+  if (!existsSync(wtRoot)) return overlayMove({ wtRoot, from, name, overlayKey, abandoned });
   const ours = clones.filter((c) => c && existsSync(c) && originFinding('clone', c, env)?.level !== 'fail');
   const gitDirs = [...new Set(ours.map(commonGitDir))]
     .filter((d): d is string => d !== null);
-  return judgeWtRoot({ wtRoot, from, name, clones: gitDirs, owners: worktreeOwners(wtRoot), overlayKey });
+  return judgeWtRoot({ wtRoot, from, name, clones: gitDirs, owners: list(wtRoot), overlayKey, abandoned });
 }

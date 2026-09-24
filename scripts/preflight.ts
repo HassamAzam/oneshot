@@ -34,7 +34,9 @@ import { db, reconcileForeignRuns } from '../src/lib/db.js';
 import { anyLive, liveConductors } from '../src/lib/fleet.js';
 import { ping } from '../src/lib/gitlab.js';
 import { accountWindowPct, checkQuota, dayUsage, windowUsage } from '../src/lib/quota.js';
-import { checkoutFindings, identityFindings, wtRootFinding, type Finding } from '../src/lib/repocheck.js';
+import {
+  checkoutFindings, identityFindings, relaxRepoChecks, repoCheckOverrideNotice, wtRootFinding, type Finding,
+} from '../src/lib/repocheck.js';
 import { foreignJournalFinding } from '../src/lib/journalproject.js';
 
 let fails = 0;
@@ -78,13 +80,15 @@ function report(f: Finding): void {
  */
 function checkProject(): void {
   section('Project');
-  for (const f of identityFindings()) report(f);
+  const override = repoCheckOverrideNotice();
+  if (override) report({ level: 'warn', label: 'repo checks overridden', detail: override });
+  for (const f of relaxRepoChecks(identityFindings())) report(f);
   if (!repoIdentity().repo) return;
   if (!WORK_REPO || !existsSync(WORK_REPO)) fail('WORK_REPO does not exist', WORK_REPO || 'no path');
   const sources = pathSources();
-  for (const f of checkoutFindings({ workRepo: WORK_REPO, seed: seedFrom(), sources })) report(f);
   const wt = wtRootFinding(WT_ROOT, sources.WT_ROOT, PROJECT_TARGET, [WORK_REPO, seedFrom()]);
-  if (wt) report(wt);
+  const checks = [...checkoutFindings({ workRepo: WORK_REPO, seed: seedFrom(), sources }), ...(wt ? [wt] : [])];
+  for (const f of relaxRepoChecks(checks)) report(f);
   const foreignRuns = foreignJournalFinding();
   if (foreignRuns) report(foreignRuns);
 }

@@ -13,7 +13,9 @@ import {
   projectConfig, repoIdentity, reviewersConfig, slackConfig,
 } from '../src/lib/config.js';
 import { ping, getBranch } from '../src/lib/gitlab.js';
-import { checkoutFindings, identityFindings, wtRootFinding, type Finding } from '../src/lib/repocheck.js';
+import {
+  checkoutFindings, identityFindings, relaxRepoChecks, repoCheckOverrideNotice, wtRootFinding, type Finding,
+} from '../src/lib/repocheck.js';
 import { foreignJournalFinding } from '../src/lib/journalproject.js';
 import { slackEnabled, userIdForEmail, userIdForHandle } from '../src/lib/slack.js';
 import { checkIdentity } from '../src/lib/identity.js';
@@ -62,7 +64,11 @@ async function main(): Promise<void> {
   section('Config');
   // Which project, first: every check below is about it. GITLAB_REPO_URL is the
   // only thing that says; any legacy selector still in .env is judged against it.
-  for (const f of identityFindings()) report(f);
+  // ONESHOT_SKIP_REPO_CHECK turns every repo-check FAIL below into a WARN;
+  // said on every run, so the override cannot quietly outlive the problem.
+  const override = repoCheckOverrideNotice();
+  if (override) warn('repo checks overridden', override);
+  for (const f of relaxRepoChecks(identityFindings())) report(f);
   const repo = repoIdentity().repo;
   const cfg = projectConfig();
   pass('labels', `"${cfg.labels.entry}" -> "${cfg.labels.exit}", blocked "${cfg.labels.blocked}", ` +
@@ -152,7 +158,7 @@ async function main(): Promise<void> {
   // The old named-target overlay used to override a plain WT_ROOT; now a line
   // left over from another project wins, and nothing else would notice.
   const shared = wtRootFinding(WT_ROOT, sources.WT_ROOT, PROJECT_TARGET, [WORK_REPO, seedFrom()]);
-  if (shared) report(shared);
+  if (shared) for (const f of relaxRepoChecks([shared])) report(f);
 
   // The seed repo is read when a worktree is leased, not at boot, so an absent
   // one is silent until phase 3 and only *hurts* at phase 6, where `verify`
@@ -179,7 +185,7 @@ async function main(): Promise<void> {
   // from it. A different project path fails and the same path on another host
   // only warns, so an ssh origin matches an https URL and erp never matches
   // erp-archive. The same call boot and preflight make.
-  for (const f of checkoutFindings({ workRepo: WORK_REPO, seed, sources })) report(f);
+  for (const f of relaxRepoChecks(checkoutFindings({ workRepo: WORK_REPO, seed, sources }))) report(f);
   // Journals are keyed by iid alone, so another project's are never resumed;
   // they are still worth knowing about.
   const foreignRuns = foreignJournalFinding();

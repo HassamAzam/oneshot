@@ -420,13 +420,23 @@ ticket.
     `WORK_REPO` line left over from a previous project would cut every worktree from the wrong
     code while tickets and MRs went to the right one. The same path on another host (an
     `~/.ssh/config` alias, or a clone from another GitLab), no `origin`, or not a git repo only
-    warns.
+    warns. A fork as `origin` refuses too — ticket branches are pushed to, and the base fetched
+    from, `origin` — and when another remote is the project the refusal gives the two
+    `git remote rename` commands that fix it.
   - **The old selectors select nothing.** `ONESHOT_PROJECT`, `ONESHOT_GITLAB_PROJECT`,
     `ONESHOT_GITLAB_API` and `ONESHOT_PROJECT_ID` (and their `ONELOOP_` spellings), and the
     `targets` overlay that used to live in `config/project.json`, are all replaced by
     `GITLAB_REPO_URL`. One left in `.env` that disagrees with the URL refuses boot, naming both
     values; one that agrees — and `ONESHOT_PROJECT_ID`, which cannot be checked offline — is a
     warning. Either way, delete the line.
+
+  If a check is wrong about your machine, `ONESHOT_SKIP_REPO_CHECK=1` downgrades these
+  refusals to warnings wherever they are made: boot, `doctor` and `preflight` (origin, legacy
+  selectors and `WT_ROOT`), `unblock` (legacy selectors) and `scripts/app.cjs` (origin and legacy
+  selectors). It never excuses a missing `GITLAB_REPO_URL`, and `scripts/app.cjs` still refuses to
+  check out into an `app-<port>` worktree cut from another clone, so a `WT_ROOT` shared with
+  another project must be fixed before the app can be warmed. Boot and `doctor` print a reminder
+  on every run while it is set — remove it once fixed.
 
   The labels in `config/project.json` must already exist on whichever project the URL names —
   Oneshot never creates one — so pointing it somewhere else starts with checking that.

@@ -128,7 +128,17 @@ disagrees with the URL, and refuses a `WORK_REPO` or seed whose `origin` is
 another project. A stale `WT_ROOT` has no origin to compare, so boot refuses it
 when it already holds another clone's worktrees, or when `ONESHOT_PROJECT` is
 still set beside a plain `WT_ROOT` that the old overlay used to replace with
-`~/Documents/<name>-wt`. `npm run setup` does all of this for you on a reconfigure.
+`~/Documents/<name>-wt` and that old root still holds worktrees (with nothing
+left there it only warns). `npm run setup` does all of this for you on a
+reconfigure, and saves the `.env` it started from as `.env.bak-<timestamp>`.
+
+If `WORK_REPO`'s `origin` is your fork, boot refuses it and names the remote
+that is the project, with the two `git remote rename` commands that swap them.
+If a check is wrong and you cannot fix it right now, `ONESHOT_SKIP_REPO_CHECK=1`
+turns these refusals into warnings (not a missing `GITLAB_REPO_URL`); boot and
+`doctor` remind you on every run until you remove it. `scripts/app.cjs` still
+refuses to check out into an `app-<port>` worktree from another clone, so a
+`WT_ROOT` shared with another project has to be fixed before the app can warm.
 
 The run journals under `state/runs/` are keyed by ticket iid alone, so the previous
 project's are still there under the same numbers. Oneshot never resumes one: each

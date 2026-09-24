@@ -9,14 +9,16 @@
  * defaults only when ~/.claude.json already holds one; skipped, it leaves the
  * .env.example placeholder, and boot refuses until a token is filled in.
  *
- * Secrets are written to .env at mode 600 and never echoed back.
+ * Secrets are written to .env at mode 600 and never echoed back. A reconfigure
+ * copies the .env it started from to .env.bak-<timestamp> (also mode 600)
+ * before writing, so a wrong answer costs nothing that cannot be copied back.
  */
 import { createInterface } from 'node:readline/promises';
 import { chmodSync, copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { legacyLines, pinPath, readKey, removeLegacySelectors, setKey } from '../src/lib/envfile.js';
+import { backupFile, legacyLines, pinPath, readKey, removeLegacySelectors, setKey } from '../src/lib/envfile.js';
 import { EXAMPLE_URL, defaultWorkRepo, defaultWtRoot, parseRepoUrl, type GitlabRepo } from '../src/lib/repourl.cjs';
 
 const ROOT = join(import.meta.dirname, '..');
@@ -54,7 +56,8 @@ function detectRepo(name: string): string {
 async function main(): Promise<void> {
   console.log(`\n${B}Oneshot setup${X}\n`);
 
-  if (existsSync(ENV)) {
+  const reconfigure = existsSync(ENV);
+  if (reconfigure) {
     const overwrite = await ask('.env already exists. Reconfigure it? (y/N)', { default: 'N' });
     if (!/^y/i.test(overwrite)) { console.log('  Keeping it.\n'); rl.close(); return; }
   } else {
@@ -162,9 +165,11 @@ async function main(): Promise<void> {
     }
   }
 
+  const backup = reconfigure ? backupFile(ENV) : '';
   writeFileSync(ENV, body);
   chmodSync(ENV, 0o600);
   console.log(`\n${G}Wrote .env (mode 600, gitignored).${X}`);
+  if (backup) console.log(`  ${D}The previous .env is saved as ${backup} (mode 600) — delete it once this one works.${X}`);
 
   console.log(`\n${B}Guardrail hooks${X}`);
   const install = await ask('Install them into ~/.claude/settings.json? (Y/n)', { default: 'Y' });

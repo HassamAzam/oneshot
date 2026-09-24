@@ -76,6 +76,12 @@ const list = (k, d) => cfg(k, d).split(',').map((s) => s.trim()).filter(Boolean)
  * in the seed and cut worktrees from it, and this script runs standalone — from the
  * ship-ticket skill, from `npm run app` — where no boot preflight has looked.
  *
+ * ONESHOT_SKIP_REPO_CHECK downgrades the legacy-selector and origin refusals to a logged
+ * warning through repourl.cjs relaxRepoChecks(), the same function boot and doctor use, so
+ * this script never refuses what the conductor lets through. A missing or invalid
+ * GITLAB_REPO_URL is not downgraded, and neither is cold()'s refusal of an app-<port>
+ * worktree cut from another clone: that one guards a `git checkout --force` into it.
+ *
  * `list`, `gc` and `down` are NOT refused. They check nothing out, and they are what a
  * person needs most while .env is half-way through a project switch: this script's own
  * errors tell them to `down --worktree` or `gc --kill`. With no WT_ROOT resolved every
@@ -90,13 +96,30 @@ const SEED = REPO.resolvePath(process.env, {
 });
 const SEED_FROM = SEED.path;
 const WT_ROOT = TARGET.wtRoot.path;
+/**
+ * Repo-check findings as a refusal: every one still a FAIL after relaxRepoChecks(),
+ * or null. Whatever the override downgraded is logged to stderr
+ * instead, so a session's output still says what boot would have said. Runs at load
+ * (CONFIG_ERROR), before `log` below exists, hence console.error.
+ */
+function refusal(findings) {
+  const relaxed = REPO.relaxRepoChecks(findings, process.env);
+  relaxed.forEach((f, i) => {
+    if (f.level !== findings[i].level) console.error('[app]', `${f.label} — ${f.detail}`);
+  });
+  const fails = relaxed.filter((x) => x.level === 'fail');
+  return fails.length ? fails.map((f) => `${f.label} — ${f.detail}`).join('; ') : null;
+}
+
 const CONFIG_ERROR = (() => {
   if (TARGET.error) return TARGET.error;
-  const conflicts = REPO.legacySelectors(process.env, TARGET.repo).filter((l) => l.conflict);
-  if (conflicts.length) {
-    return conflicts.map((l) => `${l.key}=${l.value} conflicts with GITLAB_REPO_URL (which gives ${l.derived}); `
-      + `delete the ${l.key} line from .env`).join('; ');
-  }
+  const conflicts = REPO.legacySelectors(process.env, TARGET.repo).filter((l) => l.conflict).map((l) => ({
+    level: 'fail',
+    label: `${l.key} conflicts with GITLAB_REPO_URL`,
+    detail: `${l.key}=${l.value} but GITLAB_REPO_URL gives ${l.derived}; delete the ${l.key} line from .env`,
+  }));
+  const refused = refusal(conflicts);
+  if (refused) return refused;
   if (!SEED_FROM || !WT_ROOT) return 'no seed repo or worktree root could be resolved';
   return null;
 })();
@@ -111,12 +134,8 @@ function checkoutError() {
   if (!TARGET.repo) return null;
   const subjects = [{ label: 'WORK_REPO', dir: WORK_REPO, from: TARGET.workRepo }];
   if (SEED_FROM !== WORK_REPO) subjects.push({ label: 'ONESHOT_SEED_FROM', dir: SEED_FROM, from: SEED });
-  for (const s of subjects) {
-    if (!s.dir || !fs.existsSync(s.dir)) continue;
-    const f = REPO.judgeOrigin(s, TARGET.repo.url, REPO.readOrigin(s.dir));
-    if (f.level === 'fail') return `${f.label} — ${f.detail}`;
-  }
-  return null;
+  return refusal(subjects.filter((s) => s.dir && fs.existsSync(s.dir))
+    .map((s) => REPO.judgeOrigin(s, TARGET.repo.url, REPO.readOrigin(s.dir))));
 }
 
 /**

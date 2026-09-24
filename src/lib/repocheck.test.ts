@@ -11,8 +11,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
-  checkoutFindings, identityFindings, judgeOrigin, judgeWtRoot, originFinding, readOrigin, wtRootFinding,
-  type OriginRead,
+  checkoutFindings, identityFindings, judgeOrigin, judgeWtRoot, originFinding, readOrigin, relaxRepoChecks,
+  repoCheckOverrideNotice, wtRootFinding, type Finding, type OriginRead,
 } from './repocheck.js';
 
 const URL = 'https://gitlab.example.com/acme/erp';
@@ -127,15 +127,106 @@ test('readOrigin reports a real repo\'s origin, and never throws on a directory 
     spawnSync('git', ['init', '-q', dir]);
     assert.ok('error' in readOrigin(dir), 'a repo with no origin');
     spawnSync('git', ['-C', dir, 'remote', 'add', 'origin', 'git@gitlab.example.com:acme/erp.git']);
-    assert.deepEqual(readOrigin(dir), { url: 'git@gitlab.example.com:acme/erp.git', pushUrls: [] });
+    assert.deepEqual(readOrigin(dir), { url: 'git@gitlab.example.com:acme/erp.git', pushUrls: [], remotes: [] });
     // A push URL is where the branches actually go, so it is read too.
     spawnSync('git', ['-C', dir, 'remote', 'set-url', '--push', 'origin', 'git@gitlab.example.com:acme/workstream.git']);
     assert.deepEqual(readOrigin(dir), {
-      url: 'git@gitlab.example.com:acme/erp.git', pushUrls: ['git@gitlab.example.com:acme/workstream.git'],
+      url: 'git@gitlab.example.com:acme/erp.git', pushUrls: ['git@gitlab.example.com:acme/workstream.git'], remotes: [],
     });
     const f = originFinding('WORK_REPO', dir, { GITLAB_REPO_URL: URL });
     assert.equal(f?.level, 'fail');
     assert.match(f?.detail ?? '', /pushes to git@gitlab\.example\.com:acme\/workstream\.git/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ------------------------------------------------------- origin: forks, renames
+
+const FORK = 'git@gitlab.example.com:someone/erp.git';
+
+test('a fork as origin fails, names the remote that is the project, and gives the two renames', () => {
+  const f = judgeOrigin({ label: 'WORK_REPO', dir: '/w', from: { path: '/w', source: 'plain', key: 'WORK_REPO' } }, URL, {
+    url: FORK, remotes: [{ name: 'upstream', url: 'https://gitlab.example.com/acme/erp.git' }],
+  });
+  assert.equal(f.level, 'fail');
+  assert.equal(f.label, 'WORK_REPO origin is a fork or another project');
+  assert.match(f.detail, /someone\/erp\.git/);
+  assert.match(f.detail, /remote 'upstream' \(https:\/\/gitlab\.example\.com\/acme\/erp\.git\) is the project/);
+  assert.match(f.detail, /pushes ticket branches to origin and fetches the base branch from origin/);
+  assert.ok(f.detail.includes('git -C /w remote rename origin fork && git -C /w remote rename upstream origin'), f.detail);
+  assert.match(f.detail, /point WORK_REPO at a clone of/);
+  assert.doesNotMatch(f.detail, /renamed or moved/);
+  // An existing `fork` remote is not clobbered by the suggested rename.
+  const taken = judgeOrigin({ label: 'WORK_REPO', dir: '/w' }, URL, {
+    url: FORK, remotes: [{ name: 'fork', url: 'git@gitlab.example.com:x/y.git' }, { name: 'up', url: URL }],
+  });
+  assert.ok(taken.detail.includes('remote rename origin fork2 && git -C /w remote rename up origin'), taken.detail);
+});
+
+test('with no remote that is the project, the fix also covers a project renamed or moved on GitLab', () => {
+  const ssh = judgeOrigin({ label: 'WORK_REPO', dir: '/w' }, URL, {
+    url: 'git@gitlab.example.com:acme/workstream.git', remotes: [{ name: 'mirror', url: 'git@gitlab.example.com:x/y.git' }],
+  });
+  assert.equal(ssh.level, 'fail');
+  assert.equal(ssh.label, 'WORK_REPO is a clone of another project');
+  assert.ok(ssh.detail.includes('renamed or moved on GitLab'), ssh.detail);
+  assert.ok(ssh.detail.includes('git -C /w remote set-url origin git@gitlab.example.com:acme/erp.git'), ssh.detail);
+  // The set-url keeps the transport the checkout already uses.
+  const https = judgeOrigin({ label: 'WORK_REPO', dir: '/w' }, URL, { url: 'https://gitlab.example.com/acme/old-erp.git' });
+  assert.ok(https.detail.includes('remote set-url origin https://gitlab.example.com/acme/erp.git'), https.detail);
+  const hint = (url: string): string => judgeOrigin({ label: 'WORK_REPO', dir: '/w' }, URL, { url }).detail;
+  assert.ok(hint('ssh://git@gitlab.example.com:2222/oldgroup/erp.git')
+    .includes('remote set-url origin ssh://git@gitlab.example.com:2222/acme/erp.git'), 'custom ssh port kept');
+  assert.ok(hint('gl:oldgroup/erp.git').includes('remote set-url origin gl:acme/erp.git'), 'ssh alias kept');
+  assert.ok(hint('https://oauth2:glpat-SECRET@gitlab.example.com:8443/old/erp.git')
+    .includes('remote set-url origin https://gitlab.example.com:8443/acme/erp.git'), 'https port kept');
+  assert.doesNotMatch(hint('https://oauth2:glpat-SECRET@gitlab.example.com/old/erp.git'), /SECRET|oauth2/);
+  assert.ok(hint('git@github.com:someone/erp-old.git')
+    .includes('remote set-url origin git@gitlab.example.com:acme/erp.git'), 'another host gets the project\'s own URL');
+});
+
+test('the remote named as the project is the one on GITLAB_REPO_URL\'s host, not a same-path mirror listed first', () => {
+  const f = judgeOrigin({ label: 'WORK_REPO', dir: '/w' }, URL, {
+    url: FORK, remotes: [
+      { name: 'github', url: 'https://github.com/acme/erp.git' },
+      { name: 'upstream', url: 'https://gitlab.example.com/acme/erp' },
+    ],
+  });
+  assert.equal(f.level, 'fail');
+  assert.ok(f.detail.includes("remote 'upstream'"), f.detail);
+  assert.ok(f.detail.includes('git -C /w remote rename upstream origin'), f.detail);
+  assert.doesNotMatch(f.detail, /rename github origin/);
+  // With only the same path elsewhere, it is still named — with the host caveat.
+  const only = judgeOrigin({ label: 'WORK_REPO', dir: '/w' }, URL, {
+    url: FORK, remotes: [{ name: 'github', url: 'https://github.com/acme/erp.git' }],
+  });
+  assert.ok(only.detail.includes("remote rename github origin"), only.detail);
+  assert.match(only.detail, /on host 'github\.com', not 'gitlab\.example\.com'/);
+});
+
+test('credentials in the other remotes are never echoed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oneshot-remotes-'));
+  try {
+    spawnSync('git', ['init', '-q', dir]);
+    spawnSync('git', ['-C', dir, 'remote', 'add', 'origin', FORK]);
+    spawnSync('git', ['-C', dir, 'remote', 'add', 'upstream', 'https://oauth2:glpat-SECRET@gitlab.example.com/acme/erp.git']);
+    spawnSync('git', ['-C', dir, 'remote', 'add', 'other', 'https://bot:glpat-OTHER@gitlab.example.com/x/y.git']);
+    const read = readOrigin(dir);
+    assert.ok(!('error' in read));
+    assert.deepEqual(read.remotes, [
+      { name: 'upstream', url: 'https://gitlab.example.com/acme/erp.git' },
+      { name: 'other', url: 'https://gitlab.example.com/x/y.git' },
+    ]);
+    const f = originFinding('WORK_REPO', dir, { GITLAB_REPO_URL: URL });
+    assert.equal(f?.level, 'fail');
+    assert.match(f?.detail ?? '', /remote rename upstream origin/);
+    assert.doesNotMatch(f?.detail ?? '', /SECRET|OTHER|oauth2|bot:/);
+    // Even handed an unredacted read, the judgement redacts what it prints.
+    const raw = judgeOrigin('WORK_REPO', URL, {
+      url: FORK, remotes: [{ name: 'upstream', url: 'https://oauth2:glpat-SECRET@gitlab.example.com/acme/erp.git' }],
+    });
+    assert.doesNotMatch(raw.detail, /SECRET|oauth2/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -321,31 +412,57 @@ test('a hand-set WT_ROOT not named for the project warns softly; the derived def
   }), null);
 });
 
-test('a plain WT_ROOT the old overlay used to replace fails while ONESHOT_PROJECT is still set', () => {
+test('a plain WT_ROOT the old overlay used to replace fails only when the old root holds worktrees', () => {
   const erpWt = join(homedir(), 'Documents', 'erp-wt');
-  const f = judgeWtRoot({
-    wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', clones: [], owners: [], overlayKey: 'ONESHOT_PROJECT',
-  });
+  const moved = { wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', clones: [], owners: [], overlayKey: 'ONESHOT_PROJECT' };
+  const left = [{ dir: join(erpWt, '123'), gitDir: '/r/erp/.git' }];
+  const f = judgeWtRoot({ ...moved, abandoned: left });
   assert.equal(f?.level, 'fail');
   assert.equal(f?.label, 'WT_ROOT moved when the project overlay went away');
   assert.match(f?.detail ?? '', /~\/Documents\/erp-wt/);
+  assert.match(f?.detail ?? '', /still holds 1 worktree\(s\) this move would abandon/);
   assert.match(f?.detail ?? '', /Delete the WT_ROOT line/);
+  // Nothing left behind: the same advice, but only a warning.
+  const w = judgeWtRoot(moved);
+  assert.equal(w?.level, 'warn');
+  assert.equal(w?.label, 'WT_ROOT moved when the project overlay went away');
+  assert.match(w?.detail ?? '', /nothing is abandoned yet/);
+  assert.match(w?.detail ?? '', /Delete the WT_ROOT line/);
   // The derived root, a scoped line (it beat the overlay too), or no overlay line: nothing moved.
-  assert.equal(judgeWtRoot({
-    wtRoot: erpWt, from: { ...plainWt, path: erpWt }, name: 'erp', clones: [], owners: [], overlayKey: 'ONESHOT_PROJECT',
-  }), null);
+  assert.equal(judgeWtRoot({ ...moved, wtRoot: erpWt, from: { ...plainWt, path: erpWt }, abandoned: left }), null);
   assert.notEqual(judgeWtRoot({
-    wtRoot: '/r/oneshot-wt', from: { ...plainWt, source: 'scoped', key: 'ONESHOT_ERP_WT_ROOT' }, name: 'erp',
-    clones: [], owners: [], overlayKey: 'ONESHOT_PROJECT',
+    ...moved, from: { ...plainWt, source: 'scoped', key: 'ONESHOT_ERP_WT_ROOT' }, abandoned: left,
   })?.level, 'fail');
-  assert.notEqual(judgeWtRoot({ wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', clones: [], owners: [] })?.level,
-    'fail');
-  // Caught before the root exists, which is exactly when the move has not been noticed yet.
+  assert.notEqual(judgeWtRoot({ ...moved, overlayKey: undefined, abandoned: left })?.level, 'fail');
+});
+
+test('the overlay-move warning never hides a WT_ROOT holding another clone\'s worktrees', () => {
+  const shared = {
+    wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', clones: ['/r/erp/.git'],
+    owners: [{ dir: '/r/oneshot-wt/app-8010', gitDir: '/r/workstream/.git' }],
+  };
+  for (const overlayKey of [undefined, 'ONESHOT_PROJECT', 'ONELOOP_PROJECT']) {
+    const f = judgeWtRoot({ ...shared, overlayKey, abandoned: [] });
+    assert.equal(f?.level, 'fail', String(overlayKey));
+    assert.equal(f?.label, 'WT_ROOT is shared with another clone', String(overlayKey));
+  }
+});
+
+test('wtRootFinding judges the overlay move by what the old root holds, even before WT_ROOT exists', () => {
   const env = { GITLAB_REPO_URL: URL, ONESHOT_PROJECT: 'erp' };
-  assert.equal(wtRootFinding('/no/such/oneshot-wt', { ...plainWt, path: '/no/such/oneshot-wt' }, 'erp', [], env)?.level,
-    'fail');
-  assert.equal(wtRootFinding('/no/such/oneshot-wt', { ...plainWt, path: '/no/such/oneshot-wt' }, 'erp', [],
-    { GITLAB_REPO_URL: URL }), null);
+  const gone = { ...plainWt, path: '/no/such/oneshot-wt' };
+  const oldRoot = join(homedir(), 'Documents', 'erp-wt');
+  const listed: string[] = [];
+  const empty = (d: string): [] => { listed.push(d); return []; };
+  assert.equal(wtRootFinding('/no/such/oneshot-wt', gone, 'erp', [], env, empty)?.level, 'warn');
+  assert.deepEqual(listed, [oldRoot]);
+  const holding = (d: string) => (d === oldRoot ? [{ dir: join(oldRoot, 'app-8010'), gitDir: '/r/erp/.git' }] : []);
+  const f = wtRootFinding('/no/such/oneshot-wt', gone, 'erp', [], env, holding);
+  assert.equal(f?.level, 'fail');
+  assert.ok((f?.detail ?? '').includes(join(oldRoot, 'app-8010')), f?.detail);
+  // No overlay line: nothing moved, and the old root is not even looked at.
+  const never = (): never => { throw new Error('must not list'); };
+  assert.equal(wtRootFinding('/no/such/oneshot-wt', gone, 'erp', [], { GITLAB_REPO_URL: URL }, never), null);
 });
 
 test('wtRootFinding reads real worktrees and tells this project\'s clone from another', () => {
@@ -370,4 +487,58 @@ test('wtRootFinding reads real worktrees and tells this project\'s clone from an
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+// ------------------------------------------------- ONESHOT_SKIP_REPO_CHECK
+
+const OVERRIDE = { ONESHOT_SKIP_REPO_CHECK: '1' };
+
+test('the override turns every repo-check FAIL into a WARN, keeping its text behind the variable\'s name', () => {
+  const conflict = identityFindings({ GITLAB_REPO_URL: URL, ONESHOT_PROJECT: 'workstream' });
+  const origin = judgeOrigin('WORK_REPO', URL, { url: 'git@gitlab.example.com:acme/workstream.git' });
+  const shared = judgeWtRoot({
+    wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', clones: ['/r/erp/.git'],
+    owners: [{ dir: '/r/oneshot-wt/app-8010', gitDir: '/r/workstream/.git' }],
+  });
+  const moved = judgeWtRoot({
+    wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', clones: [], owners: [], overlayKey: 'ONESHOT_PROJECT',
+    abandoned: [{ dir: '/r/erp-wt/1', gitDir: null }],
+  });
+  const fails = [...conflict.filter((f) => f.level === 'fail'), origin, shared, moved] as Finding[];
+  assert.equal(fails.length, 4);
+  assert.ok(fails.every((f) => f.level === 'fail'));
+  const relaxed = relaxRepoChecks(fails, OVERRIDE);
+  relaxed.forEach((r, i) => {
+    assert.equal(r.level, 'warn', r.label);
+    assert.equal(r.label, fails[i]?.label);
+    assert.equal(r.detail, `ONESHOT_SKIP_REPO_CHECK is set — not refusing: ${fails[i]?.detail}`);
+  });
+  // PASS and WARN findings are untouched, and the input is not mutated.
+  const pass = conflict.find((f) => f.level === 'pass') as Finding;
+  assert.deepEqual(relaxRepoChecks([pass], OVERRIDE), [pass]);
+  assert.equal(fails[0]?.level, 'fail');
+});
+
+test('the override never excuses a missing or invalid GITLAB_REPO_URL', () => {
+  for (const url of ['', 'not a url']) {
+    const env = { GITLAB_REPO_URL: url, ...OVERRIDE };
+    const [f] = relaxRepoChecks(identityFindings(env), env);
+    assert.equal(f?.level, 'fail', url);
+    assert.doesNotMatch(f?.detail ?? '', /not refusing/);
+  }
+});
+
+test('the override is parsed like any flag, in either spelling, and off changes nothing', () => {
+  const origin = judgeOrigin('WORK_REPO', URL, { url: 'git@gitlab.example.com:acme/workstream.git' });
+  for (const v of ['1', 'true', 'YES', 'on']) {
+    assert.equal(relaxRepoChecks([origin], { ONESHOT_SKIP_REPO_CHECK: v })[0]?.level, 'warn', v);
+  }
+  const legacy = relaxRepoChecks([origin], { ONELOOP_SKIP_REPO_CHECK: 'true' })[0];
+  assert.equal(legacy?.level, 'warn');
+  assert.match(legacy?.detail ?? '', /^ONELOOP_SKIP_REPO_CHECK is set — not refusing: /);
+  for (const env of [{}, { ONESHOT_SKIP_REPO_CHECK: '' }, { ONESHOT_SKIP_REPO_CHECK: '0' }, { ONESHOT_SKIP_REPO_CHECK: 'no' }]) {
+    assert.deepEqual(relaxRepoChecks([origin], env), [origin], JSON.stringify(env));
+    assert.equal(repoCheckOverrideNotice(env), null, JSON.stringify(env));
+  }
+  assert.equal(repoCheckOverrideNotice(OVERRIDE), 'repo checks downgraded by ONESHOT_SKIP_REPO_CHECK — remove it once fixed');
 });

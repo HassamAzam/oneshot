@@ -41,7 +41,7 @@ import { db, logEvent, updateRun } from '../src/lib/db.js';
 import { liveConductorIds } from '../src/lib/fleet.js';
 import { getIssue, swapLabel } from '../src/lib/gitlab.js';
 import { journalOwner } from '../src/lib/journalproject.js';
-import { identityFindings } from '../src/lib/repocheck.js';
+import { identityFindings, relaxRepoChecks, repoCheckOverrideNotice } from '../src/lib/repocheck.js';
 
 const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', D = '\x1b[2m', B = '\x1b[1m', X = '\x1b[0m';
 
@@ -330,8 +330,13 @@ async function main(): Promise<void> {
 
   // This writes labels on GitLab, so it refuses what boot refuses: no usable
   // GITLAB_REPO_URL, or a legacy selector that disagrees with it. Whoever left
-  // ONESHOT_PROJECT=erp in .env believes this command acts on erp.
-  const identity = identityFindings().filter((f) => f.level === 'fail');
+  // ONESHOT_PROJECT=erp in .env believes this command acts on erp. With
+  // ONESHOT_SKIP_REPO_CHECK on, a conflict is still printed, just not refused.
+  const override = repoCheckOverrideNotice();
+  if (override) console.log(`\n${Y}${override}${X}`);
+  const judged = relaxRepoChecks(identityFindings());
+  for (const f of judged.filter((j) => j.level === 'warn')) console.log(`\n${Y}${f.label}${X} ${f.detail}`);
+  const identity = judged.filter((f) => f.level === 'fail');
   if (identity.length) {
     for (const f of identity) console.log(`\n${R}${f.label}${X} ${f.detail}`);
     console.log(`${D}Nothing changed. \`npm run doctor\` lists everything that is wrong.${X}\n`);

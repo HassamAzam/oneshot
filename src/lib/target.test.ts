@@ -20,6 +20,7 @@ import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'n
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { checkoutFindings, identityFindings, relaxRepoChecks } from './repocheck.js';
 
 const REPO_URL = 'https://gitlab.example.com/acme/erp';
 
@@ -30,6 +31,7 @@ const KEYS = [
   'ONESHOT_GITLAB_API', 'ONELOOP_GITLAB_API', 'ONESHOT_PROJECT_ID', 'ONELOOP_PROJECT_ID',
   'ONESHOT_ERP_WORK_REPO', 'ONESHOT_ERP_WT_ROOT', 'ONESHOT_ERP_SEED_FROM',
   'ONELOOP_ERP_WORK_REPO', 'ONELOOP_ERP_WT_ROOT', 'ONELOOP_ERP_SEED_FROM', 'ONESHOT_BASE_BRANCH',
+  'ONESHOT_SKIP_REPO_CHECK', 'ONELOOP_SKIP_REPO_CHECK',
 ];
 
 function hermetic(vars: Record<string, string>): Record<string, string> {
@@ -317,6 +319,43 @@ test('scripts/app.cjs refuses a seed or WORK_REPO that is a clone of another pro
   }
 });
 
+test('ONESHOT_SKIP_REPO_CHECK lets through exactly what boot lets through, in app.cjs and TypeScript alike', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oneshot-appskip-'));
+  try {
+    spawnSync('git', ['init', '-q', dir]);
+    spawnSync('git', ['-C', dir, 'remote', 'add', 'origin', 'git@gitlab.example.com:acme/workstream.git']);
+    const probe = 'const a = require(APP); process.stdout.write(JSON.stringify([a.config.error, a.checkoutError()]))';
+    const shapes: Array<Record<string, string>> = [
+      { GITLAB_REPO_URL: REPO_URL, WORK_REPO: dir },
+      { GITLAB_REPO_URL: REPO_URL, WORK_REPO: '/tmp/no-such-erp', ONESHOT_PROJECT: 'workstream' },
+      { WORK_REPO: dir, ONESHOT_PROJECT: 'workstream' },
+    ];
+    for (const shape of shapes) {
+      const overrides: Array<Record<string, string>> = [{}, { ONESHOT_SKIP_REPO_CHECK: '1' }, { ONELOOP_SKIP_REPO_CHECK: 'yes' }];
+      for (const override of overrides) {
+        const vars: Record<string, string> = { ...shape, ...override };
+        const env = hermetic(vars);
+        const [configError, checkoutError] = JSON.parse(runApp(vars, probe).last) as Array<string | null>;
+        const cjsRefuses = Boolean(configError || checkoutError);
+        const sources = {
+          WORK_REPO: { path: vars.WORK_REPO ?? '', source: 'plain' as const, key: 'WORK_REPO' },
+          ONESHOT_SEED_FROM: { path: '', source: 'default' as const, key: '' },
+        };
+        const ts = relaxRepoChecks([
+          ...identityFindings(env), ...checkoutFindings({ workRepo: vars.WORK_REPO ?? '', seed: '', sources }, env),
+        ], env);
+        const tsRefuses = ts.some((f) => f.level === 'fail');
+        assert.equal(cjsRefuses, tsRefuses, JSON.stringify(vars));
+        const skipped = Object.keys(override).length > 0;
+        // Only a missing GITLAB_REPO_URL still refuses with the override on.
+        assert.equal(cjsRefuses, !skipped || !vars.GITLAB_REPO_URL, JSON.stringify(vars));
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a phase session\'s app.cjs resolves the conductor\'s project, whatever ONESHOT_HOME/.env says', async () => {
   // A session's environment is an allowlist and app.cjs inside it fills the
   // rest from ONESHOT_HOME/.env. The conductor booted from the SHELL here —
@@ -351,6 +390,42 @@ test('a phase session\'s app.cjs resolves the conductor\'s project, whatever ONE
     assert.equal(cjs.error, null);
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a phase session\'s app.cjs skips the repo checks exactly when the conductor did', async () => {
+  const root = new URL('../..', import.meta.url).pathname;
+  const home = mkdtempSync(join(tmpdir(), 'oneshot-sessionskip-'));
+  const clone = mkdtempSync(join(tmpdir(), 'oneshot-sessionskip-clone-'));
+  try {
+    symlinkSync(join(root, 'skills'), join(home, 'skills'));
+    spawnSync('git', ['init', '-q', clone]);
+    spawnSync('git', ['-C', clone, 'remote', 'add', 'origin', 'git@gitlab.example.com:acme/workstream.git']);
+    const app = JSON.stringify(join(root, 'scripts', 'app.cjs'));
+    const sessionRefusal = async (conductor: Record<string, string>, dotenv: string): Promise<string | null> => {
+      writeFileSync(join(home, '.env'), dotenv);
+      let session: Record<string, string> = {};
+      await loadWith({ GITLAB_REPO_URL: REPO_URL, WORK_REPO: clone, ...conductor }, (m) => {
+        session = m.projectSessionEnv();
+      });
+      const child = spawnSync(process.execPath,
+        ['-e', `process.stdout.write(JSON.stringify(require(${app}).checkoutError()))`],
+        { cwd: '/', env: { PATH: process.env.PATH ?? '', HOME: homedir(), ONESHOT_HOME: home, ...session }, encoding: 'utf8' },
+      );
+      assert.equal(child.status, 0, child.stderr);
+      return JSON.parse(child.stdout.trim().split('\n').pop() ?? 'null') as string | null;
+    };
+    const conductors: Array<Record<string, string>> = [{ ONESHOT_SKIP_REPO_CHECK: '1' }, { ONELOOP_SKIP_REPO_CHECK: 'yes' }];
+    for (const conductor of conductors) {
+      assert.equal(await sessionRefusal(conductor, ''), null, JSON.stringify(conductor));
+      assert.equal(await sessionRefusal(conductor, 'ONESHOT_SKIP_REPO_CHECK=0\n'), null, JSON.stringify(conductor));
+    }
+    assert.match(await sessionRefusal({}, '') ?? '', /is a clone of another project/);
+    assert.match(await sessionRefusal({}, 'ONESHOT_SKIP_REPO_CHECK=1\nONELOOP_SKIP_REPO_CHECK=1\n') ?? '',
+      /is a clone of another project/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(clone, { recursive: true, force: true });
   }
 });
 

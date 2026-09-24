@@ -17,8 +17,8 @@ import { homedir, userInfo } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
 import { deskUsername } from './identity.js';
 import {
-  LEGACY_SELECTOR_KEYS, REPO_URL_VAR, expandPath as expandPathFrom, readEnv, resolvePath, resolveTarget,
-  scopedEnvName as scopedEnvNameFor, spellings,
+  LEGACY_SELECTOR_KEYS, REPO_URL_VAR, SKIP_REPO_CHECK_VAR, expandPath as expandPathFrom, readEnv, repoCheckOverride,
+  resolvePath, resolveTarget, scopedEnvName as scopedEnvNameFor, spellings,
   type GitlabRepo, type ResolvedPath,
 } from './repourl.cjs';
 import { parseMrFeedbackConfig } from '../mrfeedback/config.js';
@@ -633,6 +633,12 @@ export function pathSources(): Record<'WORK_REPO' | 'WT_ROOT' | 'ONESHOT_SEED_FR
  * key that is ABSENT, and repourl.cjs reads '' as unset. The seed is passed as
  * the conductor resolved it; '' (seeding off here) is what makes app.cjs fall
  * back to WORK_REPO, as it always has.
+ *
+ * ONESHOT_SKIP_REPO_CHECK is handed over the same way: '1' when the conductor
+ * booted with it on, '' otherwise, both spellings. Exported only in the shell
+ * it would otherwise let boot through while every session's `app.cjs ensure`
+ * refused the same origin — and a line in ONESHOT_HOME/.env may not switch it
+ * on or off behind the conductor's back.
  */
 export function projectSessionEnv(): Record<string, string> {
   const { repo } = repoIdentity();
@@ -649,6 +655,8 @@ export function projectSessionEnv(): Record<string, string> {
     if (scoped) for (const k of spellings(scoped)) env[k] = '';
   }
   for (const k of LEGACY_SELECTOR_KEYS) env[k] = '';
+  for (const k of spellings(SKIP_REPO_CHECK_VAR)) env[k] = '';
+  if (repoCheckOverride(process.env)) env[SKIP_REPO_CHECK_VAR] = '1';
   return env;
 }
 

@@ -6,7 +6,10 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { legacyLines, pinPath, readKey, removeKey, removeLegacySelectors, setKey } from './envfile.js';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { backupFile, legacyLines, pinPath, readKey, removeKey, removeLegacySelectors, setKey } from './envfile.js';
 
 const ROOT = '/opt/oneshot';
 
@@ -57,4 +60,45 @@ test('setKey and removeKey touch whole keys only', () => {
   assert.equal(removeKey(body, 'WORK_REPO'), 'WORK_REPO_X=1\n# WORK_REPO=3');
   assert.equal(setKey(body, 'WORK_REPO', '9'), 'WORK_REPO_X=1\nWORK_REPO=9\n# WORK_REPO=3');
   assert.equal(setKey('A=1', 'B', ''), 'A=1');
+});
+
+/** Every `$` pattern String.replace gives a meaning to in a replacement string. */
+const DOLLARS = ["x$'y", 'a$&b', '$1', '$$', '$`'];
+
+test('a value full of $ patterns is written verbatim, replacing or appending', () => {
+  const body = '# comment\nGITLAB_TOKEN=abc\nOTHER=1\n';
+  for (const v of DOLLARS) {
+    const replaced = setKey(body, 'GITLAB_TOKEN', v);
+    assert.equal(replaced, `# comment\nGITLAB_TOKEN=${v}\nOTHER=1\n`, v);
+    assert.equal(readKey(replaced, 'GITLAB_TOKEN'), v, v);
+    const appended = setKey(body, 'SLACK_BOT_TOKEN', v);
+    assert.equal(appended, `${body}\nSLACK_BOT_TOKEN=${v}`, v);
+  }
+});
+
+test('pinPath writes a path full of $ patterns verbatim', () => {
+  for (const v of DOLLARS) {
+    const answer = `/data/${v}`;
+    const body = pinPath(OLD, { envName: 'WT_ROOT', name: 'erp', answer, derived: '~/Documents/erp-wt', root: ROOT });
+    assert.equal(readKey(body, 'WT_ROOT'), answer, v);
+    assert.equal(body.split('\n').length, OLD.split('\n').length, v);
+    assert.equal(readKey(body, 'GITLAB_TOKEN'), 'x', v);
+  }
+});
+
+test('backupFile copies the file beside itself at mode 600, and never overwrites a backup', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oneshot-envbak-'));
+  try {
+    const env = join(dir, '.env');
+    writeFileSync(env, 'GITLAB_TOKEN=secret\n', { mode: 0o644 });
+    const at = new Date(2026, 8, 24, 7, 5, 3);
+    const first = backupFile(env, at);
+    assert.equal(first, `${env}.bak-20260924-070503`);
+    assert.equal(readFileSync(first, 'utf8'), 'GITLAB_TOKEN=secret\n');
+    assert.equal(statSync(first).mode & 0o777, 0o600);
+    assert.equal(backupFile(env, at), `${env}.bak-20260924-070503-2`);
+    assert.equal(readFileSync(first, 'utf8'), 'GITLAB_TOKEN=secret\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -42,13 +42,19 @@ export interface LegacySelector {
   conflict: boolean;
 }
 
+/** A remote of the checkout other than origin; `url` already has its credentials redacted. */
+export interface OtherRemote {
+  name: string;
+  url: string;
+}
+
 /**
  * What `git remote get-url` said about a checkout's origin, or why it could not say.
  * `url` is the first non-local URL when the origin is a local clone, `via` the local
- * hops taken to reach it.
+ * hops taken to reach it, `remotes` the checkout's other remotes.
  */
 export type OriginRead =
-  | { url: string; pushUrls?: string[]; via?: string[] }
+  | { url: string; pushUrls?: string[]; via?: string[]; remotes?: OtherRemote[] }
   | { error: string };
 
 /** What a checkout is to Oneshot, and which variable put its path there — for the fix-it text. */
@@ -94,3 +100,10 @@ export declare function resolveTarget(env: Env, root: string): {
 };
 export declare const LEGACY_SELECTOR_KEYS: string[];
 export declare function legacySelectors(env: Env, repo: GitlabRepo | null): LegacySelector[];
+export declare const SKIP_REPO_CHECK_VAR: 'ONESHOT_SKIP_REPO_CHECK';
+/** The spelling of ONESHOT_SKIP_REPO_CHECK switched on in `env`, else null. */
+export declare function repoCheckOverride(env: Env): string | null;
+/** The standing reminder boot and doctor print while the override is on; null when off. */
+export declare function repoCheckOverrideNotice(env: Env): string | null;
+/** Every repo-check FAIL but a missing/invalid GITLAB_REPO_URL as a WARN, when the override is on. */
+export declare function relaxRepoChecks(findings: Finding[], env: Env): Finding[];

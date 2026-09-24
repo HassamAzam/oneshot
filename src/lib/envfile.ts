@@ -8,15 +8,47 @@
  * so an answer that equals the derived default has to REMOVE the old line, not
  * just skip writing a new one.
  */
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { LEGACY_SELECTOR_KEYS, expandPath, scopedEnvName, spellings } from './repourl.cjs';
 
 const lineRe = (key: string): RegExp => new RegExp(`^${key}=.*$`, 'm');
 
-/** Replace `key`'s uncommented line, or append one. An empty value writes nothing. */
+/**
+ * Replace `key`'s uncommented line, or append one. An empty value writes nothing.
+ *
+ * The line goes in through a FUNCTION replacer: as a replacement STRING, a
+ * token containing `$&`, `$'`, `` $` `` or `$1` would splice pieces of the
+ * old .env into the new one and truncate the token itself.
+ */
 export function setKey(body: string, key: string, value: string): string {
   if (!value) return body;
   const re = lineRe(key);
-  return re.test(body) ? body.replace(re, `${key}=${value}`) : `${body}\n${key}=${value}`;
+  const line = `${key}=${value}`;
+  return re.test(body) ? body.replace(re, () => line) : `${body}\n${line}`;
+}
+
+const pad = (n: number): string => String(n).padStart(2, '0');
+
+/**
+ * Copy `file` to `<file>.bak-YYYYMMDD-HHMMSS` (local time) at mode 600 — it
+ * holds the same secrets — and return the copy's path. A second backup in the
+ * same second gets a `-2`, `-3` suffix rather than overwriting the first.
+ */
+export function backupFile(file: string, now: Date = new Date()): string {
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+    + `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const content = readFileSync(file);
+  for (let n = 1; ; n += 1) {
+    const dest = `${file}.bak-${stamp}${n > 1 ? `-${n}` : ''}`;
+    try {
+      writeFileSync(dest, content, { flag: 'wx', mode: 0o600 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+      throw err;
+    }
+    chmodSync(dest, 0o600);
+    return dest;
+  }
 }
 
 /** Every uncommented `key=` line removed. Commented lines are documentation and stay. */
