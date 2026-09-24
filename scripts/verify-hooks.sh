@@ -183,6 +183,69 @@ if command -v ln >/dev/null 2>&1; then
 fi
 
 echo
+echo "frontend-test-guard"
+# The matcher is the app repo's own Jest `testMatch`, so the two halves of that
+# config are the two halves of this block.
+expect_deny  "__tests__/ under frontend/src" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/frontend/src/components/leaves/person_view/__tests__/LeaveForm.test.js")"
+expect_deny  "a plain .js inside __tests__/ (testMatch is directory-based)" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/frontend/src/components/leaves/__tests__/helpers.js")"
+expect_deny  ".test.js outside __tests__/ (erp has two of these)" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/frontend/src/common/utils/tests/misc.test.js")"
+expect_deny  ".spec.jsx under frontend/src" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/frontend/src/components/rewards/BonusInput.spec.jsx")"
+expect_deny  ".test.tsx under frontend/src" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/frontend/src/components/home/Announcements.test.tsx")"
+expect_deny  "Edit of an existing Jest test, not just Write" \
+    frontend-test-guard.cjs '{"tool_name":"Edit","tool_input":{"file_path":"'"$ONESHOT_WORKTREE"'/frontend/src/components/profile/__tests__/AddRelative.test.js"}}'
+
+# THE CARVE-OUT. Playwright is the sanctioned route and `verify` breaks on every
+# UI ticket if any of these is denied. Each lives outside Jest's `roots`, which
+# is exactly why the rule is anchored on frontend/src and not on the filename.
+expect_allow "Playwright driver in the worktree scratch dir" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/.verify-scratch/cases.spec.js")"
+expect_allow "Playwright driver in the run's harness dir" \
+    frontend-test-guard.cjs "$(write_payload "$ROOT/state/runs/0/harness/drive.test.js")"
+expect_allow "Playwright spec at the app repo root, outside Jest's roots" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/e2e/leaves.spec.ts")"
+expect_allow "Playwright spec under frontend/ but outside frontend/src" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/frontend/e2e/leaves.spec.js")"
+
+# Everything else the guard must keep its hands off.
+expect_allow "a backend Django test"   frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/apps/leaves/tests/leave_form_test.py")"
+expect_allow "a backend pytest-style test" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/apps/leaves/tests/test_leave_form.py")"
+expect_allow "ordinary frontend source"  frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/frontend/src/components/leaves/LeaveForm.jsx")"
+expect_allow "the port-pinning config verify must edit" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/frontend/src/constants/config.js")"
+expect_allow "Jest's own setup file (infrastructure, outside roots)" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/frontend/config/setupTests.js")"
+expect_allow "a snapshot (.snap is not in testMatch)" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/frontend/src/components/profile/__tests__/__snapshots__/AddRelative.test.js.snap")"
+expect_allow "Oneshot's own unit test (this repo has no frontend/)" \
+    frontend-test-guard.cjs "$(write_payload "$ROOT/src/conductor/runner.test.ts")"
+expect_allow "Read of a Jest test — this guard is writes only" \
+    frontend-test-guard.cjs '{"tool_name":"Read","tool_input":{"file_path":"'"$ONESHOT_WORKTREE"'/frontend/src/components/profile/__tests__/AddRelative.test.js"}}'
+
+# The guard is phase-independent: verify writes Playwright, implement writes
+# code, and neither may author a Jest test. Pinning a non-implement phase stops
+# someone narrowing this to `implement` and reopening it for every other phase.
+SAVED_PHASE="$ONESHOT_PHASE"
+export ONESHOT_PHASE="verify"
+expect_deny  "a Jest test from verify, not just implement" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/frontend/src/components/leaves/__tests__/LeaveForm.test.js")"
+expect_allow "verify's Playwright driver"  frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/.verify-scratch/run-cases.js")"
+export ONESHOT_PHASE="$SAVED_PHASE"
+
+# A path that reaches frontend/src through a symlink is still frontend/src, and
+# a prefix-only check would wave it through. Same realpath rule write-scope
+# depends on, pinned here so nobody "simplifies" realish() out of this guard.
+mkdir -p "$ONESHOT_WORKTREE/frontend/src/components"
+ln -sfn "$ONESHOT_WORKTREE/frontend/src/components" "$ONESHOT_WORKTREE/shortcut" 2>/dev/null
+expect_deny  "a Jest test reached through a symlink (realpath escape)" \
+    frontend-test-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/shortcut/__tests__/Sneaky.test.js")"
+
+echo
 echo "pause-check"
 mkdir -p "$ROOT/state"
 touch "$ROOT/state/PAUSE"
