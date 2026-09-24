@@ -65,6 +65,7 @@ const CODES = [
   'E_WEBPACK_DEAD', 'E_BUNDLE_UNREACHABLE',
   'E_NO_CREDENTIALS', 'E_LOGIN_FAILED', 'E_LOGIN_2FA', 'E_TRIAL_EXPIRED',
   'E_MODULE_UNKNOWN', 'E_MODULE_TIMEOUT', 'E_NOT_UP', 'E_PLAYWRIGHT_MISSING',
+  'E_SELECTOR_EMPTY',
 ];
 
 class HarnessError extends Error {
@@ -972,6 +973,14 @@ async function shot(session, name) {
  *
  * Returns null when the element never resolves a box — absent, detached, or
  * `display:none`. Null means "not measurable", never "measured as zero".
+ *
+ * Each probe carries its own timeout. `boundingBox()` with no argument inherits
+ * Playwright's 30s actionability default, so on a selector that matches nothing the first
+ * call outlives this function's whole budget: measured at 30052ms against a 1200ms
+ * timeout, and 60106ms for an `overlap()` where both sides were absent. The missing-
+ * selector path is the common one — "zero matches is a question" means a phase retries
+ * corrected locators routinely — so the per-probe cap is what keeps the documented
+ * `timeout` honest.
  */
 async function settle(session, selector, opts = {}) {
   const timeout = Number(opts.timeout || 5000);
@@ -981,7 +990,9 @@ async function settle(session, selector, opts = {}) {
   let last = null;
   let stableSince = null;
   while (Date.now() - started < timeout) {
-    const box = await loc.boundingBox().catch(() => null);
+    const left = timeout - (Date.now() - started);
+    const probe = Math.max(50, Math.min(500, left));
+    const box = await loc.boundingBox({ timeout: probe }).catch(() => null);
     const steady = box && last
       && Math.abs(box.x - last.x) < 1 && Math.abs(box.y - last.y) < 1
       && Math.abs(box.width - last.width) < 1 && Math.abs(box.height - last.height) < 1;
@@ -995,6 +1006,38 @@ async function settle(session, selector, opts = {}) {
     await sleep(50);
   }
   return last;
+}
+
+/**
+ * Is the element something a user can actually see?
+ *
+ * A box is not visibility. `visibility:hidden` and `opacity:0` both keep their geometry,
+ * so a dismissed popover that is merely hidden rather than unmounted still measures
+ * 200x120 in the same place as the field under it — reported here as a 6000px overlap on
+ * a screen where nothing is wrong. That is the ticket-244 failure mode reversed, and it
+ * is the more dangerous direction: a false defect costs a week, a missed one costs a
+ * retest. react-datepicker unmounts on close so it is safe, but MUI Popper with
+ * `keepMounted` and any CSS fade dismissal are not.
+ *
+ * Playwright's own `isVisible()` does not cover this: it treats `opacity:0` as visible.
+ * Opacity also compounds down the tree, so a faded ancestor hides a fully opaque child —
+ * hence the walk to the root rather than reading the one element.
+ */
+async function visible(session, selector) {
+  const loc = session.page.locator(selector).first();
+  return loc.evaluate((el) => {
+    let effective = 1;
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      const cs = getComputedStyle(node);
+      if (cs.display === 'none') return { visible: false, why: 'display:none' };
+      if (cs.visibility === 'hidden' || cs.visibility === 'collapse') {
+        return { visible: false, why: `visibility:${cs.visibility}` };
+      }
+      effective *= Number(cs.opacity);
+    }
+    if (effective < 0.05) return { visible: false, why: `opacity:${effective.toFixed(2)}` };
+    return { visible: true, why: null };
+  }, { timeout: 2000 }).catch(() => ({ visible: false, why: 'unmeasurable' }));
 }
 
 function intersection(a, b) {
@@ -1023,6 +1066,16 @@ function intersection(a, b) {
  * `outsideViewport` catches the other direction. CSS `zoom` and a short viewport have
  * already put a real element at `top=1194px` in a 900px window, where it cannot overlap
  * anything because it is not on screen at all — a green result that means nothing.
+ *
+ * `hidden` is the same guard for elements that kept their box but are not on screen. If
+ * either side is invisible there is nothing for a user to see, so `intersects` is false
+ * and `hidden` names which one and why.
+ *
+ * One thing this does NOT handle: both boxes are viewport-relative and they are read one
+ * after the other, so a page that scrolls between the two reads compares two different
+ * coordinate frames. Measured: two elements 600px apart, truthfully `px=0`, came back as
+ * `px=20000` with a 400px scroll landing in the gap. Settle the page before measuring —
+ * do not call this while something is still scrolling a field into view.
  */
 async function overlap(session, a, b, opts = {}) {
   const boxA = await settle(session, a, opts);
@@ -1034,7 +1087,16 @@ async function overlap(session, a, b, opts = {}) {
   if (missing.length) {
     return { intersects: null, px: null, missing, a: boxA, b: boxB, viewport };
   }
+  const seen = await Promise.all([visible(session, a), visible(session, b)]);
+  const hidden = [a, b]
+    .map((sel, i) => (seen[i].visible ? null : { selector: sel, why: seen[i].why }))
+    .filter(Boolean);
   const hit = intersection(boxA, boxB);
+  if (hidden.length) {
+    return {
+      intersects: false, px: 0, region: hit, hidden, a: boxA, b: boxB, viewport, outsideViewport: false,
+    };
+  }
   const outsideViewport = viewport
     ? [boxA, boxB].some((box) => box.y >= viewport.height || box.x >= viewport.width)
     : false;
@@ -1042,6 +1104,7 @@ async function overlap(session, a, b, opts = {}) {
     intersects: hit.px > 0,
     px: hit.px,
     region: hit,
+    hidden,
     a: boxA,
     b: boxB,
     viewport,

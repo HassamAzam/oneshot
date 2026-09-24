@@ -165,7 +165,7 @@ pytest is unaffected and is fine to run.
   // → { intersects: true, px: 10340, region: {...}, a: {...}, b: {...} }
   ```
 
-  Three ways this reads green on a broken screen, all of them paid for already:
+  Four ways this reads the wrong verdict, all of them paid for already:
 
   - **`boundingBox()` does not wait for the geometry to settle.** It returns the
     box as it is when asked. A popper re-anchors — it measures its reference,
@@ -181,10 +181,27 @@ pytest is unaffected and is fine to run.
     `locator:`, never a pass. A popover absence-assertion passes identically
     whether dismissal works or the popover never opened at all, so prove the
     thing you expect to be there IS there before concluding the thing you expect
-    to be gone is gone.
+    to be gone is gone. To make `runCase` record that as `blocked` you have to
+    throw a `HarnessError` — it files a plain `Error` as `fail`, which is a
+    defect claim against a branch that may have nothing wrong with it:
+
+    ```js
+    if (res.intersects === null) {
+      throw new h.HarnessError('E_SELECTOR_EMPTY', `locator: ${res.missing} did not resolve`);
+    }
+    ```
   - **An element off-screen cannot overlap anything.** CSS `zoom` and a short
     viewport have put a real element at `top=1194px` in a 900px window. Check
-    `outsideViewport` before believing a zero.
+    `outsideViewport` before believing a zero. `hidden` is the same guard for an
+    element that kept its box but is not on screen — `visibility:hidden` and
+    `opacity:0` both measure full size, so a popover that is hidden rather than
+    unmounted would otherwise be reported as covering the field it no longer
+    covers.
+  - **Nothing here survives the page scrolling underneath it.** The two boxes are
+    viewport-relative and read one after the other, so a scroll that lands
+    between them compares two different frames: two elements 600px apart,
+    truthfully `px=0`, measured `px=20000`. Let the scroll finish before you
+    measure.
 
   Screenshot after the settle, not before — a shot timed one tick early omits the
   defect, and then the disproof and the proof look identical in `artifacts/`.
