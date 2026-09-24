@@ -136,6 +136,26 @@ test('without the bug label research is not offered the reproduction skill', () 
   assert.ok(!names(prompt).includes('bug-reproduction'));
 });
 
+// ------------------------------------------- research's external-document rule
+
+test('research is told not to spend a fetch on a chat permalink it cannot read', () => {
+  // #8652 was linked to a sibling whose description cited a Slack thread as the
+  // original report. Research followed it and got a 403: archive URLs need an
+  // authenticated session, and a phase session is given only the GitLab MCP, so
+  // the call can never succeed. The rule above it -- try every external document
+  // -- is right, and this is the one class worth carving out of it.
+  const prompt = promptFor(cfg('research'), ctx(ticket()));
+  assert.match(prompt, /Slack\s+archive URL answers 403/);
+  assert.match(prompt, /Record it in `unknowns` by URL/);
+});
+
+test('research still opens every other external document', () => {
+  // The carve-out must not read as permission to skip links in general.
+  const prompt = promptFor(cfg('research'), ctx(ticket()));
+  assert.match(prompt, /Try each document linked outside GitLab with WebFetch/);
+  assert.match(prompt, /Never guess what an\s+unopened document says/);
+});
+
 test('the reproduction instructions follow the same gate as the skill', () => {
   // The two halves must agree: loading the skill file without the prose leaves
   // research a method for a job it was never asked to do, and the prose without
