@@ -192,6 +192,38 @@ expect_allow "Read while paused"       pause-check.cjs '{"tool_name":"Read","too
 rm -f "$ROOT/state/PAUSE"
 expect_allow "Bash when not paused"    pause-check.cjs "$(bash_payload 'npm test')"
 
+echo
+echo "mr-gate"
+mr_payload() {
+    printf '{"tool_name":"%s","tool_input":%s}' "$1" "$2"
+}
+
+expect_deny  "conventional-commit prefix in title" mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__create_merge_request '{"title":"chore: remove unused celery task","description":"[closes https://gitlab.example.com/g/p/-/issues/1]"}')"
+expect_deny  "create with no closes line"          mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__create_merge_request '{"title":"Remove Unused Celery Task","description":"Does a thing."}')"
+expect_allow "plain title plus closes line"        mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__create_merge_request '{"title":"Remove Unused Celery Task","description":"Does a thing.\n\n[closes https://gitlab.example.com/g/p/-/issues/1]"}')"
+expect_allow "update that touches neither field"   mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__update_merge_request '{"labels":"ready"}')"
+expect_deny  "update sending a closes-less body"   mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__update_merge_request '{"description":"Rewritten body."}')"
+
+echo
+echo "secret-guard"
+expect_deny  "Read of this repo's .env"        secret-guard.cjs \
+    "$(printf '{"tool_name":"Read","tool_input":{"file_path":"%s/.env"}}' "$ROOT")"
+expect_deny  "cat of this repo's .env"         secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env"}}' "$ROOT")"
+expect_deny  "grep TOKEN by absolute path"     secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"grep TOKEN %s/.env"}}' "$ROOT")"
+expect_allow "the work repo's own .env"        secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env"}}' "$ONESHOT_WORKTREE")"
+expect_allow "grepping the source for a name"  secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"grep -rn GITLAB_TOKEN src/"}}'
+expect_allow "reading an ordinary file"        secret-guard.cjs \
+    '{"tool_name":"Read","tool_input":{"file_path":"/tmp/notes.md"}}'
+
 rm -rf "$ONESHOT_WORKTREE"
 
 echo
