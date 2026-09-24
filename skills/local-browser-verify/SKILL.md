@@ -167,10 +167,15 @@ pytest is unaffected and is fine to run.
 
   Three ways this reads green on a broken screen, all of them paid for already:
 
-  - **Reading the box the same tick the overlay opens** returns the value it was
-    about to leave: MUI animates placement over 0.2–0.3s. `overlap` settles both
-    boxes first; on a hand-rolled check, poll the box until it stops moving. A
-    fixed `sleep` is not a settle.
+  - **`boundingBox()` does not wait for the geometry to settle.** It returns the
+    box as it is when asked. A popper re-anchors — it measures its reference,
+    picks a placement, and flips it when that one does not fit — so consecutive
+    reads during that negotiation gave y = 100, 220, 340, 460, 580, 700 with no
+    transition involved at all. `overlap` settles both boxes first; on a
+    hand-rolled check, poll until the box stops moving. A fixed `sleep` is not a
+    settle. Do not lean on animation timing for this: a 0.2-0.3s CSS fade is
+    frequently over before the first round-trip returns, so a naive read looks
+    correct on a fast machine and wrong on a slow one.
   - **`intersects: null` is not "no overlap"** — it means one selector did not
     resolve a box, and `missing` says which. That is a `blocked` with
     `locator:`, never a pass. A popover absence-assertion passes identically

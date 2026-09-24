@@ -954,10 +954,17 @@ async function shot(session, name) {
 /**
  * Wait until an element's geometry stops moving, then return its box.
  *
- * Reading a box the same tick an overlay opens returns the PRE-transition value. MUI
- * animates placement and opacity over 0.2–0.3s, so a popover measured on the tick of the
- * click reports the position it was about to leave — the same class of error that read a
- * real 2px focus ring back as `0px 0px 0px 0px` and cost run 181 six false failures.
+ * `boundingBox()` does not wait for geometry to settle — it returns whatever the box is
+ * at the moment it is asked. Measured against a 1.5s transition, 11 of 12 polls came
+ * back mid-flight; against a popper re-anchoring every 80ms, consecutive reads gave
+ * y = 100, 220, 340, 460, 580, 700. Either way the caller gets a position the element
+ * was passing through, not the one it came to rest at.
+ *
+ * Re-anchoring is the case that matters. A popper (react-datepicker and MUI both sit on
+ * @popperjs/core) measures its reference, computes a placement, and flips it when the
+ * first choice does not fit — so the box moves in discrete jumps for as long as that
+ * negotiation runs, with no transition involved. A pure CSS fade of 0.2-0.3s is often
+ * over before the first round-trip returns, so animation alone is the weaker argument.
  *
  * Stability, not a fixed sleep: poll until two consecutive samples agree to within a
  * pixel and stay that way for `quiet`. A blind `sleep` is either too short on a cold
