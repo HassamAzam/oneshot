@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { codePhaseStatus, mergePollWait, nextIndex, testcaseGateRoute } from './runner.js';
+import {
+  codePhaseStatus, mergePollWait, nextIndex, testcaseGateRoute, uiEvidenceRefusal,
+} from './runner.js';
 import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
 
 function phase(name: string, n: number, group?: string): PhaseConfig {
@@ -149,4 +151,66 @@ test('a revision with no testcases phase to cycle parks, never silently proceeds
   // Treating a revision as an approval because the board is misconfigured would
   // turn a reviewer asking for changes into a sign-off they never gave.
   assert.equal(testcaseGateRoute('feedback', false), 'park');
+});
+
+/**
+ * `uiEvidenceRefusal` — the two ways a pack can report success and prove nothing.
+ *
+ * Both are reachable today: the schema requires `screenshots` and `observations`
+ * to be PRESENT, and an empty array satisfies that. `publish.ts` then returns
+ * null for a pack with nothing in it, so the MR gets no comment and the phase
+ * still records ok. The reviewer is told nothing and nobody is told why.
+ */
+const pack = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  screenshots: [], observations: [], designConformance: [], ...over,
+});
+const shot = { file: 'a.png', caption: 'the reset page', caseId: 'TC-1' };
+const obs = (before: string, after: string) => ({
+  what: 'document.title on /accounts/password_reset/',
+  before, after, how: 'Playwright page.title()', caseId: 'TC-1',
+});
+
+test('a pack with no screenshots and no observations is refused', () => {
+  const why = uiEvidenceRefusal(pack());
+  assert.ok(why, 'a pack that produced nothing must not record ok');
+  assert.match(why, /no screenshots/i);
+});
+
+test('either kind of evidence on its own is a complete pack', () => {
+  // The prompt explicitly promises this: a non-visual change is allowed to
+  // return zero screenshots and a full table, and must not be failed for it.
+  assert.equal(uiEvidenceRefusal(pack({ screenshots: [shot] })), null);
+  assert.equal(uiEvidenceRefusal(pack({ observations: [obs('', 'Forgot Password')] })), null);
+});
+
+test('a design-conformance pack with nothing else is not refused', () => {
+  const rows = [{ screenId: 's1', designShot: 'd.png', builtShot: 'b.png', differences: [] }];
+  assert.equal(uiEvidenceRefusal(pack({ designConformance: rows })), null);
+});
+
+test('an observation table where every value is unchanged is refused', () => {
+  const why = uiEvidenceRefusal(pack({ observations: [obs('en', 'en'), obs(' x ', 'x')] }));
+  assert.ok(why, 'a table that shows no change is not evidence of a change');
+  assert.match(why, /unchanged/i);
+});
+
+test('one unchanged row among changed ones is a control, not a refusal', () => {
+  // A row proving something did NOT regress is legitimate evidence. Only a
+  // table where NOTHING moved proves nothing.
+  const rows = [obs('', 'Forgot Password'), obs('en', 'en')];
+  assert.equal(uiEvidenceRefusal(pack({ observations: rows })), null);
+});
+
+test('an unmeasured base is not counted as unchanged', () => {
+  // `before` is allowed to be "not measured" with a reason. That row is honest
+  // about proving nothing; it must not be read as before === after.
+  const why = uiEvidenceRefusal(pack({ observations: [obs('not measured — no base app', 'en')] }));
+  assert.equal(why, null);
+});
+
+test('a phase that returned no artifact at all is left to the caller', () => {
+  // r.out.ok is false in that case and the runner already fails it; returning a
+  // second reason here would double-report one failure.
+  assert.equal(uiEvidenceRefusal(null), null);
+  assert.equal(uiEvidenceRefusal(undefined), null);
 });
