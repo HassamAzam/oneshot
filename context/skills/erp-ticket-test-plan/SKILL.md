@@ -26,6 +26,17 @@ Cover every category:
 
 **Derive every "Expected" from the ticket's business logic, NOT the code's output.** If the expected value comes from the same code path you are testing, a systematic bug passes silently.
 
+## Walk the traps list before you present
+
+**Read `refs/traps.md` and walk it against your draft before the GATE.** Every entry there is a revision request QA has already had to make on a real ticket — a case that failed on a correct build, passed on an unchanged one, or was never written at all. It is the difference between a list that is approved in one round and one that costs three.
+
+Two checks to run over the finished draft:
+
+- **Would this case still pass if the diff were reverted?** If yes it proves nothing about the change. Keep it if it guards a regression, but label it a smoke check and give it a positive control (traps B).
+- **Does this change REMOVE something that was hiding a state** — a blur, a disabled look, a muted colour, a collapsed row? Then write the cases for what it was hiding, not just for its absence (traps C). This class is the most-missed one on record.
+
+Note in your output which traps you applied and which you considered and ruled out, so the reviewer can see the list was walked rather than skimmed.
+
 ## Present + GATE
 
 Show the full plan as a numbered list (Type · Scenario · Expected). Then:
@@ -160,6 +171,11 @@ The remaining intents change nothing structurally — they are answered, acted o
 
 **7. Re-confirm with a diff, then re-gate.**
 Show: count before → after; the ids added and what each one came from (intent 1); the ids changed or retired under rule 5 (intents 2–8), each with the line that did it; every line answered or discarded under rule 6 (intents 9–12) and why; and confirmation that no other existing case was touched. Then run the GATE again.
+
+Walk `refs/traps.md` over the revised list too — a revision round is exactly where a trap resurfaces, because the cases you just rewrote are the ones nobody has checked yet.
+
+**8. Name the trap this round taught you.**
+If the feedback names something `refs/traps.md` does not already cover, end your output with a `candidateTraps` block: the trap stated generally enough to fire on a different ticket, how it bites a case, what to assert instead, and this ticket as its source. Do not edit `refs/traps.md` yourself — it is shared by every run and a human curates it. Proposing the entry is the whole job.
 
 > **The approve-and-add round is the only append-only path left.** When a reviewer signs off AND names a case in the same comment, the gate appends that case mechanically rather than cycling this phase: only bullet lines (`- Verify that …`) and lines opening with a test verb are read, every other line is dropped, and each appended case is tagged `boundary` / `medium` with `Matches the QA-reported edge case: …` as its Expected unless the line carries its own `expects:` clause. Every other reply cycles this phase, where you rewrite the list yourself under rules 1–6.
 
