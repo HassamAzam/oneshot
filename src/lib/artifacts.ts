@@ -22,6 +22,7 @@
 import {
   cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { STATE, artifactDir, runDir } from './config.js';
 import type { MrFeedbackLedger } from '../mrfeedback/types.js';
@@ -105,6 +106,55 @@ export interface ReviewGateState {
   requestNoteId?: number | null;
   approved: boolean;
   feedback: string[];
+  /**
+   * Digest of the artifact that was approved, stamped when the sign-off lands.
+   *
+   * `approved: true` on its own records THAT a human approved, never WHAT. The
+   * design gate is armed by `!designApproval?.approved` and so runs exactly
+   * once; anything that rewrites design.json afterwards inherits the sign-off
+   * silently, and `ui-evidence` then tells the reviewer "a human approved these
+   * screens before the code was written" about screens nobody saw.
+   *
+   * ABSENT means an approval recorded before this field existed. Those are
+   * treated as matching -- see `approvalCovers()`. Re-arming every in-flight
+   * run's gate on upgrade would be a worse bug than the one this closes.
+   */
+  approvedDigest?: string;
+}
+
+/**
+ * A stable digest of whatever a gate approved.
+ *
+ * Key order in the artifact is an accident of how the phase serialised it, not
+ * a change a reviewer could see, so keys are sorted before hashing. Truncated
+ * because this is drift detection between two local values, not a security
+ * boundary.
+ */
+export function gateSubjectDigest(value: unknown): string {
+  const stable = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(stable);
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(
+        Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
+          .map(([k, val]) => [k, stable(val)]),
+      );
+    }
+    return v;
+  };
+  return createHash('sha256').update(JSON.stringify(stable(value) ?? null)).digest('hex').slice(0, 16);
+}
+
+/**
+ * Whether a recorded approval still covers `subject`.
+ *
+ * True when the gate never approved anything (the caller decides what an
+ * unapproved gate means), when no digest was stamped (pre-upgrade approvals),
+ * or when the digest still matches. False only on a PROVEN mismatch.
+ */
+export function approvalCovers(state: ReviewGateState | undefined, subject: unknown): boolean {
+  if (!state?.approved) return true;
+  if (!state.approvedDigest) return true;
+  return state.approvedDigest === gateSubjectDigest(subject);
 }
 
 export interface RunJournal {

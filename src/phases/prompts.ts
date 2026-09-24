@@ -24,7 +24,7 @@ import {
   type PhaseConfig,
 } from '../lib/config.js';
 import { join } from 'node:path';
-import { readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
+import { approvalCovers, readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import {
@@ -1475,7 +1475,15 @@ impossible.`;
     // Only a design a human signed off on is worth pairing against. An
     // unapproved one is a draft, and "the build departs from the draft" is not
     // a finding — the run never promised to match it.
-    const conformance = ctx.journal.designApproval?.approved && designed.length
+    //
+    // approvalCovers() is the second half of that: this block tells the
+    // reviewer "a human approved these screens before the code was written",
+    // and design.json can be rewritten after the sign-off. Saying it about
+    // screens nobody approved is worse than saying nothing, so a stale approval
+    // drops the block rather than captioning the wrong thing as approved.
+    const approvedDesign = ctx.journal.designApproval?.approved
+      && approvalCovers(ctx.journal.designApproval, ctx.prior.design);
+    const conformance = approvedDesign && designed.length
       ? `
 ## Pair the shipped screens against the approved design
 This ticket went through the \`design\` gate: a human approved these screens before the code was

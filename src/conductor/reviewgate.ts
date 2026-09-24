@@ -66,7 +66,7 @@
  */
 import { DRY_RUN, phases, projectConfig, reviewersConfig } from '../lib/config.js';
 import {
-  readArtifact, readJournal, updateJournal, writeArtifact,
+  gateSubjectDigest, readArtifact, readJournal, updateJournal, writeArtifact,
   type ReviewGateState, type RunJournal,
 } from '../lib/artifacts.js';
 import {
@@ -313,6 +313,27 @@ function persist(iid: number, gate: Gate, state: ReviewGateState): RunJournal | 
   return updateJournal(iid, { [GATE_STATE[gate]]: state });
 }
 
+/**
+ * Clear a gate's sign-off so the next check posts a FRESH request.
+ *
+ * Re-arming by flipping `approved` alone is not enough and fails in the worst
+ * possible direction: the gate keys off `requestNoteId`, so it would poll the
+ * PREVIOUS request note, find the `approved` reply still sitting on it, and
+ * approve the rewritten artifact against a sign-off given for the old one --
+ * stamping a fresh digest on it and making the drift undetectable from then on.
+ * The note id has to go with the verdict.
+ *
+ * Feedback history is kept: the reviewer's earlier rounds still apply to the
+ * artifact being redrawn, and dropping them would send the next round in blind.
+ */
+export function rearmGate(iid: number, gate: Gate): RunJournal | null {
+  const j = readJournal(iid);
+  const prior = j ? stateOf(j, gate) : blankState();
+  return persist(iid, gate, {
+    requestTs: null, requestNoteId: null, approved: false, feedback: prior.feedback,
+  });
+}
+
 export interface CheckGateOpts {
   iid: number;
   gate: Gate;
@@ -329,6 +350,14 @@ export interface CheckGateOpts {
    * decision has been made. Distinct from the request comment above: that one
    * asks, this one records what was agreed, so the ticket reads in order.
    */
+  /**
+   * The artifact this gate is asking a human to sign off on.
+   *
+   * Digested and stamped onto the gate state when the approval lands, so a
+   * later rewrite of that artifact can be told apart from the one that was
+   * actually approved. Omit it and the gate behaves exactly as before.
+   */
+  subject?: unknown;
   onApproved?: () => Promise<void>;
   /**
    * Invoked with the round's non-`approved` replies, BEFORE `onApproved` —
@@ -396,7 +425,7 @@ async function uploadAll(iid: number, attachments: GateAttachment[]): Promise<st
  * the dry run forever waiting for something it can never ask for.
  */
 export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult> {
-  const { iid, gate, requestBody, onApproved, onFeedback } = opts;
+  const { iid, gate, requestBody, subject, onApproved, onFeedback } = opts;
 
   if (DRY_RUN) {
     log.warn(`[dry-run] would pause at the '${gate}' review gate — auto-approving`, { iid });
@@ -501,6 +530,7 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
       ...state,
       approved: true,
       feedback: feedback ? [...state.feedback, feedback] : state.feedback,
+      ...(subject === undefined ? {} : { approvedDigest: gateSubjectDigest(subject) }),
     };
     persist(iid, gate, state);
     await setBoardLabel(iid, gate, false);
