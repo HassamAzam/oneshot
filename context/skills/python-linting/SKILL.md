@@ -1,61 +1,80 @@
 ---
 name: python-linting
-description: Mandatory Python linting workflow (flake8 + pylint) and test naming conventions for this ERP repo. Used by backend-agent and qa-agent after every Python file change.
+description: Judgement calls around Python linting in this ERP repo — what to do instead of an inline comment, when a lint disable is legitimate, how to break a circular import, and how to shorten an over-long test name. The flake8/pylint run and the inline-comment ban are enforced by the py-lint hook, not by this skill.
 ---
 
 # Python Linting & Test Naming
 
 Shared rules for all agents that write or modify `.py` files in this repo.
 
-## Linting (mandatory after every Python file change)
+## What the hook already does
 
-Run both linters on **each changed `.py` file** before committing. Migrations are excluded automatically by both rc files.
+`hooks/py-lint.cjs` runs flake8, pylint and an inline-comment scan on every
+`.py` file a phase writes, and blocks the write when any of them has something
+to say. You do not need to run the linters yourself, and there is no value in
+reporting that you did — a clean write means the gate passed.
 
-```bash
-# flake8 — config in .flake8 (excludes migrations/, max-line 120, inline-quotes=double)
-flake8 <file1.py> <file2.py> ...
+What the hook cannot do is choose the fix. Everything below is that choice.
 
-# pylint — config in .pylintrc (excludes migrations/, max-line 120)
-pylint <file1.py> <file2.py> ...
-```
+## Instead of an inline comment
 
-**Key flake8 rules in effect** (not ignored):
-- `D102` — public methods (including `setUpTestData`) must have docstrings
-- `E501` / line length — max 120 chars
-- `Q000` — double quotes required for inline strings (`inline-quotes = double`)
+The hook rejects `#` comments, so the question is never *how to word one*. It is
+which of these the comment was trying to compensate for:
 
-Fix all errors before reporting done. Zero errors from both tools is the bar.
+1. A variable or function whose name does not say what it holds — rename it so
+   the code reads as the comment would have.
+2. A block doing something the surrounding function does not explain — extract
+   it into a small helper whose name carries the explanation.
+3. A genuinely non-obvious invariant or reason — add a sentence to the
+   enclosing function's docstring.
 
-## Comment style — hard rules
+Docstrings are the only prose allowed in source: module, class, function and
+method. Use them for *why*, not for restating *what*.
 
-- **NEVER write inline comments.** No `# ...` lines, no trailing `  # ...` on a code line, no `# ----` section banners. Comments rot, restate the code, and clutter diffs.
-- **Docstrings are the only allowed prose in source.** Module docstrings, function/method docstrings, and class docstrings are fine. Use them to explain *why* something exists or any non-obvious invariant.
-- If you feel the urge to write an inline comment, choose one of these instead:
-  1. Rename a variable / function so the code reads as the comment would have said.
-  2. Extract a small named helper whose name carries the explanation.
-  3. Add a sentence to the enclosing function's docstring.
-- The only inline-comment exceptions allowed: `# type: ignore[...]` for genuine type-checker suppression and the lint-disable line below — both still require the affirmation rule.
+## Circular imports
 
-## Imports — hard rules
+All imports go at the top of the module. When a top-level import creates a
+cycle, moving it inside the function is not the fix — it hides a structural
+problem behind a disable and the cycle survives.
 
-- **All imports go at the top of the module.** No `from x import y` inside functions, methods, or branches.
-- If a top-level import causes a circular dependency, do NOT silently move it inside the function with `# pylint: disable=import-outside-toplevel`. Instead, **stop and inform the user**: explain the circular chain (which two modules import each other), propose the structural fix (move the shared symbol to a third module, or split the import-heavy module), and proceed only after user affirmation. Falling back to a local import is acceptable only when the user explicitly approves it for that case.
+**Stop and tell the user.** Name the two modules that import each other, propose
+the structural fix (move the shared symbol to a third module, or split the
+import-heavy one), and say what it would cost. A local import is acceptable only
+when the user explicitly approves it for that case.
 
-## Lint-disable / noqa — hard rules
+## When a lint disable is legitimate
 
-- **Disabling a linter rule is a code smell, not a fix.** `# pylint: disable=...`, `# noqa`, `# noqa: E501`, `# type: ignore`, and equivalents bypass the safety net the team has agreed to. The job is to write code the linter accepts, not to silence the linter.
-- Common cases and the right fix:
-  - **`E501` line-too-long** → break the line. For function signatures, put each parameter on its own line. For long strings, use implicit string concatenation across lines or a short helper variable. Do NOT add `# noqa: E501`.
-  - **`broad-except`** → catch the specific exception type (or a tuple of types) the call site can actually raise. If a third-party SDK genuinely raises `Exception` and there is no narrower type, ask the user before disabling.
-  - **`too-many-positional-arguments` / `too-many-locals`** → refactor: extract a dataclass/`TypedDict` for the parameter cluster, or split the function. Disable only with affirmation.
-  - **`import-outside-toplevel`** → see the imports rule above.
-- If you genuinely cannot avoid a disable (e.g. circular import that cannot be broken without large refactor; broad-except for a third-party SDK that raises bare `Exception`), **stop and inform the user** with: which file/line, which rule, why the alternatives fail, what the refactor would cost. Proceed only after explicit affirmation.
-- When affirmed, place the disable on a single line, with the narrowest scope (one rule per disable, never blanket `# pylint: disable=all`), and add a one-line docstring/explanation in the enclosing function's docstring describing why.
+Disabling a rule is a code smell, not a fix — the job is code the linter
+accepts. Reach for the real fix first:
 
-## Test Naming (pylint C0103)
+| Rule | The fix that is not a disable |
+| --- | --- |
+| `E501` line-too-long | Break the line. One parameter per line for signatures; implicit concatenation or a short named variable for long strings. |
+| `broad-except` | Catch the exception the call site can actually raise. |
+| `too-many-positional-arguments` / `too-many-locals` | Extract a dataclass or `TypedDict` for the parameter cluster, or split the function. |
+| `import-outside-toplevel` | See circular imports above. |
 
-- Test method names must match `[a-z_][a-z0-9_]{2,50}$` — **max 50 characters** (enforced by pylint).
-- Count characters before committing. If a descriptive name exceeds 50 chars, shorten it:
-  - Drop filler words: `with`, `on`, `returns`, `the`, `that`
-  - Use abbreviations: `ok` instead of `returns_200`, `empty` instead of `empty_string`
-  - Example: `test_patch_with_null_comment_on_flagged_choice_returns_200` (58) → `test_patch_null_comment_flagged_choice_ok` (41) ✓
+Two cases are genuinely irreducible: a cycle that cannot be broken without a
+large refactor, and a third-party SDK that raises bare `Exception`. For those,
+**stop and inform the user** — file and line, the rule, why each alternative
+fails, what the refactor would cost — and proceed only on explicit affirmation.
+
+When affirmed: one rule per disable, narrowest possible scope, never a blanket
+`# pylint: disable=all`, and a line in the enclosing docstring saying why. The
+hook allows `# pylint:` and `# noqa` comments through precisely so this path
+stays open — it cannot tell an affirmed disable from an unaffirmed one, so that
+honesty is yours to keep.
+
+## Test naming (pylint C0103)
+
+Test method names must match `[a-z_][a-z0-9_]{2,50}$` — **max 50 characters**.
+Pylint enforces the limit; shortening without losing the meaning is the part it
+cannot do:
+
+- Drop filler: `with`, `on`, `returns`, `the`, `that`.
+- Abbreviate outcomes: `ok` for `returns_200`, `empty` for `empty_string`.
+- Keep the subject and the condition; those are what a failure report is read
+  for.
+
+`test_patch_with_null_comment_on_flagged_choice_returns_200` (58) →
+`test_patch_null_comment_flagged_choice_ok` (41) ✓
