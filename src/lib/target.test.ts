@@ -27,6 +27,16 @@ let seq = 0;
  * Exported constants are frozen at import, but targetOverrides() re-reads the
  * environment on every call, so asserting on it after the restore would test
  * this machine's .env rather than the case.
+ *
+ * An `undefined` case means "unset", and it is written as an EMPTY STRING rather
+ * than deleted. config.ts loads dotenv at module scope, so every cache-busted
+ * re-import runs it again; dotenv skips a key it finds with hasOwnProperty but
+ * refills a deleted one from .env. Deleting therefore does not express "unset"
+ * on a desk whose .env sets the variable — ONESHOT_PROJECT=erp there brought
+ * PROJECT_TARGET back as 'erp' where the case asked for ''. An empty string is
+ * opaque to dotenv and equivalent for the code under test: envOr() falls
+ * through to its fallback on '' exactly as it does on absent, and nothing in
+ * src/ tests presence.
  */
 async function loadWith(
   value: string | undefined,
@@ -36,8 +46,7 @@ async function loadWith(
   const vars = { [VAR]: value, ...extra };
   const before = new Map(Object.keys(vars).map((k) => [k, process.env[k]]));
   for (const [k, v] of Object.entries(vars)) {
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
+    process.env[k] = v === undefined ? '' : v;
   }
   try {
     seq += 1;
