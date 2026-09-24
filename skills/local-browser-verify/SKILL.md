@@ -206,6 +206,39 @@ pytest is unaffected and is fine to run.
   Screenshot after the settle, not before — a shot timed one tick early omits the
   defect, and then the disproof and the proof look identical in `artifacts/`.
 
+- **"The calendar covers the fields below it" is two different defects. Say which
+  one you measured.** An open popover sitting on top of the fields under it is
+  normal, and `.react-datepicker-popper` already carries `z-index: 99999` in
+  `custom.css` — so a pixel count on its own does not name a bug. Two things
+  produce that screenshot and they have nothing in common:
+
+  - **It re-opened after the selection.** react-datepicker closes on select and
+    puts focus back on the input, guarded by a `preventFocus` flag — but
+    `sendFocusBackToInput` drops that flag in the same callback that calls
+    `setFocus()`, and with no delay on the `setTimeout`. If the surrounding form
+    re-renders in between (a Formik `setFieldValue` on `onChange` will do it) the
+    focus lands after the guard cleared, `handleFocus` runs `setOpen(true)`, and
+    the calendar comes back on its own. This is the defect.
+  - **It only ever opened downward.** A tall calendar
+    (`showYearDropdown` + `scrollableYearDropdown`) asked for
+    `popperPlacement="top-start"` inside a modal has no room above, so Popper
+    flips it to the bottom and it lands on the next field. Placement, not
+    dismissal.
+
+  They are distinguishable in one read. Select a date, let the form settle, then
+  measure the popper against the field below it:
+
+  ```js
+  const r = await h.overlap(session, '.react-datepicker-popper', '[name="training.end_date"]');
+  ```
+
+  `intersects: null` means the popper unmounted — it closed and stayed closed, so
+  there is no re-open, and anything in the screenshot is placement while it was
+  legitimately open. A number means it is still on screen after the selection.
+  Record which of the two you saw, in those words: a verdict that says only
+  "calendar overlaps end date by 9342px" sends the fix at the z-index, which is
+  already correct, and the real defect survives the MR.
+
 ## Record one result per case
 
 - Every case id from the list gets a result: pass, fail, blocked, or skipped.
