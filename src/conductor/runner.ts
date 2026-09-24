@@ -64,6 +64,7 @@ import {
   type PhaseRecord, type Remediation, type RunJournal,
 } from '../lib/artifacts.js';
 import { branchFor, newRunId, worktreeName } from '../lib/ids.js';
+import { writeDesignTokens } from '../lib/designtokens.js';
 import {
   leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort, seedWorktree,
 } from '../lib/worktrees.js';
@@ -1550,6 +1551,18 @@ export async function runTicket(
     // The ledger row is opened before the phase and closed after it, so an
     // external watchdog can see a phase that has been 'running' for longer than
     // its own timeout should allow — the one signal a wedged SDK spawn gives.
+    // Hand `design` its palette rather than making it go and distil one. The
+    // phase budgets ~10 of its 115 turns for this (config/phases.json), and the
+    // work is a deterministic read of three frontend files. Best-effort by
+    // construction: the skill still knows how to read them itself, and
+    // tokens.css names anything the extractor could not resolve.
+    if (p.name === 'design' && wt) {
+      const tokens = writeDesignTokens(iid, wt);
+      log[tokens ? 'ok' : 'warn'](tokens
+        ? `design     tokens.css generated for #${iid}`
+        : `design     could not generate tokens.css for #${iid} — the phase reads the theme itself`);
+    }
+
     const rowId = phaseStart(runId, p.name, lap, modelFor(p));
     const out = await runPhase({
       iid, runId, lap, cfg: p,
