@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "One orchestrator, one label: a deterministic conductor that drives GitLab tickets from label to Ready For Deployment through fresh per-phase Claude sessions \u2014 pipelined, with one ticket at a time in the merge\u2192deploy\u2192qa window.",
+  "description": "One orchestrator, one label: a deterministic conductor that drives GitLab tickets from label to Ready For Deployment through fresh per-phase Claude sessions — pipelined, with one ticket at a time in the merge→deploy→qa window.",
   "engines": {
     "node": ">=20"
   },
@@ -31,7 +31,8 @@
     "board:doctor": "node scripts/board/doctor.mjs",
     "fleet:verify": "tsx scripts/verify-fleet.ts",
     "token:set": "tsx scripts/token.ts",
-    "token:show": "tsx scripts/token.ts --show"
+    "token:show": "tsx scripts/token.ts --show",
+    "env:check": "tsx scripts/envcheck.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.77",

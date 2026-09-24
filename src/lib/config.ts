@@ -10,7 +10,8 @@
  * prompts about a detected key, it silently uses it, and a subscription fleet
  * becomes a metered API bill with no signal that anything changed.
  */
-import { readFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, readdirSync, symlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, userInfo } from 'node:os';
@@ -35,7 +36,14 @@ loadDotenv({ path: join(ROOT, '.env'), quiet: true });
  * as an opaque `invalid_auth` from the API.
  */
 export function isPlaceholder(v: string): boolean {
-  return /REPLACE_ME|<[a-z-]+>|CHANGE_?ME|your-.*-here/i.test(v);
+  if (/REPLACE_ME|<[a-z-]+>|CHANGE_?ME|your-.*-here/i.test(v)) return true;
+  // Stand-in PATHS, which the patterns above do not catch because they look
+  // like ordinary paths. A documented example such as `~/their/path/erp` gets
+  // pasted verbatim, `~` expands, and the result is a real-looking absolute
+  // path to a directory nobody created — reported as a missing checkout, with
+  // a suggestion to clone into it. Treating it as unset surfaces it as what it
+  // is: a value still waiting to be filled in.
+  return /(^|\/)(their|your|my|some)[-_/]path(\/|$)|(^|\/)path[-_/]to(\/|$)/i.test(v);
 }
 
 export function envOr(name: string, fallback = ''): string {
@@ -659,6 +667,44 @@ export const WT_ROOT = targetPath(activeTarget()?.wtRoot, 'WT_ROOT', '~/Document
  * minutes per worktree — so it stays a function with no default rather than
  * quietly becoming WORK_REPO.
  */
+/**
+ * Look for a checkout of `project` on this machine.
+ *
+ * Exists so a failure can name the path the person actually has instead of the
+ * one they were told to type. Matched by REMOTE, not by directory name: a
+ * folder called `erp` that points somewhere else is not the repo, and the
+ * layouts people really use (~/Desktop/workstream-repo/erp) are not guessable
+ * from the name alone. One level of nesting is searched, which covers every
+ * layout seen so far without walking the whole home directory.
+ */
+export function findCheckout(project: string): string {
+  const bases = ['Documents', 'Desktop', 'code', 'work', 'repos', 'projects', 'src', '']
+    .map((b) => (b ? join(homedir(), b) : homedir()));
+  const slug = project.split('/').pop() ?? project;
+
+  const remoteMatches = (dir: string): boolean => {
+    if (!existsSync(join(dir, '.git'))) return false;
+    try {
+      const url = execFileSync('git', ['-C', dir, 'remote', 'get-url', 'origin'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 });
+      return url.includes(project);
+    } catch { return false; }
+  };
+
+  for (const base of bases) {
+    if (!existsSync(base)) continue;
+    if (remoteMatches(join(base, slug))) return join(base, slug);
+    let entries: string[] = [];
+    try { entries = readdirSync(base); } catch { continue; }
+    for (const entry of entries) {
+      if (entry.startsWith('.')) continue;
+      const nested = join(base, entry, slug);
+      if (remoteMatches(nested)) return nested;
+    }
+  }
+  return '';
+}
+
 export function seedFrom(): string {
   return targetPath(activeTarget()?.seedFrom, 'ONESHOT_SEED_FROM', '');
 }
