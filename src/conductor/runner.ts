@@ -56,6 +56,7 @@ import {
   claimMarker, claimNoteBody, isMachineNote, readOwnership, settleMs,
 } from '../lib/claims.js';
 import { collectTicketDocs } from '../lib/ticketdocs.js';
+import { currentProjectKey, journalOwner } from '../lib/journalproject.js';
 import {
   archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
   phaseSucceeded, phaseSettled, readArtifact,
@@ -641,7 +642,16 @@ export async function runTicket(
     }
   }
 
-  const decision = decideResume(readJournal(iid));
+  // A journal from another project (journalproject.ts) is never resumed, whatever
+  // its status: it is archived after the claim below and the ticket starts fresh.
+  const existing = readJournal(iid);
+  const journalHome = existing ? journalOwner(existing) : null;
+  if (existing && journalHome?.kind === 'foreign') {
+    log.warn(`#${iid} — the run journal on disk is not this project's (${journalHome.why}); starting fresh`);
+  }
+  const decision: ResumeDecision = existing && journalHome?.kind === 'foreign'
+    ? { kind: 'fresh', archive: existing.runId }
+    : decideResume(existing);
   if (decision.kind === 'refuse') {
     log.warn(`#${iid} — ${decision.reason}`);
     return { runId: '', iid, status: 'refused', reason: decision.reason };
@@ -681,12 +691,17 @@ export async function runTicket(
 
   if (decision.kind === 'fresh' && decision.archive) {
     const moved = archiveRun(iid, decision.archive);
-    if (moved) log.info(`#${iid} had a completed run — archived to ${moved}`);
+    if (moved) {
+      log.info(`#${iid} had a ${journalHome?.kind === 'foreign' ? 'run from another project' : 'completed run'} `
+        + `— archived to ${moved}`);
+    }
   }
 
+  const project = currentProjectKey() ?? undefined;
   let j: RunJournal = resuming ? decision.journal : {
     runId,
     iid,
+    project,
     title: issue.title,
     url: issueUrl(iid),
     createdAt: Date.now(),
@@ -696,6 +711,8 @@ export async function runTicket(
 
   if (resuming) {
     j.status = 'running';
+    // An unstamped journal proven ours by its ticket url is adopted here.
+    if (!j.project && project) j.project = project;
     delete j.blockedWhy;
     delete j.blockedAt;
     writeJournal(j);
@@ -838,6 +855,8 @@ export async function runTicket(
   // `git worktree prune`, so a resumed run can carry a path that no longer
   // exists — and passing a missing cwd to the SDK surfaces as the maximally
   // confusing `spawn node ENOENT`, which looks like a broken PATH.
+  // Which clone it was cut from is already settled: journalOwner() at the claim
+  // refuses to resume a journal whose worktree is not a worktree of WORK_REPO.
   let worktree: string | undefined = j.worktree && existsSync(j.worktree) ? j.worktree : undefined;
   if (j.worktree && !worktree) {
     log.warn('recorded worktree is gone — re-leasing', { was: j.worktree });

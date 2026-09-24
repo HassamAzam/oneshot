@@ -110,6 +110,15 @@ export interface ReviewGateState {
 export interface RunJournal {
   runId: string;
   iid: number;
+  /**
+   * Which GitLab project the run belongs to: repoKey(GITLAB_REPO_URL),
+   * `<host>/<group>/<project>` lower-cased. The directory is keyed by iid
+   * alone, and iids are only unique within a project — so after the URL moves
+   * to another project, issue #237's journal would otherwise be resumed for the
+   * new project's #237, worktree, MR iid and all. See journalproject.ts.
+   * Absent on journals written before it existed.
+   */
+  project?: string;
   title: string;
   url: string;
   createdAt: number;

@@ -40,6 +40,8 @@ import {
 import { db, logEvent, updateRun } from '../src/lib/db.js';
 import { liveConductorIds } from '../src/lib/fleet.js';
 import { getIssue, swapLabel } from '../src/lib/gitlab.js';
+import { journalOwner } from '../src/lib/journalproject.js';
+import { identityFindings } from '../src/lib/repocheck.js';
 
 const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', D = '\x1b[2m', B = '\x1b[1m', X = '\x1b[0m';
 
@@ -326,11 +328,32 @@ async function main(): Promise<void> {
   const { iid, phase: only, forcePhase, dryRun, skipCases, reason } = parsed;
   const skipReason = reason ?? 'retired by an operator via npm run unblock';
 
+  // This writes labels on GitLab, so it refuses what boot refuses: no usable
+  // GITLAB_REPO_URL, or a legacy selector that disagrees with it. Whoever left
+  // ONESHOT_PROJECT=erp in .env believes this command acts on erp.
+  const identity = identityFindings().filter((f) => f.level === 'fail');
+  if (identity.length) {
+    for (const f of identity) console.log(`\n${R}${f.label}${X} ${f.detail}`);
+    console.log(`${D}Nothing changed. \`npm run doctor\` lists everything that is wrong.${X}\n`);
+    process.exit(1);
+  }
+
   const journal = readJournal(iid);
   if (!journal) {
     console.log(`\n${Y}#${iid} has no run journal${X} ${D}(${join(runDir(iid), 'run.json')})${X}`);
     console.log(`${D}Nothing to unblock — this ticket has never been run.${X}\n`);
     process.exit(0);
+  }
+
+  // state/runs is keyed by iid alone. A journal left by the project
+  // GITLAB_REPO_URL used to name would otherwise put THIS project's #<iid> back
+  // into Loop to resume another project's worktree and MR (journalproject.ts).
+  const home = journalOwner(journal);
+  if (home.kind === 'foreign') {
+    console.log(`\n${R}#${iid}'s run journal is not this project's${X} — ${home.why}.`);
+    console.log(`${D}Nothing changed. The conductor never resumes it: re-add the entry label to start the `
+      + `ticket fresh (the journal is archived then), or move ${runDir(iid)} aside yourself.${X}\n`);
+    process.exit(1);
   }
 
   const doomed = new Set(

@@ -26,9 +26,11 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   CONTEXT_REPO, DRY_RUN, FOLLOW_TICK_MS, GITLAB_USERNAME, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT,
-  TICK_MS, WORK_REPO,
-  auditAuth, envOr, phases, portPool, projectConfig, slackConfig,
+  PROJECT_TARGET, TICK_MS, WORK_REPO, WT_ROOT,
+  auditAuth, envOr, pathSources, phases, portPool, projectConfig, repoIdentity, seedFrom, slackConfig,
 } from './lib/config.js';
+import { checkoutFindings, identityFindings, wtRootFinding, type Finding } from './lib/repocheck.js';
+import { foreignJournalFinding } from './lib/journalproject.js';
 import { activeRunsFleet, logEvent, reconcileForeignRuns } from './lib/db.js';
 import { ensureClaudeDir } from './lib/claudedir.js';
 import { probe, netState } from './lib/reachability.js';
@@ -237,7 +239,11 @@ function handleFollowOutcome(outcome: RunOutcome): void {
 async function banner(): Promise<void> {
   const cfg = projectConfig();
   log.banner('Oneshot');
-  log.info(`project    ${cfg.gitlab.project} (${projectUrl()})`);
+  // Printed from repoIdentity() rather than cfg.gitlab, which throws without
+  // GITLAB_REPO_URL: the banner runs before preflight, and preflight is where
+  // that has to be said — as a refusal, not as a crash in the banner.
+  const { repo } = repoIdentity();
+  log.info(`project    ${repo ? `${repo.project} (${projectUrl()})` : 'none — GITLAB_REPO_URL is unset or invalid'}`);
   log.info(`labels     "${cfg.labels.entry}" in  ->  "${cfg.labels.exit}" out`);
   log.info(`base       ${cfg.branches.base}   protected: ${cfg.branches.protected.join(', ')}`);
   log.info(`phases     ${phases().length} (${phases().filter((p) => p.kind === 'code').length} deterministic)`);
@@ -311,15 +317,36 @@ function preflight(): boolean {
   }
   for (const n of auth.notes) log.warn(`auth       ${n}`);
 
+  // Which project, and whether anything left in .env still claims otherwise. A
+  // legacy selector that disagrees with GITLAB_REPO_URL refuses boot rather
+  // than being ignored: whoever wrote it believes it is in force.
+  const say = (f: Finding): void => {
+    const line = `${f.label}: ${f.detail}`;
+    if (f.level === 'fail') { log.error(line); fatal = true; } else if (f.level === 'warn') log.warn(line);
+  };
+  for (const f of identityFindings()) say(f);
+  const { repo } = repoIdentity();
+
   if (!envOr('GITLAB_TOKEN')) {
     log.error('GITLAB_TOKEN is not set. cp .env.example .env and fill it in.');
     fatal = true;
   }
 
-  if (!existsSync(WORK_REPO)) {
-    log.error(`WORK_REPO does not exist: ${WORK_REPO}`);
-    log.error(`  git clone git@gitlab.arbisoft.com:${projectConfig().gitlab.project}.git ${WORK_REPO}`);
+  if (!WORK_REPO || !existsSync(WORK_REPO)) {
+    log.error(`WORK_REPO does not exist: ${WORK_REPO || '(no path — GITLAB_REPO_URL is what derives one)'}`);
+    if (repo && WORK_REPO) log.error(`  git clone ${repo.sshUrl} ${WORK_REPO}`);
     fatal = true;
+  } else {
+    // The stale-clone guard: a WORK_REPO or ONESHOT_SEED_FROM line left over
+    // from another project would cut worktrees from, and warm the app on, that
+    // project's code. Unreadable only warns. A WT_ROOT shared with another clone,
+    // or moved by the overlay going away, fails too.
+    const sources = pathSources();
+    for (const f of checkoutFindings({ workRepo: WORK_REPO, seed: seedFrom(), sources })) say(f);
+    const wt = wtRootFinding(WT_ROOT, sources.WT_ROOT, PROJECT_TARGET, [WORK_REPO, seedFrom()]);
+    if (wt) say(wt);
+    const foreignRuns = foreignJournalFinding();
+    if (foreignRuns) say(foreignRuns);
   }
   if (!existsSync(CONTEXT_REPO)) {
     log.warn(`CONTEXT_REPO does not exist: ${CONTEXT_REPO} — prior-art recall will be thin`);

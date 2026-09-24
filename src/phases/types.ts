@@ -108,6 +108,5 @@ export interface Screenshot {
 }
 
 export function GITLAB_PROJECT_URL(): string {
-  const c = projectConfig();
-  return `https://${c.gitlab.host}/${c.gitlab.project}`;
+  return projectConfig().gitlab.webUrl;
 }

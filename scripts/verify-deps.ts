@@ -14,7 +14,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE_ENV, ROOT, envOr } from '../src/lib/config.js';
+import { BASE_ENV, ROOT, envOr, repoIdentity } from '../src/lib/config.js';
 
 const G = '\x1b[32m', R = '\x1b[31m', Y = '\x1b[33m', D = '\x1b[2m', X = '\x1b[0m';
 let fails = 0;
@@ -126,13 +126,18 @@ async function main(): Promise<void> {
   if (!token) {
     warn('GITLAB_TOKEN unset — probing without auth');
   }
+  // The same API root a phase hands the server (src/conductor/phase.ts). With
+  // GITLAB_REPO_URL unusable there is none to give; listing tools needs no API
+  // call, so the probe still runs and the URL is failed on its own line.
+  const { repo, error } = repoIdentity();
+  if (!repo) fail('GITLAB_REPO_URL', error ?? 'unset');
   // The SAME env object a phase hands the SDK — whole, not merged over
   // process.env. Merging is what let a server with no PATH pass this check and
   // then die inside every phase.
   const probe = await probeStdioServer(cmd, args, {
     ...BASE_ENV,
     GITLAB_PERSONAL_ACCESS_TOKEN: token || 'probe',
-    GITLAB_API_URL: envOr('ONESHOT_GITLAB_API', 'https://gitlab.arbisoft.com/api/v4'),
+    ...(repo ? { GITLAB_API_URL: repo.apiUrl } : {}),
     USE_PIPELINE: 'true',
     USE_GITLAB_WIKI: 'false',
     USE_MILESTONE: 'false',

@@ -8,12 +8,13 @@ import { existsSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
-  CONTEXT_REPO, PROJECT_TARGET, SKILLS_ROOT, WORK_REPO, WT_ROOT, scopedEnvName, seedFrom,
-  targetOverrides,
+  CONTEXT_REPO, PROJECT_TARGET, SKILLS_ROOT, WORK_REPO, WT_ROOT, pathSources, seedFrom,
   auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, phases, portPool,
-  projectConfig, reviewersConfig, slackConfig,
+  projectConfig, repoIdentity, reviewersConfig, slackConfig,
 } from '../src/lib/config.js';
-import { ping, listBranches } from '../src/lib/gitlab.js';
+import { ping, getBranch } from '../src/lib/gitlab.js';
+import { checkoutFindings, identityFindings, wtRootFinding, type Finding } from '../src/lib/repocheck.js';
+import { foreignJournalFinding } from '../src/lib/journalproject.js';
 import { slackEnabled, userIdForEmail, userIdForHandle } from '../src/lib/slack.js';
 import { checkIdentity } from '../src/lib/identity.js';
 import { otelStatus, promptTextExported } from '../src/lib/otel.js';
@@ -35,6 +36,11 @@ function fail(label: string, detail = ''): void {
   console.log(`  ${R}FAIL${X}  ${label}${detail ? ` ${D}${detail}${X}` : ''}`);
 }
 function section(name: string): void { console.log(`\n${name}`); }
+function report(f: Finding): void {
+  if (f.level === 'fail') fail(f.label, f.detail);
+  else if (f.level === 'warn') warn(f.label, f.detail);
+  else pass(f.label, f.detail);
+}
 
 async function main(): Promise<void> {
   console.log('\nOneshot doctor');
@@ -54,10 +60,15 @@ async function main(): Promise<void> {
 
   // --------------------------------------------------------------- config
   section('Config');
+  // Which project, first: every check below is about it. GITLAB_REPO_URL is the
+  // only thing that says; any legacy selector still in .env is judged against it.
+  for (const f of identityFindings()) report(f);
+  const repo = repoIdentity().repo;
   const cfg = projectConfig();
-  pass('project.json', `${cfg.gitlab.project} (id ${cfg.gitlab.projectId})`);
   pass('labels', `"${cfg.labels.entry}" -> "${cfg.labels.exit}", blocked "${cfg.labels.blocked}", ` +
-    `optional review gate "${cfg.labels.review}" (off unless a ticket carries it too)`);
+    (cfg.labels.review
+      ? `optional review gate "${cfg.labels.review}" (off unless a ticket carries it too)`
+      : 'review label: off (labels.review empty)'));
   if (cfg.labels.testcaseReview) {
     pass('board label', `"${cfg.labels.testcaseReview}" — on while a ticket sits at the testcases QA gate`);
   }
@@ -103,42 +114,27 @@ async function main(): Promise<void> {
 
   // ---------------------------------------------------------------- paths
   section('Paths');
-  // Which project this conductor is pointed at, before any path is judged. A
-  // target moves WORK_REPO, the seed and the worktree root at once, so a
-  // reader looking at a surprising path below needs this line first.
-  if (PROJECT_TARGET) {
-    pass('target', `${PROJECT_TARGET} -> ${cfg.gitlab.project} (${cfg.gitlab.projectId}), base ${cfg.branches.base}`);
-    // The one deliberate break from "env wins" in this repo, so it is stated
-    // rather than left for someone to discover from a path they did not expect.
-    for (const o of targetOverrides()) {
-      warn(`${o.name} is set but the '${PROJECT_TARGET}' target overrides it`,
-        `using ${o.using}, ignoring ${o.ignored} — remove ${o.name} from .env to silence this`);
-    }
-  } else {
-    pass('target', `none (ONESHOT_PROJECT unset) -> ${cfg.gitlab.project} (${cfg.gitlab.projectId})`);
-  }
-  // The env var is printed with the failure because it is not always the
-  // label: SKILLS_ROOT is overridden by ONESHOT_SKILLS_ROOT. Reporting the
-  // path alone leaves the reader guessing which knob moves it, and the
-  // defaults below are one machine's layout, so a fresh clone hits all three.
-  // Under a target, plain WORK_REPO is ignored (targetPath), so naming it here
-  // would send a machine whose checkout is elsewhere to set a variable that
-  // cannot move the path. The scoped name is the one that works.
-  for (const [label, p, required, envVar] of [
-    ['WORK_REPO', WORK_REPO, true, PROJECT_TARGET ? scopedEnvName('WORK_REPO') : 'WORK_REPO'],
-    ['CONTEXT_REPO', CONTEXT_REPO, false, 'CONTEXT_REPO'],
-    ['SKILLS_ROOT', SKILLS_ROOT, false, 'ONESHOT_SKILLS_ROOT'],
-  ] as Array<[string, string, boolean, string]>) {
-    if (existsSync(p)) pass(label, p);
-    else if (required) fail(label, `${p} does not exist — set ${envVar}`);
+  // Each path says which variable put it there. A plain WORK_REPO beats the
+  // default derived from GITLAB_REPO_URL, and the scoped ONESHOT_<NAME>_<VAR>
+  // beats both, so a surprising directory below is only fixable if the line
+  // that chose it is named. The env var is printed with a failure for the same
+  // reason: SKILLS_ROOT is moved by ONESHOT_SKILLS_ROOT, not by its own name.
+  const sources = pathSources();
+  const origin = (name: keyof typeof sources): string => {
+    const src = sources[name];
+    if (src.source === 'scoped') return `from ${src.key} — the per-project spelling, still honoured`;
+    if (src.source === 'plain') return `from ${src.key}`;
+    return 'default derived from GITLAB_REPO_URL';
+  };
+  for (const [label, p, required, envVar, from] of [
+    ['WORK_REPO', WORK_REPO, true, 'WORK_REPO', origin('WORK_REPO')],
+    ['CONTEXT_REPO', CONTEXT_REPO, false, 'CONTEXT_REPO', ''],
+    ['SKILLS_ROOT', SKILLS_ROOT, false, 'ONESHOT_SKILLS_ROOT', ''],
+  ] as Array<[string, string, boolean, string, string]>) {
+    if (!p) fail(label, `no path — set GITLAB_REPO_URL (default ~/Documents/<name>) or ${envVar}`);
+    else if (existsSync(p)) pass(label, from ? `${p} (${from})` : p);
+    else if (required) fail(label, `${p} does not exist — clone the project there, or set ${envVar}`);
     else warn(label, `${p} does not exist — set ${envVar}`);
-  }
-
-  if (existsSync(WORK_REPO)) {
-    const git = spawnSync('git', ['-C', WORK_REPO, 'remote', 'get-url', 'origin'], { encoding: 'utf8' });
-    const url = git.stdout.trim();
-    if (url.includes(cfg.gitlab.project)) pass('WORK_REPO origin', url);
-    else fail('WORK_REPO origin mismatch', `${url} is not ${cfg.gitlab.project}`);
   }
 
   if (existsSync(SKILLS_ROOT)) {
@@ -149,9 +145,14 @@ async function main(): Promise<void> {
     } else warn('no skills/ under SKILLS_ROOT', skillsDir);
   }
 
-  if (existsSync(WT_ROOT)) {
-    if (statSync(WT_ROOT).isDirectory()) pass('WT_ROOT', WT_ROOT);
-  } else warn('WT_ROOT will be created on first run', WT_ROOT);
+  if (!WT_ROOT) fail('WT_ROOT', 'no path — set GITLAB_REPO_URL (default ~/Documents/<name>-wt) or WT_ROOT');
+  else if (existsSync(WT_ROOT)) {
+    if (statSync(WT_ROOT).isDirectory()) pass('WT_ROOT', `${WT_ROOT} (${origin('WT_ROOT')})`);
+  } else warn('WT_ROOT will be created on first run', `${WT_ROOT} (${origin('WT_ROOT')})`);
+  // The old named-target overlay used to override a plain WT_ROOT; now a line
+  // left over from another project wins, and nothing else would notice.
+  const shared = wtRootFinding(WT_ROOT, sources.WT_ROOT, PROJECT_TARGET, [WORK_REPO, seedFrom()]);
+  if (shared) report(shared);
 
   // The seed repo is read when a worktree is leased, not at boot, so an absent
   // one is silent until phase 3 and only *hurts* at phase 6, where `verify`
@@ -169,8 +170,20 @@ async function main(): Promise<void> {
     const copies = envOr('ONESHOT_SEED_COPIES', '').split(',').map((s) => s.trim()).filter(Boolean);
     const missing = [...links, ...copies].filter((rel) => !existsSync(join(seed, rel)));
     if (missing.length) warn('seed entries missing from the seed repo', missing.join(', '));
-    else pass('seed repo', `${seed} (${links.length} linked, ${copies.length} copied)`);
+    else pass('seed repo', `${seed} (${links.length} linked, ${copies.length} copied; ${origin('ONESHOT_SEED_FROM')})`);
   }
+
+  // A clone of some other project would cut every worktree from the wrong code
+  // while tickets and MRs went to the right one — and the seed is not only
+  // borrowed from: scripts/app.cjs fetches MR refs in it and cuts app worktrees
+  // from it. A different project path fails and the same path on another host
+  // only warns, so an ssh origin matches an https URL and erp never matches
+  // erp-archive. The same call boot and preflight make.
+  for (const f of checkoutFindings({ workRepo: WORK_REPO, seed, sources })) report(f);
+  // Journals are keyed by iid alone, so another project's are never resumed;
+  // they are still worth knowing about.
+  const foreignRuns = foreignJournalFinding();
+  if (foreignRuns) report(foreignRuns);
 
   const ports = portPool();
   if (ports.length) pass('port pool', ports.join(', '));
@@ -180,10 +193,12 @@ async function main(): Promise<void> {
   section('GitLab');
   if (!envOr('GITLAB_TOKEN')) {
     fail('GITLAB_TOKEN unset', 'cp .env.example .env and fill it in');
+  } else if (!repo) {
+    warn('GitLab not checked', 'there is no project to ask about until GITLAB_REPO_URL is fixed (see Config)');
   } else {
     const p = await ping();
     if (p.ok) {
-      pass('reachable + authenticated', `project id ${p.data?.id}`);
+      pass('reachable + authenticated', `${repo.project}, project id ${p.data?.id}`);
 
       // Who is this desk? The token answers, and the token also does the work,
       // so there is no second fact that can disagree with it.
@@ -202,18 +217,21 @@ async function main(): Promise<void> {
         pass('acts as itself', `${idc.token.username}, token from ${idc.token.source.source}`);
       }
       if (idc.warning && !idc.token?.source.shared) warn('identity', idc.warning.split('\n')[0] ?? '');
-      const br = await listBranches();
-      if (br.ok && br.data) {
-        const names = new Set(br.data.map((x) => x.name));
-        if (names.has(cfg.branches.base)) pass('base branch exists', cfg.branches.base);
-        else fail('base branch missing', cfg.branches.base);
+      // Each branch is fetched by name. Listing them returns one page of 100,
+      // and a project with more branches than that hides `dev` off the page.
+      const wanted = [...new Set([cfg.branches.base, ...cfg.branches.protected])];
+      const branch = new Map(await Promise.all(wanted.map(async (n) => [n, await getBranch(n)] as const)));
+      const base = branch.get(cfg.branches.base);
+      if (base?.ok && base.data) pass('base branch exists', cfg.branches.base);
+      else if (base?.status === 404) fail('base branch missing', cfg.branches.base);
+      else warn('base branch not checked', base?.error ?? `HTTP ${base?.status ?? '?'}`);
 
-        for (const prot of cfg.branches.protected) {
-          const found = br.data.find((x) => x.name === prot);
-          if (!found) { warn(`protected branch '${prot}' not found`, 'listed in config but absent'); continue; }
-          if (!found.protected) fail(`'${prot}' is NOT protected on GitLab`, 'server-side protection is the real guarantee');
-          else pass(`'${prot}' protected`);
-        }
+      for (const prot of cfg.branches.protected) {
+        const found = branch.get(prot);
+        if (found?.status === 404) { warn(`protected branch '${prot}' not found`, 'listed in config but absent'); continue; }
+        if (!found?.ok || !found.data) { warn(`protected branch '${prot}' not checked`, found?.error ?? `HTTP ${found?.status ?? '?'}`); continue; }
+        if (!found.data.protected) fail(`'${prot}' is NOT protected on GitLab`, 'server-side protection is the real guarantee');
+        else pass(`'${prot}' protected`);
       }
     } else if (p.kind === 'auth') {
       fail('GitLab refused the token', `HTTP ${p.status} — needs scope 'api'`);

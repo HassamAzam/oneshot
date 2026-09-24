@@ -2,10 +2,10 @@
 
 One orchestrator. One label. Zero human gates.
 
-Oneshot takes a GitLab issue in [`arbisoft/workstreamai`](https://gitlab.arbisoft.com/arbisoft/workstreamai)
-carrying the label **`Loop`** and drives it — unattended — to **`merged`**: recall prior art,
-research, plan, implement, brainstorm test cases, review, verify in a real browser, screenshot
-the result, open the MR, and merge it.
+Oneshot takes a GitLab issue carrying the label **`Loop`** in the project `GITLAB_REPO_URL` names —
+today [`arbisoft/erp`](https://gitlab.arbisoft.com/arbisoft/erp) — and drives it, unattended, to
+**`Merged`**: recall prior art, research, plan, implement, brainstorm test cases, review, verify
+in a real browser, screenshot the result, open the MR, and merge it.
 
 **The pipeline ends at the merge.** Nothing is deployed, nothing is QA'd on a running build,
 and no demo is recorded — deploying is a person's job, and the ticket says so when it hands
@@ -27,7 +27,7 @@ owner.
 
 | One Loop | Oneshot |
 |---|---|
-| 9-label state machine, 11 transitions | `Loop` in → `merged` out. Nothing between. |
+| 9-label state machine, 11 transitions | `Loop` in → `Merged` out. Nothing between. |
 | `label-guard.js` + `config/labels.json` | deleted |
 | claim → post note → re-fetch → verify → roll back | one SQLite row |
 | `HANDOFF:` markers + route table | a phase returns a value to its caller |
@@ -70,7 +70,7 @@ Three things fall out of that:
    8  mr           ∥  Sonnet 5  MR + description
    9  merge           code      merge into dev — dev is final, nothing promotes on
                                 the run's record: ticket note, MR note, Slack,
-                                label → `merged`, teardown
+                                label → `Merged`, teardown
 
   ∥  runs concurrently with the phase above it
 
@@ -147,6 +147,10 @@ holds — has a third row this mode fills without touching either of the first t
 change) should be able to, without every OTHER ticket paying for it and without resurrecting
 `label-guard.js`'s closed label-state machine that v2 deliberately deleted (README's "Why this is
 not One Loop v2", above).
+
+Which label that is comes from `labels.review` in `config/project.json`, and for ERP it is
+**empty — off** — because that project has no such label. Set it to an existing label name before
+relying on the label; the path trigger further down works without it.
 
 Put the `Review` label on a ticket **alongside** `Loop` and three pause points activate. **GitLab is
 the approval channel, and Slack is where the ask is heard.** Oneshot posts the request as a ticket
@@ -390,27 +394,61 @@ npm install
 npm start                                  # no .env? an interactive wizard runs first
 ```
 
-`npm start` with no `.env` hands off to a setup wizard that reuses the GitLab token already in
-`~/.claude.json`, detects your repo clones, and warns before configuring a remote telemetry
-endpoint. Then `npm run verify` (deps → hooks → doctor) is the gate. It checks auth, config coherence, paths, GitLab reachability and
+`npm start` with no `.env` hands off to a setup wizard. It asks first for `GITLAB_REPO_URL` — the
+one line that says which GitLab project Oneshot works on — and derives the default clone location
+from it; then it reuses the GitLab token already in `~/.claude.json`, detects your repo clones,
+and warns before configuring a remote telemetry endpoint. Then `npm run verify` (deps → hooks → doctor) is the gate. It checks auth, config coherence, paths, GitLab reachability and
 branch protection, and that every guard script is present and its test suite passes. It exits
 non-zero on anything that would only surface as a confusing failure three phases into a real
 ticket.
 
+- **Project — one line decides it.** `GITLAB_REPO_URL` in `.env` names the GitLab project Oneshot
+  claims tickets from, labels, branches and merges into — today ERP,
+  `GITLAB_REPO_URL=https://gitlab.arbisoft.com/arbisoft/erp`. It is required, and nothing else
+  names a project: `config/project.json` holds only labels, branches and gates. From the URL come
+  the host, the API root (`<scheme>://<host>/api/v4`), the project path, the web URL, and a short
+  name — the last path segment, lower-cased, so `erp` — that the default `WORK_REPO` and `WT_ROOT`
+  are named after. A web URL, a `.git` clone URL, an SSH clone URL (`git@host:group/project.git`
+  or `ssh://…`), a subgroup path and a pasted browser URL (`…/erp/-/issues/12`) all parse to the
+  same project. The numeric project id is never configured: API calls use the URL-encoded path,
+  and GitLab is asked for the id in the one place that needs it. Two checks — at boot, in
+  `npm run doctor` and in `npm run preflight` — keep the URL the single source of truth:
+
+  - **`WORK_REPO` must be a clone of it.** Its `origin` project path is compared with
+    `GITLAB_REPO_URL`'s — ssh and https count as equal, case and `.git` are ignored, and it is
+    never a substring match. A different path refuses boot and names both URLs; otherwise a
+    `WORK_REPO` line left over from a previous project would cut every worktree from the wrong
+    code while tickets and MRs went to the right one. The same path on another host (an
+    `~/.ssh/config` alias, or a clone from another GitLab), no `origin`, or not a git repo only
+    warns.
+  - **The old selectors select nothing.** `ONESHOT_PROJECT`, `ONESHOT_GITLAB_PROJECT`,
+    `ONESHOT_GITLAB_API` and `ONESHOT_PROJECT_ID` (and their `ONELOOP_` spellings), and the
+    `targets` overlay that used to live in `config/project.json`, are all replaced by
+    `GITLAB_REPO_URL`. One left in `.env` that disagrees with the URL refuses boot, naming both
+    values; one that agrees — and `ONESHOT_PROJECT_ID`, which cannot be checked offline — is a
+    warning. Either way, delete the line.
+
+  The labels in `config/project.json` must already exist on whichever project the URL names —
+  Oneshot never creates one — so pointing it somewhere else starts with checking that.
 - **Auth:** the Agent SDK uses the same credential as Claude Code — if `claude login` works here,
   phases run with no API key. **Never set `ANTHROPIC_API_KEY`.** See below.
 - **Kill switches:** `touch state/PAUSE` freezes everything, including sessions already mid-phase.
   `state/PAUSE-QUOTA` is the machine's own park after a usage limit and clears itself — a
   separate file precisely so nothing automatic ever lifts a pause you set.
-- **Paths:** the four path defaults are one machine's layout (`~/Documents/...`), so a fresh
-  clone almost certainly needs to override them. Note the third is **not** named after its label:
+- **Paths:** `WORK_REPO` and `WT_ROOT` default to directories named after the project — `<name>`
+  below is the short name derived from `GITLAB_REPO_URL` — so a clone kept at `~/Documents/erp`
+  needs neither line. A plain `WORK_REPO` or `WT_ROOT` beats that default, and an older
+  per-project spelling such as `ONESHOT_ERP_WORK_REPO` is still honoured above both; `doctor`
+  prints which line chose each path. `CONTEXT_REPO`'s default is one machine's layout
+  (`~/Documents/erp`), so a fresh clone may need to override it. Note the third is **not**
+  named after its label:
 
   | Env var | Default | What it is |
   |---|---|---|
-  | `WORK_REPO` | `~/Documents/workstreamai` | the clone phases actually commit in |
+  | `WORK_REPO` | `~/Documents/<name>` | the clone phases actually commit in — its `origin` must be `GITLAB_REPO_URL` |
   | `CONTEXT_REPO` | `~/Documents/erp` | read-only clone for research |
-  | `ONESHOT_SKILLS_ROOT` | `~/Documents/erp/.claude` | skills handed to the phases |
-  | `WT_ROOT` | `~/Documents/oneshot-wt` | where per-run worktrees are leased |
+  | `ONESHOT_SKILLS_ROOT` | `./context` (the vendored snapshot) | skills handed to the phases; point it at a live `.claude` such as `~/Documents/erp/.claude` to override |
+  | `WT_ROOT` | `~/Documents/<name>-wt` | where per-run worktrees are leased |
   | `ONESHOT_SEED_FROM` | _(unset)_ | an already-installed clone whose `node_modules`/`venv` are linked into each new worktree, with `ONESHOT_SEED_LINKS` / `ONESHOT_SEED_COPIES` naming what to carry |
 
   Leave `ONESHOT_SEED_FROM` unset and a leased worktree has no dependencies, so `verify`
@@ -420,7 +458,10 @@ ticket.
 - **Seeding — the seed clone must be *installed*, not just present.** A leased worktree is a bare
   `git worktree`: it has none of the gitignored pieces a checkout needs to *run*. Oneshot never
   installs them (that would cost `npm install` minutes per ticket); it carries them over from
-  `ONESHOT_SEED_FROM` when the worktree is leased. `npm run setup` writes that path for you but
+  `ONESHOT_SEED_FROM` when the worktree is leased. `npm run setup` writes that path for you — your
+  `WORK_REPO` answer, because the seed has to be a clone of the same project (`scripts/app.cjs`
+  fetches refs from it, and boot, `doctor` and `app.cjs` refuse one whose `origin` is not
+  `GITLAB_REPO_URL`) — but
   installs nothing — **you install the seed clone once, by hand**, following the work repo's own
   README (*Conventional Setup → Installation*). Four entries are carried, named in `.env`:
 
@@ -447,7 +488,7 @@ ticket.
   | `no seed repo configured` | `ONESHOT_SEED_FROM` is unset | set it (or re-run `npm run setup`) |
   | `seed entries missing from the seed repo: …` | the clone exists but is not installed — the list names exactly what to create | install the clone; re-run `doctor` |
 
-  You are done when `doctor` prints `seed repo <path> (3 linked, 2 copied)`. Both warnings are
+  You are done when `doctor` prints `seed repo <path> (3 linked, 2 copied; …)`. Both warnings are
   **non-blocking for `doctor` and blocking for the first ticket**: a missing entry does not fail at
   boot, it fails when `verify` tries to start the dev server, three phases in.
 
