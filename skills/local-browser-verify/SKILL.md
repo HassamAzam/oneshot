@@ -162,10 +162,17 @@ pytest is unaffected and is fine to run.
   ```js
   const h = require('<oneshot>/skills/local-browser-verify/scripts/harness.cjs');
   await h.overlap(session, '.react-datepicker-popper', '[name="end_date"]');
-  // → { intersects: true, px: 10340, region: {...}, a: {...}, b: {...} }
+  // → { intersects: true, areaPx: 10352, region: { width: 242, height: 43 }, ... }
   ```
 
-  Four ways this reads the wrong verdict, all of them paid for already:
+  Five ways this reads the wrong verdict, all of them paid for already:
+
+  - **`areaPx` is an area, not a distance.** It is `region.width * region.height`.
+    Reported as "covered by 10352px" it reads as a length, and a length that
+    large is impossible on a 900px-tall screen — so a reader reasonably assumes
+    the measurement is broken and dismisses a real defect. Quote `region`, or the
+    height it implies: 10352 over a 242px-wide popover is a 43px band, i.e. one
+    input row. Say "px²" or "the whole Title row", never "10352 pixels".
 
   - **`boundingBox()` does not wait for the geometry to settle.** It returns the
     box as it is when asked. A popper re-anchors — it measures its reference,
@@ -200,8 +207,8 @@ pytest is unaffected and is fine to run.
   - **Nothing here survives the page scrolling underneath it.** The two boxes are
     viewport-relative and read one after the other, so a scroll that lands
     between them compares two different frames: two elements 600px apart,
-    truthfully `px=0`, measured `px=20000`. Let the scroll finish before you
-    measure.
+    truthfully `areaPx=0`, measured `areaPx=20000`. Let the scroll finish before
+    you measure.
 
   Screenshot after the settle, not before — a shot timed one tick early omits the
   defect, and then the disproof and the proof look identical in `artifacts/`.
@@ -236,7 +243,7 @@ pytest is unaffected and is fine to run.
   there is no re-open, and anything in the screenshot is placement while it was
   legitimately open. A number means it is still on screen after the selection.
   Record which of the two you saw, in those words: a verdict that says only
-  "calendar overlaps end date by 9342px" sends the fix at the z-index, which is
+  "calendar overlaps end date by 9342px²" sends the fix at the z-index, which is
   already correct, and the real defect survives the MR.
 
 ## Record one result per case

@@ -1013,7 +1013,7 @@ async function settle(session, selector, opts = {}) {
  *
  * A box is not visibility. `visibility:hidden` and `opacity:0` both keep their geometry,
  * so a dismissed popover that is merely hidden rather than unmounted still measures
- * 200x120 in the same place as the field under it — reported here as a 6000px overlap on
+ * 200x120 in the same place as the field under it — reported here as a 6000 px² overlap on
  * a screen where nothing is wrong. That is the ticket-244 failure mode reversed, and it
  * is the more dangerous direction: a false defect costs a week, a missed one costs a
  * retest. react-datepicker unmounts on close so it is safe, but MUI Popper with
@@ -1043,12 +1043,23 @@ async function visible(session, selector) {
 function intersection(a, b) {
   const width = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
   const height = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
-  if (width <= 0 || height <= 0) return { width: 0, height: 0, px: 0 };
-  return { width: Math.round(width), height: Math.round(height), px: Math.round(width * height) };
+  if (width <= 0 || height <= 0) return { width: 0, height: 0, areaPx: 0 };
+  return {
+    width: Math.round(width),
+    height: Math.round(height),
+    areaPx: Math.round(width * height),
+  };
 }
 
 /**
- * Does `a` visually cover `b`? Answer in pixels.
+ * Does `a` visually cover `b`? Answer as an area, in square pixels.
+ *
+ * `areaPx` is `region.width * region.height` — the size of the covered patch, NOT a
+ * distance. It is named `areaPx` rather than `px` because "10352px" reads as a length,
+ * and a length that large is impossible on a 900px-tall screen, so the number invites
+ * the reader to dismiss a real defect as a broken measurement. Divide by `region.width`
+ * to recover the height a human would describe: 10352 over a 242px-wide popover is a
+ * 43px band, i.e. one input row. Quote `region` when a reviewer needs to picture it.
  *
  * "Obscured", "overlapping" and "covers the field below" are the one bug class this
  * harness could state a rule about but never measure: a screenshot proves it only to a
@@ -1073,9 +1084,9 @@ function intersection(a, b) {
  *
  * One thing this does NOT handle: both boxes are viewport-relative and they are read one
  * after the other, so a page that scrolls between the two reads compares two different
- * coordinate frames. Measured: two elements 600px apart, truthfully `px=0`, came back as
- * `px=20000` with a 400px scroll landing in the gap. Settle the page before measuring —
- * do not call this while something is still scrolling a field into view.
+ * coordinate frames. Measured: two elements 600px apart, truthfully `areaPx=0`, came back
+ * as `areaPx=20000` with a 400px scroll landing in the gap. Settle the page before
+ * measuring — do not call this while something is still scrolling a field into view.
  */
 async function overlap(session, a, b, opts = {}) {
   const boxA = await settle(session, a, opts);
@@ -1085,7 +1096,7 @@ async function overlap(session, a, b, opts = {}) {
   if (!boxA) missing.push(a);
   if (!boxB) missing.push(b);
   if (missing.length) {
-    return { intersects: null, px: null, missing, a: boxA, b: boxB, viewport };
+    return { intersects: null, areaPx: null, missing, a: boxA, b: boxB, viewport };
   }
   const seen = await Promise.all([visible(session, a), visible(session, b)]);
   const hidden = [a, b]
@@ -1094,15 +1105,15 @@ async function overlap(session, a, b, opts = {}) {
   const hit = intersection(boxA, boxB);
   if (hidden.length) {
     return {
-      intersects: false, px: 0, region: hit, hidden, a: boxA, b: boxB, viewport, outsideViewport: false,
+      intersects: false, areaPx: 0, region: hit, hidden, a: boxA, b: boxB, viewport, outsideViewport: false,
     };
   }
   const outsideViewport = viewport
     ? [boxA, boxB].some((box) => box.y >= viewport.height || box.x >= viewport.width)
     : false;
   return {
-    intersects: hit.px > 0,
-    px: hit.px,
+    intersects: hit.areaPx > 0,
+    areaPx: hit.areaPx,
     region: hit,
     hidden,
     a: boxA,
