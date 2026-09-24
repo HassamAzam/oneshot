@@ -319,6 +319,34 @@ test('scripts/app.cjs refuses a seed or WORK_REPO that is a clone of another pro
   }
 });
 
+test('scripts/app.cjs reuses an app worktree of any clone of this project, and no other project\'s', () => {
+  // cold() checks a ref out INTO a reused app-<port> worktree, so it must refuse
+  // another project's — but boot judges WT_ROOT by project, not by clone, and a
+  // second clone of this project must not be refused here after boot accepted it.
+  const dir = mkdtempSync(join(tmpdir(), 'oneshot-appclone-'));
+  const git = (...a: string[]): void => { spawnSync('git', a, { encoding: 'utf8' }); };
+  const clone = (name: string, origin: string): string => {
+    const d = join(dir, name);
+    git('init', '-q', d);
+    git('-C', d, 'remote', 'add', 'origin', origin);
+    git('-C', d, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init');
+    git('-C', d, 'worktree', 'add', '-q', '--detach', join(dir, `wt-${name}`));
+    return join(dir, `wt-${name}`);
+  };
+  try {
+    const own = clone('b', 'git@gitlab.example.com:acme/erp.git');
+    const secondClone = clone('a', 'https://gitlab.example.com/acme/erp.git');
+    const otherProject = clone('x', 'git@gitlab.example.com:acme/workstream.git');
+    const unknown = clone('u', '/no/such/local/clone');
+    const vars = { GITLAB_REPO_URL: REPO_URL, WORK_REPO: join(dir, 'b') };
+    const probe = `const a = require(APP); process.stdout.write(JSON.stringify(${JSON.stringify([own, secondClone, otherProject, unknown])}.map(a.cutFromOurClone)))`;
+    // An origin that proves nothing falls back to the clone identity, as before.
+    assert.deepEqual(JSON.parse(runApp(vars, probe).last), [true, true, false, false]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('ONESHOT_SKIP_REPO_CHECK lets through exactly what boot lets through, in app.cjs and TypeScript alike', () => {
   const dir = mkdtempSync(join(tmpdir(), 'oneshot-appskip-'));
   try {

@@ -64,6 +64,12 @@ export interface OriginSubject {
   from?: ResolvedPath;
 }
 
+/**
+ * Which project a checkout is, by its origin: judgeOrigin()'s PASS, FAIL and WARN as
+ * something to act on. `url` is the redacted fetch or push URL that names the other project.
+ */
+export type OriginProject = { kind: 'same' } | { kind: 'other'; url: string } | { kind: 'unknown' };
+
 export interface Finding {
   level: 'pass' | 'warn' | 'fail';
   label: string;
@@ -83,6 +89,7 @@ export declare function repoKey(url: string): string | null;
 export declare function readOrigin(dir: string, hops?: number): OriginRead;
 export declare function localRemotePath(url: string, dir: string): string | null;
 export declare function judgeOrigin(subject: OriginSubject, repoUrl: string, read: OriginRead): Finding;
+export declare function originProject(repoUrl: string, read: OriginRead): OriginProject;
 export declare function scopedEnvName(name: string, envName: string): string;
 export declare function expandPath(p: string, root: string): string;
 export declare function defaultWorkRepo(name: string): string;

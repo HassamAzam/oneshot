@@ -440,6 +440,31 @@ function judgeOrigin(subject, repoUrl, read) {
   return { level: 'pass', label: `${label} origin`, detail: `${redactUrl(read.url)}${via}` };
 }
 
+/**
+ * Which project readOrigin()'s answer makes a checkout, for a caller that has
+ * to ACT on it rather than word it for a person: `{ kind: 'same' }`,
+ * `{ kind: 'other', url }` with the (redacted) URL that proves it, or
+ * `{ kind: 'unknown' }`. Pure.
+ *
+ * The rules are judgeOrigin()'s, level for level — 'other' is its FAIL (a
+ * fetch or push URL whose project PATH is not GITLAB_REPO_URL's), 'unknown'
+ * its WARN (unreadable, no GitLab URL, the same path on another host), 'same'
+ * its PASS — so nothing is treated as another project's on evidence the origin
+ * check itself would only warn about. It judges a PROJECT, never a clone: two
+ * clones of one project are both 'same'.
+ */
+function originProject(repoUrl, read) {
+  if ('error' in read) return { kind: 'unknown' };
+  const want = repoParts(repoUrl);
+  if (!want) return { kind: 'unknown' };
+  const urls = [read.url, ...(read.pushUrls || [])];
+  const parts = urls.map(repoParts);
+  const wrong = urls.findIndex((u, i) => parts[i] && parts[i].path !== want.path);
+  if (wrong !== -1) return { kind: 'other', url: redactUrl(urls[wrong]) };
+  if (parts.some((p) => !p || p.host !== want.host)) return { kind: 'unknown' };
+  return { kind: 'same' };
+}
+
 function lowerFirst(s) { return s.charAt(0).toLowerCase() + s.slice(1); }
 
 /**
@@ -662,6 +687,7 @@ module.exports = {
   readOrigin,
   localRemotePath,
   judgeOrigin,
+  originProject,
   scopedEnvName,
   expandPath,
   defaultWorkRepo,

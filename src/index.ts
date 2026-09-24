@@ -342,14 +342,16 @@ function preflight(): boolean {
     log.error(`WORK_REPO does not exist: ${WORK_REPO || '(no path — GITLAB_REPO_URL is what derives one)'}`);
     if (repo && WORK_REPO) log.error(`  git clone ${repo.sshUrl} ${WORK_REPO}`);
     fatal = true;
-  } else {
+  } else if (repo) {
     // The stale-clone guard: a WORK_REPO or ONESHOT_SEED_FROM line left over
     // from another project would cut worktrees from, and warm the app on, that
-    // project's code. Unreadable only warns. A WT_ROOT shared with another clone
-    // fails too, and so does one the overlay's removal moved away from worktrees
-    // still in the old root.
+    // project's code. Unreadable only warns. A WT_ROOT holding another
+    // project's worktrees fails too, and so does one that has moved away from
+    // this project's worktrees still in the derived default root. With no
+    // usable GITLAB_REPO_URL there is no project to judge any of them against,
+    // and its own FAIL above already says why boot refuses.
     const sources = pathSources();
-    const wt = wtRootFinding(WT_ROOT, sources.WT_ROOT, PROJECT_TARGET, [WORK_REPO, seedFrom()]);
+    const wt = wtRootFinding(WT_ROOT, sources.WT_ROOT, PROJECT_TARGET);
     const checks = [...checkoutFindings({ workRepo: WORK_REPO, seed: seedFrom(), sources }), ...(wt ? [wt] : [])];
     for (const f of relaxRepoChecks(checks)) say(f);
     const foreignRuns = foreignJournalFinding();

@@ -76,7 +76,9 @@ function report(f: Finding): void {
  * The same refusals boot makes (src/index.ts), so "READY" here can never
  * precede a conductor that will not start: an unusable GITLAB_REPO_URL, a
  * legacy selector that disagrees with it, a WORK_REPO or seed cloned from
- * another project. And the same warning about a WT_ROOT shared with one.
+ * another project, a WT_ROOT shared with another project or moved away from
+ * this project's worktrees. Past an unusable URL there is no project to judge
+ * the rest against, so they are not run.
  */
 function checkProject(): void {
   section('Project');
@@ -86,7 +88,7 @@ function checkProject(): void {
   if (!repoIdentity().repo) return;
   if (!WORK_REPO || !existsSync(WORK_REPO)) fail('WORK_REPO does not exist', WORK_REPO || 'no path');
   const sources = pathSources();
-  const wt = wtRootFinding(WT_ROOT, sources.WT_ROOT, PROJECT_TARGET, [WORK_REPO, seedFrom()]);
+  const wt = wtRootFinding(WT_ROOT, sources.WT_ROOT, PROJECT_TARGET);
   const checks = [...checkoutFindings({ workRepo: WORK_REPO, seed: seedFrom(), sources }), ...(wt ? [wt] : [])];
   for (const f of relaxRepoChecks(checks)) report(f);
   const foreignRuns = foreignJournalFinding();

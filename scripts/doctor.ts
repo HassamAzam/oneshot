@@ -155,9 +155,10 @@ async function main(): Promise<void> {
   else if (existsSync(WT_ROOT)) {
     if (statSync(WT_ROOT).isDirectory()) pass('WT_ROOT', `${WT_ROOT} (${origin('WT_ROOT')})`);
   } else warn('WT_ROOT will be created on first run', `${WT_ROOT} (${origin('WT_ROOT')})`);
-  // The old named-target overlay used to override a plain WT_ROOT; now a line
-  // left over from another project wins, and nothing else would notice.
-  const shared = wtRootFinding(WT_ROOT, sources.WT_ROOT, PROJECT_TARGET, [WORK_REPO, seedFrom()]);
+  // A plain WT_ROOT beats the derived default, so a line left over from another
+  // project wins and nothing else would notice. Judged only against a project:
+  // with GITLAB_REPO_URL unusable (Config says so) there is none to compare with.
+  const shared = repo ? wtRootFinding(WT_ROOT, sources.WT_ROOT, PROJECT_TARGET) : null;
   if (shared) for (const f of relaxRepoChecks([shared])) report(f);
 
   // The seed repo is read when a worktree is leased, not at boot, so an absent
@@ -185,11 +186,16 @@ async function main(): Promise<void> {
   // from it. A different project path fails and the same path on another host
   // only warns, so an ssh origin matches an https URL and erp never matches
   // erp-archive. The same call boot and preflight make.
-  for (const f of relaxRepoChecks(checkoutFindings({ workRepo: WORK_REPO, seed, sources }))) report(f);
-  // Journals are keyed by iid alone, so another project's are never resumed;
-  // they are still worth knowing about.
-  const foreignRuns = foreignJournalFinding();
-  if (foreignRuns) report(foreignRuns);
+  if (repo) {
+    for (const f of relaxRepoChecks(checkoutFindings({ workRepo: WORK_REPO, seed, sources }))) report(f);
+    // Journals are keyed by iid alone, so another project's are never resumed;
+    // they are still worth knowing about.
+    const foreignRuns = foreignJournalFinding();
+    if (foreignRuns) report(foreignRuns);
+  } else {
+    warn('checkouts not checked', 'there is no project to compare WORK_REPO, the seed, WT_ROOT or the run '
+      + 'journals with until GITLAB_REPO_URL is fixed (see Config)');
+  }
 
   const ports = portPool();
   if (ports.length) pass('port pool', ports.join(', '));

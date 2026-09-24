@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  codePhaseStatus, mergePollWait, nextIndex, testcaseGateRoute, uiEvidenceRefusal,
+  codePhaseStatus, decideClaim, mergePollWait, nextIndex, testcaseGateRoute, uiEvidenceRefusal,
 } from './runner.js';
 import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
+import type { RunJournal } from '../lib/artifacts.js';
+import type { JournalOwner } from '../lib/journalproject.js';
 
 function phase(name: string, n: number, group?: string): PhaseConfig {
   return { name, n, kind: 'session', timeoutMin: 30, onFail: 'abort', ...(group ? { group } : {}) };
@@ -76,6 +78,40 @@ test('an advance steps past the last member of a group, not past the current ind
     at('verify'),
   );
   assert.deepEqual([...forced], []);
+});
+
+// ------------------------------------------------ whose journal, at the claim
+
+const journal = (o: Partial<RunJournal> = {}): RunJournal => ({
+  runId: 'r1', iid: 237, project: 'gitlab.example.com/acme/erp', title: 't',
+  url: 'https://gitlab.example.com/acme/erp/-/issues/237', createdAt: 1, status: 'aborted',
+  worktree: '/wt/t237-r1', mrIid: 12,
+  phases: [{ phase: 'plan', status: 'ok' }, { phase: 'implement', status: 'ok' }] as RunJournal['phases'],
+  ...o,
+});
+const OURS: JournalOwner = { kind: 'ours', adopt: false };
+const DROP: JournalOwner = {
+  kind: 'ours', adopt: false, dropWorktree: true, why: 'its recorded worktree /wt/t237-r1 is a checkout of x',
+};
+
+test('a journal of another project is archived and the ticket starts fresh, whatever its status', () => {
+  for (const status of ['running', 'aborted', 'parked', 'blocked'] as const) {
+    const j = journal({ status, blockedAt: 0 });
+    assert.deepEqual(decideClaim(j, { kind: 'foreign', why: 'x' }), { kind: 'fresh', archive: 'r1' }, status);
+  }
+});
+
+test('an ours journal whose worktree is dropped still RESUMES — its phases and MR are never thrown away', () => {
+  for (const owner of [OURS, DROP, { kind: 'ours', adopt: true } as JournalOwner]) {
+    const j = journal();
+    const d = decideClaim(j, owner);
+    assert.equal(d.kind, 'resume', JSON.stringify(owner));
+    assert.equal(d.kind === 'resume' && d.journal, j);
+  }
+  // Only its own status decides otherwise, exactly as for any journal of ours.
+  assert.deepEqual(decideClaim(journal({ status: 'done' }), DROP), { kind: 'fresh', archive: 'r1' });
+  assert.equal(decideClaim(journal({ status: 'blocked', blockedAt: Date.now() }), DROP).kind, 'refuse');
+  assert.deepEqual(decideClaim(null, null), { kind: 'fresh', archive: null });
 });
 
 // ------------------------------------------------ merge parked on a human merge

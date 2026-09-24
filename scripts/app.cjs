@@ -80,7 +80,7 @@ const list = (k, d) => cfg(k, d).split(',').map((s) => s.trim()).filter(Boolean)
  * warning through repourl.cjs relaxRepoChecks(), the same function boot and doctor use, so
  * this script never refuses what the conductor lets through. A missing or invalid
  * GITLAB_REPO_URL is not downgraded, and neither is cold()'s refusal of an app-<port>
- * worktree cut from another clone: that one guards a `git checkout --force` into it.
+ * worktree of another project: that one guards a `git checkout --force` into it.
  *
  * `list`, `gc` and `down` are NOT refused. They check nothing out, and they are what a
  * person needs most while .env is half-way through a project switch: this script's own
@@ -400,18 +400,24 @@ function commonGitDir(dir) {
 
 let OWN_GIT_DIRS = null;
 /**
- * Was `wt` cut from this project's clone (the seed's or WORK_REPO's git directory)?
+ * Is `wt` a checkout of this project — cut from the seed's or WORK_REPO's clone, or
+ * from any other clone whose origin is GITLAB_REPO_URL's project?
  *
  * Being under WT_ROOT is not enough on its own. A WT_ROOT line left over from another
  * project still holds that project's app-<port> pool, and without this a `warm` would
- * adopt one of those, a cold start would check this project's base branch out INTO it —
- * resolving against the other clone — and `down --all` would stop its servers. When
+ * adopt one of those, a cold start would check this project's base branch out INTO it,
+ * and `down --all` would stop its servers. The question is which PROJECT, not which
+ * clone — boot and doctor accept a second clone of this project in WT_ROOT, and this
+ * must agree with them — so the origin decides. Only when the origin proves nothing
+ * (unreadable, an ssh alias) does the clone identity decide, as it always did. When
  * neither clone can be read there is nothing to compare with, and the old rule stands.
  */
 function cutFromOurClone(wt) {
   if (!OWN_GIT_DIRS) {
     OWN_GIT_DIRS = new Set([SEED_FROM, WORK_REPO].filter((d) => d && fs.existsSync(d)).map(commonGitDir).filter(Boolean));
   }
+  const project = TARGET.repo ? REPO.originProject(TARGET.repo.url, REPO.readOrigin(wt)).kind : 'unknown';
+  if (project !== 'unknown') return project === 'same';
   if (!OWN_GIT_DIRS.size) return true;
   return OWN_GIT_DIRS.has(commonGitDir(wt));
 }
@@ -840,8 +846,8 @@ async function cold(target, notes) {
 
   if (fs.existsSync(path.join(wt, '.git'))) {
     if (!cutFromOurClone(wt)) {
-      throw new AppError('E_CONFIG', `${wt} is a worktree of ${commonGitDir(wt)}, not of ${SEED_FROM}: `
-        + `WT_ROOT=${WT_ROOT} is shared with another project`,
+      throw new AppError('E_CONFIG', `${wt} is not a checkout of ${TARGET.repo ? TARGET.repo.project : 'this project'} `
+        + `(cut from ${commonGitDir(wt)}): WT_ROOT=${WT_ROOT} is shared with another project`,
         `give this project a WT_ROOT of its own (the default is ~/Documents/${TARGET.name}-wt), or remove that worktree`);
     }
     for (const f of PINNED) git(['update-index', '--no-skip-worktree', f], wt, true);
@@ -1145,7 +1151,7 @@ Environment: GITLAB_REPO_URL (the project; WORK_REPO and WT_ROOT default from it
  * to the TypeScript side: the claim that the two agree is only worth something checked.
  */
 module.exports = {
-  ensure, warm, discover, gc, down, resolveRef, checkoutError,
+  ensure, warm, discover, gc, down, resolveRef, checkoutError, cutFromOurClone,
   config: { name: TARGET.name, WORK_REPO, SEED_FROM, WT_ROOT, BASE_BRANCH, error: CONFIG_ERROR },
 };
 if (require.main === module) main();

@@ -31,7 +31,7 @@
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  phaseByName, projectConfig, runDir,
+  WT_ROOT, phaseByName, projectConfig, runDir,
 } from '../src/lib/config.js';
 import {
   readArtifact, readJournal, writeArtifact, writeJournal,
@@ -40,7 +40,8 @@ import {
 import { db, logEvent, updateRun } from '../src/lib/db.js';
 import { liveConductorIds } from '../src/lib/fleet.js';
 import { getIssue, swapLabel } from '../src/lib/gitlab.js';
-import { journalOwner } from '../src/lib/journalproject.js';
+import { worktreeName } from '../src/lib/ids.js';
+import { journalOwner, worktreeToResume } from '../src/lib/journalproject.js';
 import { identityFindings, relaxRepoChecks, repoCheckOverrideNotice } from '../src/lib/repocheck.js';
 
 const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', D = '\x1b[2m', B = '\x1b[1m', X = '\x1b[0m';
@@ -353,12 +354,26 @@ async function main(): Promise<void> {
   // state/runs is keyed by iid alone. A journal left by the project
   // GITLAB_REPO_URL used to name would otherwise put THIS project's #<iid> back
   // into Loop to resume another project's worktree and MR (journalproject.ts).
+  // Whose it is comes from the journal's own record; its worktree only decides
+  // whether the resume keeps that worktree. The one worktree case refused here
+  // is another project's checkout sitting where the re-lease would land: the
+  // resume would block on it again at once.
   const home = journalOwner(journal);
   if (home.kind === 'foreign') {
     console.log(`\n${R}#${iid}'s run journal is not this project's${X} — ${home.why}.`);
     console.log(`${D}Nothing changed. The conductor never resumes it: re-add the entry label to start the `
       + `ticket fresh (the journal is archived then), or move ${runDir(iid)} aside yourself.${X}\n`);
     process.exit(1);
+  }
+  const resume = worktreeToResume(journal, home, join(WT_ROOT, worktreeName(iid, journal.runId)));
+  if (resume.kind === 'block') {
+    console.log(`\n${R}#${iid} would only block again${X} — ${resume.why.replace(/^worktree: /, '')}.`);
+    console.log(`${D}Nothing changed.${X}\n`);
+    process.exit(1);
+  }
+  if (resume.kind === 'drop') {
+    console.log(`\n${Y}#${iid}'s worktree will not be reused${X} — ${resume.why}. `
+      + `${D}The resume leases a fresh one from WORK_REPO and leaves that one on disk.${X}`);
   }
 
   const doomed = new Set(

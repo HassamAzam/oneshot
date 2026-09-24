@@ -125,27 +125,35 @@ An `.env` from before `GITLAB_REPO_URL` may still carry `ONESHOT_PROJECT`,
 `WORK_REPO`, `WT_ROOT` or `ONESHOT_SEED_FROM` pointing at the previous project's
 clone. Delete them. The selectors select nothing now. Boot refuses one that
 disagrees with the URL, and refuses a `WORK_REPO` or seed whose `origin` is
-another project. A stale `WT_ROOT` has no origin to compare, so boot refuses it
-when it already holds another clone's worktrees, or when `ONESHOT_PROJECT` is
-still set beside a plain `WT_ROOT` that the old overlay used to replace with
-`~/Documents/<name>-wt` and that old root still holds worktrees (with nothing
-left there it only warns). `npm run setup` does all of this for you on a
-reconfigure, and saves the `.env` it started from as `.env.bak-<timestamp>`.
+another project. A stale `WT_ROOT` has no origin of its own, so boot judges the
+worktrees on disk, each by its clone's `origin` — by project, never by which
+clone. It refuses a `WT_ROOT` that already holds another project's worktrees
+(worktrees of a second clone of this project are fine), and one that points
+away from `~/Documents/<name>-wt` while that default root still holds this
+project's worktrees, which nothing would manage after the move. Whether an old
+`ONESHOT_PROJECT` line is still set makes no difference to either. Delete the
+`WT_ROOT` line to go back to the default, or finish or remove those worktrees
+first. `npm run setup` does all of this for you on a reconfigure, and saves the
+`.env` it started from as `.env.bak-<timestamp>`.
 
 If `WORK_REPO`'s `origin` is your fork, boot refuses it and names the remote
 that is the project, with the two `git remote rename` commands that swap them.
 If a check is wrong and you cannot fix it right now, `ONESHOT_SKIP_REPO_CHECK=1`
 turns these refusals into warnings (not a missing `GITLAB_REPO_URL`); boot and
 `doctor` remind you on every run until you remove it. `scripts/app.cjs` still
-refuses to check out into an `app-<port>` worktree from another clone, so a
-`WT_ROOT` shared with another project has to be fixed before the app can warm.
+refuses to check out into an `app-<port>` worktree of another project (judged by
+its `origin`, like boot — any clone of this project is fine), so fix a `WT_ROOT`
+shared with another project before the app can warm.
 
 The run journals under `state/runs/` are keyed by ticket iid alone, so the previous
 project's are still there under the same numbers. Oneshot never resumes one: each
 new journal records its project, and a journal that is not this project's is
 archived and the ticket started fresh when that iid is claimed; `npm run unblock`
 refuses it. A journal written before the stamp is judged by the issue URL it
-recorded. Boot and `doctor` warn while any are left, and print the one command that
+recorded. Its worktree never makes a journal foreign: one cut from another clone of
+this project is resumed in place, and one whose `origin` is another project is left
+on disk while the run resumes in a fresh worktree from `WORK_REPO`. Boot and `doctor`
+warn while any foreign journals are left, and print the one command that
 moves exactly those aside. Do not move `state/runs/*`: that takes this project's live
 runs with it, and a fresh run cannot lease a branch the old worktree still holds.
 

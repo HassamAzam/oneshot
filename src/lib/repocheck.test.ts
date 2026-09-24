@@ -6,13 +6,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   checkoutFindings, identityFindings, judgeOrigin, judgeWtRoot, originFinding, readOrigin, relaxRepoChecks,
-  repoCheckOverrideNotice, wtRootFinding, type Finding, type OriginRead,
+  repoCheckOverrideNotice, sameDir, worktreeOwners, wtRootFinding, type Finding, type OriginProject, type OriginRead,
 } from './repocheck.js';
 
 const URL = 'https://gitlab.example.com/acme/erp';
@@ -385,106 +385,243 @@ test('checkoutFindings judges the seed as strictly as WORK_REPO, and only when i
 // ------------------------------------------------------------------ WT_ROOT
 
 const plainWt = { path: '/r/oneshot-wt', source: 'plain' as const, key: 'WT_ROOT' };
+const SAME: OriginProject = { kind: 'same' };
+const UNKNOWN: OriginProject = { kind: 'unknown' };
+const WORKSTREAM: OriginProject = { kind: 'other', url: 'git@gitlab.example.com:acme/workstream.git' };
+const DERIVED = join(homedir(), 'Documents', 'erp-wt');
 
-test('a WT_ROOT holding another clone\'s worktrees fails, as scripts/app.cjs does, naming the line that set it', () => {
+test('a WT_ROOT holding another project\'s worktrees fails, naming that project and the line that set it', () => {
   const f = judgeWtRoot({
-    wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', clones: ['/r/erp/.git'],
+    wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp',
     owners: [
-      { dir: '/r/oneshot-wt/app-8010', gitDir: '/r/workstream/.git' },
-      { dir: '/r/oneshot-wt/123', gitDir: '/r/erp/.git' },
+      { dir: '/r/oneshot-wt/app-8010', project: WORKSTREAM },
+      { dir: '/r/oneshot-wt/t123-r1', project: SAME },
     ],
   });
   assert.equal(f?.level, 'fail');
-  assert.equal(f?.label, 'WT_ROOT is shared with another clone');
-  assert.match(f?.detail ?? '', /\(from WT_ROOT\) holds 1 worktree\(s\) cut from \/r\/workstream\/\.git/);
-  assert.match(f?.detail ?? '', /~\/Documents\/erp-wt/);
+  assert.equal(f?.label, 'WT_ROOT is shared with another project');
+  assert.match(f?.detail ?? '', /\(from WT_ROOT\) holds 1 worktree\(s\) of git@gitlab\.example\.com:acme\/workstream\.git/);
+  assert.match(f?.detail ?? '', /e\.g\. \/r\/oneshot-wt\/app-8010/);
+  assert.match(f?.detail ?? '', /~\/Documents\/erp-wt, which deleting the WT_ROOT line gives/);
+});
+
+test('worktrees of any clone of this project, or of an origin that cannot be judged, never make WT_ROOT shared', () => {
+  const erpWt = { ...plainWt, path: '/r/erp-wt' };
+  const owners = [
+    { dir: '/r/erp-wt/t1-r1', project: SAME },
+    { dir: '/r/erp-wt/app-8010', project: SAME },
+    { dir: '/r/erp-wt/t2-r2', project: UNKNOWN },
+  ];
+  assert.equal(judgeWtRoot({ wtRoot: '/r/erp-wt', from: erpWt, name: 'erp', owners }), null);
 });
 
 test('a hand-set WT_ROOT not named for the project warns softly; the derived default never does', () => {
-  const f = judgeWtRoot({ wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', clones: [], owners: [] });
+  const f = judgeWtRoot({ wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', owners: [] });
   assert.equal(f?.label, 'WT_ROOT is not named for this project');
+  assert.equal(f?.level, 'warn');
   assert.equal(judgeWtRoot({
-    wtRoot: '/r/erp-wt', from: { ...plainWt, path: '/r/erp-wt' }, name: 'erp', clones: [], owners: [],
+    wtRoot: '/r/erp-wt', from: { ...plainWt, path: '/r/erp-wt' }, name: 'erp', owners: [],
   }), null);
   assert.equal(judgeWtRoot({
     wtRoot: '/r/anything', from: { path: '/r/anything', source: 'default', key: '' }, name: 'erp',
-    clones: ['/r/erp/.git'], owners: [{ dir: '/r/anything/1', gitDir: '/r/erp/.git' }],
+    owners: [{ dir: '/r/anything/1', project: SAME }],
   }), null);
 });
 
-test('a plain WT_ROOT the old overlay used to replace fails only when the old root holds worktrees', () => {
-  const erpWt = join(homedir(), 'Documents', 'erp-wt');
-  const moved = { wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', clones: [], owners: [], overlayKey: 'ONESHOT_PROJECT' };
-  const left = [{ dir: join(erpWt, '123'), gitDir: '/r/erp/.git' }];
-  const f = judgeWtRoot({ ...moved, abandoned: left });
+test('a WT_ROOT moved away from the derived root while it still holds this project\'s worktrees fails', () => {
+  const moved = { wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', owners: [] };
+  const left = [{ dir: join(DERIVED, 't123-r1'), project: SAME }, { dir: join(DERIVED, 'app-8010'), project: SAME }];
+  const f = judgeWtRoot({ ...moved, stranded: left });
   assert.equal(f?.level, 'fail');
-  assert.equal(f?.label, 'WT_ROOT moved when the project overlay went away');
-  assert.match(f?.detail ?? '', /~\/Documents\/erp-wt/);
-  assert.match(f?.detail ?? '', /still holds 1 worktree\(s\) this move would abandon/);
-  assert.match(f?.detail ?? '', /Delete the WT_ROOT line/);
-  // Nothing left behind: the same advice, but only a warning.
-  const w = judgeWtRoot(moved);
-  assert.equal(w?.level, 'warn');
-  assert.equal(w?.label, 'WT_ROOT moved when the project overlay went away');
-  assert.match(w?.detail ?? '', /nothing is abandoned yet/);
-  assert.match(w?.detail ?? '', /Delete the WT_ROOT line/);
-  // The derived root, a scoped line (it beat the overlay too), or no overlay line: nothing moved.
-  assert.equal(judgeWtRoot({ ...moved, wtRoot: erpWt, from: { ...plainWt, path: erpWt }, abandoned: left }), null);
-  assert.notEqual(judgeWtRoot({
-    ...moved, from: { ...plainWt, source: 'scoped', key: 'ONESHOT_ERP_WT_ROOT' }, abandoned: left,
-  })?.level, 'fail');
-  assert.notEqual(judgeWtRoot({ ...moved, overlayKey: undefined, abandoned: left })?.level, 'fail');
+  assert.equal(f?.label, 'WT_ROOT moved away from this project\'s worktrees');
+  assert.match(f?.detail ?? '', /^WT_ROOT=\/r\/oneshot-wt is in force, but the default root ~\/Documents\/erp-wt still holds 2 worktree\(s\) of this project/);
+  assert.ok((f?.detail ?? '').includes(`Delete the WT_ROOT line from .env to return to ${DERIVED}`), f?.detail);
+  assert.match(f?.detail ?? '', /app-<port> server/);
+  // A scoped line chose it: that line, and a plain one under it, are what to delete.
+  const scoped = judgeWtRoot({ ...moved, from: { ...plainWt, source: 'scoped', key: 'ONESHOT_ERP_WT_ROOT' }, stranded: left });
+  assert.equal(scoped?.level, 'fail');
+  assert.match(scoped?.detail ?? '', /Delete the ONESHOT_ERP_WT_ROOT line \(and a plain WT_ROOT line, if any\)/);
 });
 
-test('the overlay-move warning never hides a WT_ROOT holding another clone\'s worktrees', () => {
-  const shared = {
-    wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', clones: ['/r/erp/.git'],
-    owners: [{ dir: '/r/oneshot-wt/app-8010', gitDir: '/r/workstream/.git' }],
-  };
-  for (const overlayKey of [undefined, 'ONESHOT_PROJECT', 'ONELOOP_PROJECT']) {
-    const f = judgeWtRoot({ ...shared, overlayKey, abandoned: [] });
-    assert.equal(f?.level, 'fail', String(overlayKey));
-    assert.equal(f?.label, 'WT_ROOT is shared with another clone', String(overlayKey));
+test('what the derived root holds decides the move: nothing, another project\'s, or only unjudgeable ones', () => {
+  const moved = { wtRoot: '/r/erp-elsewhere', from: { ...plainWt, path: '/r/erp-elsewhere' }, name: 'erp', owners: [] };
+  assert.equal(judgeWtRoot({ ...moved, stranded: [] }), null);
+  assert.equal(judgeWtRoot(moved), null);
+  assert.equal(judgeWtRoot({ ...moved, stranded: [{ dir: join(DERIVED, 'app-8010'), project: WORKSTREAM }] }), null);
+  // Maybe this project's (an ssh alias origin reads as unknown): the same advice, never a refusal.
+  const w = judgeWtRoot({ ...moved, stranded: [{ dir: join(DERIVED, 't9-r9'), project: UNKNOWN }] });
+  assert.equal(w?.level, 'warn');
+  assert.equal(w?.label, 'WT_ROOT moved away from worktrees that may be this project\'s');
+  assert.match(w?.detail ?? '', /origin cannot be matched/);
+  assert.ok((w?.detail ?? '').includes(`Delete the WT_ROOT line from .env to return to ${DERIVED}`), w?.detail);
+  // One provable worktree is enough to fail, whatever else is there.
+  const mixed = judgeWtRoot({
+    ...moved, stranded: [{ dir: join(DERIVED, 't9-r9'), project: UNKNOWN }, { dir: join(DERIVED, 't8-r8'), project: SAME }],
+  });
+  assert.equal(mixed?.level, 'fail');
+  assert.ok((mixed?.detail ?? '').includes(join(DERIVED, 't8-r8')), mixed?.detail);
+  // WT_ROOT IS the derived root: nothing moved.
+  assert.equal(judgeWtRoot({
+    wtRoot: DERIVED, from: { ...plainWt, path: DERIVED }, name: 'erp', owners: [],
+    stranded: [{ dir: join(DERIVED, 't8-r8'), project: SAME }],
+  }), null);
+});
+
+test('the move rule never hides a WT_ROOT holding another project\'s worktrees', () => {
+  const f = judgeWtRoot({
+    wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp',
+    owners: [{ dir: '/r/oneshot-wt/app-8010', project: WORKSTREAM }],
+    stranded: [{ dir: join(DERIVED, 't8-r8'), project: SAME }],
+  });
+  assert.equal(f?.level, 'fail');
+  assert.equal(f?.label, 'WT_ROOT is shared with another project');
+});
+
+test('wtRootFinding gives the same verdict whether or not a legacy ONESHOT_PROJECT line is still set', () => {
+  const gone = { ...plainWt, path: '/no/such/oneshot-wt' };
+  const holding = (d: string) => (d === DERIVED ? [{ dir: join(DERIVED, 't8-r8'), project: SAME }] : []);
+  const verdicts = [
+    { GITLAB_REPO_URL: URL },
+    { GITLAB_REPO_URL: URL, ONESHOT_PROJECT: 'erp' },
+    { GITLAB_REPO_URL: URL, ONELOOP_PROJECT: 'erp' },
+  ].map((env) => wtRootFinding('/no/such/oneshot-wt', gone, 'erp', env, holding));
+  assert.equal(verdicts[0]?.level, 'fail');
+  assert.equal(verdicts[0]?.label, 'WT_ROOT moved away from this project\'s worktrees');
+  assert.deepEqual(verdicts[1], verdicts[0]);
+  assert.deepEqual(verdicts[2], verdicts[0]);
+});
+
+test('wtRootFinding lists the derived root only when WT_ROOT is elsewhere, and judges nothing without a URL', () => {
+  const listed: string[] = [];
+  const empty = (d: string): [] => { listed.push(d); return []; };
+  const env = { GITLAB_REPO_URL: URL };
+  // Elsewhere and not created yet: the derived root is still looked at, and empty (or absent) is nothing.
+  assert.equal(wtRootFinding('/no/such/oneshot-wt', { ...plainWt, path: '/no/such/oneshot-wt' }, 'erp', env, empty), null);
+  assert.deepEqual(listed, [DERIVED]);
+  // WT_ROOT is the derived root: listed once, as itself.
+  listed.length = 0;
+  wtRootFinding(DERIVED, { path: DERIVED, source: 'default', key: '' }, 'erp', env, empty);
+  assert.ok(listed.every((d) => d === DERIVED) && listed.length <= 1, listed.join(', '));
+  // No usable URL: nothing is listed and nothing is said (the URL's own FAIL says why).
+  const never = (): never => { throw new Error('must not list'); };
+  for (const bad of [{}, { GITLAB_REPO_URL: '' }, { GITLAB_REPO_URL: 'not a url' }]) {
+    assert.equal(wtRootFinding('/r/oneshot-wt', plainWt, 'erp', bad, never), null, JSON.stringify(bad));
   }
 });
 
-test('wtRootFinding judges the overlay move by what the old root holds, even before WT_ROOT exists', () => {
-  const env = { GITLAB_REPO_URL: URL, ONESHOT_PROJECT: 'erp' };
-  const gone = { ...plainWt, path: '/no/such/oneshot-wt' };
-  const oldRoot = join(homedir(), 'Documents', 'erp-wt');
-  const listed: string[] = [];
-  const empty = (d: string): [] => { listed.push(d); return []; };
-  assert.equal(wtRootFinding('/no/such/oneshot-wt', gone, 'erp', [], env, empty)?.level, 'warn');
-  assert.deepEqual(listed, [oldRoot]);
-  const holding = (d: string) => (d === oldRoot ? [{ dir: join(oldRoot, 'app-8010'), gitDir: '/r/erp/.git' }] : []);
-  const f = wtRootFinding('/no/such/oneshot-wt', gone, 'erp', [], env, holding);
-  assert.equal(f?.level, 'fail');
-  assert.ok((f?.detail ?? '').includes(join(oldRoot, 'app-8010')), f?.detail);
-  // No overlay line: nothing moved, and the old root is not even looked at.
-  const never = (): never => { throw new Error('must not list'); };
-  assert.equal(wtRootFinding('/no/such/oneshot-wt', gone, 'erp', [], { GITLAB_REPO_URL: URL }, never), null);
+/** Real repos under a temp dir: one project reached through two clones, and another project. */
+function withProjects(fn: (p: {
+  base: string; cloneA: string; cloneB: string; theirs: string; git: (...a: string[]) => void;
+}) => void): void {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'oneshot-wtroot-')));
+  const git = (...a: string[]): void => {
+    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  try {
+    const origin = join(base, 'origin.git');
+    git('init', '-q', '--bare', origin);
+    git('-C', origin, 'remote', 'add', 'origin', `${URL}.git`);
+    const seed = join(base, 'seed');
+    git('init', '-q', seed);
+    git('-C', seed, 'commit', '-q', '--allow-empty', '-m', 'x');
+    git('-C', seed, 'push', '-q', origin, 'HEAD:refs/heads/dev');
+    const cloneA = join(base, 'cloneA');
+    const cloneB = join(base, 'cloneB');
+    git('clone', '-q', '-b', 'dev', origin, cloneA);
+    git('clone', '-q', '-b', 'dev', origin, cloneB);
+    const theirs = join(base, 'workstream');
+    git('init', '-q', theirs);
+    git('-C', theirs, 'commit', '-q', '--allow-empty', '-m', 'x');
+    git('-C', theirs, 'remote', 'add', 'origin', 'git@gitlab.example.com:acme/workstream.git');
+    fn({ base, cloneA, cloneB, theirs, git });
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
+test('wtRootFinding reads real worktrees by project: two clones of this one share a root, another project does not', () => {
+  withProjects(({ base, cloneA, cloneB, theirs, git }) => {
+    const root = join(base, 'erp-wt');
+    mkdirSync(root);
+    // The derived root is redirected into the temp dir, so the machine's real one is never read.
+    const derived = join(base, 'derived-erp-wt');
+    const list = (d: string, url: string) => worktreeOwners(d === DERIVED ? derived : d, url);
+    const from = { path: root, source: 'plain' as const, key: 'WT_ROOT' };
+    git('-C', cloneA, 'worktree', 'add', '-q', '--detach', join(root, 't1-r1'));
+    git('-C', cloneB, 'worktree', 'add', '-q', '--detach', join(root, 'app-8010'));
+    mkdirSync(join(root, 'not-a-worktree'));
+    assert.deepEqual(worktreeOwners(root, URL).map((o) => o.project), [SAME, SAME]);
+    assert.equal(wtRootFinding(root, from, 'erp', { GITLAB_REPO_URL: URL }, list), null);
+
+    git('-C', theirs, 'worktree', 'add', '-q', '--detach', join(root, 'app-8011'));
+    const f = wtRootFinding(root, from, 'erp', { GITLAB_REPO_URL: URL }, list);
+    assert.equal(f?.level, 'fail');
+    assert.equal(f?.label, 'WT_ROOT is shared with another project');
+    assert.ok((f?.detail ?? '').includes(`holds 1 worktree(s) of git@gitlab.example.com:acme/workstream.git`), f?.detail);
+    assert.ok((f?.detail ?? '').includes(join(root, 'app-8011')), f?.detail);
+  });
 });
 
-test('wtRootFinding reads real worktrees and tells this project\'s clone from another', () => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'oneshot-wtroot-')));
-  const git = (...a: string[]): void => { spawnSync('git', a, { encoding: 'utf8' }); };
+test('wtRootFinding reads real worktrees left in the derived root, by project and not by clone', () => {
+  withProjects(({ base, cloneA, theirs, git }) => {
+    const derived = join(base, 'derived-erp-wt');
+    mkdirSync(derived);
+    const list = (d: string, url: string) => worktreeOwners(d === DERIVED ? derived : d, url);
+    const elsewhere = join(base, 'elsewhere');
+    const from = { path: elsewhere, source: 'plain' as const, key: 'WT_ROOT' };
+    const env = { GITLAB_REPO_URL: URL };
+    // Empty derived root, then one holding only another project's worktree: nothing to say.
+    assert.equal(wtRootFinding(elsewhere, from, 'erp', env, list), null);
+    git('-C', theirs, 'worktree', 'add', '-q', '--detach', join(derived, 'app-8011'));
+    assert.equal(wtRootFinding(elsewhere, from, 'erp', env, list), null);
+    // One of this project's, cut from a clone that is not WORK_REPO: the move strands it.
+    git('-C', cloneA, 'worktree', 'add', '-q', '--detach', join(derived, 't5-r5'));
+    const f = wtRootFinding(elsewhere, from, 'erp', env, list);
+    assert.equal(f?.level, 'fail');
+    assert.equal(f?.label, 'WT_ROOT moved away from this project\'s worktrees');
+    assert.ok((f?.detail ?? '').includes(join(derived, 't5-r5')), f?.detail);
+  });
+});
+
+test('a WT_ROOT that is a symlink to the derived root, or its target, has not moved', () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'oneshot-wtlink-')));
+  const home = process.env.HOME;
   try {
-    const mine = join(base, 'erp');
-    const theirs = join(base, 'workstream');
-    const root = join(base, 'shared-wt');
-    for (const r of [mine, theirs]) {
-      git('init', '-q', r);
-      git('-C', r, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'x');
-    }
-    mkdirSync(root);
-    git('-C', mine, 'worktree', 'add', '-q', '--detach', join(root, '1'));
-    assert.equal(wtRootFinding(root, { path: root, source: 'default', key: '' }, 'erp', [mine]), null);
-    git('-C', theirs, 'worktree', 'add', '-q', '--detach', join(root, 'app-8010'));
-    const f = wtRootFinding(root, { path: root, source: 'plain', key: 'WT_ROOT' }, 'erp', [mine]);
-    assert.equal(f?.label, 'WT_ROOT is shared with another clone');
-    assert.ok((f?.detail ?? '').includes(`cut from ${join(theirs, '.git')}`), f?.detail);
-    assert.equal(wtRootFinding(join(base, 'no-such'), { path: '', source: 'default', key: '' }, 'erp', [mine]), null);
+    process.env.HOME = base;
+    const derived = join(base, 'Documents', 'erp-wt');
+    const target = join(base, 'ssd', 'erp-wt');
+    mkdirSync(target, { recursive: true });
+    mkdirSync(join(base, 'Documents'));
+    symlinkSync(target, derived);
+    const holding = (d: string) => [{ dir: join(d, 't8-r8'), project: SAME }];
+    const env = { GITLAB_REPO_URL: URL };
+    assert.equal(wtRootFinding(target, { path: target, source: 'plain', key: 'WT_ROOT' }, 'erp', env, holding), null);
+    // A different directory beside it has moved.
+    const other = join(base, 'ssd', 'erp-wt-2');
+    mkdirSync(other);
+    assert.equal(wtRootFinding(other, { path: other, source: 'plain', key: 'WT_ROOT' }, 'erp', env, holding)?.level, 'fail');
   } finally {
+    if (home === undefined) delete process.env.HOME; else process.env.HOME = home;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('a WT_ROOT naming the derived root in another letter case, on a case-insensitive disk, has not moved', (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'oneshot-wtcase-')));
+  const home = process.env.HOME;
+  try {
+    const derived = join(base, 'Documents', 'erp-wt');
+    mkdirSync(derived, { recursive: true });
+    const lower = join(base, 'documents', 'erp-wt');
+    if (!existsSync(lower)) { t.skip('the temp filesystem is case-sensitive'); return; }
+    assert.ok(sameDir(lower, derived));
+    process.env.HOME = base;
+    const holding = (d: string) => [{ dir: join(d, 't9-r9'), project: SAME }];
+    const from = { path: lower, source: 'plain' as const, key: 'WT_ROOT' };
+    assert.equal(wtRootFinding(lower, from, 'erp', { GITLAB_REPO_URL: URL }, holding), null);
+  } finally {
+    if (home === undefined) delete process.env.HOME; else process.env.HOME = home;
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -497,12 +634,12 @@ test('the override turns every repo-check FAIL into a WARN, keeping its text beh
   const conflict = identityFindings({ GITLAB_REPO_URL: URL, ONESHOT_PROJECT: 'workstream' });
   const origin = judgeOrigin('WORK_REPO', URL, { url: 'git@gitlab.example.com:acme/workstream.git' });
   const shared = judgeWtRoot({
-    wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', clones: ['/r/erp/.git'],
-    owners: [{ dir: '/r/oneshot-wt/app-8010', gitDir: '/r/workstream/.git' }],
+    wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp',
+    owners: [{ dir: '/r/oneshot-wt/app-8010', project: WORKSTREAM }],
   });
   const moved = judgeWtRoot({
-    wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', clones: [], owners: [], overlayKey: 'ONESHOT_PROJECT',
-    abandoned: [{ dir: '/r/erp-wt/1', gitDir: null }],
+    wtRoot: '/r/oneshot-wt', from: plainWt, name: 'erp', owners: [],
+    stranded: [{ dir: join(DERIVED, 't1-r1'), project: SAME }],
   });
   const fails = [...conflict.filter((f) => f.level === 'fail'), origin, shared, moved] as Finding[];
   assert.equal(fails.length, 4);

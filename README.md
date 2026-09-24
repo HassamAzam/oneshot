@@ -434,9 +434,10 @@ ticket.
   refusals to warnings wherever they are made: boot, `doctor` and `preflight` (origin, legacy
   selectors and `WT_ROOT`), `unblock` (legacy selectors) and `scripts/app.cjs` (origin and legacy
   selectors). It never excuses a missing `GITLAB_REPO_URL`, and `scripts/app.cjs` still refuses to
-  check out into an `app-<port>` worktree cut from another clone, so a `WT_ROOT` shared with
-  another project must be fixed before the app can be warmed. Boot and `doctor` print a reminder
-  on every run while it is set — remove it once fixed.
+  check out into an `app-<port>` worktree of another project (judged by its `origin`, like boot;
+  any clone of this project is fine), so a `WT_ROOT` shared with another project must be fixed
+  before the app can be warmed. Boot and `doctor` print a reminder on every run while it is set —
+  remove it once fixed.
 
   The labels in `config/project.json` must already exist on whichever project the URL names —
   Oneshot never creates one — so pointing it somewhere else starts with checking that.
