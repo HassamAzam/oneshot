@@ -146,6 +146,8 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
       { hooks: [guard('log-event.cjs')], timeout: 10 },
     ],
     PostToolUse: [
+      { matcher: WRITE_TOOLS, hooks: [guard('script-standards.cjs')], timeout: 20 },
+      // log-event stays last so a blocked write is still recorded.
       { hooks: [guard('log-event.cjs')], timeout: 10 },
     ],
     SessionStart: [
