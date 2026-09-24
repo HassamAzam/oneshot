@@ -20,6 +20,15 @@ let seq = 0;
  * and WORK_REPO are module-level constants read at load, so a cache-busting
  * query string is the only way to observe a different environment.
  *
+ * The empty string, never `delete`, is how "absent" is expressed — for the
+ * target and for anything in `extra`. config.js calls dotenv at module load,
+ * and dotenv fills in any key NOT already present in process.env, so deleting
+ * a variable does not produce an unconfigured run: it hands the decision to
+ * whatever `.env` the developer happens to have. This suite went red the moment
+ * a real ONESHOT_PROJECT=erp was added to one. An empty value is present, so
+ * dotenv leaves it alone, and it is what envOr and the selector already treat
+ * as unset.
+ *
  * `extra` sets further variables for the duration of the load, restoring each
  * afterwards — the scoped-override cases need one alongside ONESHOT_PROJECT.
  *
@@ -29,19 +38,16 @@ let seq = 0;
  * this machine's .env rather than the case.
  */
 async function loadWith(
-  value: string | undefined,
-  extra: Record<string, string | undefined> = {},
+  value: string,
+  extra: Record<string, string> = {},
   within?: (m: Record<string, unknown>) => void,
 ): Promise<Record<string, unknown>> {
   const vars = { [VAR]: value, ...extra };
   const before = new Map(Object.keys(vars).map((k) => [k, process.env[k]]));
-  for (const [k, v] of Object.entries(vars)) {
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-  }
+  for (const [k, v] of Object.entries(vars)) process.env[k] = v;
   try {
     seq += 1;
-    const m = await import(`./config.js?target=${encodeURIComponent(String(value))}-${seq}`);
+    const m = await import(`./config.js?target=${encodeURIComponent(value)}-${seq}`);
     within?.(m);
     return m;
   } finally {
@@ -52,8 +58,8 @@ async function loadWith(
   }
 }
 
-test('unset selects no target and leaves the default project in place', async () => {
-  const m = await loadWith(undefined);
+test('no target selected leaves the default project in place', async () => {
+  const m = await loadWith('');
   assert.equal(m.PROJECT_TARGET, '');
   assert.equal((m.activeTarget as () => unknown)(), null);
   const cfg = (m.projectConfig as () => { gitlab: { project: string; projectId: number } })();
@@ -142,8 +148,8 @@ test('the scoped name beats a plain one set alongside it', async () => {
 });
 
 test('the scoped name is ignored when no target is selected', async () => {
-  // Unset must leave everything exactly as it was, scoped variables included.
-  const m = await loadWith(undefined, { ONESHOT_ERP_WORK_REPO: '/tmp/elsewhere/erp' });
+  // No target must leave everything exactly as it was, scoped variables included.
+  const m = await loadWith('', { ONESHOT_ERP_WORK_REPO: '/tmp/elsewhere/erp' });
   assert.match(m.WORK_REPO as string, /workstreamai$/);
 });
 
