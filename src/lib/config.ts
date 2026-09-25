@@ -233,6 +233,19 @@ export interface PhaseConfig {
    * at all is what lets ONESHOT_SKIP_PHASES switch it off exactly like the rest.
    */
   onDemand?: boolean;
+  /**
+   * Restrict this phase to named ONESHOT_PROJECT targets.
+   *
+   * Absent — which is every phase that shipped before this field — means the
+   * phase runs for every target and for no target at all, so adding the field
+   * changes nothing about the pipeline anybody is already running.
+   *
+   * Present, the phase is dropped unless the active target is listed. That is
+   * what lets a change of pipeline SHAPE ride along with the project switch
+   * instead of landing on everyone the moment they pull: a phase nobody else
+   * asked for is a phase nobody else gets.
+   */
+  targets?: string[];
 }
 
 export interface BudgetConfig {
@@ -342,6 +355,10 @@ export function phases(): PhaseConfig[] {
     );
     _phases = loadJson<{ phases: PhaseConfig[] }>('phases.json').phases
       .filter((p) => !skip.has(p.name))
+      // A phase that names targets belongs to those targets only. An empty
+      // array is read the same as naming none of them: the phase never runs,
+      // which is a switched-off phase rather than an unrestricted one.
+      .filter((p) => !p.targets || p.targets.includes(PROJECT_TARGET))
       .sort((a, b) => a.n - b.n);
   }
   return _phases;
