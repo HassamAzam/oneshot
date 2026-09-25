@@ -1,7 +1,11 @@
 import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { notABugComment, notABugDecision, notABugSlackText, reproductionOf } from './reproduction.js';
+import {
+  notABugApprovalRequestBody, notABugComment, notABugDecision, notABugSlackText, reproductionOf,
+} from './reproduction.js';
+import { gateApprovedText, gateAskText } from './reviewgate.js';
+import type { RunJournal } from '../lib/artifacts.js';
 
 const complete = {
   kind: 'bug',
@@ -67,4 +71,32 @@ test('the Slack post names the ticket, the commit and the label', () => {
   assert.match(text, /`7a21bb0c`/);
   assert.match(text, /labelled \*Not a Bug\*/);
   assert.match(text, /issues\/123/);
+});
+
+test('the Not a Bug gate asks QA before anything is labelled, and says feedback reproduces again', () => {
+  const repro = reproductionOf({ reproduction: complete })!;
+  const body = notABugApprovalRequestBody(repro, 'Not a Bug');
+  assert.match(body, /Oneshot pauses here/);
+  assert.match(body, /Nothing has been labelled yet/);
+  assert.match(body, /`7a21bb0c1d2e`/);
+  assert.match(body, /1\. Open \/home\//);
+  assert.match(body, /Only QA may sign this off/);
+  assert.match(body, /\*\*`approved`\*\* to confirm — the ticket is labelled \*\*Not a Bug\*\*/);
+  assert.match(body, /treated as FEEDBACK and research reproduces the bug again/);
+  assert.doesNotMatch(body, /labelled the ticket/);
+});
+
+test('the Not a Bug gate still asks when the project has no label configured', () => {
+  const body = notABugApprovalRequestBody(reproductionOf({ reproduction: complete })!);
+  assert.match(body, /closed as not a bug/);
+  assert.match(body, /to confirm and the run stops/);
+});
+
+test('the Not a Bug gate\'s Slack ask and resolution read as a stop, not a continue', () => {
+  const j = { iid: 123, title: 'Keyboard focus obscured' } as RunJournal;
+  const ask = gateAskText(j, 'notABug', 99, '<@U1>');
+  assert.match(ask, /QA approval needed/);
+  assert.match(ask, /Not a Bug/);
+  assert.match(ask, /reproduced again/);
+  assert.equal(gateApprovedText(j, 'notABug', '<@U1>').includes('the run stops'), true);
 });

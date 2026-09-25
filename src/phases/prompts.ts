@@ -479,7 +479,9 @@ Load the \`bug-reproduction\` skill and follow it. In short:
 - Follow the ticket's steps, measure what the bug is about, screenshot into the run's
   artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`.
 
-**'not-reproduced' stops this run**: it takes the ticket out of the loop (labelling it Not a Bug when the project configures that label) and posts your evidence on the ticket and in Slack.
+**'not-reproduced' pauses this run for a QA reviewer**: your evidence is posted on the ticket and in
+Slack, and only if QA confirms is the ticket taken out of the loop (labelled Not a Bug when the project
+configures that label). If QA disagrees, their reply comes back to you and you reproduce again.
 Use it ONLY when the app ran on this unfixed code, you were logged in with access to the screen,
 you executed every reported step, and you observed the correct behaviour — with evidence. A
 different browser, device, data set, role or environment from the one the ticket describes, a
@@ -488,6 +490,27 @@ Reading code is never evidence that a bug does not exist.
 
 Do not let reproduction starve the rest of this phase: if bring-up or login is still failing
 after a reasonable wait, record 'inconclusive' with the error and finish the research.
+${notABugFeedbackBlock(ctx)}`;
+}
+
+/**
+ * QA's replies to an earlier not-reproduced verdict, for a research that runs
+ * again because of them. A reply that is not `approved` is the context the
+ * last attempt missed, so it outranks your own reading of the ticket.
+ */
+function notABugFeedbackBlock(ctx: PromptCtx): string {
+  const rounds = ctx.journal.notABugApproval?.feedback;
+  if (!rounds?.length) return '';
+  return `
+## QA did not confirm Not a Bug — reproduce again with their feedback
+An earlier research on this run recorded 'not-reproduced'. A QA reviewer read that evidence on the
+ticket and, instead of confirming, replied with what it missed. Treat each reply as part of the bug
+report: use the data, role, account, steps, browser or environment it names, and run the reproduction
+again from the start. Do not repeat the earlier attempt unchanged. Record 'not-reproduced' again only
+if you followed the feedback and still observed the correct behaviour — and say in \`reason\` how you
+applied each point.
+
+${rounds.map((f, i) => `### Round ${i + 1}\n${f}`).join('\n\n')}
 `;
 }
 
