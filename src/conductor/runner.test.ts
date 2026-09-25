@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  codePhaseStatus, decideClaim, mergePollWait, nextIndex, testcaseGateRoute, uiEvidenceRefusal,
+  codePhaseStatus, decideClaim, mergePollWait, nextIndex, salvagedReview, testcaseGateRoute,
+  uiEvidenceRefusal,
 } from './runner.js';
 import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
 import type { RunJournal } from '../lib/artifacts.js';
@@ -249,4 +250,40 @@ test('a phase that returned no artifact at all is left to the caller', () => {
   // second reason here would double-report one failure.
   assert.equal(uiEvidenceRefusal(null), null);
   assert.equal(uiEvidenceRefusal(undefined), null);
+});
+
+const finding = (id: string, severity: string) => ({
+  id, severity, file: 'apps/payroll/views.py', line: 10, what: 'w', why: 'y', fix: 'f',
+});
+
+test('a dead review with a blocker on record comes back as changes-requested', () => {
+  const out = salvagedReview([finding('F-01', 'blocker'), finding('F-02', 'minor')], 'timed out');
+  assert.equal(out?.verdict, 'changes-requested');
+  // The minor rides along: the verdict is decided by the serious findings, but
+  // implement reads the whole list and a written-down minor is still output.
+  assert.equal(out?.findings.length, 2);
+  assert.match(out!.summary, /PARTIAL/);
+  assert.match(out!.summary, /F-01 \[blocker\]/);
+});
+
+test('a major is salvageable too — the bar is blocker OR major', () => {
+  assert.equal(salvagedReview([finding('F-01', 'major')], null)?.verdict, 'changes-requested');
+});
+
+test('minors and suggestions alone are not a verdict, so the infra re-attempt stands', () => {
+  assert.equal(salvagedReview([finding('F-01', 'minor'), finding('F-02', 'suggestion')], 'x'), null);
+});
+
+test('an empty partial salvages nothing', () => {
+  assert.equal(salvagedReview([], 'timed out'), null);
+});
+
+test('a partial whose findings is not an array salvages nothing instead of throwing', () => {
+  // The file is freehand model output and readArtifact does not validate its
+  // shape; a throw here escapes runTicket and strands the claim.
+  for (const bad of [{ F1: finding('F-01', 'blocker') }, 'blocker', 3, {}]) {
+    assert.equal(salvagedReview(bad, 'timed out'), null);
+  }
+  // Non-object entries inside an array are dropped, not dereferenced.
+  assert.equal(salvagedReview([null, 'x', finding('F-01', 'blocker')], null)?.findings.length, 1);
 });

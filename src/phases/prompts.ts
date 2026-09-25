@@ -20,7 +20,8 @@
  *    attributed to this ticket.
  */
 import {
-  STATE, artifactDir, bugReproductionEnabled, envOr, phaseByName, phases, projectConfig, runDir,
+  DEFAULT_MAX_TURNS, STATE, artifactDir, bugReproductionEnabled, envOr, phaseByName, phases,
+  projectConfig, runDir,
   type PhaseConfig,
 } from '../lib/config.js';
 import { join } from 'node:path';
@@ -311,6 +312,16 @@ function baseBranch(): string {
 /** The phase's own configured wall clock, so a prompt cannot quote a stale number. */
 function budgetMin(phase: string, fallback: number): number {
   return phaseByName(phase)?.timeoutMin ?? fallback;
+}
+
+/**
+ * Same contract as budgetMin() for the turn cap: quoted from config, never typed
+ * in. The fallback is the runtime's own default rather than a parameter, because
+ * `maxTurns` is optional on a row and a prompt that quotes a bigger number than
+ * phase.ts enforces teaches the session to pace past the cap it is killed at.
+ */
+function budgetTurns(phase: string): number {
+  return phaseByName(phase)?.maxTurns ?? DEFAULT_MAX_TURNS;
 }
 
 function testCases(ctx: PromptCtx): TestCase[] {
@@ -1185,6 +1196,13 @@ them. Do not edit anything outside your worktree.`;
     const prev = findingsOf(ctx);
     const files = i.filesChanged ?? [];
     const layers = layersOf(files);
+    const mins = budgetMin('review', 30);
+    const turns = budgetTurns('review');
+    // The landing mark is counted in turns, not minutes: the session is handed
+    // no start instant (phaseEnv sets none, and review gets the bare system
+    // prompt with no date line), so a minute mark is one it cannot find. Its
+    // own tool calls it can count — the same yardstick testcases and verify use.
+    const landAt = Math.round(turns * 0.7);
 
     const agents = [
       layers.backend ? '`backend-reviewer-agent`' : '',
@@ -1194,17 +1212,55 @@ them. Do not edit anything outside your worktree.`;
       '`spec-conformance-agent`',
     ].filter(Boolean);
 
-    // Both layers changed is the case worth spelling out: three sequential
-    // Task calls is three times the wall clock for exactly the same signal,
-    // and this phase's cap is the tightest of any that dispatches subagents.
+    // Parallel was never the hard part — UNABANDONABLE was. A blocking Task
+    // call hands this phase's whole clock to its slowest child and cannot take
+    // it back, and that is how review became the pipeline's most reliable way
+    // to produce nothing: two recorded overruns, both killed at the 30-minute
+    // mark while still working (33.3 and 32.4 minutes, kill plus teardown),
+    // each returning no findings and costing an infra re-attempt of the same
+    // fan-out. Backgrounded children invert the
+    // ownership: the session holds the clock, collects what has landed when the
+    // deadline arrives, and names what did not in `summary` instead of dying
+    // with it. `dead-code-sweep` is deliberately NOT a sixth child — the skill
+    // tells an interactive caller to dispatch it through general-purpose, which
+    // inside this budget is one more process competing for the same minutes.
     const agentBlock = `Delegate to ${agents.join(', ')} — they carry the standards this repo is
-reviewed against and they resolve from your worktree's \`.claude/agents\`. Dispatch ALL OF THEM
-IN ONE MESSAGE so they run in parallel; issuing them one at a time multiplies your wall clock
-for identical output. If the Task tool cannot resolve one of them, review that layer yourself
-against \`.claude/rules/\` and say in \`summary\` which agent was unavailable.
+reviewed against and they resolve from your worktree's \`.claude/agents\`.
+
+Dispatch ALL OF THEM IN ONE MESSAGE, each with \`run_in_background: true\`. One message because
+issuing them one at a time multiplies your wall clock for identical output; backgrounded because
+a blocking dispatch gives your budget away to the slowest child and you cannot get it back —
+that is what kills this phase more often than anything it reviews.
+
+Then collect them with \`TaskOutput\`, \`block: true\`, and a \`timeout\` in milliseconds, at most
+600000 — the tool's maximum; a larger value is rejected and costs you a turn. If a collect
+returns \`retrieval_status: timeout\` and you are not at your landing mark, collect that agent
+again. At the mark, stop waiting: an agent still running is not collected again.
+
+An agent you stopped waiting for does not make its dimension clean. Before you land, cover that
+dimension yourself — review the diff against the same \`.claude/rules/\` the agent would have —
+and say in \`summary\` which agent did not land and that you covered it in-session. If you cannot
+cover it, record it as NOT REVIEWED in \`summary\`, naming the agent — and then your verdict may
+NOT be 'approve': 'approve' requires every dispatched dimension to have landed or been covered
+by you, otherwise the verdict is 'changes-requested'.
+
 Give \`spec-conformance-agent\` the ticket's title, description and acceptance criteria from
 above as its \`ticket_context\`: it is the one agent that says whether the change — and each
-thing a finding asks for — is inside this ticket's scope.`;
+thing a finding asks for — is inside this ticket's scope.
+
+\`util-reuse-agent\` earns a child only if this diff ADDS a helper-shaped function — a formatter,
+validator, sorter, calculator, API wrapper, permission check. If it does not, skip it and say so
+in one line: a dispatch with nothing to find still costs you the wait.
+
+\`dead-code-sweep\` is a skill, not an agent. Run it YOURSELF in review-only mode over the diff
+you have already read — detection and findings only, no deletions, no re-lint, no commit. Do not
+dispatch it as another child. Where \`erp-code-review\` tells you to send it through
+\`general-purpose\`, this phase overrides that deliberately: that skill is written for an
+interactive session with no deadline, and a sixth process competing for ${mins} minutes has
+already cost this phase a whole lap.
+
+If the Task tool cannot resolve one of them, review that layer yourself against
+\`.claude/rules/\` and say in \`summary\` which agent was unavailable.`;
 
     const lapBlock = ctx.lap > 0 && prev.length
       ? `## This is review lap ${ctx.lap}
@@ -1290,15 +1346,35 @@ approve or send back.
 
 ${agentBlock}
 
-\`verdict\` is 'changes-requested' if ANY finding is a blocker or a major; otherwise 'approve'.
+## Your clock — a review killed at its cap returns nothing, so this is a protocol, not advice
+
+Your budget is ${mins} minutes and ${turns} turns. A session that overruns returns NO findings
+and NO verdict: the conductor reads it as an infrastructure death, re-attempts the same fan-out,
+and the ticket pays another ${mins} minutes for the same nothing.
+
+- LAND THE PLANE at ~${landAt} turns — about 70% of your ${turns}. Keep a rough count of your
+  own tool calls; you are not told the time, so the count is your clock. Stop collecting,
+  aggregate what you have, write the verdict. A review that is missing one dimension and says
+  which is worth more than three laps that each said nothing at all.
+- WRITE AS YOU GO — the backstop for everything above. Each time an agent lands, and after each
+  pass of your own, rewrite \`${runDir(ctx.ticket.iid)}/review-partial.json\` as
+  \`{"findings": [<Finding so far>]}\` — the same shape as your final \`findings\` field. If this
+  session dies anyway, the conductor salvages a recorded blocker or major out of that file
+  instead of throwing the lap away, so a session that kept it current has already succeeded.
+- Do not re-derive what you were handed. The diff, implement's file list and the case list above
+  are your inputs; a survey of the repo is not, and it is the other way this phase runs out.
+
+\`verdict\` is 'changes-requested' if ANY finding is a blocker or a major, or if a dispatched
+dimension was neither landed nor covered by you (above); otherwise 'approve'.
 Minors and suggestions alone do not send a change back — the run has a lap cap, and spending it
 on style is how a correct change fails to ship.${ctx.lap > 0 ? `\nOn this lap in particular: do not raise a new cosmetic-only finding. If it was acceptable on\nlap 0 it is acceptable now, and raising it costs the ticket a whole lap.` : ''}
 
 A defect you found is not a block. 'changes-requested' is your normal negative verdict;
 \`blocked\` is for a diff you could not read at all.
 
-Do not change a line of code. You have no Write tool this phase, deliberately: a reviewer who
-fixes what they find has reviewed nothing.`;
+Do not change a line of code, and do not edit a file in the worktree: a reviewer who fixes
+what they find has reviewed nothing. Your one legal write is the review-partial.json backstop
+above, under the run directory — nothing else.`;
   },
 
   verify: (ctx) => {

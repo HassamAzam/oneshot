@@ -31,3 +31,43 @@ test('the review prompt names accessibility-reviewer-agent exactly when UI chang
   assert.doesNotMatch(reviewPrompt(['frontend/src/common/utils/misc.js']), /accessibility-reviewer-agent/);
   assert.doesNotMatch(reviewPrompt(['apps/payroll/views.py']), /accessibility-reviewer-agent/);
 });
+
+test('agents are dispatched in the background and collected on a bounded wait', () => {
+  const p = reviewPrompt(['apps/payroll/views.py']);
+  assert.match(p, /run_in_background: true/);
+  assert.match(p, /`TaskOutput`/);
+  // The point of the bound: an agent still running at the mark is dropped from
+  // the review, not waited for until the phase dies with it.
+  assert.match(p, /NOT REVIEWED/);
+});
+
+test('dead-code-sweep is run in-session, never dispatched as another child', () => {
+  const p = reviewPrompt(['apps/payroll/views.py']);
+  assert.match(p, /`dead-code-sweep` is a skill, not an agent/);
+  assert.match(p, /Do not\ndispatch it as another child/);
+});
+
+test('the phase quotes its own configured budget and names the partial file', () => {
+  const p = reviewPrompt(['apps/payroll/views.py']);
+  assert.match(p, /LAND THE PLANE/);
+  assert.match(p, /review-partial\.json/);
+  // Quoted from config/phases.json, never typed into the prose.
+  assert.match(p, /Your budget is \d+ minutes and \d+ turns/);
+  // The partial is a Write the session is told to make; a closing line that
+  // says it has no Write tool (it does — review's writes is ["run"]) is the
+  // most recent thing it reads and cancels the backstop.
+  assert.doesNotMatch(p, /no Write tool/);
+});
+
+test('the landing mark is counted in turns, and the collect timeout fits the tool', () => {
+  const p = reviewPrompt(['apps/payroll/views.py']);
+  // The session is given no start instant, so a minute mark is one it cannot find.
+  assert.match(p, /LAND THE PLANE at ~\d+ turns/);
+  // TaskOutput's schema caps timeout at 600000 ms; a bigger number is rejected.
+  assert.match(p, /at most\s+600000/);
+});
+
+test('a review whose dispatched dimensions did not all land cannot approve', () => {
+  const p = reviewPrompt(['apps/payroll/views.py']);
+  assert.match(p, /'approve' requires every dispatched dimension to have landed or been covered/);
+});
