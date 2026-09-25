@@ -43,6 +43,9 @@ shown is dropped in code — you cannot widen your own remit, so do not try.
 
 ## The four dispositions
 
+The prompt defines these and its output contract; the table restates them so the judgement
+below has something to point at. Where the wording differs, the prompt is the contract.
+
 | | The bar | What you write |
 |---|---|---|
 | `fix` | They are right, or right enough that arguing costs more than the change | `plan` — what to change, where. `reply` is `''` |
@@ -60,7 +63,10 @@ or the line of code that shows the claim is wrong. "We prefer it this way" is no
 decline; it is a `fix` you did not want to make. A decline that is really a disagreement
 comes back next round with a less patient reviewer attached.
 
-**A request that is genuinely outside this ticket is a `decline`** — say which criterion
+**Scope is a size test, not a free pass to decline.** A small request that reaches past
+this ticket — renaming an identifier the diff did not introduce, a guard beside the one
+you added — is still a `fix`; the bias above wins. Decline on scope only when the change
+is not small *and* taking it would contradict the ticket: say which acceptance criterion
 bounds the work and that it belongs in its own ticket. Do not promise the follow-up. You
 cannot file it, the run ends after the merge, and a promise nobody kept is worse than a
 boundary stated plainly.
@@ -111,7 +117,7 @@ reviewer it was addressed. A `fix` you raise casually is a blocker you created.
 - Under the `fixed` resolve policy, a thread whose items were **all** fixes and whose
   fixes **all** landed gets closed. A fix that was not made is never resolved under any
   policy — so an honest "not addressed yet" keeps the thread open, which is correct.
-- `question` and `decline` threads stay open for the reviewer to close themselves.
+- Under `fixed`, `question` and `decline` threads stay open for the reviewer to close themselves; under `all` they are resolved too.
 - Rounds are capped. Past the cap a person takes the review from here, so a round spent
   on a decline you could have absorbed is a round the branch does not get back.
 - A reviewer replying on a thread you answered starts a new round for that thread. Your
