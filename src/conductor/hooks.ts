@@ -150,6 +150,10 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
     ],
     SessionStart: [
       { hooks: [guard('budget-gate.cjs')], timeout: 20 },
+      // Self-gates to `testcases` and injects that skill's traps list. An
+      // instruction to read a file is a request; a phase that has died at its
+      // cap drops reads first. Injecting costs zero turns and cannot be skipped.
+      { hooks: [guard('traps-brief.cjs')], timeout: 15 },
     ],
   };
 }
