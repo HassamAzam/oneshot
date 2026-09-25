@@ -1417,26 +1417,26 @@ before any write, the transaction-rollback pattern for something you only need t
 idempotent \`get_or_create\`, the \`exec()\` scope traps, markers and cleanup tracking. Use it.
 Two things it cannot know, because it was written for a person testing a deployed server:
 
-- The database is THIS worktree's local seeded one, reached through the venv Django shell
-  (\`import ssl, hashlib\` first, exactly as above). There is no webshell in this phase and no
-  dev/stage server — never create data on one, and never navigate to one. \`baseUrl\` is the
-  only app you touch.
+- The database is the local seeded Postgres the worktree points at — ONE database, shared by
+  every worktree and by any other run executing at this moment — reached through the venv
+  Django shell (\`import ssl, hashlib\` first, exactly as above). There is no webshell in this
+  phase and no dev/stage server — never create data on one, and never navigate to one.
+  \`baseUrl\` is the only app you touch.
 - Nobody will paste a script's output back to you. Where that skill hands a script to a user,
   you run it yourself and read the output.
 
 Its cleanup half is not housekeeping here — this database OUTLIVES your session, and the next
-lap, \`ui-evidence\` and every later run execute against what you leave behind. That is not
-hypothetical: a drag case once moved an entry between two day columns, the move persisted, and
-a later case could no longer reach the empty-state it needed and had to be reported \`blocked\`
-on a precondition the branch had nothing to do with. So prefer a rollback for anything you only
-need to observe; where a case must genuinely leave a row behind, mark it and name it in
-\`summary\`.
+lap, \`ui-evidence\` and every later run execute against what you leave behind, while another
+run may be reading and writing it at the same moment you are. So prefer a rollback for anything
+you only need to MEASURE in the shell; data a case has to SEE in the browser must commit, so
+create the minimum, mark it, and name it in \`summary\`.
 
 Arranging data is still BOUNDED: batch it into ONE script that inspects and fixes every case's
-preconditions at once, not a few calls per case. A precondition you cannot arrange inside that
-budget is 'blocked' with one line naming exactly what was missing — data archaeology is where
-whole sessions quietly go to die, and an honest 'blocked' costs the pipeline far less than a
-session that died mid-list.
+preconditions at once, not a few calls per case. Because the database is shared, that script
+changes only rows it created or marked itself; it never edits a row another run or the seed
+left there. A precondition you cannot arrange inside those limits is 'blocked' with one line
+naming exactly what was missing — data archaeology is where whole sessions quietly go to die,
+and an honest 'blocked' costs the pipeline far less than a session that died mid-list.
 
 ## The case list — execute it id for id (phase 4)
 ${caseList(cases, { steps: true })}

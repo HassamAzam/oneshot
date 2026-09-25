@@ -179,6 +179,17 @@ test('the data-setup boundaries travel with the skill that needs them', () => {
   assert.match(p, /OUTLIVES your session/, 'cleanup is the half that a later lap pays for');
 });
 
+test('verify is told the database is shared now, and that browser-visible data must commit', () => {
+  // Every worktree gets the same hrdb/local_settings.py, so concurrent runs write one
+  // Postgres. And a rollback in a separate `manage.py shell` process never reaches the
+  // server the browser talks to, so "rollback" is only for what the shell measures.
+  const p = promptFor(cfg('verify'), ctx(ticket()));
+  assert.match(p, /ONE database, shared by\s+every worktree/);
+  assert.match(p, /at the same moment you are/);
+  assert.match(p, /SEE in the browser must commit/);
+  assert.ok(!/not\s+hypothetical/.test(p), 'no incident is asserted to the model as fact');
+});
+
 // ------------------------------------------- verify failures reach implement
 
 /**
