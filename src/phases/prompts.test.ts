@@ -156,6 +156,40 @@ test('an unlabelled ticket is never told to bring the app up', () => {
   assert.ok(!/app\.cjs ensure/.test(without));
 });
 
+// ------------------------------------------ verify is told how to make data
+
+test('verify carries a data method, not just a browser one', () => {
+  // The phase drives a real app against a real database. Declaring only
+  // local-browser-verify gave it bring-up and case-driving with nothing to say
+  // about the STATE a case asserts against, and every session improvised one.
+  const got = names(systemPromptFor(cfg('verify'), ctx(ticket())));
+  assert.ok(got.includes('local-browser-verify'));
+  assert.ok(got.includes('erp-ticket-test-data'));
+});
+
+test('the data-setup boundaries travel with the skill that needs them', () => {
+  // erp-ticket-test-data was written for a person on dev/stage with a webshell
+  // and someone to paste output back. Loading it into an autonomous local phase
+  // without reframing it is how a verify session ends up writing to a shared
+  // server, or waiting for a human who is not there. Both halves or neither.
+  const p = promptFor(cfg('verify'), ctx(ticket()));
+  assert.match(p, /erp-ticket-test-data/, 'the prompt must name the skill it is reframing');
+  assert.match(p, /no\s+dev\/stage server/, 'the local-database boundary must be stated');
+  assert.match(p, /Nobody will paste a script's output back to you/, 'the no-human boundary must be stated');
+  assert.match(p, /OUTLIVES your session/, 'cleanup is the half that a later lap pays for');
+});
+
+test('verify is told the database is shared now, and that browser-visible data must commit', () => {
+  // Every worktree gets the same hrdb/local_settings.py, so concurrent runs write one
+  // Postgres. And a rollback in a separate `manage.py shell` process never reaches the
+  // server the browser talks to, so "rollback" is only for what the shell measures.
+  const p = promptFor(cfg('verify'), ctx(ticket()));
+  assert.match(p, /ONE database, shared by\s+every worktree/);
+  assert.match(p, /at the same moment you are/);
+  assert.match(p, /SEE in the browser must commit/);
+  assert.ok(!/not\s+hypothetical/.test(p), 'no incident is asserted to the model as fact');
+});
+
 // ------------------------------------------- verify failures reach implement
 
 /**
