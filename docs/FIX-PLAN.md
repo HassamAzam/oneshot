@@ -168,3 +168,7 @@ Run ten tickets. No new design documents until the board shows ten runs with cas
 results. The GitLab mirror project stays the evaluation bench; rebase its `dev` from the
 real repo before each batch, and promote to the real repo only by a fresh MR through the
 human merge gate that already exists.
+
+*Superseded 2026-09-24: Oneshot no longer has a built-in project. It works on whatever
+`GITLAB_REPO_URL` in `.env` names, and the move to ERP points that at the real repo, so the
+mirror-as-bench step above no longer applies.*

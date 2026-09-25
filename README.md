@@ -2,10 +2,10 @@
 
 One orchestrator. One label. Zero human gates.
 
-Oneshot takes a GitLab issue in [`arbisoft/workstreamai`](https://gitlab.arbisoft.com/arbisoft/workstreamai)
-carrying the label **`Loop`** and drives it — unattended — to **`merged`**: recall prior art,
-research, plan, implement, brainstorm test cases, review, verify in a real browser, screenshot
-the result, open the MR, and merge it.
+Oneshot takes a GitLab issue carrying the label **`Loop`** in the project `GITLAB_REPO_URL` names —
+today [`arbisoft/erp`](https://gitlab.arbisoft.com/arbisoft/erp) — and drives it, unattended, to
+**`Merged`**: recall prior art, research, plan, implement, brainstorm test cases, review, verify
+in a real browser, screenshot the result, open the MR, and merge it.
 
 **The pipeline ends at the merge.** Nothing is deployed, nothing is QA'd on a running build,
 and no demo is recorded — deploying is a person's job, and the ticket says so when it hands
@@ -27,7 +27,7 @@ owner.
 
 | One Loop | Oneshot |
 |---|---|
-| 9-label state machine, 11 transitions | `Loop` in → `merged` out. Nothing between. |
+| 9-label state machine, 11 transitions | `Loop` in → `Merged` out. Nothing between. |
 | `label-guard.js` + `config/labels.json` | deleted |
 | claim → post note → re-fetch → verify → roll back | one SQLite row |
 | `HANDOFF:` markers + route table | a phase returns a value to its caller |
@@ -58,6 +58,8 @@ Three things fall out of that:
  issue labelled `Loop`
    0  recall          Haiku     prior art from past runs
    1  research        Opus 5    trace the code path, state blast radius
+ 1.5  design      ⟨D⟩ Opus 5    mockups, before/after screens
+                                ── parks until a dev approves on the ticket ──
    2  plan            Opus 5    phased plan
    3  implement       Opus 5    commits on oneshot/ticket-<iid>-<slug>
    4  testcases    ∥  Opus 5    ONE shared case list, written against real code
@@ -68,13 +70,18 @@ Three things fall out of that:
    8  mr           ∥  Sonnet 5  MR + description
    9  merge           code      merge into dev — dev is final, nothing promotes on
                                 the run's record: ticket note, MR note, Slack,
-                                label → `merged`, teardown
+                                label → `Merged`, teardown
 
   ∥  runs concurrently with the phase above it
 
   ⟨R⟩ the optional `Review` label adds three human pauses to this same list —
       before 3, before 5, and inside 9. Nothing else changes: no phase is
       added, removed or reordered. See "Optional human review gates".
+
+  ⟨D⟩ the optional `Design` label ADDS a phase, which is what makes it
+      different from ⟨R⟩: the UI is drawn and agreed before it is planned.
+      A ticket without the label never runs it and never sees the pause.
+      See "Designing before building".
 ```
 
 **Merge is the last phase.** A merged change is where this pipeline's warrant runs out: the
@@ -141,6 +148,10 @@ change) should be able to, without every OTHER ticket paying for it and without 
 `label-guard.js`'s closed label-state machine that v2 deliberately deleted (README's "Why this is
 not One Loop v2", above).
 
+Which label that is comes from `labels.review` in `config/project.json`, and for ERP it is
+**empty — off** — because that project has no such label. Set it to an existing label name before
+relying on the label; the path trigger further down works without it.
+
 Put the `Review` label on a ticket **alongside** `Loop` and three pause points activate. **GitLab is
 the approval channel, and Slack is where the ask is heard.** Oneshot posts the request as a ticket
 comment and reads the verdict back out of that ticket's comments; the same ask is simultaneously
@@ -188,9 +199,10 @@ notification and never a verdict.
    must not bury the merge refusals that are.
 **The label is not the only trigger.** A person applies it, so it is forgettable — and the
 tickets most worth pausing on are exactly the ones nobody remembers to label. So the gates also
-arm themselves when a run *touches* anything in `highScrutinyPaths` (config/project.json):
-`apps/auth/`, `apps/payroll/`, `apps/leaves/`, `apps/project_logs/`, `common/permissions.py` —
-the same paths the ERP's own `security.md` marks "escalate immediately".
+arm themselves when a run *touches* anything in `highScrutinyPaths`: the `paths` of every module
+in `config/risk-modules.json`. That list now reaches past the paths the ERP's own `security.md`
+marks "escalate immediately" — `apps/invoices/` and `apps/costing/` are gated without being named
+there, and the widening is the point.
 
 The check runs against what the run has declared it will touch: the `files` on each plan step at
 the plan gate, plus `implement`'s reported `filesChanged` by the test-case gate. Evaluating it
@@ -198,7 +210,8 @@ twice is deliberate — a plan that swore off payroll and a diff that edited it 
 the case worth catching, and only the second evaluation sees it. When paths arm the gates,
 `reviewMode` is persisted on the journal so the pure-code `merge` phase honours a pause no label
 ever asked for, and the request says which path armed it rather than claiming a label that is not
-there. Empty the array to switch the behaviour off.
+there. To disarm a module's trigger, remove its `paths` in `config/risk-modules.json` — emptying
+`highScrutinyPaths` in config/project.json does nothing, the module paths are merged in at load.
 
 **Comment `approved`** (that exact word, case-insensitive, trimmed — not a substring of a longer
 reply) **on the ticket** to release a pause. It only counts from an account in that gate's own
@@ -255,6 +268,62 @@ Three minutes rather than the watcher's `TICK_MS` minute, because a parked run r
 pipeline on every tick and any phase without a recorded success is re-attempted from scratch each
 time — a `skip`-on-fail phase like `recall` burns a full model lap per tick for as long as a human
 takes to reply. The slower cadence still reads a reply promptly while spending a third as much.
+
+## Designing before building
+
+The `Review` label above changes how much scrutiny a run's **code** gets. `Design` answers a
+different question — what should this look like — and it is the one label that **adds a phase**
+rather than adding a guard around one.
+
+Put `Design` on a ticket alongside `Loop` and a `design` phase runs between `research` and
+`plan`. It reads the tokens out of the real frontend, captures the screens this ticket touches
+as they are **today**, draws each one as a self-contained mockup against those tokens, and — when
+the change spans more than one screen or adds a step — draws each state of the flow as its own
+screen. The conductor posts all of that to the ticket as one
+comment, and the run **parks**.
+
+```
+ … research ──▶ design ──▶[ D  a dev approves the design ]──▶ plan ──▶ implement …
+                   ▲                                    │
+                   └──────── anything else is feedback ──┘
+```
+
+**Why before `plan` and not after.** Same reason the test-case gate sits before `review`: this is
+the last point at which approving still changes everything downstream. A design agreed here is
+what `plan` plans and `implement` builds. The same approval taken once a plan existed would be
+approving a picture of a decision already made — and a gate that cannot change what it guards is
+decoration.
+
+**A ticket without the label never runs the phase.** It is filtered out of the run's phase list
+entirely rather than skipped in place, so nothing downstream does index arithmetic around a phase
+nobody is running. `ONESHOT_SKIP_PHASES=design` switches it off globally without touching config.
+
+**`Design` arms this gate and nothing else arms it** — not `Review`, not `reviewAllRuns`, not
+`highScrutinyPaths`. Those three are answers to "how risky is this code". This one is a decision
+about the work, and a team that turns the code-review posture off has not thereby said designs may
+ship unreviewed. The same label decides both the phase and the gate, so the two cannot disagree.
+
+**Approval is a dev sign-off** — `config/reviewers.json`'s `dev` list, read exactly the way the
+plan gate reads it. Comment the single word `approved` on the ticket to release the run into
+`plan`; any other comment from that list is feedback, `design` re-runs with it, and the gate asks
+again with the redrawn screens. No cap on rounds. Widening this to QA, or to a named product
+owner, is a config edit and not a code change.
+
+**A Design ticket with no UI is not an error.** The phase can answer `applicable: false` — the
+ticket turned out backend-only, or someone labelled optimistically — and the run continues to
+`plan` with no gate and no pause, the same way an inconclusive bug reproduction carries on. A
+mislabelled ticket costs one artifact, not a person.
+
+**What was approved is then held to.** The approved design goes into `plan` and `implement` as
+their specification, and `ui-evidence` captures each approved screen as it actually shipped and
+posts the pair on the MR with every departure listed. An empty departure list is the claim that
+it matches — which is a claim a reviewer can check against two pictures, rather than an assertion
+they have to take on trust.
+
+**GitLab is the whole channel.** The design is posted there, the verdict is read there, and the
+audit record lands there. Slack gets the same write-only heads-up every other gate sends, because
+the dev who has to look is not the person watching the run's thread — but nothing is ever read
+back out of it, so a Slack that is down costs a notification and never a verdict.
 
 ## MR review feedback
 
@@ -325,27 +394,72 @@ npm install
 npm start                                  # no .env? an interactive wizard runs first
 ```
 
-`npm start` with no `.env` hands off to a setup wizard that reuses the GitLab token already in
-`~/.claude.json`, detects your repo clones, and warns before configuring a remote telemetry
-endpoint. Then `npm run verify` (deps → hooks → doctor) is the gate. It checks auth, config coherence, paths, GitLab reachability and
+`npm start` with no `.env` hands off to a setup wizard. It asks first for `GITLAB_REPO_URL` — the
+one line that says which GitLab project Oneshot works on — and derives the default clone location
+from it; then it reuses the GitLab token already in `~/.claude.json`, detects your repo clones,
+and warns before configuring a remote telemetry endpoint. Then `npm run verify` (deps → hooks → doctor) is the gate. It checks auth, config coherence, paths, GitLab reachability and
 branch protection, and that every guard script is present and its test suite passes. It exits
 non-zero on anything that would only surface as a confusing failure three phases into a real
 ticket.
 
+- **Project — one line decides it.** `GITLAB_REPO_URL` in `.env` names the GitLab project Oneshot
+  claims tickets from, labels, branches and merges into — today ERP,
+  `GITLAB_REPO_URL=https://gitlab.arbisoft.com/arbisoft/erp`. It is required, and nothing else
+  names a project: `config/project.json` holds only labels, branches and gates. From the URL come
+  the host, the API root (`<scheme>://<host>/api/v4`), the project path, the web URL, and a short
+  name — the last path segment, lower-cased, so `erp` — that the default `WORK_REPO` and `WT_ROOT`
+  are named after. A web URL, a `.git` clone URL, an SSH clone URL (`git@host:group/project.git`
+  or `ssh://…`), a subgroup path and a pasted browser URL (`…/erp/-/issues/12`) all parse to the
+  same project. The numeric project id is never configured: API calls use the URL-encoded path,
+  and GitLab is asked for the id in the one place that needs it. Two checks — at boot, in
+  `npm run doctor` and in `npm run preflight` — keep the URL the single source of truth:
+
+  - **`WORK_REPO` must be a clone of it.** Its `origin` project path is compared with
+    `GITLAB_REPO_URL`'s — ssh and https count as equal, case and `.git` are ignored, and it is
+    never a substring match. A different path refuses boot and names both URLs; otherwise a
+    `WORK_REPO` line left over from a previous project would cut every worktree from the wrong
+    code while tickets and MRs went to the right one. The same path on another host (an
+    `~/.ssh/config` alias, or a clone from another GitLab), no `origin`, or not a git repo only
+    warns. A fork as `origin` refuses too — ticket branches are pushed to, and the base fetched
+    from, `origin` — and when another remote is the project the refusal gives the two
+    `git remote rename` commands that fix it.
+  - **The old selectors select nothing.** `ONESHOT_PROJECT`, `ONESHOT_GITLAB_PROJECT`,
+    `ONESHOT_GITLAB_API` and `ONESHOT_PROJECT_ID` (and their `ONELOOP_` spellings), and the
+    `targets` overlay that used to live in `config/project.json`, are all replaced by
+    `GITLAB_REPO_URL`. One left in `.env` that disagrees with the URL refuses boot, naming both
+    values; one that agrees — and `ONESHOT_PROJECT_ID`, which cannot be checked offline — is a
+    warning. Either way, delete the line.
+
+  If a check is wrong about your machine, `ONESHOT_SKIP_REPO_CHECK=1` downgrades these
+  refusals to warnings wherever they are made: boot, `doctor` and `preflight` (origin, legacy
+  selectors and `WT_ROOT`), `unblock` (legacy selectors) and `scripts/app.cjs` (origin and legacy
+  selectors). It never excuses a missing `GITLAB_REPO_URL`, and `scripts/app.cjs` still refuses to
+  check out into an `app-<port>` worktree of another project (judged by its `origin`, like boot;
+  any clone of this project is fine), so a `WT_ROOT` shared with another project must be fixed
+  before the app can be warmed. Boot and `doctor` print a reminder on every run while it is set —
+  remove it once fixed.
+
+  The labels in `config/project.json` must already exist on whichever project the URL names —
+  Oneshot never creates one — so pointing it somewhere else starts with checking that.
 - **Auth:** the Agent SDK uses the same credential as Claude Code — if `claude login` works here,
   phases run with no API key. **Never set `ANTHROPIC_API_KEY`.** See below.
 - **Kill switches:** `touch state/PAUSE` freezes everything, including sessions already mid-phase.
   `state/PAUSE-QUOTA` is the machine's own park after a usage limit and clears itself — a
   separate file precisely so nothing automatic ever lifts a pause you set.
-- **Paths:** the four path defaults are one machine's layout (`~/Documents/...`), so a fresh
-  clone almost certainly needs to override them. Note the third is **not** named after its label:
+- **Paths:** `WORK_REPO` and `WT_ROOT` default to directories named after the project — `<name>`
+  below is the short name derived from `GITLAB_REPO_URL` — so a clone kept at `~/Documents/erp`
+  needs neither line. A plain `WORK_REPO` or `WT_ROOT` beats that default, and an older
+  per-project spelling such as `ONESHOT_ERP_WORK_REPO` is still honoured above both; `doctor`
+  prints which line chose each path. `CONTEXT_REPO`'s default is one machine's layout
+  (`~/Documents/erp`), so a fresh clone may need to override it. Note the third is **not**
+  named after its label:
 
   | Env var | Default | What it is |
   |---|---|---|
-  | `WORK_REPO` | `~/Documents/workstreamai` | the clone phases actually commit in |
+  | `WORK_REPO` | `~/Documents/<name>` | the clone phases actually commit in — its `origin` must be `GITLAB_REPO_URL` |
   | `CONTEXT_REPO` | `~/Documents/erp` | read-only clone for research |
-  | `ONESHOT_SKILLS_ROOT` | `~/Documents/erp/.claude` | skills handed to the phases |
-  | `WT_ROOT` | `~/Documents/oneshot-wt` | where per-run worktrees are leased |
+  | `ONESHOT_SKILLS_ROOT` | `./context` (the vendored snapshot) | skills handed to the phases; point it at a live `.claude` such as `~/Documents/erp/.claude` to override |
+  | `WT_ROOT` | `~/Documents/<name>-wt` | where per-run worktrees are leased |
   | `ONESHOT_SEED_FROM` | _(unset)_ | an already-installed clone whose `node_modules`/`venv` are linked into each new worktree, with `ONESHOT_SEED_LINKS` / `ONESHOT_SEED_COPIES` naming what to carry |
 
   Leave `ONESHOT_SEED_FROM` unset and a leased worktree has no dependencies, so `verify`
@@ -355,7 +469,10 @@ ticket.
 - **Seeding — the seed clone must be *installed*, not just present.** A leased worktree is a bare
   `git worktree`: it has none of the gitignored pieces a checkout needs to *run*. Oneshot never
   installs them (that would cost `npm install` minutes per ticket); it carries them over from
-  `ONESHOT_SEED_FROM` when the worktree is leased. `npm run setup` writes that path for you but
+  `ONESHOT_SEED_FROM` when the worktree is leased. `npm run setup` writes that path for you — your
+  `WORK_REPO` answer, because the seed has to be a clone of the same project (`scripts/app.cjs`
+  fetches refs from it, and boot, `doctor` and `app.cjs` refuse one whose `origin` is not
+  `GITLAB_REPO_URL`) — but
   installs nothing — **you install the seed clone once, by hand**, following the work repo's own
   README (*Conventional Setup → Installation*). Four entries are carried, named in `.env`:
 
@@ -382,7 +499,7 @@ ticket.
   | `no seed repo configured` | `ONESHOT_SEED_FROM` is unset | set it (or re-run `npm run setup`) |
   | `seed entries missing from the seed repo: …` | the clone exists but is not installed — the list names exactly what to create | install the clone; re-run `doctor` |
 
-  You are done when `doctor` prints `seed repo <path> (3 linked, 2 copied)`. Both warnings are
+  You are done when `doctor` prints `seed repo <path> (3 linked, 2 copied; …)`. Both warnings are
   **non-blocking for `doctor` and blocking for the first ticket**: a missing entry does not fail at
   boot, it fails when `verify` tries to start the dev server, three phases in.
 
