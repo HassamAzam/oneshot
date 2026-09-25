@@ -22,6 +22,67 @@ these make an argument.
 Nothing else. A pack of thirty screenshots is read as carefully as a pack of
 zero.
 
+## Getting a real "before"
+
+The "after" is the app you already have. The "before" is the base branch — and the
+one way NOT to get it is by moving files in this checkout. The git guard refuses
+`checkout`, `restore`, `stash` and `reset` from this phase, and anything left altered
+here is what `mr` pushes: one run left a staged revert of its own fix behind that way,
+and the fix would have been silently undone if it had been committed.
+
+Bring up a SECOND app on the base branch instead. It runs on its own ports
+(`ONESHOT_APP_PORTS`, 8010-8012) as its own processes, and — with the command below —
+writes nothing into this run's directory, so the run's app and the run's
+`harness/app-env.json` stay exactly as they were.
+
+**First, check that it is cheap.** `ensure` cannot be told to give up on a cold start,
+and a cold start waits up to 90s for Django and up to 20 minutes for the first webpack
+compile — against this phase's 40-minute budget. So look before you call it:
+
+```
+node $ONESHOT_HOME/scripts/app.cjs list
+git rev-parse origin/<base branch>
+```
+
+Go ahead only if `list` shows an instance with `healthy: true` and `bundleReady: true`
+that is EITHER at the base branch already (its `head` is the first 10 characters of
+that sha — reused, near-instant) OR `ours: true` with `dirty: 0` (switched to the base
+branch in place, ~20s). If neither exists, the next call is a cold start: do not make
+it — caption the gap and ship the "after" alone.
+
+Then:
+
+```
+env -u ONESHOT_WORKTREE -u ONESHOT_PORT -u ONESHOT_TICKET -u ONESHOT_IID \
+  ONESHOT_RUN_DIR=$ONESHOT_HOME/state/runs/$ONESHOT_TICKET/base-app \
+  node $ONESHOT_HOME/scripts/app.cjs ensure --ref <base branch>
+```
+
+Every variable in that line matters:
+
+- `ONESHOT_WORKTREE` / `ONESHOT_PORT`: with a worktree pinned, `ensure` answers for THAT
+  checkout and ignores `--ref` entirely (scripts/app.cjs, the pinned branch of `ensure`)
+  — you would photograph the change twice and call it a pair.
+- `ONESHOT_TICKET` / `ONESHOT_IID` / `ONESHOT_RUN_DIR`: `ensure` writes the app it brought
+  up to `<run dir>/harness/app-env.json`, and without these it resolves the run dir from
+  `ONESHOT_TICKET` — i.e. it would overwrite THIS run's `app-env.json` with the base
+  app. Pointing `ONESHOT_RUN_DIR` at a `base-app/` subdirectory keeps that write, and the
+  harness's own `servers.json`, out of the run's files. (The shell expands
+  `$ONESHOT_TICKET` before `env` strips it.)
+
+The command prints the base app's descriptor on stdout; navigate to ITS `baseUrl` for
+the "before" shot. Take the "after" on your own instance — `http://localhost:$ONESHOT_PORT`,
+the `baseUrl` you already had — and do not re-read any `app-env.json` to find it once
+the base app is up.
+
+- Same viewport, same data, same path in both shots, or the pair proves nothing.
+- Leave that instance running. It is shared, and the next run reuses it.
+- If `list` shows no cheap instance (above), or `ensure` fails (`E_NO_PORTS`,
+  `E_REF_UNRESOLVED`), say so in the caption and ship the "after" alone. Never present an
+  unchanged region of this branch as a "before".
+- A value that is not in the viewport does not need any of this: read it from source
+  with `git show origin/<base>:<path>` and record it in `observations`.
+
 ## Changes a screenshot cannot show
 
 A page title, an `aria-*`, `alt` or `lang` value, a meta tag, focus order, a

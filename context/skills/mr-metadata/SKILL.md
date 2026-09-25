@@ -14,6 +14,34 @@ Covers three mandatory rules for every MR/PR that is created:
 
 ---
 
+## When the GitLab tools are absent
+
+The MR is normally opened through the GitLab MCP tools, and sometimes they are simply
+not in the toolset — three runs hit this (`GitLab MCP tools are absent from my
+toolset`), and `ONESHOT_DRY_RUN` or a failed MCP spawn both cause it. It is not a dead
+end and not a verdict on the ticket:
+
+1. Push the branch — that needs no MCP tool — **unless `ONESHOT_DRY_RUN=1`**. A dry run
+   is not allowed to reach the remote: the git guard refuses the push, and nothing will
+   open the MR afterwards either. Under a dry run, report the branch name and the
+   commits you would have pushed instead.
+2. Produce the title this skill defines. Inside Oneshot the phase's structured output
+   carries a `title` but has no field for a description, so the description cannot
+   travel: put it in `summary`, and say plainly that the MR body still needs a human.
+3. State plainly that the GitLab tools are absent and the MR itself must be opened by
+   the caller.
+
+Inside Oneshot's `mr` phase, the phase prompt wins where it is more specific: set
+`blocked` naming the absent tools. Outside a dry run the conductor then opens the MR in
+code from the pushed branch — reusing the Draft `mr-open` already opened when there is
+one, otherwise with your title and a description it composes itself from the ticket
+and the changed files. Under a dry run nobody opens it.
+
+What wastes a session is stopping at the missing tool with no title and, outside a dry
+run, no pushed branch, leaving the caller to redo the work.
+
+---
+
 ## Rule 1 — MR Title
 
 **The title must summarise the whole branch's changes — not just the last commit.**
