@@ -136,9 +136,9 @@ export const RESEARCH_SCHEMA = phaseSchema({
     additionalProperties: false,
     description:
       'Whether the reported defect actually happens on the base branch, established by running ' +
-      'it (skill: bug-reproduction). A verdict of not-reproduced STOPS the run and takes the ticket ' +
-      'out of the loop (labelling it Not a Bug when the project configures that label), so it must ' +
-      'rest on steps you executed, never on reading code.',
+      'it (skill: bug-reproduction). A verdict of not-reproduced PAUSES the run for a QA reviewer; if ' +
+      'they confirm, the ticket is taken out of the loop (labelled Not a Bug when the project ' +
+      'configures that label), so it must rest on steps you executed, never on reading code.',
     properties: {
       kind: {
         type: 'string',

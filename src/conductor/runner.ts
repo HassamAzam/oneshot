@@ -82,7 +82,9 @@ import {
   claimOwnership, claimTicket, getRun, logEvent, phaseEnd, phaseStart, updateRun,
 } from '../lib/db.js';
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
-import { declareNotABug, notABugDecision } from './reproduction.js';
+import {
+  declareNotABug, notABugApprovalRequestBody, notABugDecision, reproAttachments,
+} from './reproduction.js';
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
@@ -114,6 +116,15 @@ const exec = promisify(execFile);
  * human to reply in — so the wait would never end, and the one status that
  * deliberately alerts nobody would be the one that needs somebody.
  */
+/**
+ * The Not a Bug gate's own `unavailable`. Not GATE_UNAVAILABLE: this gate arms
+ * on any ticket research could not reproduce, Review label or not, and what it
+ * is missing is a QA list to ask — not Slack.
+ */
+const NOT_A_BUG_UNAVAILABLE =
+  'research could not reproduce this bug, but config/reviewers.json names no QA reviewer to '
+  + 'confirm Not a Bug — add one there and unblock, or remove the entry label to drop the ticket';
+
 const GATE_UNAVAILABLE =
   'this ticket carries the Review label, but Slack is not configured (token + channel), so its '
   + 'approval gates have nowhere to ask — configure Slack, or remove the Review label to run '
@@ -927,6 +938,7 @@ export async function runTicket(
     for (const name of phasesOwedByRound(j.mrFeedback, j.phases, window)) forced.add(name);
   }
 
+  const researchIdx = list.findIndex((p) => p.name === 'research');
   let i = 0;
   while (i < list.length) {
     const phase = list[i]!;
@@ -944,6 +956,46 @@ export async function runTicket(
     if (phase.onDemand) {
       i += 1;
       continue;
+    }
+
+    // The Not a Bug gate — between `research` and whatever follows it.
+    //
+    // Research could not reproduce the reported bug. That verdict no longer
+    // labels the ticket by itself: stopping a real bug as Not a Bug silently
+    // drops a defect someone reported, and a reproduction that missed the
+    // reporter's data, role or environment looks exactly like a correct one.
+    // So a QA reviewer sees the evidence first. `approved` labels the ticket
+    // and stops the run; anything else is the context research missed, and
+    // research runs again with it in its prompt (see reproductionBlock).
+    //
+    // Checked before shouldSkip so a resume parked here lands on it whichever
+    // phase follows research, and latched by `approved`: a person who later
+    // overrules the label (remove it, add the entry label back) resumes into
+    // `plan` rather than being asked again.
+    if (researchIdx !== -1 && i === researchIdx + 1 && bugReproductionEnabled() && !j.notABugApproval?.approved) {
+      const decision = notABugDecision(prior.research ?? readArtifact(iid, 'research.json'));
+      if (decision.stop) {
+        const gate = await checkApprovalGate({
+          iid,
+          gate: 'notABug',
+          requestBody: notABugApprovalRequestBody(decision.repro, cfg.labels.notABug || undefined),
+          attachments: reproAttachments(iid, decision.repro.evidence),
+        });
+        j = readJournal(iid) ?? j;
+        if (gate.verdict === 'unavailable') return finish(j, 'blocked', NOT_A_BUG_UNAVAILABLE);
+        if (gate.verdict === 'pending') {
+          return finish(j, 'parked',
+            'awaiting Not a Bug confirmation — a QA reviewer comments `approved` on the ticket to '
+            + 'close it as Not a Bug, or comments what was missed to have it reproduced again');
+        }
+        if (gate.verdict === 'feedback') {
+          forced.add('research');
+          i = researchIdx;
+          continue;
+        }
+        const reason = await declareNotABug(iid, ticket.title, runId, decision.repro);
+        return finish(j, 'aborted', reason);
+      }
     }
 
     // A phase with no implementation STOPS the run — including 'code' phases.
@@ -1503,19 +1555,12 @@ export async function runTicket(
 
       prior[r.cfg.name] = r.out.data;
       // Research reproduced (or failed to reproduce) the reported bug on the
-      // unfixed base branch. Only a complete not-reproduced verdict stops the
-      // run — see src/conductor/reproduction.ts for why the bar is that high.
-      // Evaluated only on a research that RAN this pass: a resumed run skips
-      // research, which is how a person overrules Not a Bug (remove the label,
-      // add the entry label back) without the run re-stopping itself.
+      // unfixed base branch. A complete not-reproduced verdict is acted on by
+      // the Not a Bug gate at the top of the loop, which a person resolves; all
+      // that is left here is saying why an incomplete one did not arm it.
       if (r.cfg.name === 'research' && bugReproductionEnabled()) {
         const decision = notABugDecision(r.out.data);
         if (!decision.stop && decision.note) log.warn(`research: ${decision.note}`);
-        if (decision.stop) {
-          const reason = await declareNotABug(iid, ticket.title, runId, decision.repro);
-          claim({ kind: 'stop', status: 'aborted', reason, noRemediation: true }, r.cfg.name);
-          continue;
-        }
       }
       if (r.cfg.name === 'implement' && activeRound(j.mrFeedback)?.status === 'fixing') {
         const addressed = addressedFeedbackOf(r.out.data);
