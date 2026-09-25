@@ -154,6 +154,97 @@ pytest is unaffected and is fine to run.
   wrong column. Never sum a percentage or utilization column as if it were cost:
   a "drill-down total" that comes out near 200 is a utilization column adding to
   ~100% per head, not money — check the header before you compare it to a cell.
+- **Measure a visual bug after the interaction, not on the tick of it.** "Obscured",
+  "overlapping", "covers the field below" and "still open after selecting" are
+  claims about geometry, and geometry has a number. Drive the interaction, let
+  the overlay come to rest, then measure:
+
+  ```js
+  const h = require('<oneshot>/skills/local-browser-verify/scripts/harness.cjs');
+  await h.overlap(session, '.react-datepicker-popper', '[name="end_date"]');
+  // → { intersects: true, areaPx: 10352, region: { width: 242, height: 43 }, ... }
+  ```
+
+  Five ways this reads the wrong verdict, all of them paid for already:
+
+  - **`areaPx` is an area, not a distance.** It is `region.width * region.height`.
+    Reported as "covered by 10352px" it reads as a length, and a length that
+    large is impossible on a 900px-tall screen — so a reader reasonably assumes
+    the measurement is broken and dismisses a real defect. Quote `region`, or the
+    height it implies: 10352 over a 242px-wide popover is a 43px band, i.e. one
+    input row. Say "px²" or "the whole Title row", never "10352 pixels".
+
+  - **`boundingBox()` does not wait for the geometry to settle.** It returns the
+    box as it is when asked. A popper re-anchors — it measures its reference,
+    picks a placement, and flips it when that one does not fit — so consecutive
+    reads during that negotiation gave y = 100, 220, 340, 460, 580, 700 with no
+    transition involved at all. `overlap` settles both boxes first; on a
+    hand-rolled check, poll until the box stops moving. A fixed `sleep` is not a
+    settle. Do not lean on animation timing for this: a 0.2-0.3s CSS fade is
+    frequently over before the first round-trip returns, so a naive read looks
+    correct on a fast machine and wrong on a slow one.
+  - **`intersects: null` is not "no overlap"** — it means one selector did not
+    resolve a box, and `missing` says which. That is a `blocked` with
+    `locator:`, never a pass. A popover absence-assertion passes identically
+    whether dismissal works or the popover never opened at all, so prove the
+    thing you expect to be there IS there before concluding the thing you expect
+    to be gone is gone. To make `runCase` record that as `blocked` you have to
+    throw a `HarnessError` — it files a plain `Error` as `fail`, which is a
+    defect claim against a branch that may have nothing wrong with it:
+
+    ```js
+    if (res.intersects === null) {
+      throw new h.HarnessError('E_SELECTOR_EMPTY', `locator: ${res.missing} did not resolve`);
+    }
+    ```
+  - **An element off-screen cannot overlap anything.** CSS `zoom` and a short
+    viewport have put a real element at `top=1194px` in a 900px window. Check
+    `outsideViewport` before believing a zero. `hidden` is the same guard for an
+    element that kept its box but is not on screen — `visibility:hidden` and
+    `opacity:0` both measure full size, so a popover that is hidden rather than
+    unmounted would otherwise be reported as covering the field it no longer
+    covers.
+  - **Nothing here survives the page scrolling underneath it.** The two boxes are
+    viewport-relative and read one after the other, so a scroll that lands
+    between them compares two different frames: two elements 600px apart,
+    truthfully `areaPx=0`, measured `areaPx=20000`. Let the scroll finish before
+    you measure.
+
+  Screenshot after the settle, not before — a shot timed one tick early omits the
+  defect, and then the disproof and the proof look identical in `artifacts/`.
+
+- **"The calendar covers the fields below it" is two different defects. Say which
+  one you measured.** An open popover sitting on top of the fields under it is
+  normal, and `.react-datepicker-popper` already carries `z-index: 99999` in
+  `custom.css` — so a pixel count on its own does not name a bug. Two things
+  produce that screenshot and they have nothing in common:
+
+  - **It re-opened after the selection.** react-datepicker closes on select and
+    puts focus back on the input, guarded by a `preventFocus` flag — but
+    `sendFocusBackToInput` drops that flag in the same callback that calls
+    `setFocus()`, and with no delay on the `setTimeout`. If the surrounding form
+    re-renders in between (a Formik `setFieldValue` on `onChange` will do it) the
+    focus lands after the guard cleared, `handleFocus` runs `setOpen(true)`, and
+    the calendar comes back on its own. This is the defect.
+  - **It only ever opened downward.** A tall calendar
+    (`showYearDropdown` + `scrollableYearDropdown`) asked for
+    `popperPlacement="top-start"` inside a modal has no room above, so Popper
+    flips it to the bottom and it lands on the next field. Placement, not
+    dismissal.
+
+  They are distinguishable in one read. Select a date, let the form settle, then
+  measure the popper against the field below it:
+
+  ```js
+  const r = await h.overlap(session, '.react-datepicker-popper', '[name="training.end_date"]');
+  ```
+
+  `intersects: null` means the popper unmounted — it closed and stayed closed, so
+  there is no re-open, and anything in the screenshot is placement while it was
+  legitimately open. A number means it is still on screen after the selection.
+  Record which of the two you saw, in those words: a verdict that says only
+  "calendar overlaps end date by 9342px²" sends the fix at the z-index, which is
+  already correct, and the real defect survives the MR.
 
 ## Record one result per case
 
