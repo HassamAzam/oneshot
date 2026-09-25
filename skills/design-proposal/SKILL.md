@@ -35,11 +35,19 @@ about the feature and feedback about your colour choices.
 
 In order:
 
-1. **Read the real tokens.** `frontend/src/jss/Theme.js` (`getColors`,
-   `getPalateColors`), `frontend/src/jss/style.js` (Lato/Montserrat),
-   `frontend/src/scss/_variables.scss`. Distil them into one `tokens.css` that
-   every mockup imports — a system-level change is then a one-file edit instead
-   of a find-and-replace across five files.
+1. **Use the tokens you were handed.** `tokens.css` is already in your artifact
+   directory, generated before this session started by a deterministic read of
+   `frontend/src/jss/Theme.js` (`getColors`), `frontend/src/jss/style.js`
+   (Lato/Montserrat) and `frontend/src/scss/_variables.scss`. Every mockup
+   imports it, so a system-level change is a one-file edit instead of a
+   find-and-replace across five files.
+
+   **Read its header before you draw.** It names the files it read and lists
+   every token it could NOT resolve. Those are the only ones you go to the
+   source for — going back for the rest re-derives, by hand and less reliably,
+   something that is already correct in front of you. If the file is absent
+   altogether the generator could not run: read the three files above and
+   distil them yourself, exactly as this step used to say.
 2. **Capture the screens as they are today.** Bring the app up the way everything
    else does (`node $ONESHOT_HOME/scripts/app.cjs ensure`) and screenshot each
    screen this ticket touches. Those captures are the `before` on every screen,
