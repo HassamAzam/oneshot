@@ -471,10 +471,15 @@ Load the \`bug-reproduction\` skill and follow it. In short:
   Worktree ${ctx.worktree ?? '(none leased)'}, port ${ctx.port ?? '(none leased)'} (also
   \`$ONESHOT_PORT\`). Reach it with \`node $ONESHOT_HOME/scripts/app.cjs ensure\` — no
   arguments, never \`--ref\` — and log in with the harness exactly as the skill says.
+- That \`ensure\` also reports \`disabledIntegrations\`: the things this environment
+  cannot reach, read from the app's own settings. If the behaviour the ticket describes
+  depends on one of them, you cannot run it here — record 'inconclusive', name the
+  integration, and go back to the trace. Do not spend turns proving it is unreachable;
+  that answer is the same on every run and is already in front of you.
 - Follow the ticket's steps, measure what the bug is about, screenshot into the run's
   artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`.
 
-**'not-reproduced' stops this run** and labels the ticket Not a Bug on the ticket and in Slack.
+**'not-reproduced' stops this run**: it takes the ticket out of the loop (labelling it Not a Bug when the project configures that label) and posts your evidence on the ticket and in Slack.
 Use it ONLY when the app ran on this unfixed code, you were logged in with access to the screen,
 you executed every reported step, and you observed the correct behaviour — with evidence. A
 different browser, device, data set, role or environment from the one the ticket describes, a
@@ -491,8 +496,8 @@ function findingsOf(ctx: PromptCtx): Finding[] {
   if (fromPrior) return fromPrior;
   // On a resumed run `implement` is built before `review` is reached, so
   // prior.review is not loaded yet and a review that sent the work back is
-  // invisible to the lap meant to fix it (#179: two implement laps finished in
-  // a minute with nothing to do). Read it off disk, as verifyFailuresOf does —
+  // invisible to the lap meant to fix it (observed: two implement laps finished
+  // in a minute with nothing to do). Read it off disk, as verifyFailuresOf does —
   // only when it asked for changes, so an approved review's minor notes never
   // turn an ordinary lap into a fix lap.
   const onDisk = readArtifact<{ verdict?: string; findings?: Finding[] }>(ctx.ticket.iid, 'findings.json');
@@ -709,20 +714,22 @@ export const PROMPTS: Record<string, (ctx: PromptCtx) => string> = {
 
 Search this system's memory of past completed runs for tickets that overlap this one.
 
-The memory lives at \`${STATE}/memory/\` — that ABSOLUTE path, not a path under any other
-repo this session can see. \`index.jsonl\` there has one line per completed run
-({iid, title, labels, modules, files, symbols, mr, verdict, tags, ts}), and
-\`tickets/<iid>.md\` holds each full card. Read the index, score candidates on file-path
-overlap first (in a monorepo that is the strongest signal for "similar ticket"), then module,
-label and title-token overlap. Read the top 3 cards at most.
+The method is the \`prior-art-recall\` skill — load it and follow it. In short:
 
-FIRST, check whether \`${STATE}/memory/index.jsonl\` exists at all. If it does not, or it is
-empty, STOP IMMEDIATELY and return an empty list and an empty brief. Do not search the
-filesystem for alternatives, do not look for other memory formats, do not explore. On a
-system with no completed runs yet this is the expected answer and it costs one tool call.
-
-Otherwise produce a prior-art brief short enough to sit inside three later prompts: what was
-done, what broke, what to reuse. An empty brief is a correct answer, not a failure.`,
+- The memory lives at \`${STATE}/memory/\` — that ABSOLUTE path, not a path under any other
+  repo this session can see. \`index.jsonl\` there has one line per completed run
+  ({iid, title, labels, modules, files, symbols, mr, verdict, tags, ts}), and
+  \`tickets/<iid>.md\` holds each full card.
+- FIRST, check whether \`${STATE}/memory/index.jsonl\` exists at all. If it does not, or it
+  is empty, STOP IMMEDIATELY and return an empty list and an empty brief. Do not search the
+  filesystem for alternatives, do not look for other memory formats, do not explore. On a
+  system with no completed runs yet this is the expected answer and it costs one tool call.
+- Otherwise score candidates on the ladder IN ORDER: file-path overlap first (in a monorepo
+  that is the strongest signal for "similar ticket"), then module, then label, then
+  title-token overlap — which on its own is never enough, because ERP titles repeat the same
+  nouns across unrelated modules. Read the top 3 cards at most.
+- Produce a prior-art brief short enough to sit inside three later prompts: what was done,
+  what broke, what to reuse. An empty brief is a correct answer, not a failure.`,
 
   research: (ctx) => `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 
@@ -1029,7 +1036,7 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
     // the ones that matter: a review finding is a reader's hypothesis about a
     // diff, a verify failure is a measurement taken against a running build.
     // This used to discard the failures whenever review had anything to say, so
-    // #194 spent both cycle laps closing a rebase and a test-file move while a
+    // a run spent both cycle laps closing a rebase and a test-file move while a
     // reproducible h3 duplication — observed, with evidence — went untouched.
     const verifyFailures = verifyFailuresOf(ctx);
 
@@ -1595,8 +1602,8 @@ ${conformance}
 
 - Do not inject anything into the page before a screenshot: no overlay, banner, label, style or
   script. \`page.evaluate\` may READ the DOM, never write it. A caption painted onto the page is
-  text you wrote, presented as something the app rendered — and on #189 it covered the very
-  header a reviewer would check. Say it in \`caption\` instead.
+  text you wrote, presented as something the app rendered — and a banner drawn over the layout
+  hides the very header a reviewer would check. Say it in \`caption\` instead.
 - Do not change the worktree to produce a 'before'. You have no write access to it, and the git
   guard refuses \`checkout\`/\`restore\`/\`stash\`/\`reset\` from this phase: the files on disk are the
   change under review, and anything left altered there is what \`mr\` pushes.

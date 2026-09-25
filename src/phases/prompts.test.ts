@@ -1,8 +1,9 @@
+import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
-import { phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { ROOT, phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Ticket } from './types.js';
 
@@ -78,6 +79,34 @@ test('plan always gets the skills that are its method', () => {
   assert.ok(names(prompt).includes('util-reuse-methodology'));
 });
 
+// ------------------------------------------------ recall has a method now
+
+test('recall is given a method, not just a prompt', () => {
+  // Phase 0 was the last session phase carrying its whole method inline. The
+  // scoring ladder in particular was four lines of prompt with no room to say
+  // why each rung outranks the next.
+  assert.deepEqual(names(systemPromptFor(cfg('recall'), ctx(ticket()))), ['prior-art-recall']);
+});
+
+test('the skill recall declares actually ships in this repo', () => {
+  // recall runs at cwd 'conductor', so it resolves skills from the .claude that
+  // ensureClaudeDir composes at the Oneshot root. A name in config with no
+  // directory behind it fails silently — the phase just runs without it.
+  assert.ok(existsSync(join(ROOT, 'skills', 'prior-art-recall', 'SKILL.md')));
+});
+
+test('the recall prompt still stands alone if the skill does not resolve', () => {
+  // Skills are an upgrade, never a dependency (see SKILL_LINE): the prompt has
+  // to carry enough to run correctly by itself. The empty-memory stop is the
+  // part that must survive — without it the phase explores a filesystem that
+  // has nothing to find, on the tightest budget in the pipeline.
+  const p = promptFor(cfg('recall'), ctx(ticket()));
+  assert.match(p, /prior-art-recall/, 'the prompt must name the skill');
+  assert.match(p, /STOP IMMEDIATELY and return an empty list and an empty brief/);
+  assert.match(p, /file-path overlap first/, 'the ladder must survive in the short form');
+  assert.match(p, /then module, then label, then\s+title-token overlap/);
+});
+
 // --------------------------------------------- implement's gating is unchanged
 
 test('implement keeps a plan-gated skill when there is no plan to gate on', () => {
@@ -102,8 +131,8 @@ test('the bug label puts the reproduction skill in front of research', () => {
 });
 
 test('without the bug label research is not offered the reproduction skill', () => {
-  // #91 is the case: an accessibility ticket carrying no labels at all spent 57
-  // turns failing to bring the app up, for a verdict of 'inconclusive'.
+  // The case that forced this: an accessibility ticket carrying no labels at all
+  // spent 57 turns failing to bring the app up, for a verdict of 'inconclusive'.
   const prompt = systemPromptFor(cfg('research'), ctx(ticket({ labels: ['Loop'] })));
   assert.ok(!names(prompt).includes('bug-reproduction'));
 });
@@ -150,12 +179,12 @@ test('the data-setup boundaries travel with the skill that needs them', () => {
   assert.match(p, /OUTLIVES your session/, 'cleanup is the half that a later lap pays for');
 });
 
-// -------------------------------------- verify failures reach implement (#35)
+// ------------------------------------------- verify failures reach implement
 
 /**
  * A verify failure is a measurement; a review finding is a reader's hypothesis
  * about a diff. When a run cycles back to `implement` carrying both, the prompt
- * used to render only the review findings — so #194 spent both of its cycle laps
+ * used to render only the review findings — so a run spent both of its cycle laps
  * closing a rebase and a test-file move while a reproducible h3 duplication went
  * untouched, and the run blocked on a defect nothing had ever shown it.
  *

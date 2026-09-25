@@ -14,7 +14,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { appendFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  BASE_ENV, DRY_RUN, ROOT, artifactDir, envOr, modelFor, runDir,
+  BASE_ENV, DRY_RUN, ROOT, artifactDir, envOr, modelFor, projectConfig, projectSessionEnv, runDir,
   type PhaseConfig,
 } from '../lib/config.js';
 import { MEMORY } from '../lib/config.js';
@@ -92,7 +92,7 @@ const PROGRESS_EVERY_MS = 60_000;
 /**
  * No stream frame for this long means the session is stalled, not slow.
  *
- * Observed live on #179: a verify session's stream went silent mid-response —
+ * Observed live: a verify session's stream went silent mid-response —
  * one ESTABLISHED socket, 0% CPU, the API answering fresh requests in 0.1s —
  * and the phase waited out its whole 150m wall clock for a reply that was never
  * coming, four times in one night. The only legitimate frameless stretch is a
@@ -225,13 +225,40 @@ function mcpServers(): Record<string, unknown> {
       env: {
         ...BASE_ENV,
         GITLAB_PERSONAL_ACCESS_TOKEN: token,
-        GITLAB_API_URL: envOr('ONESHOT_GITLAB_API', 'https://gitlab.arbisoft.com/api/v4'),
+        // The GitLab GITLAB_REPO_URL names, so a session's tools and the
+        // conductor's own calls can only ever reach the same instance.
+        GITLAB_API_URL: projectConfig().gitlab.apiUrl,
         USE_PIPELINE: 'true',
         USE_GITLAB_WIKI: 'false',
         USE_MILESTONE: 'false',
       },
     },
   };
+}
+
+/**
+ * The managed app login, for the phases that can actually reach an app.
+ *
+ * The harness logs the app in ITSELF, reading this variable directly
+ * (harness.cjs:150). A phase's environment is an allowlist, and this variable was
+ * in none of its sources — not BASE_ENV, not phaseEnv() — so it reached no phase at
+ * all and every harness login raised E_NO_CREDENTIALS however good the account was.
+ *
+ * That is not a session failing to find a workaround. The reproduction prompt tells
+ * the agent to "log in with the harness exactly as the skill says" and never renders
+ * a password, so the instruction could not be followed by any route. Reproduction
+ * then took its documented way out — record 'inconclusive' when login keeps failing
+ * — so every ticket labelled for reproduction came back inconclusive with an empty
+ * `account`, which reads like a model giving up rather than a variable never passed.
+ *
+ * WORKTREE phases only: the app it unlocks exists nowhere else. And deliberately not
+ * rendered into a prompt the way `verify`'s block does — the harness needs the value,
+ * the session does not, and a prompt is transcribed. envOr() screens placeholders, so
+ * an unedited `.env.example` line stays unset rather than arriving as a fake login.
+ */
+export function testLoginEnv(worktree?: string): Record<string, string> {
+  const raw = envOr('ONESHOT_TEST_LOGIN');
+  return worktree && raw ? { ONESHOT_TEST_LOGIN: raw } : {};
 }
 
 export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
@@ -247,6 +274,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
 
   const env: Record<string, string> = {
     ...BASE_ENV,
+    ...projectSessionEnv(),
     ...otelBaseEnv(),
     ...otelSpawnEnv(identity),
     ...phaseEnv(identity, {
@@ -261,6 +289,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     // it, and conductor phases run at ROOT where a bare `node -e` still needs
     // the path. NODE_PATH is Node's documented fallback for exactly this.
     NODE_PATH: join(ROOT, 'node_modules'),
+    ...testLoginEnv(input.worktree),
   };
 
   // Two ways a phase ends early, and they are not the same failure. The timer
@@ -274,7 +303,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   // frames (a hung MCP call, a child that never returns), the consume loop
   // below never advances and the phase promise never settles — so the
   // conductor deadlocks forever awaiting a phase that cannot die (observed
-  // live: run #18 verify sat wedged 4h past its own 120m timeout). After ANY
+  // live: a verify session sat wedged 4h past its own 120m timeout). After ANY
   // abort we therefore arm a short grace timer that force-settles the phase
   // even when the stream refuses to unwind. The abandoned subprocess is reaped
   // separately; the invariant this restores is that the conductor always gets
@@ -410,9 +439,9 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       // `error_max_turns` — hiding the real cause and wasting the budget.
       //
       // `settled` is deliberately NOT flipped here. Leaving it false lets the
-      // post-loop "phase never reached a result frame" fallback introduced in
-      // #20 record the real turns this session already spent before the cap
-      // hit — otherwise a rate-limited phase would land in `quota_usage` as
+      // post-loop "phase never reached a result frame" fallback record the real
+      // turns this session already spent before the cap hit — otherwise a
+      // rate-limited phase would land in `quota_usage` as
       // weighted: 0 for the very tokens that got us rate-limited in the first
       // place. Later result frames can't clobber anything because we break out
       // of the iterator immediately below.

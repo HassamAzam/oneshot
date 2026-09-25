@@ -118,7 +118,7 @@ expect_allow "log from a conductor phase" \
 export ONESHOT_WORKTREE="$SAVED_WORKTREE"
 
 # A phase that stands in the worktree without write access to it (ui-evidence,
-# review, mr, …) may read it and push, never change it. Ticket #189's ui-evidence
+# review, mr, …) may read it and push, never change it. A ui-evidence session once
 # reverted the fix on disk with `git checkout <parent> -- <paths>` for a screenshot.
 SAVED_PHASE="$ONESHOT_PHASE"; SAVED_SCOPES="$ONESHOT_WRITE_SCOPES"
 export ONESHOT_PHASE="ui-evidence"

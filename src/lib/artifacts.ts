@@ -110,6 +110,15 @@ export interface ReviewGateState {
 export interface RunJournal {
   runId: string;
   iid: number;
+  /**
+   * Which GitLab project the run belongs to: repoKey(GITLAB_REPO_URL),
+   * `<host>/<group>/<project>` lower-cased. The directory is keyed by iid
+   * alone, and iids are only unique within a project — so after the URL moves
+   * to another project, issue #237's journal would otherwise be resumed for the
+   * new project's #237, worktree, MR iid and all. See journalproject.ts.
+   * Absent on journals written before it existed.
+   */
+  project?: string;
   title: string;
   url: string;
   createdAt: number;
@@ -314,6 +323,34 @@ export function phaseSucceeded(iid: number, phase: string): boolean {
   const j = readJournal(iid);
   if (!j) return false;
   return j.phases.some((p) => p.phase === phase && (p.status === 'ok' || p.status === 'warned'));
+}
+
+/**
+ * Is this phase DONE WITH — succeeded, or settled some other way?
+ *
+ * Distinct from phaseSucceeded() on purpose, and the distinction is the whole
+ * point of having two. A gate asking "did plan actually produce a plan" must
+ * never accept 'skipped'; the run loop asking "do I still owe this phase a turn"
+ * must, because 'skipped' is the answer a phase's own `onFail: 'skip'` policy
+ * already gave. runner.ts's KEPT_STATUSES says so outright — "a decision the run
+ * already made rather than a failure to retry" — and then shouldSkip() consulted
+ * phaseSucceeded(), which reports 'skipped' as not-yet-done. The two disagreed,
+ * and the loop believed the second one.
+ *
+ * Observed on ticket 256: `recall` (onFail 'skip', maxTurns 20) hit its cap and
+ * was recorded 'skipped'. The run carried on, research and plan both finished,
+ * the run PARKED at the plan gate — and then recall ran again at lap 1, after
+ * the two phases that consume its artifact, and rewrote recall.json with a
+ * summary of this run's own plan. A phase whose job is to bring PRIOR context
+ * into a run had recorded the run's own output as prior context.
+ */
+export function phaseSettled(iid: number, phase: string): boolean {
+  const j = readJournal(iid);
+  if (!j) return false;
+  return j.phases.some(
+    (p) => p.phase === phase
+      && (p.status === 'ok' || p.status === 'warned' || p.status === 'skipped'),
+  );
 }
 
 /**

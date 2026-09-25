@@ -28,7 +28,7 @@ for (const w of operator.warnings ?? []) warn(w);
 // ---- 2. is there anything to ship?
 console.log(`\n${D}Oneshot at ${CFG.oneshotHome}${X}`);
 if (!existsSync(CFG.oneshotHome)) {
-  bad(`ONESHOT_HOME does not exist: ${CFG.oneshotHome}`, 'set ONESHOT_HOME in .env to your oneshot checkout');
+  bad(`ONESHOT_HOME does not exist: ${CFG.oneshotHome}`, 'ONESHOT_HOME defaults to this checkout — remove a stale ONESHOT_HOME from .env or your shell, or point it at your oneshot checkout');
 } else if (!existsSync(join(CFG.oneshotHome, 'state', 'runs'))) {
   bad('no state/runs directory — this checkout has never run a ticket',
       'start the conductor (npm start) and let one phase finish, then re-run this');

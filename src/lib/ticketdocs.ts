@@ -21,7 +21,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { projectConfig, runDir } from './config.js';
-import { downloadUpload } from './gitlab.js';
+import { downloadUpload, resolvedProjectId } from './gitlab.js';
 import { log } from './log.js';
 import type { TicketDoc } from '../phases/types.js';
 
@@ -43,17 +43,26 @@ export interface UploadLink { secret: string; filename: string; where: string }
  * them: `/uploads/<secret>/<file>`, the same under `/-/project/<id>/`, or
  * either prefixed with the host. A full URL to another project's upload is
  * skipped — this token has no business there and the API path would be wrong.
+ *
+ * `id` is null when GitLab could not be asked for the project's number. Then a
+ * `/-/project/<n>/` link cannot be proven ours and is skipped, rather than
+ * guessed at: fetching another project's upload with this token is the thing
+ * this filter exists to prevent.
  */
 export function uploadLinks(
-  markdown: string, where: string, project: { url: string; id: number },
+  markdown: string, where: string, project: { url: string; id: number | null },
 ): UploadLink[] {
   const out: UploadLink[] = [];
+  // Case-blind, because the URL is typed into .env by a person and GitLab
+  // routes a path whatever its case — a capital letter there must not make
+  // every attachment look like another project's.
+  const url = project.url.toLowerCase();
   const re = /(https?:\/\/[^\s)"'<>\]]*?)?(?:\/-\/project\/(\d+))?\/uploads\/([0-9a-f]{16,64})\/([^\s)"'<>?#\]]+)/gi;
   for (const m of markdown.matchAll(re)) {
     const [, prefix, pid, secret, filename] = m;
-    if (pid && Number(pid) !== project.id) continue;
-    if (prefix && !pid && prefix.replace(/\/-$/, '') !== project.url) continue;
-    if (prefix && pid && !project.url.startsWith(prefix)) continue;
+    if (pid && (project.id === null || Number(pid) !== project.id)) continue;
+    if (prefix && !pid && prefix.replace(/\/-$/, '').toLowerCase() !== url) continue;
+    if (prefix && pid && !url.startsWith(prefix.toLowerCase())) continue;
     out.push({ secret: secret!, filename: filename!, where });
   }
   return out;
@@ -118,8 +127,14 @@ function toText(src: string, ext: string): string {
 export async function collectTicketDocs(
   iid: number, sources: Array<{ where: string; body: string }>,
 ): Promise<{ documents: TicketDoc[]; externalDocs: Array<{ url: string; where: string }> }> {
-  const c = projectConfig();
-  const project = { url: `https://${c.gitlab.host}/${c.gitlab.project}`, id: c.gitlab.projectId };
+  // The numeric id is asked of GitLab only when some link is written in the
+  // one shape that carries it — every other shape matches on the web URL alone.
+  const byId = sources.some((s) => /\/-\/project\/\d+\/uploads\//.test(s.body));
+  const id = byId ? await resolvedProjectId() : null;
+  if (byId && id === null) {
+    log.warn(`#${iid}: could not ask GitLab for the project id; /-/project/<id>/ upload links are skipped`);
+  }
+  const project = { url: projectConfig().gitlab.webUrl, id };
 
   const seen = new Set<string>();
   const links: UploadLink[] = [];
