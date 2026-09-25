@@ -48,7 +48,6 @@ const H = require(path.join(ONESHOT_HOME, 'skills/local-browser-verify/scripts/h
 
 /* ------------------------------------------------------------------ config */
 
-const expand = (p) => String(p || '').replace(/^~(?=$|\/)/, os.homedir());
 const cfg = (k, d) => {
   const v = process.env[k];
   return v && String(v).trim() ? String(v).trim() : d;
@@ -56,38 +55,99 @@ const cfg = (k, d) => {
 const list = (k, d) => cfg(k, d).split(',').map((s) => s.trim()).filter(Boolean);
 
 /**
- * The named target from ONESHOT_PROJECT, resolved the same way src/lib/config.ts
- * resolves it — read here rather than imported because this script is CommonJS
- * and runs standalone as `npm run app`, with no conductor to inherit from.
+ * Which project, and where this machine keeps it — resolved by src/lib/repourl.cjs,
+ * the same module src/lib/config.ts resolves it with. This script is CommonJS and
+ * runs standalone (`npm run app`, or a phase session's `node $ONESHOT_HOME/scripts/app.cjs`)
+ * with no conductor to inherit from, so it cannot import the TypeScript; sharing the
+ * one CommonJS resolver is what stops the two from disagreeing about which checkout,
+ * seed or worktree root is in play.
  *
- * A target WINS over the matching env var, matching the TypeScript side: the
- * switch exists so one line in .env moves everything, and a machine that has
- * been working on the default already spells WORK_REPO out. An unknown name
- * throws rather than silently working on the default project.
+ * GITLAB_REPO_URL names the project. Each path is ONESHOT_<NAME>_<VAR>, else the plain
+ * <VAR>, else the default derived from the URL (~/Documents/<name>, ~/Documents/<name>-wt).
+ * Relative paths resolve against the Oneshot checkout, not the cwd — a session runs this
+ * from inside a worktree. SEED_FROM falls back to WORK_REPO here, as it always has: this
+ * script fetches refs from the seed and cuts worktrees from it, so it needs one.
+ *
+ * Nothing unresolvable is guessed at, and nothing the conductor would refuse to boot on
+ * is run here either. Without a usable GITLAB_REPO_URL — even with every path spelled
+ * out, since those paths are then nobody's project — or with a legacy selector that
+ * disagrees with it, `ensure` and `warm` refuse with E_CONFIG. So they do when WORK_REPO
+ * or the seed is provably a clone of another project (checkoutError): they fetch MR refs
+ * in the seed and cut worktrees from it, and this script runs standalone — from the
+ * ship-ticket skill, from `npm run app` — where no boot preflight has looked.
+ *
+ * ONESHOT_SKIP_REPO_CHECK downgrades the legacy-selector and origin refusals to a logged
+ * warning through repourl.cjs relaxRepoChecks(), the same function boot and doctor use, so
+ * this script never refuses what the conductor lets through. A missing or invalid
+ * GITLAB_REPO_URL is not downgraded, and neither is cold()'s refusal of an app-<port>
+ * worktree of another project: that one guards a `git checkout --force` into it.
+ *
+ * `list`, `gc` and `down` are NOT refused. They check nothing out, and they are what a
+ * person needs most while .env is half-way through a project switch: this script's own
+ * errors tell them to `down --worktree` or `gc --kill`. With no WT_ROOT resolved every
+ * instance counts as foreign (annotate), so a broken config can only make them do less.
  */
-const TARGET_NAME = String(process.env.ONESHOT_PROJECT || '').trim().toLowerCase();
-const TARGET = (() => {
-  if (!TARGET_NAME) return {};
-  const cfgPath = path.join(ONESHOT_HOME, 'config', 'project.json');
-  let targets = {};
-  try { targets = (JSON.parse(fs.readFileSync(cfgPath, 'utf8')) || {}).targets || {}; }
-  catch { throw new Error(`ONESHOT_PROJECT='${TARGET_NAME}' set but ${cfgPath} is unreadable`); }
-  const found = targets[TARGET_NAME];
-  if (!found) {
-    const known = Object.keys(targets).join(', ') || 'none defined';
-    throw new Error(`ONESHOT_PROJECT='${TARGET_NAME}' is not a target in config/project.json (known: ${known})`);
-  }
-  return found;
+const REPO = require(path.join(__dirname, '..', 'src', 'lib', 'repourl.cjs'));
+const ROOT = path.resolve(__dirname, '..');
+const TARGET = REPO.resolveTarget(process.env, ROOT);
+const WORK_REPO = TARGET.workRepo.path;
+const SEED = REPO.resolvePath(process.env, {
+  name: TARGET.name, envName: 'ONESHOT_SEED_FROM', fallback: WORK_REPO, root: ROOT,
+});
+const SEED_FROM = SEED.path;
+const WT_ROOT = TARGET.wtRoot.path;
+/**
+ * Repo-check findings as a refusal: every one still a FAIL after relaxRepoChecks(),
+ * or null. Whatever the override downgraded is logged to stderr
+ * instead, so a session's output still says what boot would have said. Runs at load
+ * (CONFIG_ERROR), before `log` below exists, hence console.error.
+ */
+function refusal(findings) {
+  const relaxed = REPO.relaxRepoChecks(findings, process.env);
+  relaxed.forEach((f, i) => {
+    if (f.level !== findings[i].level) console.error('[app]', `${f.label} — ${f.detail}`);
+  });
+  const fails = relaxed.filter((x) => x.level === 'fail');
+  return fails.length ? fails.map((f) => `${f.label} — ${f.detail}`).join('; ') : null;
+}
+
+const CONFIG_ERROR = (() => {
+  if (TARGET.error) return TARGET.error;
+  const conflicts = REPO.legacySelectors(process.env, TARGET.repo).filter((l) => l.conflict).map((l) => ({
+    level: 'fail',
+    label: `${l.key} conflicts with GITLAB_REPO_URL`,
+    detail: `${l.key}=${l.value} but GITLAB_REPO_URL gives ${l.derived}; delete the ${l.key} line from .env`,
+  }));
+  const refused = refusal(conflicts);
+  if (refused) return refused;
+  if (!SEED_FROM || !WT_ROOT) return 'no seed repo or worktree root could be resolved';
+  return null;
 })();
 
-/** Target first, then the env var, then the built-in default. */
-const targetPath = (fromTarget, key, dflt) =>
-  path.resolve(expand(fromTarget || cfg(key, dflt)));
+/**
+ * A proven origin mismatch on WORK_REPO or the seed, judged by the same function boot
+ * and doctor use (repourl.cjs judgeOrigin), or null. An origin that cannot be read or
+ * parsed proves nothing and is not refused. Checked when a command runs rather than at
+ * load, so requiring this file (the parity test does) runs no git.
+ */
+function checkoutError() {
+  if (!TARGET.repo) return null;
+  const subjects = [{ label: 'WORK_REPO', dir: WORK_REPO, from: TARGET.workRepo }];
+  if (SEED_FROM !== WORK_REPO) subjects.push({ label: 'ONESHOT_SEED_FROM', dir: SEED_FROM, from: SEED });
+  return refusal(subjects.filter((s) => s.dir && fs.existsSync(s.dir))
+    .map((s) => REPO.judgeOrigin(s, TARGET.repo.url, REPO.readOrigin(s.dir))));
+}
 
-const WORK_REPO = targetPath(TARGET.workRepo, 'WORK_REPO', '~/Documents/workstreamai');
-const SEED_FROM = targetPath(TARGET.seedFrom, 'ONESHOT_SEED_FROM', WORK_REPO);
-const WT_ROOT = targetPath(TARGET.wtRoot, 'WT_ROOT', '~/Documents/oneshot-wt');
-const BASE_BRANCH = (TARGET.branches && TARGET.branches.base) || cfg('ONESHOT_BASE_BRANCH', 'dev');
+/**
+ * The base branch MRs target, from config/project.json like the conductor reads it;
+ * ONESHOT_BASE_BRANCH still overrides it for this script alone.
+ */
+const BASE_BRANCH = cfg('ONESHOT_BASE_BRANCH', '') || (() => {
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(ONESHOT_HOME, 'config', 'project.json'), 'utf8'));
+    return (c && c.branches && c.branches.base) || 'dev';
+  } catch { return 'dev'; }
+})();
 
 /**
  * `staticfiles` is in this list for a reason worth keeping.
@@ -330,9 +390,44 @@ async function discover() {
   return out.sort((a, b) => (Number(b.healthy) - Number(a.healthy)) || (Number(b.bundleReady) - Number(a.bundleReady)));
 }
 
+/**
+ * The git directory `dir` is a checkout or worktree of, real-pathed; null when it is not one.
+ */
+function commonGitDir(dir) {
+  const out = git(['rev-parse', '--git-common-dir'], dir, true);
+  return out ? real(path.resolve(dir, out.trim())) : null;
+}
+
+let OWN_GIT_DIRS = null;
+/**
+ * Is `wt` a checkout of this project — cut from the seed's or WORK_REPO's clone, or
+ * from any other clone whose origin is GITLAB_REPO_URL's project?
+ *
+ * Being under WT_ROOT is not enough on its own. A WT_ROOT line left over from another
+ * project still holds that project's app-<port> pool, and without this a `warm` would
+ * adopt one of those, a cold start would check this project's base branch out INTO it,
+ * and `down --all` would stop its servers. The question is which PROJECT, not which
+ * clone — boot and doctor accept a second clone of this project in WT_ROOT, and this
+ * must agree with them — so the origin decides. Only when the origin proves nothing
+ * (unreadable, an ssh alias) does the clone identity decide, as it always did. When
+ * neither clone can be read there is nothing to compare with, and the old rule stands.
+ */
+function cutFromOurClone(wt) {
+  if (!OWN_GIT_DIRS) {
+    OWN_GIT_DIRS = new Set([SEED_FROM, WORK_REPO].filter((d) => d && fs.existsSync(d)).map(commonGitDir).filter(Boolean));
+  }
+  const project = TARGET.repo ? REPO.originProject(TARGET.repo.url, REPO.readOrigin(wt)).kind : 'unknown';
+  if (project !== 'unknown') return project === 'same';
+  if (!OWN_GIT_DIRS.size) return true;
+  return OWN_GIT_DIRS.has(commonGitDir(wt));
+}
+
 async function annotate(inst) {
   const wt = inst.worktree;
   const isRepo = fs.existsSync(path.join(wt, '.git'));
+  // No WT_ROOT means nothing is provably ours: '' + sep would prefix every absolute path.
+  const managed = Boolean(WT_ROOT) && (wt === WT_ROOT || wt.startsWith(WT_ROOT + path.sep))
+    && (!isRepo || cutFromOurClone(wt));
   const g = isRepo ? {
     head: git(['rev-parse', 'HEAD'], wt, true),
     branch: git(['rev-parse', '--abbrev-ref', 'HEAD'], wt, true),
@@ -360,7 +455,7 @@ async function annotate(inst) {
      * WT_ROOT may have a ref checked out into it. Anything else is someone's working
      * copy and is read-only to us, however convenient it looks.
      */
-    role: (wt === WT_ROOT || wt.startsWith(WT_ROOT + path.sep)) ? 'managed' : 'foreign',
+    role: managed ? 'managed' : 'foreign',
     /**
      * Narrower than `managed`, and it is this flag — not `managed` — that licenses a
      * checkout. WT_ROOT also holds the per-ticket worktrees the conductor leases, and
@@ -368,7 +463,7 @@ async function annotate(inst) {
      * far worse outcome than paying for a cold start. Only the pool this tool creates
      * (`app-<port>`) is ours to move.
      */
-    ours: path.basename(wt).startsWith('app-') && (wt === WT_ROOT || wt.startsWith(WT_ROOT + path.sep)),
+    ours: path.basename(wt).startsWith('app-') && managed,
     dirty: dirtyLines.length,
     dirtyFiles: dirtyLines.slice(0, 6),
     bundleReady: Boolean(stats && stats.status === 'done'),
@@ -392,7 +487,7 @@ const summarize = (i) => ({
  * Resolve what the caller means by "this MR" into a sha that exists locally.
  *
  *   !123 / MR!123 / mr/123     GitLab merge request head
- *   #45  / PR#45               GitHub pull request head
+ *   #123 / PR#123              GitHub pull request head
  *   <branch> / <sha>           whatever it says
  *
  * Fetched into the SEED repo because every worktree shares its object database, so one
@@ -750,6 +845,11 @@ async function cold(target, notes) {
   const at = target ? target.sha : `origin/${BASE_BRANCH}`;
 
   if (fs.existsSync(path.join(wt, '.git'))) {
+    if (!cutFromOurClone(wt)) {
+      throw new AppError('E_CONFIG', `${wt} is not a checkout of ${TARGET.repo ? TARGET.repo.project : 'this project'} `
+        + `(cut from ${commonGitDir(wt)}): WT_ROOT=${WT_ROOT} is shared with another project`,
+        `give this project a WT_ROOT of its own (the default is ~/Documents/${TARGET.name}-wt), or remove that worktree`);
+    }
     for (const f of PINNED) git(['update-index', '--no-skip-worktree', f], wt, true);
     git(['checkout', '--force', '--detach', at], wt);
     notes.push(`reused the idle worktree ${wt} at ${at}`);
@@ -978,6 +1078,9 @@ async function down(opts) {
 
 /* ------------------------------------------------------------------ cli */
 
+/** The commands that check code out or start it, and so refuse on a config problem. */
+const CONFIG_GATED = ['ensure', 'warm'];
+
 /**
  * `--k v` uniformly, so a new value flag needs no edit here: a `--flag` takes the next
  * token as its value unless that token is itself a flag (or absent), in which case it is a
@@ -1002,6 +1105,13 @@ async function main() {
   const opts = parse(rest);
   const out = (o) => console.log(JSON.stringify(o, null, 2));
   try {
+    const configError = ['ensure', 'warm', 'list', 'gc', 'down'].includes(cmd)
+      ? CONFIG_ERROR || checkoutError() : null;
+    if (configError && CONFIG_GATED.includes(cmd)) {
+      throw new AppError('E_CONFIG', configError,
+        'fix the Oneshot .env as the message says; `npm run doctor` lists everything that is wrong');
+    }
+    if (configError) log(`config problem (${cmd} runs anyway; ensure/warm refuse): ${configError}`);
     switch (cmd) {
       case 'ensure': out(await ensure(opts)); break;
       case 'warm': out(await warm(opts)); break;
@@ -1024,7 +1134,9 @@ async function main() {
   gc [--all] [--kill]  find orphaned servers; --kill actually stops them (dry-run default)
   down --all | --worktree <path>
 
-Environment: WORK_REPO, ONESHOT_SEED_FROM, WT_ROOT, ONESHOT_APP_PORTS,
+Environment: GITLAB_REPO_URL (the project; WORK_REPO and WT_ROOT default from it),
+             WORK_REPO, ONESHOT_SEED_FROM, WT_ROOT, ONESHOT_APP_PORTS, ONESHOT_BASE_BRANCH,
+             ONESHOT_<NAME>_WORK_REPO|_SEED_FROM|_WT_ROOT  (per-machine, beats the plain var)
              ONESHOT_SEED_LINKS, ONESHOT_SEED_COPIES, ONESHOT_RUN_DIR|ONESHOT_IID`);
     }
   } catch (err) {
@@ -1034,5 +1146,12 @@ Environment: WORK_REPO, ONESHOT_SEED_FROM, WT_ROOT, ONESHOT_APP_PORTS,
   }
 }
 
-module.exports = { ensure, warm, discover, gc, down, resolveRef };
+/**
+ * `config` is what this script resolved, exported so src/lib/target.test.ts can hold it
+ * to the TypeScript side: the claim that the two agree is only worth something checked.
+ */
+module.exports = {
+  ensure, warm, discover, gc, down, resolveRef, checkoutError, cutFromOurClone,
+  config: { name: TARGET.name, WORK_REPO, SEED_FROM, WT_ROOT, BASE_BRANCH, error: CONFIG_ERROR },
+};
 if (require.main === module) main();

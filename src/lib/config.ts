@@ -11,11 +11,16 @@
  * becomes a metered API bill with no signal that anything changed.
  */
 import { readFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, userInfo } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
 import { deskUsername } from './identity.js';
+import {
+  LEGACY_SELECTOR_KEYS, REPO_URL_VAR, SKIP_REPO_CHECK_VAR, expandPath as expandPathFrom, readEnv, repoCheckOverride,
+  resolvePath, resolveTarget, scopedEnvName as scopedEnvNameFor, spellings,
+  type GitlabRepo, type ResolvedPath,
+} from './repourl.cjs';
 import { parseMrFeedbackConfig } from '../mrfeedback/config.js';
 import type { MrFeedbackConfig } from '../mrfeedback/types.js';
 
@@ -26,26 +31,12 @@ loadDotenv({ path: join(ROOT, '.env'), quiet: true });
 /**
  * Read an env var, accepting the legacy ONELOOP_ spelling for any ONESHOT_
  * name so an existing One Loop .env keeps working. ONESHOT_ wins.
- */
-/**
- * An unreplaced placeholder from .env.example.
  *
- * Treated as unset, not as a value. Otherwise `SLACK_BOT_TOKEN=xoxb-REPLACE_ME`
- * satisfies every "is it configured" check and the failure only surfaces later
- * as an opaque `invalid_auth` from the API.
+ * The rule itself lives in repourl.cjs, which scripts/app.cjs loads too — so a
+ * variable cannot count as set here and unset there.
  */
-export function isPlaceholder(v: string): boolean {
-  return /REPLACE_ME|<[a-z-]+>|CHANGE_?ME|your-.*-here/i.test(v);
-}
-
 export function envOr(name: string, fallback = ''): string {
-  const primary = process.env[name];
-  if (typeof primary === 'string' && primary !== '' && !isPlaceholder(primary)) return primary;
-  if (name.startsWith('ONESHOT_')) {
-    const legacy = process.env[`ONELOOP_${name.slice('ONESHOT_'.length)}`];
-    if (typeof legacy === 'string' && legacy !== '' && !isPlaceholder(legacy)) return legacy;
-  }
-  return fallback;
+  return readEnv(process.env, name, fallback);
 }
 
 /**
@@ -69,11 +60,13 @@ export function envFlag(name: string): boolean {
   return v === '1' || v === 'true' || v === 'on' || v === 'yes';
 }
 
-/** Expand a leading `~` and resolve relative paths against the repo root. */
+/**
+ * Expand a leading `~` and resolve relative paths against the repo root — by
+ * the same function scripts/app.cjs uses, so a path in .env means one directory
+ * to both.
+ */
 export function expandPath(p: string): string {
-  if (!p) return '';
-  const expanded = p.startsWith('~') ? join(homedir(), p.slice(1)) : p;
-  return isAbsolute(expanded) ? expanded : resolve(ROOT, expanded);
+  return expandPathFrom(p, ROOT);
 }
 
 // --------------------------------------------------------------- config files
@@ -88,7 +81,18 @@ function loadJson<T>(name: string): T {
 }
 
 export interface ProjectConfig {
-  gitlab: { host: string; apiUrl: string; project: string; projectId: number };
+  /**
+   * The project, derived from GITLAB_REPO_URL — never read from project.json,
+   * which no longer names one. Reading it throws when the URL is unset or
+   * invalid; nothing else on this object does, so code that only wants labels
+   * or branches works on a machine that has not set the URL yet.
+   *
+   * There is no numeric id here on purpose. Every project endpoint accepts the
+   * URL-encoded path as `:id`, and the one caller that needs the number asks
+   * GitLab for it (src/lib/gitlab.ts, resolvedProjectId) rather than trusting a
+   * second copy of the project's identity to agree with the first.
+   */
+  gitlab: GitlabRepo;
   contextRepo: { path: string; gitlabProject: string; skillsRoot: string };
   labels: {
     entry: string; entryId: number;
@@ -149,33 +153,15 @@ export interface ProjectConfig {
    * Repo-relative path fragments whose modules are too consequential to ship
    * unwatched. A run whose plan or diff touches one gets the `Review` label's
    * gates whether or not anybody remembered to apply the label — see
-   * `highScrutinyHits()` in src/conductor/reviewgate.ts. Empty disables it.
+   * `highScrutinyHits()` in src/conductor/reviewgate.ts. Derived at load from the
+   * `paths` of every module in config/risk-modules.json, so emptying this array
+   * disables nothing — drop a module's `paths` there instead.
    */
   highScrutinyPaths: string[];
   preserveLabels: string[];
   branches: { base: string; protected: string[]; prefix: string; pattern: string };
   promotions: Array<{ from: string; to: string; auto: boolean }>;
   concurrency: number;
-  /**
-   * Named overlays selected by ONESHOT_PROJECT. Absent or unselected, nothing
-   * here is read and every field above stands as written.
-   */
-  targets?: Record<string, TargetConfig>;
-}
-
-/**
- * One named target: which project Oneshot works on, and where that project
- * lives on this machine. Every field is optional — a target overrides only
- * what it names, so a target that differs from the default in one respect
- * says one thing.
- */
-export interface TargetConfig {
-  gitlab?: { project?: string; projectId?: number };
-  workRepo?: string;
-  seedFrom?: string;
-  wtRoot?: string;
-  branches?: { base?: string };
-  labels?: Partial<ProjectConfig['labels']>;
 }
 
 export interface PhaseConfig {
@@ -281,93 +267,63 @@ export interface SlackConfig {
 }
 
 /**
- * Which project this conductor works on, from ONESHOT_PROJECT in .env.
- *
- * Empty is the whole backwards-compatibility story: no target is selected, no
- * overlay is applied, and every path and label resolves exactly as it did
- * before targets existed. The variable is read once and lower-cased so `ERP`,
- * `erp` and `Erp` are one target rather than three misses.
+ * The project and the paths derived from it, resolved once at load by the same
+ * function scripts/app.cjs calls (repourl.cjs, resolveTarget). Never throws: a
+ * missing or invalid GITLAB_REPO_URL leaves the name empty and is reported when
+ * the project is first needed — loudly at boot and in doctor — rather than on
+ * import, which tests and tooling do on machines that have not set it.
  */
-export const PROJECT_TARGET: string = envOr('ONESHOT_PROJECT').trim().toLowerCase();
+const TARGET = resolveTarget(process.env, ROOT);
 
 /**
- * The selected overlay, or null when none is selected.
+ * The target name: the last path segment of GITLAB_REPO_URL, lower-cased —
+ * `erp` for `https://<host>/group/erp`. Empty when the URL is unset or invalid.
  *
- * An UNKNOWN name throws rather than falling back. A typo that silently left
- * the conductor pointed at the default project would be the worst possible
- * failure of a switch whose entire job is to move it: tickets would be claimed,
- * branches cut and MRs opened against a project nobody meant to touch, and
- * nothing in the logs would look wrong.
+ * It names nothing on its own any more; it is the handle the derived defaults
+ * (~/Documents/<name>, ~/Documents/<name>-wt) and the scoped path variables are
+ * keyed by, and what name-keyed features compare against. ONESHOT_PROJECT used
+ * to set it and now only gets checked against it (repocheck.ts identityFindings).
  */
-let _target: TargetConfig | null | undefined;
-export function activeTarget(): TargetConfig | null {
-  if (_target === undefined) {
-    if (!PROJECT_TARGET) {
-      _target = null;
-    } else {
-      const targets = loadJson<ProjectConfig>('project.json').targets ?? {};
-      const found = targets[PROJECT_TARGET];
-      if (!found) {
-        const known = Object.keys(targets);
-        throw new Error(
-          `ONESHOT_PROJECT='${PROJECT_TARGET}' is not a target in config/project.json. `
-          + (known.length ? `Known targets: ${known.join(', ')}. ` : 'No targets are defined. ')
-          + 'Unset it to work on the default project.',
-        );
-      }
-      _target = found;
-    }
-  }
-  return _target;
+export const PROJECT_TARGET: string = TARGET.name;
+
+/**
+ * The per-machine, per-project spelling of a path variable:
+ * `ONESHOT_<NAME>_<VAR>`, keyed by the target name.
+ *
+ * A leading `ONESHOT_` is stripped before scoping so `ONESHOT_SEED_FROM` scopes
+ * to `ONESHOT_ERP_SEED_FROM` rather than `ONESHOT_ERP_ONESHOT_SEED_FROM`. Empty
+ * when there is no target name, rather than a `ONESHOT__WORK_REPO` nobody meant.
+ */
+export function scopedEnvName(envName: string): string {
+  return scopedEnvNameFor(PROJECT_TARGET, envName);
 }
 
 /**
- * A path a target owns, resolved against the target first.
- *
- * Deliberately NOT `envOr` order. Everywhere else in this file the environment
- * wins, and here it must not: the switch exists so that ONE line in .env moves
- * the conductor to another project, and a machine that has been working on the
- * default has WORK_REPO and ONESHOT_SEED_FROM already spelled out — leaving
- * those in charge would make the switch look broken on exactly the machines it
- * is for. `doctor` names every variable this overrode, so it is never silent.
+ * The project GITLAB_REPO_URL names — the same read, at load, that every path
+ * above came from, so one process cannot hold two answers. Throws, naming the
+ * variable and an example, when it is unset or not a GitLab project URL; only
+ * asking throws, never importing.
  */
-function targetPath(fromTarget: string | undefined, envName: string, fallback: string): string {
-  if (fromTarget) return expandPath(fromTarget);
-  return expandPath(envOr(envName, fallback));
+export function gitlabRepo(): GitlabRepo {
+  if (!TARGET.repo) throw new Error(TARGET.error ?? `${REPO_URL_VAR} is not set`);
+  return TARGET.repo;
 }
 
-/** Env vars a selected target is overriding, for `doctor` to report. */
-export function targetOverrides(): Array<{ name: string; ignored: string; using: string }> {
-  const t = activeTarget();
-  if (!t) return [];
-  const pairs: Array<[string | undefined, string]> = [
-    [t.workRepo, 'WORK_REPO'], [t.seedFrom, 'ONESHOT_SEED_FROM'], [t.wtRoot, 'WT_ROOT'],
-  ];
-  return pairs.flatMap(([value, name]) => {
-    const set = envOr(name);
-    return value && set && expandPath(set) !== expandPath(value)
-      ? [{ name, ignored: expandPath(set), using: expandPath(value) }]
-      : [];
-  });
+/** gitlabRepo() for a caller that has to decide how loudly to fail. Never throws. */
+export function repoIdentity(): { repo: GitlabRepo | null; error: string | null } {
+  return { repo: TARGET.repo, error: TARGET.error };
 }
 
 let _project: ProjectConfig | null = null;
 export function projectConfig(): ProjectConfig {
   if (!_project) {
-    const c = loadJson<ProjectConfig>('project.json');
-    const t = activeTarget();
-    if (t) {
-      if (t.gitlab?.project) c.gitlab.project = t.gitlab.project;
-      if (typeof t.gitlab?.projectId === 'number') c.gitlab.projectId = t.gitlab.projectId;
-      if (t.branches?.base) c.branches.base = t.branches.base;
-      // Object.assign, so a target that names no label changes none, and a
-      // label set to '' is the documented way to switch an optional one off.
-      if (t.labels) Object.assign(c.labels, t.labels);
-    }
-    c.gitlab.apiUrl = envOr('ONESHOT_GITLAB_API', c.gitlab.apiUrl);
-    c.gitlab.project = envOr('ONESHOT_GITLAB_PROJECT', c.gitlab.project);
-    const idOverride = envOr('ONESHOT_PROJECT_ID');
-    if (idOverride) c.gitlab.projectId = Number(idOverride);
+    const c = loadJson<Omit<ProjectConfig, 'gitlab'>>('project.json') as ProjectConfig;
+    // A getter rather than a value, so that a machine without GITLAB_REPO_URL
+    // can still read labels and branches: only asking WHICH project throws.
+    Object.defineProperty(c, 'gitlab', { get: gitlabRepo, enumerable: false, configurable: true });
+    // Shared with the Plane triage router, so the gates and the routing can never disagree.
+    const risk = loadJson<{ modules: Array<{ paths?: string[] }> }>('risk-modules.json');
+    c.highScrutinyPaths = [...new Set([...(c.highScrutinyPaths ?? []), ...risk.modules.flatMap((m) => m.paths ?? [])])];
     _project = c;
   }
   return _project;
@@ -604,9 +560,18 @@ export const PAUSE_QUOTA = join(STATE, 'PAUSE-QUOTA');
 export const PAUSE_NETWORK = join(STATE, 'PAUSE-NETWORK');
 export const DB_PATH = join(STATE, 'oneshot.db');
 
-export const WORK_REPO = targetPath(
-  activeTarget()?.workRepo, 'WORK_REPO', '~/Documents/workstreamai',
-);
+/**
+ * The clone of GITLAB_REPO_URL that per-ticket worktrees are cut from:
+ * ONESHOT_<NAME>_WORK_REPO, else WORK_REPO, else ~/Documents/<name>.
+ *
+ * A plain WORK_REPO wins over the derived default like any other env var, so a
+ * line left over from another project WOULD point the conductor at the wrong
+ * clone — which is why boot and doctor refuse a WORK_REPO whose origin is not
+ * GITLAB_REPO_URL (src/lib/repocheck.ts). That check, not an override rule, is
+ * what keeps the URL the single source of truth. '' when nothing supplies a
+ * path; boot refuses that too, before any git command could run in the cwd.
+ */
+export const WORK_REPO = TARGET.workRepo.path;
 export const CONTEXT_REPO = expandPath(envOr('CONTEXT_REPO', '~/Documents/erp'));
 // Skills, agents and rules are vendored into this repo under `context/` (a
 // committed snapshot of the ERP context repo's `.claude`, which also stays in
@@ -616,7 +581,19 @@ export const CONTEXT_REPO = expandPath(envOr('CONTEXT_REPO', '~/Documents/erp'))
 // (e.g. `~/Documents/erp/.claude`) when a machine's interactive edits should
 // win over the vendored copy.
 export const SKILLS_ROOT = expandPath(envOr('ONESHOT_SKILLS_ROOT', join(ROOT, 'context')));
-export const WT_ROOT = targetPath(activeTarget()?.wtRoot, 'WT_ROOT', '~/Documents/oneshot-wt');
+/**
+ * Where leased worktrees live: ONESHOT_<NAME>_WT_ROOT, else WT_ROOT, else
+ * ~/Documents/<name>-wt. Per project by default because worktrees are named by
+ * ticket iid, so one root shared by two projects would collide issue 100 with
+ * issue 100.
+ */
+export const WT_ROOT = TARGET.wtRoot.path;
+
+function seedPath(): ResolvedPath {
+  return resolvePath(process.env, {
+    name: PROJECT_TARGET, envName: 'ONESHOT_SEED_FROM', fallback: '', root: ROOT,
+  });
+}
 
 /**
  * The installed clone a leased worktree borrows node_modules, venv and
@@ -625,8 +602,62 @@ export const WT_ROOT = targetPath(activeTarget()?.wtRoot, 'WT_ROOT', '~/Document
  * quietly becoming WORK_REPO.
  */
 export function seedFrom(): string {
-  const t = activeTarget();
-  return t?.seedFrom ? expandPath(t.seedFrom) : expandPath(envOr('ONESHOT_SEED_FROM', ''));
+  return seedPath().path;
+}
+
+/**
+ * Which variable supplied each project path — the scoped ONESHOT_<NAME>_<VAR>,
+ * the plain one, or the default derived from GITLAB_REPO_URL — for doctor to
+ * say, since a path nobody can trace to a line in .env is a path nobody fixes.
+ */
+export function pathSources(): Record<'WORK_REPO' | 'WT_ROOT' | 'ONESHOT_SEED_FROM', ResolvedPath> {
+  return { WORK_REPO: TARGET.workRepo, WT_ROOT: TARGET.wtRoot, ONESHOT_SEED_FROM: seedPath() };
+}
+
+/**
+ * The project, and the paths the conductor resolved for it, as a session's
+ * environment — merged over BASE_ENV by the phase runner.
+ *
+ * A session's environment is an allowlist, and scripts/app.cjs inside one has
+ * no conductor to inherit from: it loads ONESHOT_HOME/.env and resolves the
+ * project again. Resolving is shared (repourl.cjs), but the INPUTS were not —
+ * a GITLAB_REPO_URL exported in the shell, or a WORK_REPO that differs from
+ * .env, reached the conductor and not the session, so the session's
+ * `app.cjs ensure` could refuse with "GITLAB_REPO_URL is not set", or seed and
+ * check out another project's clone. Handing over the resolved values makes the
+ * session resolve exactly what the conductor did.
+ *
+ * Every other spelling that could outrank them — the scoped
+ * ONESHOT_<NAME>_<VAR>, the ONELOOP_ forms, the legacy selectors the conductor
+ * has already judged — is set to '' rather than left out: dotenv only fills a
+ * key that is ABSENT, and repourl.cjs reads '' as unset. The seed is passed as
+ * the conductor resolved it; '' (seeding off here) is what makes app.cjs fall
+ * back to WORK_REPO, as it always has.
+ *
+ * ONESHOT_SKIP_REPO_CHECK is handed over the same way: '1' when the conductor
+ * booted with it on, '' otherwise, both spellings. Exported only in the shell
+ * it would otherwise let boot through while every session's `app.cjs ensure`
+ * refused the same origin — and a line in ONESHOT_HOME/.env may not switch it
+ * on or off behind the conductor's back.
+ */
+export function projectSessionEnv(): Record<string, string> {
+  const { repo } = repoIdentity();
+  if (!repo) return {};
+  const env: Record<string, string> = {
+    [REPO_URL_VAR]: repo.url,
+    WORK_REPO,
+    WT_ROOT,
+    ONESHOT_SEED_FROM: seedFrom(),
+    ONELOOP_SEED_FROM: '',
+  };
+  for (const v of ['WORK_REPO', 'WT_ROOT', 'ONESHOT_SEED_FROM']) {
+    const scoped = scopedEnvName(v);
+    if (scoped) for (const k of spellings(scoped)) env[k] = '';
+  }
+  for (const k of LEGACY_SELECTOR_KEYS) env[k] = '';
+  for (const k of spellings(SKIP_REPO_CHECK_VAR)) env[k] = '';
+  if (repoCheckOverride(process.env)) env[SKIP_REPO_CHECK_VAR] = '1';
+  return env;
 }
 
 export function runDir(iid: number): string { return join(RUNS, String(iid)); }

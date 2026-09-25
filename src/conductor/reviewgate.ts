@@ -126,8 +126,9 @@ export function reviewAllRuns(): boolean {
  *
  * Substring matching against repo-relative paths, deliberately: `apps/payroll/`
  * should catch everything beneath it, and a pattern list is easier to audit
- * than a set of regexes nobody can read. Configured per project, and an empty
- * list turns the whole behaviour off.
+ * than a set of regexes nobody can read. Configured per project, and derived at
+ * load from the `paths` of every module in config/risk-modules.json — dropping a
+ * module's `paths` there is what disarms it.
  */
 export function highScrutinyHits(files: string[]): string[] {
   const guarded = projectConfig().highScrutinyPaths ?? [];
@@ -638,7 +639,7 @@ async function mentionOrName(username: string): Promise<string> {
  * Slack reserves `&`, `<` and `>` in message text, and `|` additionally
  * terminates the label inside a link — so a ticket called
  * "Payroll | increments not applied" would render as a link reading
- * "#42 Payroll" with the rest spilled out, and one containing `<` can break
+ * "#123 Payroll" with the rest spilled out, and one containing `<` can break
  * the link outright. Titles are written by whoever opened the issue, so this
  * is data, not a constant, and the gate ask is the one message that puts a
  * title inside a link label rather than beside one.

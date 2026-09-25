@@ -27,13 +27,17 @@ import { existsSync } from 'node:fs';
 import { connect } from 'node:net';
 import { basename } from 'node:path';
 import {
-  PAUSE, ROOT,
-  budgetConfig, envOr, phaseByName, portPool, projectConfig,
+  PAUSE, PROJECT_TARGET, ROOT, WORK_REPO, WT_ROOT,
+  budgetConfig, envOr, pathSources, phaseByName, portPool, repoIdentity, seedFrom,
 } from '../src/lib/config.js';
 import { db, reconcileForeignRuns } from '../src/lib/db.js';
 import { anyLive, liveConductors } from '../src/lib/fleet.js';
 import { ping } from '../src/lib/gitlab.js';
 import { accountWindowPct, checkQuota, dayUsage, windowUsage } from '../src/lib/quota.js';
+import {
+  checkoutFindings, identityFindings, relaxRepoChecks, repoCheckOverrideNotice, wtRootFinding, type Finding,
+} from '../src/lib/repocheck.js';
+import { foreignJournalFinding } from '../src/lib/journalproject.js';
 
 let fails = 0;
 let warns = 0;
@@ -60,6 +64,36 @@ function skip(label: string, detail = ''): void {
   console.log(`  ${D}SKIP${X}  ${label}${detail ? ` ${D}${detail}${X}` : ''}`);
 }
 function section(name: string): void { console.log(`\n${name}`); }
+function report(f: Finding): void {
+  if (f.level === 'fail') fail(f.label, f.detail);
+  else if (f.level === 'warn') warn(f.label, f.detail);
+  else pass(f.label, f.detail);
+}
+
+// --------------------------------------------------------------------- project
+
+/**
+ * The same refusals boot makes (src/index.ts), so "READY" here can never
+ * precede a conductor that will not start: an unusable GITLAB_REPO_URL, a
+ * legacy selector that disagrees with it, a WORK_REPO or seed cloned from
+ * another project, a WT_ROOT shared with another project or moved away from
+ * this project's worktrees. Past an unusable URL there is no project to judge
+ * the rest against, so they are not run.
+ */
+function checkProject(): void {
+  section('Project');
+  const override = repoCheckOverrideNotice();
+  if (override) report({ level: 'warn', label: 'repo checks overridden', detail: override });
+  for (const f of relaxRepoChecks(identityFindings())) report(f);
+  if (!repoIdentity().repo) return;
+  if (!WORK_REPO || !existsSync(WORK_REPO)) fail('WORK_REPO does not exist', WORK_REPO || 'no path');
+  const sources = pathSources();
+  const wt = wtRootFinding(WT_ROOT, sources.WT_ROOT, PROJECT_TARGET);
+  const checks = [...checkoutFindings({ workRepo: WORK_REPO, seed: seedFrom(), sources }), ...(wt ? [wt] : [])];
+  for (const f of relaxRepoChecks(checks)) report(f);
+  const foreignRuns = foreignJournalFinding();
+  if (foreignRuns) report(foreignRuns);
+}
 
 // --------------------------------------------------------------------- network
 
@@ -76,11 +110,12 @@ interface GitlabIdentity { id: number; username: string; name: string; bot?: boo
  */
 async function tokenIdentity(): Promise<GitlabIdentity | null> {
   const token = envOr('GITLAB_TOKEN');
-  if (!token) return null;
+  const api = repoIdentity().repo?.apiUrl;
+  if (!token || !api) return null;
   const controller = new AbortController();
   const killer = setTimeout(() => controller.abort(), 20_000);
   try {
-    const res = await fetch(`${projectConfig().gitlab.apiUrl}/user`, {
+    const res = await fetch(`${api}/user`, {
       headers: { 'PRIVATE-TOKEN': token },
       signal: controller.signal,
     });
@@ -103,6 +138,8 @@ async function checkNetwork(): Promise<void> {
 
   if (!envOr('GITLAB_TOKEN')) {
     fail('GITLAB_TOKEN unset', 'nothing can be claimed, labelled or merged');
+  } else if (!repoIdentity().repo) {
+    skip('GitLab', 'no project to reach until GITLAB_REPO_URL is fixed (see Project)');
   } else {
     const p = await ping();
     if (p.ok) {
@@ -477,6 +514,7 @@ function checkQuotaHeadroom(): void {
 async function main(): Promise<void> {
   console.log('\nOneshot preflight');
 
+  checkProject();
   await checkNetwork();
   repairStaleState();
   await checkCredentials();

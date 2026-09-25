@@ -229,7 +229,7 @@ Work top to bottom. The first row that matches is your answer.
 | `error_max_turns` in the journal | `config/phases.json` `maxTurns` | Turn cap too small for the work. **A human must edit it** (§5) |
 | Phase `warned` with `timed out after Nm while still working` | journal | `timeoutMin` too small. Same fix, same restart requirement |
 | Run `blocked`, `blockedWhy` set | journal + §6 | Read the vocabulary table in §6 |
-| Ticket labelled `Loop` never claimed | watcher skip ladder | Carries `merged` or `Needs Human`; or already claimed; or no free slot; or in block cooldown |
+| Ticket labelled `Loop` never claimed | watcher skip ladder | Carries `labels.exit` (`Merged`) or `labels.blocked` (`Needs Human`); or already claimed; or no free slot; or in block cooldown |
 | `at capacity — N run(s) in flight here` every tick | §7 | **Normal.** Not a fault |
 | Run owned by a conductor not in your live set | §1a | Orphan. Reclaimable — a live conductor picks it up, or `npm run unblock` |
 
@@ -300,9 +300,11 @@ count `failed` records for that phase and compare against `maxLaps`/`maxRetries`
    (`src/lib/reachability.ts`, `let state = 'ok'`), so a restart resets it to `ok` and
    `clearPause()` is never reached. A file written by a dead conductor **never self-clears**.
    It only means anything if `checked_at` is **under 15 minutes** old (`NETWORK_PAUSE_STALE_MS`,
-   `hooks/_common.cjs:120`). Confirm independently:
-   `curl -s -o /dev/null -w '%{http_code}\n' https://gitlab.arbisoft.com/api/v4/version` — **401
-   means reachable** (the server answered; the breaker treats 401/403 as auth, not outage).
+   `hooks/_common.cjs:120`). Confirm independently against the API root derived from
+   `GITLAB_REPO_URL` — the host is never written down anywhere else, so ask the same parser the
+   conductor uses:
+   `cd ~/Documents/oneshot && curl -s -o /dev/null -w '%{http_code}\n' "$(node -e "require('dotenv').config({quiet:true});console.log(require('./src/lib/repourl.cjs').parseRepoUrl(process.env.GITLAB_REPO_URL).apiUrl)")/version"`
+   — **401 means reachable** (the server answered; the breaker treats 401/403 as auth, not outage).
 3. **Conductor rows with `heartbeat_at = 0` / dated 1970.** Cleanly retired. `endConductor()`
    zeroes the heartbeat on purpose.
 4. **A `done` run still carrying an `owner`.** Normal — the owner is not cleared on completion.

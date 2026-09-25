@@ -9,8 +9,18 @@
  * `npm run token:set -- --show` reports what would be used without changing it.
  */
 import { createInterface } from 'node:readline';
-import { resolveToken, writeDeskToken, DESK_TOKEN_FILE, SETUP_HINT } from '../src/lib/token.js';
+import { join } from 'node:path';
+import { config as loadDotenv } from 'dotenv';
+import { resolveToken, writeDeskToken, DESK_TOKEN_FILE, setupHint, tokenPageUrl } from '../src/lib/token.js';
 import { tokenIdentity, claudeAccountEmail, usernameFromEmail } from '../src/lib/identity.js';
+import { repoFromEnv } from '../src/lib/repourl.cjs';
+
+// This script never imports config.ts (which is what loads .env for everything
+// else), so without this it could not see GITLAB_REPO_URL — the only thing that
+// says which GitLab to validate the token against and where to create one. It
+// then also sees GITLAB_TOKEN, which is what the conductor itself would fall back
+// to, so `--show` reports what a run would actually use.
+loadDotenv({ path: join(import.meta.dirname, '..', '.env'), quiet: true });
 
 const G = '\x1b[32m'; const Y = '\x1b[33m'; const R = '\x1b[31m'; const D = '\x1b[2m'; const X = '\x1b[0m';
 
@@ -18,7 +28,7 @@ async function whoIs(): Promise<void> {
   const r = resolveToken();
   if (!r.token) {
     console.log(`  ${Y}none${X}  no GitLab token on this desk\n`);
-    console.log(SETUP_HINT);
+    console.log(setupHint());
     return;
   }
   console.log(`  source  ${r.source}  ${D}${r.where}${X}`);
@@ -44,10 +54,15 @@ async function whoIs(): Promise<void> {
 async function main(): Promise<void> {
   console.log('\nOneshot desk token\n');
 
+  // Both modes ask GitLab who a token is, and without the URL there is no
+  // GitLab to ask — which would otherwise read as "GitLab rejected your token".
+  const { repo, error } = repoFromEnv(process.env);
+  if (!repo) { console.log(`${R}${error}${X}\n`); process.exitCode = 1; return; }
+
   if (process.argv.includes('--show')) { await whoIs(); console.log(); return; }
 
   console.log(`${D}Create a personal access token with scope 'api' at`);
-  console.log(`https://gitlab.arbisoft.com/-/user_settings/personal_access_tokens${X}\n`);
+  console.log(`${tokenPageUrl()}${X}\n`);
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   const token = await new Promise<string>((res) => {
