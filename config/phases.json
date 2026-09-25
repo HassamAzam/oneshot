@@ -197,10 +197,8 @@
       "maxLaps": 2,
       "coding": true,
       "needsPort": true,
-      "_why_skills": "local-browser-verify is how the app comes up and how a case is driven; erp-ticket-test-data is how the state a case asserts against is MADE. Only the first was declared, so the phase had a method for the browser and none for the database \u2014 and it improvised one per session. The cost is in the artifacts: run 46 reported TC-07 blocked because an earlier session's drag case moved an entry between day columns and the mutation persisted in the shared DB, so the empty-state the case needed no longer existed; run 53 lost five cases to pre-existing contaminated day-log rows and hand-fixed one of three before giving up; runs 32 and 46 each skipped a case whose data 'could not be fabricated within budget'. Discovery-first, transaction rollback for a measurement, idempotent get_or_create and cleanup tracking are exactly those failures, and they are already written down in that skill. It is shaped for a person on dev/stage with a webshell, which this phase is not \u2014 src/phases/prompts.ts carries the two boundaries that reframe it (the local seeded DB via the venv shell, and no user to hand a script to), the same way research's prose and its skill are gated together.",
       "skills": [
-        "local-browser-verify",
-        "erp-ticket-test-data"
+        "local-browser-verify"
       ],
       "artifact": "verify.json"
     },
@@ -287,7 +285,7 @@
       "skills": [
         "mr-feedback"
       ],
-      "_why_skills": "The four dispositions and the output contract are in the prompt; the JUDGEMENT is not \u2014 what clears the bar for `decline`, why a merely inconvenient request is a `fix`, how small a `plan` has to stay, and the fact that a reply cannot @mention anyone because respond.ts neutralises it. That is skill-shaped, and it was prose nobody could edit without touching TypeScript.",
+      "_why_skills": "The dispositions' definitions and the output contract are owned by the prompt (src/mrfeedback/prompts.ts triagePrompt); the skill's table only restates them. What the skill adds is the JUDGEMENT the prompt does not carry \u2014 what clears the bar for `decline`, why a merely inconvenient request is a `fix`, how small a `plan` has to stay, and the fact that a reply cannot @mention anyone because respond.ts neutralises it. That is skill-shaped, and it was prose nobody could edit without touching TypeScript.",
       "artifact": "mr-feedback.json",
       "_why": "ON DEMAND: the merge phase finds new review threads on the run's MR and the runner invokes this to decide what each one needs \u2014 fix, already-done, question or decline. HEAVY because declining a reviewer or answering a question from the code is judgement, and a wrong 'fix' costs a full implement\u2192verify lap. cwd 'worktree' so it reads the actual diff; writes 'run' only and no GitLab write tools (phase.ts), so it can neither change the code nor post \u2014 the conductor replies after the fixes are verified. onFail 'blocked' because an untriaged comment is a reviewer nobody answered; infra deaths still retry for free, since re-entering merge re-detects the same threads. See src/mrfeedback and config/mr-feedback.json."
     }
