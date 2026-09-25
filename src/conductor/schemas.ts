@@ -161,7 +161,7 @@ export const RESEARCH_SCHEMA = phaseSchema({
       steps: strArr('The steps you actually executed, in order, each with what you did.'),
       expected: str('What the ticket says SHOULD happen.'),
       observed: str('What actually happened when you ran the steps — concrete values, not impressions.'),
-      evidence: strArr('Bare filenames of screenshots written to the run artifacts dir, plus any measurement.'),
+      evidence: strArr('Bare filenames of screenshots written to the run artifacts dir, plus any measurement. For reproduced and not-reproduced the screenshots are attached to the ticket comment.'),
       reason: str('Why this verdict. For inconclusive or not-applicable, what stopped you.'),
     },
     required: ['kind', 'verdict', 'testedCommit', 'account', 'steps', 'expected', 'observed', 'evidence', 'reason'],

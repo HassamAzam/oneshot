@@ -78,7 +78,7 @@ import {
   claimOwnership, claimTicket, getRun, logEvent, phaseEnd, phaseStart, updateRun,
 } from '../lib/db.js';
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
-import { declareNotABug, notABugDecision } from './reproduction.js';
+import { declareNotABug, declareReproduced, notABugDecision, reproductionOf } from './reproduction.js';
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
@@ -1477,6 +1477,8 @@ export async function runTicket(
           claim({ kind: 'stop', status: 'aborted', reason, noRemediation: true }, r.cfg.name);
           continue;
         }
+        const repro = reproductionOf(r.out.data);
+        if (repro?.verdict === 'reproduced') await declareReproduced(iid, repro);
       }
       if (r.cfg.name === 'implement' && activeRound(j.mrFeedback)?.status === 'fixing') {
         const addressed = addressedFeedbackOf(r.out.data);
