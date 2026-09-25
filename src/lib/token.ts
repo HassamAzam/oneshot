@@ -34,14 +34,15 @@
  *                               already ran `glab auth login`.
  *   5. GITLAB_TOKEN              the legacy shared token. Still works; warns.
  *
- * NOT a source: the git credential helper. Both GitLab remotes here are SSH
- * (`git@gitlab.arbisoft.com:…`), and an SSH key cannot call the REST API — so
- * there is nothing to read, and looking would only produce a confusing miss.
+ * NOT a source: the git credential helper. The GitLab remotes here are SSH
+ * (`git@<host>:…`), and an SSH key cannot call the REST API — so there is
+ * nothing to read, and looking would only produce a confusing miss.
  */
 import { readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { isPlaceholder, repoFromEnv } from './repourl.cjs';
 
 export type TokenSource =
   | 'ONESHOT_GITLAB_TOKEN' | 'desk-file' | 'keychain' | 'glab' | 'GITLAB_TOKEN' | 'none';
@@ -58,7 +59,11 @@ export interface ResolvedToken {
 export const DESK_TOKEN_FILE = join(homedir(), '.config', 'oneshot', 'gitlab-token');
 const KEYCHAIN_SERVICE = 'oneshot-gitlab';
 
-const env = (n: string): string => process.env[n]?.trim() || '';
+/** An unreplaced .env.example placeholder counts as unset, the same rule envOr applies. */
+const env = (n: string): string => {
+  const v = process.env[n]?.trim() || '';
+  return isPlaceholder(v) ? '' : v;
+};
 
 function fromFile(): string {
   try {
@@ -129,10 +134,25 @@ export function writeDeskToken(token: string): string {
   return DESK_TOKEN_FILE;
 }
 
+/**
+ * Where to create a personal access token: on the GitLab that GITLAB_REPO_URL
+ * names, since a token from any other instance cannot act on that project.
+ *
+ * A function rather than a constant because this module is evaluated before
+ * config.ts has loaded .env (config.ts -> identity.ts -> token.ts), so a value
+ * captured at load would never see the URL.
+ */
+export function tokenPageUrl(): string {
+  const { repo } = repoFromEnv(process.env);
+  const origin = repo ? repo.origin : '<your GitLab, from GITLAB_REPO_URL>';
+  return `${origin}/-/user_settings/personal_access_tokens`;
+}
+
 /** What to tell an operator who has no token yet. */
-export const SETUP_HINT =
-  'Give this desk its own GitLab token:  npm run token:set\n'
-  + '  Create one at https://gitlab.arbisoft.com/-/user_settings/personal_access_tokens\n'
-  + '  with scope `api`. It is written to ~/.config/oneshot/gitlab-token, mode 0600,\n'
-  + '  outside every repo. The conductor then acts as YOU, and only claims tickets\n'
-  + '  assigned to you.';
+export function setupHint(): string {
+  return 'Give this desk its own GitLab token:  npm run token:set\n'
+    + `  Create one at ${tokenPageUrl()}\n`
+    + '  with scope `api`. It is written to ~/.config/oneshot/gitlab-token, mode 0600,\n'
+    + '  outside every repo. The conductor then acts as YOU, and only claims tickets\n'
+    + '  assigned to you.';
+}

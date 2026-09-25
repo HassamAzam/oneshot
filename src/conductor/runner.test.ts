@@ -1,9 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  codePhaseStatus, mergePollWait, nextIndex, salvagedReview, testcaseGateRoute,
+  codePhaseStatus, decideClaim, mergePollWait, nextIndex, salvagedReview, testcaseGateRoute,
+  uiEvidenceRefusal,
 } from './runner.js';
 import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
+import type { RunJournal } from '../lib/artifacts.js';
+import type { JournalOwner } from '../lib/journalproject.js';
 
 function phase(name: string, n: number, group?: string): PhaseConfig {
   return { name, n, kind: 'session', timeoutMin: 30, onFail: 'abort', ...(group ? { group } : {}) };
@@ -24,20 +27,24 @@ const at = (name: string): number => LIST.findIndex((p) => p.name === name);
  * runner.ts's shouldSkip(), which is what decides whether a phase the index
  * lands on is actually RUN. Asserting on this rather than on the `forced` set
  * is the point: the defect below was invisible from the set alone.
+ *
+ * `settled`, not `succeeded`: shouldSkip() consults phaseSettled(), so a phase
+ * recorded 'skipped' by its own `onFail: 'skip'` policy counts here too. See
+ * lib/phase-settled.test.ts for that distinction on its own.
  */
-const skips = (forced: Set<string>, succeeded: string[], name: string): boolean =>
-  !forced.has(name) && succeeded.includes(name);
+const skips = (forced: Set<string>, settled: string[], name: string): boolean =>
+  !forced.has(name) && settled.includes(name);
 
 test('a retry re-runs a phase that already succeeded on an earlier lap', () => {
   const forced = new Set<string>();
-  // #168: plan passed, the run cycled back, and the re-plan against reviewer
+  // The case: plan passed, the run cycled back, and the re-plan against reviewer
   // feedback died of infra. afterFailure() returns a retry at plan's index —
   // which reached a phase with a succeeded record on it.
   const i = nextIndex({ kind: 'retry', at: at('plan') }, at('plan'), at('plan'), LIST, forced);
 
   assert.equal(i, at('plan'));
   assert.equal(skips(forced, ['research', 'plan'], 'plan'), false,
-    'the retried phase was skipped as already-done — this is the #168 defect');
+    'the retried phase was skipped as already-done — this is the defect');
 });
 
 test('a retry forces only the retried phase, so a grouped retry runs solo', () => {
@@ -72,6 +79,40 @@ test('an advance steps past the last member of a group, not past the current ind
     at('verify'),
   );
   assert.deepEqual([...forced], []);
+});
+
+// ------------------------------------------------ whose journal, at the claim
+
+const journal = (o: Partial<RunJournal> = {}): RunJournal => ({
+  runId: 'r1', iid: 237, project: 'gitlab.example.com/acme/erp', title: 't',
+  url: 'https://gitlab.example.com/acme/erp/-/issues/237', createdAt: 1, status: 'aborted',
+  worktree: '/wt/t237-r1', mrIid: 12,
+  phases: [{ phase: 'plan', status: 'ok' }, { phase: 'implement', status: 'ok' }] as RunJournal['phases'],
+  ...o,
+});
+const OURS: JournalOwner = { kind: 'ours', adopt: false };
+const DROP: JournalOwner = {
+  kind: 'ours', adopt: false, dropWorktree: true, why: 'its recorded worktree /wt/t237-r1 is a checkout of x',
+};
+
+test('a journal of another project is archived and the ticket starts fresh, whatever its status', () => {
+  for (const status of ['running', 'aborted', 'parked', 'blocked'] as const) {
+    const j = journal({ status, blockedAt: 0 });
+    assert.deepEqual(decideClaim(j, { kind: 'foreign', why: 'x' }), { kind: 'fresh', archive: 'r1' }, status);
+  }
+});
+
+test('an ours journal whose worktree is dropped still RESUMES — its phases and MR are never thrown away', () => {
+  for (const owner of [OURS, DROP, { kind: 'ours', adopt: true } as JournalOwner]) {
+    const j = journal();
+    const d = decideClaim(j, owner);
+    assert.equal(d.kind, 'resume', JSON.stringify(owner));
+    assert.equal(d.kind === 'resume' && d.journal, j);
+  }
+  // Only its own status decides otherwise, exactly as for any journal of ours.
+  assert.deepEqual(decideClaim(journal({ status: 'done' }), DROP), { kind: 'fresh', archive: 'r1' });
+  assert.equal(decideClaim(journal({ status: 'blocked', blockedAt: Date.now() }), DROP).kind, 'refuse');
+  assert.deepEqual(decideClaim(null, null), { kind: 'fresh', archive: null });
 });
 
 // ------------------------------------------------ merge parked on a human merge
@@ -119,7 +160,7 @@ test('nothing holds a run that is not waiting on a human merge', () => {
   assert.equal(poll({ lastCheckAt: undefined }), null, 'never asked GitLab yet: ask now');
 });
 
-// workstreamai#87: the reviewer wrote "TC-05 is removed and replaced by the
+// The case: the reviewer wrote "TC-05 is removed and replaced by the
 // three separate cases below". Appending that produced a case reading `Verify
 // that TC-05 is removed and replaced by...`, left TC-05 in place, and took the
 // list from 20 cases to 44. A revision has to reach a model, and the only way
@@ -147,6 +188,68 @@ test('a revision with no testcases phase to cycle parks, never silently proceeds
   // Treating a revision as an approval because the board is misconfigured would
   // turn a reviewer asking for changes into a sign-off they never gave.
   assert.equal(testcaseGateRoute('feedback', false), 'park');
+});
+
+/**
+ * `uiEvidenceRefusal` — the two ways a pack can report success and prove nothing.
+ *
+ * Both are reachable today: the schema requires `screenshots` and `observations`
+ * to be PRESENT, and an empty array satisfies that. `publish.ts` then returns
+ * null for a pack with nothing in it, so the MR gets no comment and the phase
+ * still records ok. The reviewer is told nothing and nobody is told why.
+ */
+const pack = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  screenshots: [], observations: [], designConformance: [], ...over,
+});
+const shot = { file: 'a.png', caption: 'the reset page', caseId: 'TC-1' };
+const obs = (before: string, after: string) => ({
+  what: 'document.title on /accounts/password_reset/',
+  before, after, how: 'Playwright page.title()', caseId: 'TC-1',
+});
+
+test('a pack with no screenshots and no observations is refused', () => {
+  const why = uiEvidenceRefusal(pack());
+  assert.ok(why, 'a pack that produced nothing must not record ok');
+  assert.match(why, /no screenshots/i);
+});
+
+test('either kind of evidence on its own is a complete pack', () => {
+  // The prompt explicitly promises this: a non-visual change is allowed to
+  // return zero screenshots and a full table, and must not be failed for it.
+  assert.equal(uiEvidenceRefusal(pack({ screenshots: [shot] })), null);
+  assert.equal(uiEvidenceRefusal(pack({ observations: [obs('', 'Forgot Password')] })), null);
+});
+
+test('a design-conformance pack with nothing else is not refused', () => {
+  const rows = [{ screenId: 's1', designShot: 'd.png', builtShot: 'b.png', differences: [] }];
+  assert.equal(uiEvidenceRefusal(pack({ designConformance: rows })), null);
+});
+
+test('an observation table where every value is unchanged is refused', () => {
+  const why = uiEvidenceRefusal(pack({ observations: [obs('en', 'en'), obs(' x ', 'x')] }));
+  assert.ok(why, 'a table that shows no change is not evidence of a change');
+  assert.match(why, /unchanged/i);
+});
+
+test('one unchanged row among changed ones is a control, not a refusal', () => {
+  // A row proving something did NOT regress is legitimate evidence. Only a
+  // table where NOTHING moved proves nothing.
+  const rows = [obs('', 'Forgot Password'), obs('en', 'en')];
+  assert.equal(uiEvidenceRefusal(pack({ observations: rows })), null);
+});
+
+test('an unmeasured base is not counted as unchanged', () => {
+  // `before` is allowed to be "not measured" with a reason. That row is honest
+  // about proving nothing; it must not be read as before === after.
+  const why = uiEvidenceRefusal(pack({ observations: [obs('not measured — no base app', 'en')] }));
+  assert.equal(why, null);
+});
+
+test('a phase that returned no artifact at all is left to the caller', () => {
+  // r.out.ok is false in that case and the runner already fails it; returning a
+  // second reason here would double-report one failure.
+  assert.equal(uiEvidenceRefusal(null), null);
+  assert.equal(uiEvidenceRefusal(undefined), null);
 });
 
 const finding = (id: string, severity: string) => ({

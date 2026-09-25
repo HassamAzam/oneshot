@@ -44,9 +44,10 @@
  */
 import { execFile } from 'node:child_process';
 import { existsSync, rmSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, modelFor,
+  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -57,8 +58,11 @@ import {
 } from '../lib/claims.js';
 import { collectTicketDocs } from '../lib/ticketdocs.js';
 import {
+  currentProjectKey, journalOwner, worktreeToResume, type JournalOwner,
+} from '../lib/journalproject.js';
+import {
   archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
-  phaseSucceeded, readArtifact,
+  phaseSucceeded, phaseSettled, readArtifact,
   readJournal, recordPhase, recordRemediation, reapScratch, updateJournal, writeArtifact,
   writeJournal,
   type PhaseRecord, type Remediation, type RunJournal,
@@ -69,7 +73,7 @@ import {
 } from '../lib/worktrees.js';
 import {
   addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
-  allIssueNotes, issueUrl, swapLabel, type Issue,
+  allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
 import { checkQuota } from '../lib/quota.js';
@@ -87,11 +91,12 @@ import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
-import { mergePhase } from './codephases.js';
+import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
-  appendEdgeCases, checkApprovalGate, declaredFiles, gatesApply, planApprovalRequestBody,
-  planApprovedRecordBody, reviewAllRuns, reviewLabelPresent, testcasesApprovalRequestBody,
-  testcasesApprovedRecordBody, triggerLine,
+  appendEdgeCases, checkApprovalGate, declaredFiles, designApprovalRequestBody,
+  designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
+  planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
+  testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { Ticket, TestCase } from '../phases/types.js';
@@ -197,6 +202,7 @@ export const CODE_PHASES: Record<
     feedback?: MrFeedbackSignal;
   }>) | undefined
 > = {
+  'mr-open': mrOpenPhase,
   merge: mergePhase,
 };
 
@@ -277,7 +283,7 @@ async function fetchTicket(iid: number): Promise<Ticket | null> {
 
 // -------------------------------------------------------------------- resuming
 
-type ResumeDecision =
+export type ResumeDecision =
   | { kind: 'fresh'; archive: string | null }
   | { kind: 'resume'; journal: RunJournal }
   | { kind: 'refuse'; reason: string };
@@ -314,6 +320,19 @@ function decideResume(existing: RunJournal | null): ResumeDecision {
   }
 
   return { kind: 'fresh', archive: existing.runId };
+}
+
+/**
+ * decideResume() for a journal journalOwner() has judged. One that is another
+ * project's by its own record is never resumed, whatever its status: it is
+ * archived after the claim and the ticket starts fresh. One that is ours is
+ * decided on its status alone — including when its worktree has to be dropped,
+ * which is a question for the resume (worktreeToResume()), never a reason to
+ * throw away its phases and open a second MR.
+ */
+export function decideClaim(existing: RunJournal | null, owner: JournalOwner | null): ResumeDecision {
+  if (existing && owner?.kind === 'foreign') return { kind: 'fresh', archive: existing.runId };
+  return decideResume(existing);
 }
 
 // -------------------------------------------------------------- control flow
@@ -448,6 +467,61 @@ function failedCases(name: string, data: Record<string, unknown> | null | undefi
 }
 
 /**
+ * Refuse a UI-evidence pack that reports success and proves nothing.
+ *
+ * `UI_EVIDENCE_SCHEMA` requires `screenshots` and `observations` to be PRESENT,
+ * and an empty array satisfies that. So a session can return both empty, record
+ * ok, and publish nothing at all: `publish.ts` returns null for a pack with no
+ * attachments, no observations and no conformance rows, which is silent by
+ * design — there is genuinely nothing to say. The hole is that nothing says it
+ * to anyone. The reviewer gets an MR with no evidence comment and the journal
+ * says the phase passed.
+ *
+ * Two shapes are refused, and only these two:
+ *
+ *   - nothing at all. Either kind of evidence on its own is complete: the
+ *     prompt promises a non-visual change that zero screenshots and a full
+ *     table is a whole pack, and that promise has to hold here too.
+ *   - an observation table in which no value moved. A row proving something
+ *     did NOT regress is legitimate, so one unchanged row among changed ones
+ *     is a control, not a defect. A table where NOTHING moved is the defect:
+ *     it is published as the evidence for a change it does not show.
+ *
+ * What this does NOT ask is whether the evidence is honest. A value painted
+ * onto the page before the capture, or a base read from a checkout the session
+ * altered to produce it, both yield packs that pass here — those are guarded at
+ * the Bash surface in `git-guard.cjs` and in the phase prompt. This answers the
+ * cheaper question underneath: is there any evidence at all.
+ *
+ * ui-evidence is `onFail: warn`, so a refusal flags the pack and lets the run
+ * carry on to the MR. Evidence quality should not hold a correct fix.
+ */
+export function uiEvidenceRefusal(
+  data: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!data) return null;
+  const arr = (k: string): unknown[] => (Array.isArray(data[k]) ? data[k] as unknown[] : []);
+  const shots = arr('screenshots');
+  const observations = arr('observations') as Array<{ before?: string; after?: string }>;
+  const conformance = arr('designConformance');
+
+  if (shots.length === 0 && observations.length === 0 && conformance.length === 0) {
+    return 'ui-evidence produced no screenshots, no observations and no design comparison.'
+      + ' The phase reported success and there is nothing for a reviewer to look at,'
+      + ' so the MR carries no evidence comment at all.';
+  }
+
+  const moved = observations
+    .filter((o) => String(o.before ?? '').trim() !== String(o.after ?? '').trim());
+  if (observations.length > 0 && moved.length === 0) {
+    return `ui-evidence published ${observations.length} measured value(s) and every one is`
+      + ' unchanged between the base and this branch. A table in which nothing moved is not'
+      + ' evidence of a change.';
+  }
+  return null;
+}
+
+/**
  * The one-screen account of a run that did not finish.
  *
  * A stopped run previously said only what went wrong, on a single line that
@@ -498,7 +572,7 @@ function logStopDetail(journal: RunJournal, headline: string): void {
  * more case, appended, no session spent. The same comment with no sign-off is a
  * REVISION request, and append is the one verb that cannot express "TC-05 is
  * replaced by the three below": it leaves TC-05 in place and files the sentence
- * itself as a case. That is how workstreamai#87 reached 44 cases from 20.
+ * itself as a case. That is how one list reached 44 cases from 20.
  *
  * `revise` therefore cycles the `testcases` phase, the way the plan gate has
  * always cycled `plan` — a model re-reads the list with the reviewer's words in
@@ -531,7 +605,7 @@ export function nextIndex(
     // A retry means "run it again", and runOne() has already taken the phase
     // out of `forced` at its start. Without putting it back, a phase that
     // succeeded on an EARLIER lap reads as done and shouldSkip() passes the
-    // retry by: #168's re-plan against reviewer feedback died of infra, was
+    // retry by: a re-plan against reviewer feedback died of infra, was
     // skipped, and the old plan was re-published for approval as though it
     // were the revision. The same hole skips an implement retry inside a
     // review cycle, and an infra re-attempt of any phase that had passed.
@@ -599,7 +673,12 @@ export async function runTicket(
 ): Promise<RunOutcome> {
   const cfg = projectConfig();
   const iid = issue.iid;
-  const list = phases();
+  // Label-gated phases are FILTERED OUT, not skipped in place. A phase skipped
+  // in place still occupies an index, and `nextIndex`, `cycleTo` and the group
+  // batching all do arithmetic on those — so a phase nobody is running must
+  // not be in the list they walk. See `labelGated` in src/lib/config.ts.
+  const carried = new Set(issue.labels.map((l) => l.toLowerCase()));
+  const list = phases().filter((p) => !p.labelGated || carried.has(p.labelGated.toLowerCase()));
   const owner = opts.conductor;
 
   if (issue.assignees.length > 0) {
@@ -615,7 +694,14 @@ export async function runTicket(
     }
   }
 
-  const decision = decideResume(readJournal(iid));
+  // A journal from another project (journalproject.ts) is never resumed, whatever
+  // its status: it is archived after the claim below and the ticket starts fresh.
+  const existing = readJournal(iid);
+  const journalHome = existing ? journalOwner(existing) : null;
+  if (existing && journalHome?.kind === 'foreign') {
+    log.warn(`#${iid} — the run journal on disk is not this project's (${journalHome.why}); starting fresh`);
+  }
+  const decision = decideClaim(existing, journalHome);
   if (decision.kind === 'refuse') {
     log.warn(`#${iid} — ${decision.reason}`);
     return { runId: '', iid, status: 'refused', reason: decision.reason };
@@ -655,12 +741,17 @@ export async function runTicket(
 
   if (decision.kind === 'fresh' && decision.archive) {
     const moved = archiveRun(iid, decision.archive);
-    if (moved) log.info(`#${iid} had a completed run — archived to ${moved}`);
+    if (moved) {
+      log.info(`#${iid} had a ${journalHome?.kind === 'foreign' ? 'run from another project' : 'completed run'} `
+        + `— archived to ${moved}`);
+    }
   }
 
+  const project = currentProjectKey() ?? undefined;
   let j: RunJournal = resuming ? decision.journal : {
     runId,
     iid,
+    project,
     title: issue.title,
     url: issueUrl(iid),
     createdAt: Date.now(),
@@ -670,6 +761,8 @@ export async function runTicket(
 
   if (resuming) {
     j.status = 'running';
+    // An unstamped journal proven ours by its ticket url is adopted here.
+    if (!j.project && project) j.project = project;
     delete j.blockedWhy;
     delete j.blockedAt;
     writeJournal(j);
@@ -811,11 +904,19 @@ export async function runTicket(
   // Validate, do not trust. A journal survives a crash, a manual cleanup, or a
   // `git worktree prune`, so a resumed run can carry a path that no longer
   // exists — and passing a missing cwd to the SDK surfaces as the maximally
-  // confusing `spawn node ENOENT`, which looks like a broken PATH.
-  let worktree: string | undefined = j.worktree && existsSync(j.worktree) ? j.worktree : undefined;
-  if (j.worktree && !worktree) {
-    log.warn('recorded worktree is gone — re-leasing', { was: j.worktree });
+  // confusing `spawn node ENOENT`, which looks like a broken PATH. Which CLONE
+  // it was cut from does not matter — any clone of this project pushes to it —
+  // but one that is provably a checkout of another project is dropped here,
+  // and the first phase that needs a worktree leases one from WORK_REPO.
+  const recorded = worktreeToResume(j, journalHome, join(WT_ROOT, worktreeName(iid, runId)));
+  if (recorded.kind === 'block') return finish(j, 'blocked', recorded.why);
+  if (recorded.kind === 'gone') log.warn('recorded worktree is gone — re-leasing', { was: recorded.was });
+  if (recorded.kind === 'drop') {
+    log.warn(`#${iid} — ${recorded.why}; dropping it and re-leasing from WORK_REPO`, { was: recorded.was });
+    j = updateJournal(iid, { worktree: undefined }) ?? j;
+    updateRun(runId, { worktree: null });
   }
+  let worktree: string | undefined = recorded.kind === 'keep' ? recorded.worktree : undefined;
   // A RESUMED run never leases: ensureLeases() only calls leaseWorktree() when
   // `worktree` is unset, and the line above just set it from the journal. So
   // the seeding that composes `.claude` — the skills, rules and agents every
@@ -911,6 +1012,49 @@ export async function runTicket(
       continue;
     }
 
+    // The Design label's design-approval gate — between `design` and `plan`.
+    //
+    // It sits BEFORE `plan` rather than after it for the same reason the
+    // test-case gate sits before `review`: this is the last point at which
+    // approving still changes everything downstream. A design agreed here is
+    // what `plan` plans and `implement` builds; the same approval taken after
+    // the plan existed would be approving a picture of something already
+    // decided.
+    //
+    // A design that found no UI to draw (`applicable: false`) never arms it.
+    // Someone labels optimistically, or the ticket turns out backend-only, and
+    // a mislabelled ticket should cost a re-read of one artifact rather than a
+    // person — the same posture `bugReproduction` takes on 'inconclusive'.
+    const design = prior.design ?? null;
+    const designNeedsSignoff = design !== null && (design as { applicable?: unknown }).applicable !== false;
+    if (phase.name === 'plan' && phaseSucceeded(iid, 'design')
+      && designGateApplies(ticket.labels) && designNeedsSignoff && !j.designApproval?.approved) {
+      const gate = await checkApprovalGate({
+        iid,
+        gate: 'design',
+        requestBody: designApprovalRequestBody(design),
+        attachments: designAttachments(iid, design),
+        onApproved: async () => { await addIssueNote(iid, designApprovedRecordBody(design)); },
+      });
+      j = readJournal(iid) ?? j;
+      if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
+      if (gate.verdict === 'pending') {
+        return finish(j, 'parked',
+          'awaiting design approval — a dev reviewer comments `approved` on the ticket to continue, '
+          + 'or comments there what to change to have the design redrawn');
+      }
+      if (gate.verdict === 'feedback') {
+        const designIdx = list.findIndex((p) => p.name === 'design');
+        if (designIdx !== -1) {
+          forced.add('design');
+          i = designIdx;
+          continue;
+        }
+      }
+      // 'approved' (or 'design' somehow absent from the list) — fall through
+      // into 'plan' below, which now reads design.json as its specification.
+    }
+
     // The Review label's plan-approval gate — opt-in, additive, and checked
     // only once per run: `planApproval.approved` latches true and every later
     // pass (including an ordinary review/verify cycle back to `implement`)
@@ -969,7 +1113,7 @@ export async function runTicket(
     // removed and replaced by the three cases below" — and append is the one
     // verb that cannot express it. Appending that sentence produced a case
     // reading `Verify that TC-05 is removed and replaced by...` while TC-05
-    // itself stayed, and took workstreamai#87 from 20 cases to 44.
+    // itself stayed, and took the list from 20 cases to 44.
     //
     // So feedback cycles the phase, the way the plan gate already does: the
     // `testcases` session re-enters with the reviewer's words in its prompt and
@@ -1141,7 +1285,7 @@ export async function runTicket(
       //
       // Except when it executed nothing. A list that is ALL 'skipped' is not a
       // verdict on the environment or the change — it is a session that spent
-      // its budget before the first case (ticket #189: the whole lap went on
+      // its budget before the first case (observed: the whole lap went on
       // server bring-up, and the block said the change was "broken end to end"
       // when the servers it left behind were answering correctly). That is the
       // shape of an infra death, so it takes the free re-attempt, and only a
@@ -1318,7 +1462,20 @@ export async function runTicket(
       // written, so a case list that failed is a failed phase rather than a
       // successful one whose artifact happens to say otherwise.
       const caseFail = r.out.ok ? failedCases(r.cfg.name, r.out.data) : null;
-      const phaseOk = r.out.ok && caseFail === null;
+      // Same shape, different artifact: `design` reports its own success and
+      // nothing else reads its screens back off disk, so a session that says it
+      // drew five screens and rendered none arms a gate over an empty comment.
+      const deliverableFail = r.out.ok && r.cfg.name === 'design'
+        ? designDeliverableRefusal(iid, r.out.data as Record<string, unknown> | null)
+        : null;
+      // And again for `ui-evidence`, whose empty arrays satisfy its schema and
+      // publish as nothing. warn-on-fail, so this names a hollow pack without
+      // holding the MR behind it.
+      const evidenceFail = r.out.ok && r.cfg.name === 'ui-evidence'
+        ? uiEvidenceRefusal(r.out.data as Record<string, unknown> | null)
+        : null;
+      const phaseOk = r.out.ok && caseFail === null && deliverableFail === null
+        && evidenceFail === null;
       const accountAction = phaseOk ? undefined : r.out.accountAction;
 
       recordPhase(iid, {
@@ -1338,7 +1495,8 @@ export async function runTicket(
         // adding one means touching infraAttemptsOf, the dashboard and unblock
         // for no decision any of them make differently), so this text is the
         // only thing in the journal that tells the two apart.
-        error: accountAction ?? r.out.error ?? r.out.blocked ?? caseFail ?? undefined,
+        error: accountAction ?? r.out.error ?? r.out.blocked
+          ?? caseFail ?? deliverableFail ?? evidenceFail ?? undefined,
       });
       j = readJournal(iid) ?? j;
 
@@ -1397,10 +1555,10 @@ export async function runTicket(
           claim(
             afterFailure(
               r.cfg, r.index,
-              caseFail ?? r.out.blocked ?? r.out.error ?? 'phase failed',
+              caseFail ?? deliverableFail ?? r.out.blocked ?? r.out.error ?? 'phase failed',
               // A recorded case failure is a verdict about the work, never an
               // infra death: the session ran to completion and said so.
-              caseFail ? false : r.out.infra,
+              (caseFail || deliverableFail) ? false : r.out.infra,
             ),
             r.cfg.name,
           );
@@ -1461,8 +1619,19 @@ export async function runTicket(
 
   // ------------------------------------------------------------- run helpers
 
+  /**
+   * phaseSettled, not phaseSucceeded: 'skipped' is a settled decision.
+   *
+   * A phase configured `onFail: 'skip'` that fails is recorded 'skipped' by
+   * statusForFailure(), and KEPT_STATUSES already calls that "a decision the run
+   * already made rather than a failure to retry". Asking phaseSucceeded() here
+   * contradicted that — it reports only 'ok'/'warned', so a skipped phase read as
+   * still-owed and ran again on the next pass through the list.
+   *
+   * A cycle can still force it: `forced` short-circuits ahead of the check.
+   */
   function shouldSkip(p: PhaseConfig): boolean {
-    return !forced.has(p.name) && phaseSucceeded(iid, p.name);
+    return !forced.has(p.name) && phaseSettled(iid, p.name);
   }
 
   /**
@@ -1658,7 +1827,7 @@ export async function runTicket(
     // policy, which was worse than stopping: failedLapsOf() does not count
     // infra records, so a phase that kept hanging never used up maxLaps or
     // maxRetries, and every further death cycled back to implement — a lap
-    // that cannot fix a dead connection — forever. Seen on #179: four verify
+    // that cannot fix a dead connection — forever. Seen live: four verify
     // hangs, 12h, and implement re-run with nothing to change.
     if (infra && p.onFail !== 'skip' && p.onFail !== 'warn') {
       const spent = infraAttemptsOf(iid, p.name);
@@ -2088,12 +2257,23 @@ export async function runTicket(
     const existing = await findMergeRequests({ sourceBranch: branch, state: 'opened' });
     const found = existing.ok ? (existing.data ?? [])[0] : undefined;
     if (found) {
+      // `mr-open` opens this as a Draft so the gates have a diff to read. A
+      // draft cannot be merged, and this is the path taken when the mr SESSION
+      // did not run or produced nothing — so the marker has to come off here
+      // too, or the run reaches `merge` and parks on an MR it opened itself.
+      let title = found.title;
+      if (title.startsWith('Draft:')) {
+        const undrafted = title.replace(/^Draft:\s*/, '');
+        const patched = await updateMergeRequest(found.iid, { title: undrafted });
+        if (patched.ok) title = undrafted;
+        else log.warn('could not take the Draft marker off the merge request', { mrIid: found.iid });
+      }
       return {
         summary: `Reused the merge request already open for ${branch}.`,
         blocked: null,
         mrIid: found.iid,
         mrUrl: found.web_url,
-        title: found.title,
+        title,
         targetBranch: found.target_branch,
       };
     }

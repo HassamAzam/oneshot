@@ -6,12 +6,13 @@ description: Reproduce a reported bug on the base branch in the real app, before
 # Bug Reproduction
 
 Establish, by running it, whether the behaviour a ticket reports actually happens
-on the code as it is today. A fix built on a bug nobody saw is a guess: #179 spent
-four laps on a focus ring before anyone looked at the real screen, and the one
-case that would have proved the bug existed (TC-25) was never runnable.
+on the code as it is today. A fix built on a bug nobody saw is a guess: a run once
+spent four laps on a focus ring before anyone looked at the real screen, and the
+one case that would have proved the bug existed was never runnable.
 
-**Your verdict can stop the run.** `not-reproduced` labels the ticket *Not a Bug*,
-posts on it and in Slack, and ends the run before planning. So that verdict needs
+**Your verdict can stop the run.** `not-reproduced` takes the ticket out of the loop
+(labelling it *Not a Bug* when the project configures that label), posts on it and in
+Slack, and ends the run before planning. So that verdict needs
 the strongest evidence of the four. When in doubt, it is `inconclusive`.
 
 ## 1. Decide whether there is anything to reproduce

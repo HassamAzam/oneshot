@@ -968,7 +968,7 @@ Filler (`slack.json:42`) is dropped before tokenising, extended by **class** rat
 **G1**
 
 ```
-*Gate G1 — plan* · <https://gitlab.arbisoft.com/arbisoft/workstreamai/-/issues/8607|#8607> Project Logs sub-team filter
+*Gate G1 — plan* · <https://gitlab.example.com/group/project/-/issues/8607|#8607> Project Logs sub-team filter
 Full plan: plan-8607.md on the ticket.
 
 1 backend  Add `get_team_truncated_display_name` to apps/teams/utils.py

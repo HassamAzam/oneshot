@@ -1,46 +1,34 @@
 {
-  "_comment": "The GitLab project Oneshot works in, and the two labels that are its entire external state. Verified against gitlab.arbisoft.com on 2026-08-25: project id 1491, 16 labels, dev/stage/master protected with can_push=false.",
-  "gitlab": {
-    "host": "gitlab.arbisoft.com",
-    "apiUrl": "https://gitlab.arbisoft.com/api/v4",
-    "project": "arbisoft/workstreamai",
-    "projectId": 1491
-  },
-  "_comment_context": "Read-only. Oneshot reads this repo for prior art and conventions; it NEVER writes to it, and hooks/write-scope.js denies every write under contextRepo for every phase. See docs/HOOKS.md 4.1. Skills/agents/rules are no longer sourced live from here: they are vendored into this repo's context/ (a committed snapshot of erp/.claude that also stays in GitLab), and SKILLS_ROOT (ONESHOT_SKILLS_ROOT) defaults to that vendored copy. skillsRoot below is informational only — nothing reads it — and records where the upstream skills live for a human syncing the snapshot.",
+  "_comment": "Which labels, branches and gates Oneshot uses on its GitLab project. The project itself is NOT named here: GITLAB_REPO_URL in .env is the single source of truth for which project (host, path and API are derived from it), and the numeric project id is asked of GitLab when something needs it, never configured. Everything below must hold on whichever project that URL names \u2014 the labels must exist there and the branches must be protected there. `npm run doctor` checks only the branches against the live project; nothing checks the labels, so confirm them by hand on the project (see _comment_labels).",
+  "_comment_context": "Read-only. Oneshot reads this repo for prior art and conventions; it NEVER writes to it, and hooks/write-scope.js denies every write under contextRepo for every phase. See docs/HOOKS.md 4.1. Skills/agents/rules are no longer sourced live from here: they are vendored into this repo's context/ (a committed snapshot of erp/.claude that also stays in GitLab), and SKILLS_ROOT (ONESHOT_SKILLS_ROOT) defaults to that vendored copy. skillsRoot below is informational only \u2014 nothing reads it \u2014 and records where the upstream skills live for a human syncing the snapshot.",
   "contextRepo": {
     "path": "~/Documents/erp",
     "gitlabProject": "arbisoft/erp",
     "skillsRoot": "~/Documents/erp/.claude"
   },
-  "_comment_labels": "ONE label in, one label out. The exit label is 'merged': the pipeline now ends at the merge, so 'Ready For Deployment' would be a claim about a deploy nobody performed. exitId is null because this label's id has NOT been verified against project 1491 — harmless, because every label check here is by NAME, but the label must already EXIST on the project: Oneshot never creates one, and a swap naming a label that is not there silently drops it. There is no intermediate state machine \u2014 progress lives in the Slack card and the run journal, not on the board. All three ids below already exist on project 1491; Oneshot never creates, renames or deletes a label. 'review' is a FOURTH, OPTIONAL label, never required and never swapped by Oneshot: a ticket carrying it alongside 'Loop' gets three extra human sign-off pauses (see README's 'Optional human review gates'). Its id is not yet verified against the live project (create the label there before relying on it) \u2014 the code only ever checks label MEMBERSHIP by name, never the id, so an unverified id costs nothing.",
+  "_comment_labels": "ONE label in, one label out. The exit label is 'Merged': the pipeline ends at the merge, so 'Ready For Deployment' would be a claim about a deploy nobody performed. Every label check is by NAME and is case-sensitive, so each name must match the project's label exactly and must already EXIST there: Oneshot never creates, renames or deletes a label, and a swap naming a label that is not there silently drops it. The ids are informational \u2014 nothing reads them. Verified on 2026-09-22 against the ERP project, which is the one GITLAB_REPO_URL names as this is written: 'Merged' (707) and 'In Review' (563) already existed there, and 'Loop' (1336) and 'Needs Human' (1337) were created that day, so the required pair is present. Pointing GITLAB_REPO_URL at another project means checking these names exist on it. There is no intermediate state machine \u2014 progress lives in the Slack card and the run journal, not on the board. 'review', 'testcaseReview' and 'notABug' are OPTIONAL and empty because that project has no such labels; empty is the documented way to switch an optional LABEL off, and setting one to an existing label name switches it on. Empty switches off only the label, never the behaviour around it: an empty 'notABug' still lets bug reproduction stop a run (bugReproduction:false is what switches that off), it just adds no label when it does. 'review', when set, is never required and never swapped by Oneshot: a ticket carrying it alongside 'Loop' gets three extra human sign-off pauses (see README's 'Optional human review gates').",
   "labels": {
     "entry": "Loop",
-    "entryId": 1308,
-    "exit": "merged",
-    "exitId": null,
+    "entryId": 1336,
+    "exit": "Merged",
+    "exitId": 707,
     "blocked": "Needs Human",
-    "blockedId": 1310,
-    "review": "Review",
-    "testcaseReview": "TestCase Review",
-    "notABug": "Not a Bug",
+    "blockedId": 1337,
+    "review": "",
+    "testcaseReview": "",
+    "designReview": "",
+    "notABug": "",
     "inReview": "In Review"
   },
   "_comment_inReview": "Added while a ticket's MR waits for a person to merge it, removed when the run finishes (merged) or blocks. Not the same as `review`, which is what makes a ticket need human sign-off. Empty or absent disables it.",
-  "_comment_testcaseReview": "A FIFTH, OPTIONAL, board-only label. swapLabel adds it the moment the testcases gate first posts its request comment (a QA sign-off is now pending) and removes it the moment that gate is approved -- see src/conductor/reviewgate.ts. It never gates anything itself and is never required alongside 'Loop'; its only job is letting a board view tell 'parked at testcases QA review' apart from every other parked/blocked reason. Empty string turns it off, same as leaving 'review' unset. Must exist on the project before relying on it, same rule as every other label here.",
-  "_comment_reviewAllRuns": "TRUE = the review gates apply to EVERY run, not only tickets carrying the Review label or touching highScrutinyPaths. This is a deliberate change of posture: with it on, every run pauses after `plan` and after `testcases` for a human, and never merges its own MR. The label and the path list still work and are still worth keeping \u2014 they are what makes a gate survive this being switched back off. Requires channels:history (or groups:history) on the Slack bot token; without it every gate sits 'pending' forever and every run parks, which is why doctor FAILS rather than warns while this is true.",
+  "_comment_designReview": "A SIXTH, OPTIONAL, board-only label, EMPTY (off) by default \u2014 set it to an existing project label to switch it on. Exactly the testcaseReview mechanism, for the design gate: added when that gate first posts its request, removed when it resolves, gating nothing itself. It is empty rather than pre-filled because a swap naming a label that is not on the project is silently dropped \u2014 so a default of 'Design Review' would look configured and do nothing. Note it is NOT the 'Design' label: that one is what puts a ticket through the design phase at all and is listed under preserveLabels.",
+  "_comment_testcaseReview": "A FIFTH, OPTIONAL, board-only label, EMPTY (off) by default. swapLabel adds it the moment the testcases gate first posts its request comment (a QA sign-off is now pending) and removes it the moment that gate is approved -- see src/conductor/reviewgate.ts. It never gates anything itself and is never required alongside 'Loop'; its only job is letting a board view tell 'parked at testcases QA review' apart from every other parked/blocked reason. Empty string turns it off, same as leaving 'review' unset. Must exist on the project before relying on it, same rule as every other label here.",
+  "_comment_reviewAllRuns": "TRUE = the review gates apply to EVERY run, not only tickets carrying the Review label or touching highScrutinyPaths. This is a deliberate change of posture: with it on, every run pauses after `plan` and after `testcases` for a human, and never merges its own MR. The path list still works and is still worth keeping \u2014 it is what makes a gate survive this being switched back off. The label trigger works only once labels.review names a label that exists on the project; it is empty in this config, so no ticket is gated by a label. Requires channels:history (or groups:history) on the Slack bot token; without it every gate sits 'pending' forever and every run parks, which is why doctor FAILS rather than warns while this is true.",
   "reviewAllRuns": true,
-  "_comment_bugReproduction": "TRUE = before planning a fix, research reproduces a reported BUG on the base branch in the real app (skill: bug-reproduction). This is the project-wide switch, not the per-ticket one: a run only reproduces when the ticket ALSO carries the label mapped to bug-reproduction in config/phases.json (`Bug`), because bring-up and login are paid whether or not the ticket turns out to be a bug. An unlabelled ticket records 'not-applicable' and never starts the app. If the steps run and the correct behaviour is observed, the run stops: labels.notABug replaces the entry label, the evidence is posted as a ticket comment and in the Slack channel. Features, no-UI changes and anything that could not be run to the end (inconclusive) carry on as before. To overrule a Not a Bug verdict, remove that label and add Loop back: the run resumes at plan without reproducing again. labels.notABug must exist on the project. FALSE switches the step off.",
+  "_comment_bugReproduction": "TRUE = before planning a fix, research reproduces a reported BUG on the base branch in the real app (skill: bug-reproduction). This is the project-wide switch, not the per-ticket one: a run only reproduces when the ticket ALSO carries the label mapped to bug-reproduction in config/phases.json (`Bug`), because bring-up and login are paid whether or not the ticket turns out to be a bug. An unlabelled ticket records 'not-applicable' and never starts the app. If the steps run and the correct behaviour is observed, the run stops: the entry label is removed, labels.notABug is added in its place WHEN ONE IS SET, and the evidence is posted as a ticket comment and in the Slack channel. labels.notABug is empty in this config, so the ticket is left with neither label and the verdict lives in that comment and the Slack post. Features, no-UI changes and anything that could not be run to the end (inconclusive) carry on as before. To overrule the verdict, add Loop back (and remove labels.notABug, if one was set): the run resumes at plan without reproducing again. A non-empty labels.notABug must exist on the project. FALSE switches the step off.",
   "bugReproduction": true,
-  "_comment_high_scrutiny": "Paths the ERP's own .claude/rules/security.md marks 'escalate immediately'. A ticket whose PLAN or DIFF touches one gets the Review gates even without the Review label, because the label is human-applied and therefore forgettable \u2014 and the tickets most worth pausing on are exactly the ones nobody remembers to label. Matching is a plain substring test against repo-relative paths, so 'apps/payroll/' catches everything under it. Empty this array to switch the behaviour off entirely. Note the last two entries: authentication on the FRONTEND has no single directory the way apps/auth/ does, so its entry points are listed by name. Found the hard way \u2014 ticket #8 is an auth-context bug with 600+ production occurrences, and a backend-only list would not have gated it.",
-  "highScrutinyPaths": [
-    "apps/auth/",
-    "apps/payroll/",
-    "apps/leaves/",
-    "apps/project_logs/",
-    "common/permissions.py",
-    "frontend/src/components/login/",
-    "frontend/src/components/AuthenticatedComponent.js"
-  ],
+  "_comment_high_scrutiny": "Paths the ERP's own .claude/rules/security.md marks 'escalate immediately'. A ticket whose PLAN or DIFF touches one gets the Review gates even without the Review label, because the label is human-applied and therefore forgettable \u2014 and the tickets most worth pausing on are exactly the ones nobody remembers to label. Matching is a plain substring test against repo-relative paths, so 'apps/payroll/' catches everything under it. The paths now live in config/risk-modules.json (the `paths` of every module), shared with the Plane triage router so routing and gating read one list; they are merged into this array at load. To disarm the path trigger, remove the module's `paths` in config/risk-modules.json \u2014 emptying this array alone does nothing. Add a one-off path here only if it has no module.",
+  "highScrutinyPaths": [],
   "_comment_markers": "Persistent labels Oneshot must copy through untouched on any label write. A label swap is one update_issue call carrying the full array, so anything not listed here and not the entry/exit label would be silently dropped.",
   "preserveLabels": [
     "AI",
@@ -50,7 +38,7 @@
     "No QA",
     "Design"
   ],
-  "_comment_branches": "base is what ticket branches are cut from and what their MRs target. NOTE: the project's GitLab default branch is 'main', NOT 'dev' \u2014 do not infer the base from the default branch. 'main' is protected but currently reports can_push=true for our token, which is why it is in protectedBranches: the guard must refuse it even though the server would allow it.",
+  "_comment_branches": "base is what ticket branches are cut from and what their MRs target. Do not infer it from the project's GitLab default branch, which need not be 'dev'. Everything in protected is refused by the git guard whatever the server would allow \u2014 which is why 'main' is listed even on a project that does not have it, or where it reports can_push=true for our token. doctor WARNs about a listed branch the project does not have, and FAILs one that exists but is not protected on GitLab: on a project with an unprotected 'main', protect it there or remove it from this list.",
   "branches": {
     "base": "dev",
     "protected": [

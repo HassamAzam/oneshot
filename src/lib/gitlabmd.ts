@@ -24,7 +24,7 @@
  * Bare hex colours are wrapped in a code span, because that is the only form
  * GitLab draws a colour chip for: the span must hold the colour and nothing
  * else. Accessibility plans are dense with them, and a reviewer checking a
- * contrast pair wants to see it. Every length needs a letter, so `#161` and
+ * contrast pair wants to see it. Every length needs a letter, so `#123` and
  * `#123456` stay links to issues. The price is that all-digit colours such as
  * `#000000` and `#333333` get no chip — a missing chip beats a broken link.
  *
