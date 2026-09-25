@@ -843,8 +843,22 @@ ${JSON.stringify(ctx.prior.research ?? {}, null, 2)}
 
 Produce an implementation plan an engineer could follow without re-deriving the research.
 
-- Reuse before writing. Search \`common/\`, the app's \`utils.py\`, and
-  \`frontend/src/**/utils/\` for helpers that already do this, and name them.
+- Search the noun, not the name. Before writing a helper or changing a value, query the
+  identifiers involved — the model, field, constant, testid or string the change reads or
+  writes — and read what surrounds the hits. A grep for \`def <the name you would have
+  chosen>\` can only confirm a guess: when it returns nothing it has told you nothing, and
+  "no helper exists" on that evidence is a wrong claim, not an unknown. Whatever already
+  reads those identifiers is your prior art — name it in \`reuse\`, extended or rejected.
+- Every site that renders, persists, exports, files, snapshots or keys off a value you
+  change is inside your blast radius, whether or not you edit that file. Find them by
+  name; do not reason about how many there probably are.
+- Breadth is never the default. Where your approach also changes behaviour for records,
+  people or periods the ticket does not name, the steps implement the narrow version —
+  gated to what the ticket describes — and the wider one becomes the \`openQuestions\`
+  entry with that gating as its default. Writing the consequence into \`risks\` does not
+  license the steps to take it: a risk you authored is a choice you are making, and the
+  approver needs to be able to decline it by answering a question rather than by rejecting
+  the plan.
 - Steps are ordered and each names the files it touches and its layer.
 - Set \`migrations\` true if any model, field, constraint or relation changes.
 - Risks are concrete: what breaks, and the mitigation.
@@ -852,6 +866,8 @@ Produce an implementation plan an engineer could follow without re-deriving the 
   \`file:line\`), an \`openQuestions\` entry with the default you assume, or an \`outOfScope\`
   entry. Never decide one silently. A scope or product choice the ticket does not state is an
   open question, not a risk — the approver reads open questions first and can overrule them.
+  So does anything this phase discovers that research did not raise: a consequence you found
+  while planning is under the same obligation as one you were handed.
 - \`acceptanceCoverage\` has one entry per research acceptance criterion. Mark a criterion
   \`not-satisfiable\` when no change can demonstrate it as written, and say what is done instead.
 - \`feedbackResponse\` answers the LATEST feedback round point by point. \`where\` must name the part
