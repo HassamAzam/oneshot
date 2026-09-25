@@ -160,14 +160,6 @@ function credentials() {
   return { email: raw.slice(0, idx), password: raw.slice(idx + 1) };
 }
 
-function adminCredentials() {
-  // Django's admin form takes a USERNAME. The SPA takes an email and translates it
-  // internally. Run 20 fed the email to the admin form and the login silently failed.
-  const user = process.env.ONESHOT_ADMIN_USER || '';
-  const pass = process.env.ONESHOT_ADMIN_PASSWORD || '';
-  return user && pass ? { user, pass } : null;
-}
-
 /* ------------------------------------------------------------------ preflight */
 
 function preflight(wt) {

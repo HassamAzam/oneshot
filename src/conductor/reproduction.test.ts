@@ -1,3 +1,4 @@
+import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { notABugComment, notABugDecision, notABugSlackText, reproductionOf } from './reproduction.js';

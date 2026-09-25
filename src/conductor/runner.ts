@@ -44,9 +44,10 @@
  */
 import { execFile } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, modelFor,
+  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -56,6 +57,9 @@ import {
   claimMarker, claimNoteBody, isMachineNote, readOwnership, settleMs,
 } from '../lib/claims.js';
 import { collectTicketDocs } from '../lib/ticketdocs.js';
+import {
+  currentProjectKey, journalOwner, worktreeToResume, type JournalOwner,
+} from '../lib/journalproject.js';
 import {
   archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
   phaseSucceeded, phaseSettled, readArtifact,
@@ -279,7 +283,7 @@ async function fetchTicket(iid: number): Promise<Ticket | null> {
 
 // -------------------------------------------------------------------- resuming
 
-type ResumeDecision =
+export type ResumeDecision =
   | { kind: 'fresh'; archive: string | null }
   | { kind: 'resume'; journal: RunJournal }
   | { kind: 'refuse'; reason: string };
@@ -316,6 +320,19 @@ function decideResume(existing: RunJournal | null): ResumeDecision {
   }
 
   return { kind: 'fresh', archive: existing.runId };
+}
+
+/**
+ * decideResume() for a journal journalOwner() has judged. One that is another
+ * project's by its own record is never resumed, whatever its status: it is
+ * archived after the claim and the ticket starts fresh. One that is ours is
+ * decided on its status alone — including when its worktree has to be dropped,
+ * which is a question for the resume (worktreeToResume()), never a reason to
+ * throw away its phases and open a second MR.
+ */
+export function decideClaim(existing: RunJournal | null, owner: JournalOwner | null): ResumeDecision {
+  if (existing && owner?.kind === 'foreign') return { kind: 'fresh', archive: existing.runId };
+  return decideResume(existing);
 }
 
 // -------------------------------------------------------------- control flow
@@ -641,7 +658,14 @@ export async function runTicket(
     }
   }
 
-  const decision = decideResume(readJournal(iid));
+  // A journal from another project (journalproject.ts) is never resumed, whatever
+  // its status: it is archived after the claim below and the ticket starts fresh.
+  const existing = readJournal(iid);
+  const journalHome = existing ? journalOwner(existing) : null;
+  if (existing && journalHome?.kind === 'foreign') {
+    log.warn(`#${iid} — the run journal on disk is not this project's (${journalHome.why}); starting fresh`);
+  }
+  const decision = decideClaim(existing, journalHome);
   if (decision.kind === 'refuse') {
     log.warn(`#${iid} — ${decision.reason}`);
     return { runId: '', iid, status: 'refused', reason: decision.reason };
@@ -681,12 +705,17 @@ export async function runTicket(
 
   if (decision.kind === 'fresh' && decision.archive) {
     const moved = archiveRun(iid, decision.archive);
-    if (moved) log.info(`#${iid} had a completed run — archived to ${moved}`);
+    if (moved) {
+      log.info(`#${iid} had a ${journalHome?.kind === 'foreign' ? 'run from another project' : 'completed run'} `
+        + `— archived to ${moved}`);
+    }
   }
 
+  const project = currentProjectKey() ?? undefined;
   let j: RunJournal = resuming ? decision.journal : {
     runId,
     iid,
+    project,
     title: issue.title,
     url: issueUrl(iid),
     createdAt: Date.now(),
@@ -696,6 +725,8 @@ export async function runTicket(
 
   if (resuming) {
     j.status = 'running';
+    // An unstamped journal proven ours by its ticket url is adopted here.
+    if (!j.project && project) j.project = project;
     delete j.blockedWhy;
     delete j.blockedAt;
     writeJournal(j);
@@ -837,11 +868,19 @@ export async function runTicket(
   // Validate, do not trust. A journal survives a crash, a manual cleanup, or a
   // `git worktree prune`, so a resumed run can carry a path that no longer
   // exists — and passing a missing cwd to the SDK surfaces as the maximally
-  // confusing `spawn node ENOENT`, which looks like a broken PATH.
-  let worktree: string | undefined = j.worktree && existsSync(j.worktree) ? j.worktree : undefined;
-  if (j.worktree && !worktree) {
-    log.warn('recorded worktree is gone — re-leasing', { was: j.worktree });
+  // confusing `spawn node ENOENT`, which looks like a broken PATH. Which CLONE
+  // it was cut from does not matter — any clone of this project pushes to it —
+  // but one that is provably a checkout of another project is dropped here,
+  // and the first phase that needs a worktree leases one from WORK_REPO.
+  const recorded = worktreeToResume(j, journalHome, join(WT_ROOT, worktreeName(iid, runId)));
+  if (recorded.kind === 'block') return finish(j, 'blocked', recorded.why);
+  if (recorded.kind === 'gone') log.warn('recorded worktree is gone — re-leasing', { was: recorded.was });
+  if (recorded.kind === 'drop') {
+    log.warn(`#${iid} — ${recorded.why}; dropping it and re-leasing from WORK_REPO`, { was: recorded.was });
+    j = updateJournal(iid, { worktree: undefined }) ?? j;
+    updateRun(runId, { worktree: null });
   }
+  let worktree: string | undefined = recorded.kind === 'keep' ? recorded.worktree : undefined;
   // A RESUMED run never leases: ensureLeases() only calls leaseWorktree() when
   // `worktree` is unset, and the line above just set it from the journal. So
   // the seeding that composes `.claude` — the skills, rules and agents every

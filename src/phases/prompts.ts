@@ -479,7 +479,7 @@ Load the \`bug-reproduction\` skill and follow it. In short:
 - Follow the ticket's steps, measure what the bug is about, screenshot into the run's
   artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`.
 
-**'not-reproduced' stops this run** and labels the ticket Not a Bug on the ticket and in Slack.
+**'not-reproduced' stops this run**: it takes the ticket out of the loop (labelling it Not a Bug when the project configures that label) and posts your evidence on the ticket and in Slack.
 Use it ONLY when the app ran on this unfixed code, you were logged in with access to the screen,
 you executed every reported step, and you observed the correct behaviour — with evidence. A
 different browser, device, data set, role or environment from the one the ticket describes, a

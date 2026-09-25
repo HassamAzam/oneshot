@@ -8,7 +8,7 @@
  * responses, and a caller that blurs them retries forever against a dead link.
  */
 import { envOr, projectConfig, DRY_RUN } from './config.js';
-import { resolveToken, SETUP_HINT } from './token.js';
+import { resolveToken, setupHint } from './token.js';
 import { log } from './log.js';
 import type { MrDiscussion } from '../mrfeedback/types.js';
 
@@ -40,18 +40,26 @@ function token(): string {
   const read = envOr('GITLAB_READ_TOKEN');
   if (read) return read;
   const t = resolveToken();
-  if (!t.token) throw new Error(`No GitLab token for this desk. ${SETUP_HINT}`);
+  if (!t.token) throw new Error(`No GitLab token for this desk. ${setupHint()}`);
   return t.token;
 }
 
 function writeToken(): string {
   const t = resolveToken();
-  if (!t.token) throw new Error(`No GitLab token for this desk. ${SETUP_HINT}`);
+  if (!t.token) throw new Error(`No GitLab token for this desk. ${setupHint()}`);
   return t.token;
 }
 
 function base(): string { return projectConfig().gitlab.apiUrl; }
-function projectId(): number { return projectConfig().gitlab.projectId; }
+
+/**
+ * The `:id` every project endpoint takes: the URL-encoded path (`group%2Fproject`),
+ * which GitLab accepts wherever it accepts the number. Using it means the project's
+ * identity is exactly one fact — GITLAB_REPO_URL — with no numeric id configured
+ * alongside it to go stale. The number, where something genuinely needs it, is
+ * asked of GitLab: see resolvedProjectId().
+ */
+function projectId(): string { return encodeURIComponent(projectConfig().gitlab.project); }
 
 /**
  * Classify a failure. 5xx counts as "network" for circuit-breaker purposes:
@@ -373,10 +381,6 @@ export async function swapLabel(
 }
 
 export interface Branch { name: string; protected: boolean; commit: { id: string } }
-
-export function listBranches(): Promise<GitlabResult<Branch[]>> {
-  return call<Branch[]>('GET', `/projects/${projectId()}/repository/branches?per_page=100`);
-}
 
 export function getBranch(name: string): Promise<GitlabResult<Branch>> {
   return call<Branch>(
@@ -712,14 +716,39 @@ export function mergeRefusal(res: GitlabResult<unknown>): MergeRefusal {
   return 'other';
 }
 
-/** Cheapest possible authenticated call — the reachability probe. */
-export async function ping(): Promise<GitlabResult<{ id: number }>> {
-  return call<{ id: number }>('GET', `/projects/${projectId()}?statistics=false`);
+let numericId: number | null = null;
+
+function remember(res: GitlabResult<{ id: number }>): void {
+  if (res.ok && typeof res.data?.id === 'number') numericId = res.data.id;
 }
 
+/** Cheapest possible authenticated call — the reachability probe. */
+export async function ping(): Promise<GitlabResult<{ id: number }>> {
+  const res = await call<{ id: number }>('GET', `/projects/${projectId()}?statistics=false`);
+  // The probe already carries the numeric id, so the first healthy tick
+  // answers resolvedProjectId() for free.
+  remember(res);
+  return res;
+}
+
+/**
+ * The project's NUMERIC id, asked of GitLab once and then remembered; null when
+ * GitLab could not be asked.
+ *
+ * Only for what the API cannot do with a path: recognising this project's own
+ * `/-/project/<id>/uploads/…` links in a ticket (src/lib/ticketdocs.ts). It is
+ * deliberately not configuration — a configured id is a second statement of the
+ * project's identity, and the one that silently goes stale when the first moves.
+ * A failure is not remembered, so the next caller asks again.
+ */
+export async function resolvedProjectId(): Promise<number | null> {
+  if (numericId === null) remember(await ping());
+  return numericId;
+}
+
+/** The project's web URL, scheme and any explicit port included, as GITLAB_REPO_URL gives them. */
 export function projectUrl(): string {
-  const c = projectConfig();
-  return `https://${c.gitlab.host}/${c.gitlab.project}`;
+  return projectConfig().gitlab.webUrl;
 }
 
 export function issueUrl(iid: number): string {
