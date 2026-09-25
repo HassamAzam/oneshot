@@ -401,6 +401,58 @@ export function mergePollWait(o: {
   return dueIn > 0 ? dueIn : null;
 }
 
+/** A finding as review-partial.json carries it — only `severity` is read here. */
+export interface PartialFinding { severity?: string; [k: string]: unknown }
+
+/**
+ * What a dead review session's partial file is worth, if anything.
+ *
+ * Only a blocker or a major is salvaged into a verdict, and the asymmetry is
+ * the whole point: 'approve' asserts that the entire diff was read, which a
+ * session that died cannot assert about the dimensions that never reported,
+ * while a recorded blocker is a fact about the code that an unfinished review
+ * does not make less true. A partial holding only minors is left alone — the
+ * infra re-attempt it would otherwise pre-empt is the better answer there.
+ *
+ * What the salvaged 'changes-requested' buys is a verdict ON RECORD, not an
+ * implement lap. The salvage marks the phase ok, and `failedCases()` only
+ * fails `verify`, so review's own `cycle → implement` does not fire and the
+ * run moves on. The recorded verdict then does two things: `findingsOf()`
+ * hands these findings to implement if a later verify cycle sends the run
+ * back there, and `qualityGate()` refuses the merge on it — so the run stops
+ * at the merge with the blocker named, instead of burning its infra attempts
+ * at review with nothing on record. An implement lap spent on the salvaged
+ * blocker itself would need `failedCases()` to fail review too; that is a
+ * separate change.
+ *
+ * Every finding is carried into the artifact, not just the serious ones: the
+ * verdict is decided by the serious ones, but a minor the session had already
+ * written down is still review output and implement reads the whole list.
+ *
+ * The file is freehand model output and `readArtifact`'s type is erasure, not
+ * validation, so `findings` is checked to be an array before it is touched: a
+ * partial that parses but holds an object or a string salvages nothing and
+ * falls back to the infra re-attempt, rather than throwing out of runTicket.
+ */
+export function salvagedReview(
+  findings: unknown, error: string | null,
+): { summary: string; blocked: null; verdict: string; findings: PartialFinding[] } | null {
+  if (!Array.isArray(findings) || findings.length === 0) return null;
+  const list = findings.filter((f): f is PartialFinding => typeof f === 'object' && f !== null);
+  const serious = list.filter((f) => f.severity === 'blocker' || f.severity === 'major');
+  if (!serious.length) return null;
+  const ids = serious.map((f) => `${String(f.id ?? '?')} [${String(f.severity)}]`).join(', ');
+  return {
+    summary: `Salvaged from review-partial.json: ${list.length} finding(s) recorded before `
+      + `the session died (${error ?? 'no error text'}), including ${serious.length} `
+      + `blocker/major: ${ids}. The review is PARTIAL — a dimension that never reported is `
+      + 'unreviewed, not clean.',
+    blocked: null,
+    verdict: 'changes-requested',
+    findings: list,
+  };
+}
+
 /**
  * A phase that executed its case list and recorded failures did NOT succeed.
  *
@@ -418,42 +470,6 @@ export function mergePollWait(o: {
  * stays where it is as a backstop: it re-derives the same fact deterministically
  * at the merge, and a check that only runs early is a check a resumed run skips.
  */
-/** A finding as review-partial.json carries it — only `severity` is read here. */
-export interface PartialFinding { severity?: string; [k: string]: unknown }
-
-/**
- * What a dead review session's partial file is worth, if anything.
- *
- * Only a blocker or a major is salvaged into a verdict, and the asymmetry is
- * the whole point: 'approve' asserts that the entire diff was read, which a
- * session that died cannot assert about the dimensions that never reported,
- * while a recorded blocker is a fact about the code that an unfinished review
- * does not make less true. So a partial holding one blocker becomes a
- * 'changes-requested' the next implement lap can act on, and a partial holding
- * only minors is left alone — the infra re-attempt it would otherwise pre-empt
- * is the better answer there.
- *
- * Every finding is carried into the artifact, not just the serious ones: the
- * verdict is decided by the serious ones, but a minor the session had already
- * written down is still review output and implement reads the whole list.
- */
-export function salvagedReview(
-  findings: PartialFinding[], error: string | null,
-): { summary: string; blocked: null; verdict: string; findings: PartialFinding[] } | null {
-  const serious = findings.filter((f) => f.severity === 'blocker' || f.severity === 'major');
-  if (!serious.length) return null;
-  const ids = serious.map((f) => `${String(f.id ?? '?')} [${String(f.severity)}]`).join(', ');
-  return {
-    summary: `Salvaged from review-partial.json: ${findings.length} finding(s) recorded before `
-      + `the session died (${error ?? 'no error text'}), including ${serious.length} `
-      + `blocker/major: ${ids}. The review is PARTIAL — a dimension that never reported is `
-      + 'unreviewed, not clean.',
-    blocked: null,
-    verdict: 'changes-requested',
-    findings,
-  };
-}
-
 function failedCases(name: string, data: Record<string, unknown> | null | undefined): string | null {
   if (name !== 'verify') return null;
   const results = (data as { results?: Array<{ id?: string; result?: string }> } | null)?.results;
@@ -1406,14 +1422,14 @@ export async function runTicket(
         }
       }
 
-      // The same bargain again for the phase that overruns most. A review that
-      // dies returns no verdict, the death is infra so no lap is spent, and the
-      // conductor re-attempts the identical fan-out until MAX_INFRA_ATTEMPTS is
-      // gone and the run blocks — thirteen of those are on this machine's
-      // ledger and not one produced a finding. Its prompt now rewrites
-      // review-partial.json as each agent lands, so what the session had
-      // already established survives it; salvagedReview() decides what that is
-      // worth.
+      // The same bargain again for review, a phase whose 30-minute kill returns
+      // no verdict at all. A review that dies returns nothing, the death is
+      // infra so no lap is spent, and the conductor re-attempts the identical
+      // fan-out until MAX_INFRA_ATTEMPTS is gone and the run blocks — two of
+      // those are on this machine's ledger, neither produced a finding. Its
+      // prompt now rewrites review-partial.json as each agent lands, so what
+      // the session had already established survives it; salvagedReview()
+      // decides what that is worth.
       //
       // The mtime guard is the same hazard verify's salvage names above: a
       // partial from an EARLIER lap is still on disk when the cleanup did not
@@ -1424,7 +1440,7 @@ export async function runTicket(
         const path = artifactPath(iid, 'review-partial.json');
         const fresh = existsSync(path) && statSync(path).mtimeMs >= r.startedAt;
         const partial = fresh
-          ? readArtifact<{ findings?: PartialFinding[] }>(iid, 'review-partial.json')
+          ? readArtifact<{ findings?: unknown }>(iid, 'review-partial.json')
           : null;
         const salvaged = salvagedReview(partial?.findings ?? [], r.out.error ?? null);
         if (salvaged) {

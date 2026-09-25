@@ -119,11 +119,16 @@ The collector (`scripts/board/index.mjs:95`) reads `run.json` and transcripts on
   `bash|sh|zsh`. Any segment the parser cannot classify in a worktree phase → deny.
 - `src/conductor/hooks.ts:61` — add `git-guard.cjs` and `write-scope.cjs` to `FAIL_CLOSED`.
   A guard that crashes must not become allow.
-- `review` phase: `prompts.ts:805` says "you have no Write tool". Make it true, not deleted:
-  the phase's artifact arrives by structured output (`phase.ts:407`), so set its `writes`
-  to `[]` in `phases.json` and `toolPolicy` (`phase.ts:107`) will strip Write/Edit. Do the
-  same for `testcases`, `plan`, `research`, `recall`. Only `implement`, `verify`,
-  `ui-evidence`, `deploy`, `qa`, `demo`, `memorize`, `document`, `remediate` write files.
+- `review` and `testcases` KEEP `writes: ["run"]`, and must not be narrowed to `[]`. Each
+  rewrites a `<phase>-partial.json` under the run directory as it goes (`review-partial.json`,
+  `testcases-partial.json`), and the runner salvages a session that dies at its cap out of
+  that file (`salvagedReview()` and the testcases salvage in `runner.ts`). `writes: []` makes
+  `toolPolicy` strip Write/Edit, which silently kills both salvage paths. The review prompt
+  therefore no longer claims "you have no Write tool"; it states the scope instead — no edit
+  in the worktree, the partial under the run directory is the one legal write — and
+  `write-scope.cjs` enforces that scope. For `plan`, `research` and `recall`, check first
+  whether the phase writes anything under the run directory; if it does not, set `writes` to
+  `[]` so `toolPolicy` strips Write/Edit (the artifact arrives by structured output).
 - Done when: `npm run hooks:verify` has a case for each bypass form above and it passes.
 
 ## 6. Test-case gate feedback writes real cases  (~2 hours)

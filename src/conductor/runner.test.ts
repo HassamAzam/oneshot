@@ -277,3 +277,13 @@ test('minors and suggestions alone are not a verdict, so the infra re-attempt st
 test('an empty partial salvages nothing', () => {
   assert.equal(salvagedReview([], 'timed out'), null);
 });
+
+test('a partial whose findings is not an array salvages nothing instead of throwing', () => {
+  // The file is freehand model output and readArtifact does not validate its
+  // shape; a throw here escapes runTicket and strands the claim.
+  for (const bad of [{ F1: finding('F-01', 'blocker') }, 'blocker', 3, {}]) {
+    assert.equal(salvagedReview(bad, 'timed out'), null);
+  }
+  // Non-object entries inside an array are dropped, not dereferenced.
+  assert.equal(salvagedReview([null, 'x', finding('F-01', 'blocker')], null)?.findings.length, 1);
+});

@@ -164,6 +164,14 @@ export interface ProjectConfig {
   concurrency: number;
 }
 
+/**
+ * The turn cap a session phase gets when its config/phases.json row omits
+ * `maxTurns`. One constant because two readers need the same number: phase.ts
+ * hands it to the SDK, and a prompt that quotes its own budget must quote the
+ * cap the SDK will actually enforce, not a different fallback typed beside it.
+ */
+export const DEFAULT_MAX_TURNS = 40;
+
 export interface PhaseConfig {
   name: string;
   n: number;

@@ -17,7 +17,7 @@ import {
   BASE_ENV, DRY_RUN, ROOT, artifactDir, envOr, modelFor, projectConfig, projectSessionEnv, runDir,
   type PhaseConfig,
 } from '../lib/config.js';
-import { MEMORY } from '../lib/config.js';
+import { DEFAULT_MAX_TURNS, MEMORY } from '../lib/config.js';
 import { otelBaseEnv, otelSpawnEnv } from '../lib/otel.js';
 import { phaseEnv, type PhaseIdentity } from '../lib/ids.js';
 import { recordUsage, looksLikeUsageLimit, parkForQuota } from '../lib/quota.js';
@@ -369,7 +369,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       prompt: input.prompt,
       options: {
         model,
-        maxTurns: cfg.maxTurns ?? 40,
+        maxTurns: cfg.maxTurns ?? DEFAULT_MAX_TURNS,
         cwd,
         // Coding phases get the full Claude Code harness on top of ours; the
         // rest get a plain (cheaper) system prompt.
