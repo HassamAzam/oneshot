@@ -41,6 +41,21 @@ type HookOutput = Record<string, unknown>;
 const NODE = envOr('ONESHOT_NODE', process.execPath);
 const HOOK_TIMEOUT_MS = 15_000;
 
+/**
+ * Guards that need longer than the default, and why.
+ *
+ * The default is deliberately short: a guard stands between the session and
+ * its next turn, so every millisecond is paid on every tool call. py-lint is
+ * the exception — it spawns flake8 and pylint, and pylint alone can take
+ * several seconds on a large module. At 15s it would fail open on exactly the
+ * files most worth checking, and a guard that quietly stops running on big
+ * inputs is worse than no guard, because the pass it reports is indistinguish-
+ * able from a real one.
+ */
+const GUARD_TIMEOUT_MS = new Map<string, number>([
+  ['py-lint.cjs', 60_000],
+]);
+
 /** Guards that must DENY rather than allow when they cannot run. */
 const FAIL_CLOSED = new Set<string>();
 
@@ -92,7 +107,7 @@ function runGuard(script: string, input: unknown, env: Record<string, string>): 
     const killer = setTimeout(() => {
       child.kill('SIGKILL');
       done(guardFailure(script, 'it timed out'));
-    }, HOOK_TIMEOUT_MS);
+    }, GUARD_TIMEOUT_MS.get(script) ?? HOOK_TIMEOUT_MS);
 
     child.stdout.on('data', (d) => { stdout += String(d); });
     child.on('error', (err) => {
@@ -146,6 +161,8 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
       { hooks: [guard('log-event.cjs')], timeout: 10 },
     ],
     PostToolUse: [
+      { matcher: WRITE_TOOLS, hooks: [guard('py-lint.cjs')], timeout: 60 },
+      // log-event stays last so a blocked write is still recorded.
       { hooks: [guard('log-event.cjs')], timeout: 10 },
     ],
     SessionStart: [

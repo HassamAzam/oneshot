@@ -192,6 +192,72 @@ expect_allow "Read while paused"       pause-check.cjs '{"tool_name":"Read","too
 rm -f "$ROOT/state/PAUSE"
 expect_allow "Bash when not paused"    pause-check.cjs "$(bash_payload 'npm test')"
 
+# py-lint is PostToolUse, so it answers with {"decision":"block"} rather than a
+# permissionDecision — the allow/deny helpers above cannot read it.
+expect_block() {
+    local out; out="$(run "$2" "$3")"
+    if printf '%s' "$out" | grep -q '"decision":"block"'; then
+        green "  PASS  block: $1"; PASS=$((PASS+1))
+    else
+        red   "  FAIL  should have BLOCKED: $1"; FAIL=$((FAIL+1))
+    fi
+}
+
+expect_clean() {
+    local out; out="$(run "$2" "$3")"
+    if [ -z "$out" ] || ! printf '%s' "$out" | grep -q '"decision":"block"'; then
+        green "  PASS  clean: $1"; PASS=$((PASS+1))
+    else
+        red   "  FAIL  should have PASSED: $1"; FAIL=$((FAIL+1))
+    fi
+}
+
+py_payload() {
+    printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":true}}' "$1"
+}
+
+echo
+echo "py-lint"
+mkdir -p "$ONESHOT_WORKTREE/apps/demo/migrations"
+
+cat > "$ONESHOT_WORKTREE/apps/demo/clean.py" <<'PYEOF'
+"""A module that satisfies both linters."""
+
+
+def add_totals(first_total, second_total):
+    """Return the sum of two totals."""
+    return first_total + second_total
+PYEOF
+
+cat > "$ONESHOT_WORKTREE/apps/demo/commented.py" <<'PYEOF'
+"""A module whose only sin is an inline comment."""
+
+
+def add_totals(first_total, second_total):
+    """Return the sum of two totals."""
+    # add them up
+    return first_total + second_total
+PYEOF
+
+cat > "$ONESHOT_WORKTREE/apps/demo/allowed_comment.py" <<'PYEOF'
+"""A module whose only comment is an affirmed disable."""
+
+
+def add_totals(first_total, second_total):  # pylint: disable=invalid-name
+    """Return the sum of two totals."""
+    return first_total + second_total
+PYEOF
+
+cp "$ONESHOT_WORKTREE/apps/demo/commented.py" "$ONESHOT_WORKTREE/apps/demo/migrations/0001_initial.py"
+
+expect_block "inline comment"            py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/commented.py")"
+expect_clean "clean file"                py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/clean.py")"
+expect_clean "affirmed pylint disable"   py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/allowed_comment.py")"
+expect_clean "migration is exempt"       py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/migrations/0001_initial.py")"
+expect_clean "non-python file"           py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/notes.md")"
+expect_clean "python outside worktree"   py-lint.cjs "$(py_payload "/tmp/oneshot-verify-outside.py")"
+expect_clean "failed write is not linted" py-lint.cjs "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":false}}' "$ONESHOT_WORKTREE/apps/demo/commented.py")"
+
 rm -rf "$ONESHOT_WORKTREE"
 
 echo
