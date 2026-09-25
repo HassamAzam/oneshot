@@ -1543,8 +1543,16 @@ Produce the screenshot pack a reviewer will look at INSTEAD of checking out the 
 pack is what verify's shots do not show:
 
   - a BEFORE/AFTER pair for each changed screen whose change you can SEE. The 'before' is the
-    base branch's behaviour; if you cannot produce one without a second checkout, say so in the
-    caption rather than passing off an unchanged region as a before.
+    base branch's behaviour, taken from a SECOND app instance on its own port — never by moving
+    files in this checkout. The \`ui-evidence-pack\` skill gives the steps; if it does not
+    resolve: run \`node $ONESHOT_HOME/scripts/app.cjs list\` and continue only if an instance
+    that is healthy with bundleReady is already at \`origin/${baseBranch()}\` or is ours with
+    dirty 0; then run \`env -u ONESHOT_WORKTREE -u ONESHOT_PORT -u ONESHOT_TICKET -u ONESHOT_IID
+    ONESHOT_RUN_DIR=$ONESHOT_HOME/state/runs/$ONESHOT_TICKET/base-app node
+    $ONESHOT_HOME/scripts/app.cjs ensure --ref ${baseBranch()}\`, shoot the 'before' at the
+    \`baseUrl\` it prints, and the 'after' on \`$ONESHOT_PORT\`. Caption the omission only if
+    that instance will not come up cheaply; never pass an unchanged region of this branch off as
+    a before.
   - the states a passing test never reaches: empty, loading, error, and the permission-denied
     view if the change touches a gated screen.
   - one shot per high-blast case that PASSED${highPassed.length ? ` (${highPassed.map((x) => x.id).join(', ')})` : ''}, so the pack shows the feature
