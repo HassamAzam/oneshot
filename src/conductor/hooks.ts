@@ -125,6 +125,8 @@ function runGuard(script: string, input: unknown, env: Record<string, string>): 
 /** Tool-name matchers, mirroring hooks/hooks.settings.json. */
 const WRITE_TOOLS = '^(Write|Edit|NotebookEdit)$';
 const BASH = '^Bash$';
+const MR_TOOLS = '^mcp__gitlab__(create|update)_merge_request$';
+const READ_OR_BASH = '^(Read|NotebookRead|Bash)$';
 
 /**
  * Build the hook set for one phase.
@@ -142,6 +144,8 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
       { hooks: [guard('pause-check.cjs')], timeout: 15 },
       { matcher: WRITE_TOOLS, hooks: [guard('write-scope.cjs')], timeout: 15 },
       { matcher: BASH, hooks: [guard('git-guard.cjs')], timeout: 20 },
+      { matcher: MR_TOOLS, hooks: [guard('mr-gate.cjs')], timeout: 15 },
+      { matcher: READ_OR_BASH, hooks: [guard('secret-guard.cjs')], timeout: 15 },
       // log-event stays last so a denied call is still recorded.
       { hooks: [guard('log-event.cjs')], timeout: 10 },
     ],

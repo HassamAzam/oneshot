@@ -287,7 +287,15 @@ These rules apply to **every** MR/PR creation path:
 
 These govern **opening an MR**. They do not govern posting to an MR that already exists — a changelog or QA guide on an open MR is `mr-change-logger`'s job, and that skill deliberately never creates a ticket and never blocks on a missing one. When both skills are loaded in the same session, each applies to its own object: this skill owns the title and the closes line at creation time; `mr-change-logger` owns what gets posted afterwards and never overrides a closes line this skill set.
 
-- Never fabricate a ticket URL — only use URLs confirmed via session context, the GitLab API response, or user input.
-- Never skip the closes line — if no ticket exists yet, create one (after asking) rather than omitting it. (Exception: the automated docs / chore-sync case above creates the ticket non-interactively, without asking — it still gets a closes line.)
-- Never pick an unrelated ticket just to satisfy the requirement.
-- Never print `GITLAB_TOKEN` to the user.
+The `mr-gate` hook refuses an MR whose title carries a conventional-commit
+prefix or whose description has no `[closes <url>]` line, so neither can be
+forgotten. `secret-guard` refuses a read of this repo's `.env`, and the session
+environment is a whitelist that never carries `GITLAB_TOKEN` in the first
+place — so there is no token for you to print.
+
+What no gate can check is whether the ticket is the RIGHT one, and that is the
+rule that matters most here:
+
+- Never fabricate a ticket URL — only use URLs confirmed via session context, the GitLab API response, or user input. A gate sees a well-formed link, not a real one.
+- Never pick an unrelated ticket just to satisfy the requirement. A closes line pointing at the wrong ticket is worse than none: it closes someone else's work.
+- If no ticket exists yet, create one (after asking) rather than omitting it. (Exception: the automated docs / chore-sync case above creates the ticket non-interactively, without asking — it still gets a closes line.)
