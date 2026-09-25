@@ -476,8 +476,12 @@ Load the \`bug-reproduction\` skill and follow it. In short:
   depends on one of them, you cannot run it here — record 'inconclusive', name the
   integration, and go back to the trace. Do not spend turns proving it is unreachable;
   that answer is the same on every run and is already in front of you.
+- Before driving the browser, plan: the role/flag/data the bug needs and one query that
+  finds that data, the route to the screen, and the value that means buggy vs correct.
 - Follow the ticket's steps, measure what the bug is about, screenshot into the run's
-  artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`.
+  artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`. Screenshot for EITHER
+  verdict: a 'reproduced' or 'not-reproduced' verdict is posted on the ticket with those
+  screenshots attached. Finish with the skill's checklist.
 
 **'not-reproduced' stops this run**: it takes the ticket out of the loop (labelling it Not a Bug when the project configures that label) and posts your evidence on the ticket and in Slack.
 Use it ONLY when the app ran on this unfixed code, you were logged in with access to the screen,

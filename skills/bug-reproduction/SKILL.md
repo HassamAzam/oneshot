@@ -28,7 +28,33 @@ Read the description AND every comment.
 Feature, or a change with no UI or runnable surface → `verdict: not-applicable`,
 say why in `reason`, and stop here. Do not bring the app up.
 
-## 2. Confirm you are on the unfixed code
+## 2. Plan the reproduction before touching the browser
+
+The app is still coming up, so spend that time on a plan. Write down, before any
+browser step:
+
+- **Conditions.** The role or permission that reaches the screen, any feature
+  flag or setting the ticket depends on, and the browser, viewport or device it
+  names. When `ensure` (step 4) reports `disabledIntegrations`, check them: a bug
+  behind one of those cannot be run here. That is `inconclusive` now, not after
+  twenty turns.
+- **Data.** The exact shape of record the bug needs (e.g. "a review month with at
+  least one processed increment"), and one targeted query that finds it: an API
+  filter, a list endpoint, a read-only DB lookup. Do not page through the UI
+  month by month hoping to find it.
+- **Route.** The URL and the clicks from login to the moment the bug should show,
+  from the ticket's steps or the `uiPath` you traced. Note anything known to get
+  in the way on this app: blocking modals, slow skeletons, default filters that
+  hide rows.
+- **Observable.** The number or attribute that shows the bug (overlap in px, a
+  computed style, a cell value, an aria attribute) and the value that would mean
+  the behaviour is CORRECT. Without that second value, `not-reproduced` is not
+  reachable, so you will be recording `inconclusive` anyway.
+
+If the plan cannot be completed (the data does not exist on this DB, the role is
+not available), stop and record `inconclusive` with what was missing.
+
+## 3. Confirm you are on the unfixed code
 
 At research time the worktree has no ticket commits yet — it IS the base branch.
 Prove it rather than assume it:
@@ -40,7 +66,7 @@ git rev-parse HEAD                      # record as testedCommit
 
 If the first command prints commits, you are not on unfixed code: `inconclusive`.
 
-## 3. Bring the app up and log in — with the verify harness
+## 4. Bring the app up and log in — with the verify harness
 
 Use exactly what `local-browser-verify` uses. Read its "Bring the app up" and "Log
 in" sections; do not improvise a bring-up.
@@ -62,7 +88,7 @@ abandon it. A named harness error (`E_WEBPACK_DEAD`, `E_DB_UNREACHABLE`, …) is
 
 Login goes through the real form with `ONESHOT_TEST_LOGIN`. Record the account.
 
-## 4. Run the reported steps
+## 5. Run the reported steps
 
 - Follow the ticket's steps, in its own terms. Where it gives none, derive them
   from the description and the `uiPath` you traced, and say they were derived.
@@ -73,10 +99,15 @@ Login goes through the real form with `ONESHOT_TEST_LOGIN`. Record the account.
   "not announced" all have a number or an attribute: overlap in px, contrast
   ratio, a cell value, an aria attribute. Record the number, not "looks fine".
 - Screenshot the moment the bug should appear into the run artifacts dir
-  (`state/runs/<iid>/artifacts/`), named `repro-<n>.png`. Record bare filenames.
+  (`state/runs/<iid>/artifacts/`), named `repro-<n>.png`, and list the bare
+  filenames in `evidence`. This applies to **both** verdicts: for `reproduced` the
+  shot shows the defect, for `not-reproduced` it shows the correct behaviour at
+  the same point. Crop or scroll so the affected element is visible without
+  zooming. A full page where the bug is one pixel row proves nothing to a
+  reader. The conductor attaches the first three to the ticket comment.
 - Record every step you actually ran, in order, in `steps`.
 
-## 5. Decide the verdict
+## 6. Decide the verdict
 
 | Verdict | Only when |
 |---|---|
@@ -96,16 +127,43 @@ Rules that keep `not-reproduced` honest:
 - `reason` for `not-reproduced` must say, in one or two sentences a QA engineer can
   check, what you ran and what correct behaviour you saw instead.
 
+## 7. Check before you finish
+
+Go through this list. Any "no" on a `reproduced` or `not-reproduced` verdict
+means fix the record, or change the verdict to `inconclusive`.
+
+- [ ] `testedCommit` recorded, and `git log origin/dev..HEAD` was empty.
+- [ ] Every condition in your plan was met: role, flag, data, browser/viewport.
+- [ ] Every reported step is in `steps`, in order, as something you executed
+      (not something you read in code).
+- [ ] `observed` holds a value (number, style, cell text), not "looks fine" or
+      "looks broken".
+- [ ] `evidence` lists at least one `repro-<n>.png` that exists in the artifacts
+      dir and shows the element in question, plus the measurement.
+- [ ] `expected` is quoted or paraphrased from the ticket, not from the code.
+- [ ] `reason` could be checked by a QA engineer who never saw this session.
+- [ ] If anything you observed was a different defect (an unrelated 500, a
+      console error elsewhere), it is not counted as this bug. Mention it in
+      `reason` if a later phase needs it.
+- [ ] For `not-reproduced`: you observed the correct value you planned for, on
+      the ticket's own conditions.
+
 ## Output
 
 Fill `reproduction` in the research output: `kind`, `verdict`, `testedCommit`,
-`account`, `steps`, `expected` (from the ticket), `observed` (what happened — values),
+`account`, `steps`, `expected` (from the ticket), `observed` (what happened, as values),
 `evidence` (filenames and measurements), `reason`.
+
+The conductor turns that record into a ticket comment, with the screenshots
+attached, for both `reproduced` and `not-reproduced`. The wording is in
+[templates/](templates/README.md), which also shows which field fills which line.
+Anything you leave out of the record is missing from the comment too.
 
 ## Do not
 
 - Do not fix, patch or edit anything. Research writes no code.
 - Do not stop the servers — later phases reuse them.
-- Do not label, comment or post anywhere. The conductor does that from your verdict.
+- Do not label, comment or post anywhere. The conductor posts the comment from
+  your record.
 - Do not spend the research budget here: if bring-up or login is still failing after
   a reasonable wait, record `inconclusive` and finish the rest of research.

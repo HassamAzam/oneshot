@@ -13,10 +13,14 @@
  * correct behaviour observed on a recorded commit) stops anything. A
  * not-reproduced verdict that is missing any of that is treated as
  * inconclusive, and the run carries on as it always did.
+ *
+ * A 'reproduced' verdict stops nothing, but it is posted on the ticket too,
+ * with its screenshots, so QA sees the bug was confirmed before the fix is
+ * planned. Both comments are rendered from the skill's templates/ folder.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { DRY_RUN, artifactDir, projectConfig } from '../lib/config.js';
+import { DRY_RUN, ROOT, artifactDir, projectConfig } from '../lib/config.js';
 import { addIssueNote, issueUrl, swapLabel, uploadFile, type Upload } from '../lib/gitlab.js';
 import { log } from '../lib/log.js';
 import { thread } from '../lib/slack.js';
@@ -85,37 +89,43 @@ export function notABugDecision(research: Record<string, unknown> | null | undef
   return { stop: true, repro };
 }
 
-/** The ticket comment. Written for QA and the reporter, not for the pipeline. */
-export function notABugComment(
+/** Where the skill keeps the ticket comment, one template per verdict that posts. */
+const TEMPLATES = join(ROOT, 'skills', 'bug-reproduction', 'templates');
+
+/**
+ * The ticket comment for a verdict that posts one. Written for QA and the
+ * reporter, not for the pipeline.
+ *
+ * The wording lives in the skill folder (templates/<verdict>.md) so the skill
+ * owns what the ticket is told; this only fills the placeholders. A placeholder
+ * with nothing to say renders empty, and the blank lines it leaves collapse.
+ */
+export function reproductionComment(
   repro: Reproduction,
-  opts: { runId: string; label?: string; entryLabel: string; screenshots: Upload[] },
+  opts: { screenshots: Upload[]; runId?: string; label?: string; entryLabel?: string },
 ): string {
-  const steps = repro.steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
-  const shots = opts.screenshots.map((u) => u.markdown).join('\n');
-  const extraEvidence = repro.evidence.filter((e) => !/\.png$/i.test(e));
-  return [
-    `**Oneshot could not reproduce this bug** — the run has stopped before planning a fix` +
-      `${opts.label ? ` and labelled the ticket **${opts.label}**` : ''}.`,
-    '',
-    `**Why:** ${repro.reason || '(no reason recorded)'}`,
-    '',
-    '**What was run**',
-    `- Code: \`${repro.testedCommit}\` (unfixed base branch)`,
-    `- Account: ${repro.account || '(not recorded)'}`,
-    '',
-    steps,
-    '',
-    `**Expected (from the ticket):** ${repro.expected || '(not recorded)'}`,
-    '',
-    `**Observed:** ${repro.observed}`,
-    ...(extraEvidence.length ? ['', '**Measurements**', ...extraEvidence.map((e) => `- ${e}`)] : []),
-    ...(shots ? ['', shots] : []),
-    '',
-    '---',
-    `If this is still a bug — different data, role, browser, device or environment — add those ` +
-      `details here, remove ${opts.label ? `**${opts.label}**` : 'the stop'} and add **${opts.entryLabel}** back. ` +
-      `Oneshot will resume run \`${opts.runId}\` from planning without reproducing again.`,
-  ].join('\n');
+  const verdict = repro.verdict === 'not-reproduced' ? 'not-reproduced' : 'reproduced';
+  const measurements = repro.evidence.filter((e) => !/\.png$/i.test(e));
+  const values: Record<string, string> = {
+    reason: repro.reason || '(no reason recorded)',
+    commit: repro.testedCommit || '(not recorded)',
+    account: repro.account || '(not recorded)',
+    steps: repro.steps.map((s, i) => `${i + 1}. ${s}`).join('\n'),
+    expected: repro.expected || '(not recorded)',
+    observed: repro.observed || '(not recorded)',
+    measurements: measurements.length ? ['**Measurements**', ...measurements.map((e) => `- ${e}`)].join('\n') : '',
+    screenshots: opts.screenshots.length
+      ? opts.screenshots.map((u) => u.markdown).join('\n')
+      : '_No screenshot was attached._',
+    labelClause: opts.label ? ` and labelled the ticket **${opts.label}**` : '',
+    labelRef: opts.label ? `**${opts.label}**` : 'the stop',
+    entryLabel: opts.entryLabel ?? '',
+    runId: opts.runId ?? '',
+  };
+  return readFileSync(join(TEMPLATES, `${verdict}.md`), 'utf8')
+    .replace(/\{\{(\w+)\}\}/g, (m, key: string) => values[key] ?? m)
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 /** The Slack channel post. */
@@ -138,6 +148,29 @@ async function uploadScreenshots(iid: number, evidence: string[]): Promise<Uploa
   return out;
 }
 
+/** Upload the screenshots and post the verdict's ticket comment. Never throws. */
+async function postComment(
+  iid: number, repro: Reproduction, opts: { runId?: string; label?: string; entryLabel?: string },
+): Promise<void> {
+  try {
+    const screenshots = await uploadScreenshots(iid, repro.evidence);
+    const noted = await addIssueNote(iid, reproductionComment(repro, { ...opts, screenshots }));
+    if (!noted.ok) log.warn(`${repro.verdict}: ticket comment failed on #${iid}`, { error: noted.error ?? noted.kind });
+  } catch (err) {
+    log.warn(`${repro.verdict}: ticket comment failed on #${iid}`, { error: (err as Error).message.slice(0, 160) });
+  }
+}
+
+/**
+ * Tell the ticket the bug was reproduced, with the screenshots, before the fix
+ * is planned. The run carries on; nothing is labelled.
+ */
+export async function declareReproduced(iid: number, repro: Reproduction): Promise<void> {
+  if (DRY_RUN) return;
+  await postComment(iid, repro, {});
+  log.info(`#${iid} — reproduced on ${repro.testedCommit.slice(0, 8)}`);
+}
+
 /**
  * Label, comment and post. Returns the reason the run stops with.
  *
@@ -158,11 +191,7 @@ export async function declareNotABug(
     const labelled = await swapLabel(iid, remove, label ? [label] : []);
     if (!labelled.ok) log.warn(`not-a-bug: label update failed on #${iid}`, { error: labelled.error ?? labelled.kind });
 
-    const screenshots = await uploadScreenshots(iid, repro.evidence);
-    const noted = await addIssueNote(iid, notABugComment(repro, {
-      runId, label, entryLabel: cfg.labels.entry, screenshots,
-    }));
-    if (!noted.ok) log.warn(`not-a-bug: ticket comment failed on #${iid}`, { error: noted.error ?? noted.kind });
+    await postComment(iid, repro, { runId, label, entryLabel: cfg.labels.entry });
   }
 
   await thread(null, notABugSlackText(iid, title, repro, label));

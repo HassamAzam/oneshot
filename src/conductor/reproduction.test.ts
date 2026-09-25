@@ -1,7 +1,7 @@
 import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { notABugComment, notABugDecision, notABugSlackText, reproductionOf } from './reproduction.js';
+import { notABugDecision, notABugSlackText, reproductionComment, reproductionOf } from './reproduction.js';
 
 const complete = {
   kind: 'bug',
@@ -45,7 +45,7 @@ test('an unknown verdict string is read as inconclusive', () => {
 
 test('the ticket comment carries the evidence and how to overrule', () => {
   const repro = reproductionOf({ reproduction: complete })!;
-  const body = notABugComment(repro, {
+  const body = reproductionComment(repro, {
     runId: 'r-abc', label: 'Not a Bug', entryLabel: 'Loop',
     screenshots: [{ url: '/uploads/x/repro-1.png', markdown: '![repro-1](/uploads/x/repro-1.png)' }],
   });
@@ -58,6 +58,43 @@ test('the ticket comment carries the evidence and how to overrule', () => {
   assert.match(body, /remove \*\*Not a Bug\*\* and add \*\*Loop\*\* back/);
   assert.match(body, /r-abc/);
   assert.doesNotMatch(body, /- repro-1\.png/);
+  assert.doesNotMatch(body, /\{\{/);
+});
+
+const reproduced = {
+  ...complete,
+  verdict: 'reproduced',
+  observed: '1 of 18 rows rendered with filter: blur(2px)',
+  evidence: ['repro-1.png', 'repro-2.png', 'filter blur(2px) on 1/18 rows'],
+  reason: 'The processed row is blurred on the unfixed base commit, as the ticket reports.',
+};
+
+test('a reproduced verdict gets its own comment with the screenshots and no overrule footer', () => {
+  const repro = reproductionOf({ reproduction: reproduced })!;
+  const body = reproductionComment(repro, {
+    screenshots: [
+      { url: '/uploads/x/repro-1.png', markdown: '![repro-1](/uploads/x/repro-1.png)' },
+      { url: '/uploads/y/repro-2.png', markdown: '![repro-2](/uploads/y/repro-2.png)' },
+    ],
+  });
+  assert.match(body, /reproduced this bug/);
+  assert.doesNotMatch(body, /could not reproduce/);
+  assert.match(body, /`7a21bb0c1d2e`/);
+  assert.match(body, /1\. Open \/home\//);
+  assert.match(body, /blur\(2px\) on 1\/18 rows/);
+  assert.match(body, /!\[repro-1\][\s\S]*!\[repro-2\]/);
+  assert.doesNotMatch(body, /add \*\*/);
+  assert.doesNotMatch(body, /\{\{/);
+  assert.doesNotMatch(body, /\n{3,}/);
+});
+
+test('a comment with no screenshot says so rather than going quiet', () => {
+  for (const verdict of ['reproduced', 'not-reproduced']) {
+    const repro = reproductionOf({ reproduction: { ...complete, verdict, evidence: [] } })!;
+    const body = reproductionComment(repro, { screenshots: [], label: 'Not a Bug', entryLabel: 'Loop', runId: 'r' });
+    assert.match(body, /No screenshot was attached/);
+    assert.doesNotMatch(body, /Measurements/);
+  }
 });
 
 test('the Slack post names the ticket, the commit and the label', () => {
