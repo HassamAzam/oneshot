@@ -284,7 +284,10 @@
       ],
       "onFail": "blocked",
       "onDemand": true,
-      "skills": [],
+      "skills": [
+        "mr-feedback"
+      ],
+      "_why_skills": "The dispositions' definitions and the output contract are owned by the prompt (src/mrfeedback/prompts.ts triagePrompt); the skill's table only restates them. What the skill adds is the JUDGEMENT the prompt does not carry \u2014 what clears the bar for `decline`, why a merely inconvenient request is a `fix`, how small a `plan` has to stay, and the fact that a reply cannot @mention anyone because respond.ts neutralises it. That is skill-shaped, and it was prose nobody could edit without touching TypeScript.",
       "artifact": "mr-feedback.json",
       "_why": "ON DEMAND: the merge phase finds new review threads on the run's MR and the runner invokes this to decide what each one needs \u2014 fix, already-done, question or decline. HEAVY because declining a reviewer or answering a question from the code is judgement, and a wrong 'fix' costs a full implement\u2192verify lap. cwd 'worktree' so it reads the actual diff; writes 'run' only and no GitLab write tools (phase.ts), so it can neither change the code nor post \u2014 the conductor replies after the fixes are verified. onFail 'blocked' because an untriaged comment is a reviewer nobody answered; infra deaths still retry for free, since re-entering merge re-detects the same threads. See src/mrfeedback and config/mr-feedback.json."
     }

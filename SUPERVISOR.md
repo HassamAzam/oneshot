@@ -271,20 +271,37 @@ it re-prices every future ticket. (It is also inert while `enabled: false`.)
 
 ## 6. Block-reason vocabulary
 
-Generated in `afterFailure()` (`src/conductor/runner.ts:843-890`). A block sets status `blocked`,
-swaps the ticket to `Needs Human`, and starts a **60-minute cooldown** before any resume.
+Most reasons come from `afterFailure()` in `src/conductor/runner.ts`; the MR-feedback ones come
+from `feedbackRound()` in the same file and from the merge phase's review-thread hooks
+(`src/mrfeedback/mergehooks.ts`). Match on the whole reason, not its tail — two different
+mechanisms both end in `gave up after N attempts`. A block sets status `blocked`, swaps the ticket
+to `Needs Human`, and starts a **60-minute cooldown** before any resume.
 
 | Reason text | Means | Who fixes it |
 |---|---|---|
-| `gave up after N attempts` | A `retry` phase exhausted `maxRetries` | You — read the last lap's error |
+| `<phase>: … — gave up after N attempts`, where `<phase>` is `onFail: retry` | That phase exhausted `maxRetries` | You — read the last lap's error |
+| `merge: could not finish answering review threads on !M: … — gave up after N attempts` (or `merge: cannot read the head of !M … — gave up after N attempts`) | GitLab refused a reply or resolve on the run's MR for `MAX_RESPOND_ATTEMPTS` (3) merge passes. `merge` has no `maxRetries` and is `onFail: blocked`; the count is `respondAttempts` in the journal's `mrFeedback` ledger, not `failed` journal records | You — check the thread is not locked or deleted and that the operator's `GITLAB_TOKEN` can write notes on the project, then `npm run unblock`. Replies already posted are journaled and are not re-posted |
+| `mr-feedback: N new review thread(s) on !M after K round(s) — a person takes the review from here` | A full-auto run hit `maxRounds` in `config/mr-feedback.json`. `noRemediation` — `remediate` will not touch it | A person — take the review over on the MR. (A Review-mode run **parks** with the same text plus `; still awaiting a human merge` instead of blocking) |
 | `still outstanding after N laps through <phase>` | A `cycle` phase hit `maxLaps` | You — findings the loop cannot satisfy |
+| `<phase>: … — died of infrastructure N times in a row. A code change cannot fix that…` | The phase was killed or cancelled (hang, network, disk, quota) more than `MAX_INFRA_ATTEMPTS` times running; infra deaths spend no lap, so this is the only thing that stops them | You — check network (VPN / IPv6 route), `df` on the data volume and quota, then unblock |
 | `cycleTo '<x>' is not in the phase list` | Config error | You — fix `config/phases.json` |
+| `mr-feedback: the phase is missing from config/phases.json` / `mr-feedback: implement is not in the phase list` | Config error, `noRemediation` | You — fix `config/phases.json`, restart the conductor (§5), unblock |
 | `paused mid-phase — resumes when unpaused` | A pause file landed mid-run | Clear the pause (read §1b first) |
+
+**`parked` is not `blocked`.** A run whose status is `parked` is waiting on a person by design —
+the Review label's plan approval or human merge, or a Review-mode run past the MR-feedback round
+cap. It has no cooldown and needs no unblock; it resumes on its own once the person acts.
+
+**A full-auto run can block at merge on unresolved threads.** On a project that requires all
+discussions resolved before merge, a full-auto run under `resolve: never` — or with `question` /
+`decline` threads under `resolve: fixed` — leaves those threads open for a person (README 'MR review
+feedback'), so the merge cannot land until someone resolves them.
 
 Laps are counted by `failedLapsOf()` (`src/lib/artifacts.ts:165`) from **the journal**, counting
 only `status === 'failed'` — **`warned` does not count**. To answer "how many attempts left",
 count `failed` records for that phase and compare against `maxLaps`/`maxRetries` in
-`config/phases.json`.
+`config/phases.json`. This does not apply to the `merge: … review threads` row above — that count
+lives in the `mrFeedback` ledger.
 
 ---
 
