@@ -80,7 +80,7 @@ async function main(): Promise<void> {
   }
   if (bugReproductionEnabled()) {
     if (cfg.labels.notABug) {
-      pass('bug reproduction', `on — a bug research cannot reproduce stops the run as "${cfg.labels.notABug}" ` +
+      pass('bug reproduction', `on — a bug research cannot reproduce parks for QA, and stops as "${cfg.labels.notABug}" once they approve ` +
         '(the label must exist on the project)');
     } else {
       warn('bug reproduction without a label',

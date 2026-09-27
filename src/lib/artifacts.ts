@@ -153,6 +153,13 @@ export interface RunJournal {
   /** Test-case approval gate state (Review label, between `testcases` and `review`). */
   testcasesApproval?: ReviewGateState;
   /**
+   * Not a Bug confirmation gate state (between `research` and the phase after
+   * it). Armed only when research could not reproduce a reported bug: a QA
+   * reviewer's `approved` labels the ticket Not a Bug and stops the run; any
+   * other reply is fed back into a fresh `research` that reproduces again.
+   */
+  notABugApproval?: ReviewGateState;
+  /**
    * When the `merge` phase last asked GitLab whether a human has merged the
    * MR. A Review-labelled ticket is never merged by Oneshot, so this phase is
    * a wait, not an action, and re-asking on every --follow tick is pure noise.

@@ -119,7 +119,8 @@ export interface ProjectConfig {
     designReview: string;
     /**
      * Put on a ticket whose reported defect `research` could not reproduce on the
-     * base branch, in place of the entry label. Must exist on the project; unset
+     * base branch, in place of the entry label — only once a QA reviewer (config/
+     * reviewers.json) has confirmed the verdict by commenting `approved`. Must exist on the project; unset
      * means the run still stops and says why, but no label is added.
      */
     notABug?: string;
@@ -133,7 +134,8 @@ export interface ProjectConfig {
   /**
    * Reproduce a reported bug on the base branch during `research` before any
    * fix is planned (skill: bug-reproduction). A run whose defect does not
-   * reproduce stops, is labelled `labels.notABug`, and says so on the ticket
+   * reproduce parks for a QA reviewer; once they approve it stops, is labelled
+   * `labels.notABug`, and says so on the ticket
    * and in Slack. False turns the whole step off.
    *
    * The project-wide half of the switch. The per-ticket half is the label
