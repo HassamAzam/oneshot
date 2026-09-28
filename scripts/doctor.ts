@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
   CONTEXT_REPO, PROJECT_TARGET, SKILLS_ROOT, WORK_REPO, WT_ROOT, pathSources, seedFrom,
-  auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, phases, portPool,
+  auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, phases, phasesOutsideTarget, portPool,
   projectConfig, repoIdentity, reviewersConfig, slackConfig,
 } from '../src/lib/config.js';
 import { ping, getBranch } from '../src/lib/gitlab.js';
@@ -106,6 +106,10 @@ async function main(): Promise<void> {
   const ph = phases();
   const codePhases = ph.filter((p) => p.kind === 'code').map((p) => p.name);
   pass(`${ph.length} phases`, `deterministic: ${codePhases.join(', ')}`);
+  for (const o of phasesOutsideTarget()) {
+    pass(`phase ${o.name} left out for this project`,
+      `targets: ${o.targets.join(', ') || '(none)'}; this project is '${PROJECT_TARGET || '(unset)'}'`);
+  }
   const missingTier = ph.filter((p) => p.kind === 'session' && !p.tier);
   if (missingTier.length) fail('phases without a tier', missingTier.map((p) => p.name).join(', '));
 

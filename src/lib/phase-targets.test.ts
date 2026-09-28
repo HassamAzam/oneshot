@@ -62,3 +62,31 @@ test('an untargeted phase runs under every target', async () => {
     }
   }
 });
+
+test('a target in phases.json matches whatever its case', async () => {
+  const { runsForTarget } = await import('./config.js');
+  assert.ok(runsForTarget({ targets: ['ERP'] }, 'erp'));
+  assert.ok(runsForTarget({ targets: [' Erp '] }, 'erp'));
+  assert.ok(!runsForTarget({ targets: ['erpp'] }, 'erp'));
+  assert.ok(!runsForTarget({ targets: [] }, 'erp'), 'an empty list is a switched-off phase');
+  assert.ok(runsForTarget({}, ''), 'no targets runs everywhere, including with no project');
+});
+
+test('a target name no project could match is refused, not silently dropped', async () => {
+  const { assertTargets } = await import('./config.js');
+  for (const targets of [[''], ['  '], ['arbisoft/erp'], ['erp x']]) {
+    assert.throws(() => assertTargets({ name: 'p', targets }), /phase 'p' names target\(s\) no project can match/);
+  }
+  assert.throws(() => assertTargets({ name: 'p', targets: 'erp' as unknown as string[] }), /must be an array/);
+  for (const targets of [undefined, [], ['erp'], ['ERP', 'workstreamai']]) {
+    assert.doesNotThrow(() => assertTargets({ name: 'p', targets }));
+  }
+});
+
+test('every targets list shipped in phases.json is well formed', async () => {
+  const { assertTargets } = await import('./config.js');
+  const { readFileSync } = await import('node:fs');
+  const raw = JSON.parse(readFileSync(new URL('../../config/phases.json', import.meta.url), 'utf8')) as {
+    phases: Array<{ name: string; targets?: string[] }> };
+  raw.phases.forEach((p) => assertTargets(p));
+});

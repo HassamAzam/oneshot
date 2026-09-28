@@ -358,18 +358,54 @@ export function bugReproductionEnabled(): boolean {
   return projectConfig().bugReproduction !== false;
 }
 
+/**
+ * Whether `phase` belongs to `target`. Compared the way PROJECT_TARGET is
+ * derived — trimmed and lower-cased — so `ERP` in phases.json is the erp
+ * target rather than a phase that silently never runs.
+ */
+export function runsForTarget(phase: Pick<PhaseConfig, 'targets'>, target: string): boolean {
+  return !phase.targets || phase.targets.some((t) => t.trim().toLowerCase() === target);
+}
+
+/**
+ * Refuses a `targets` list that no GITLAB_REPO_URL could ever select: not an
+ * array, or an entry that is blank or carries a slash or whitespace, which a
+ * project's last path segment never does. There is no list of known projects
+ * to check a spelling against, so a well-formed typo still drops the phase;
+ * doctor names every phase the active target leaves out so that is visible.
+ */
+export function assertTargets(phase: Pick<PhaseConfig, 'name' | 'targets'>): void {
+  if (phase.targets === undefined) return;
+  const where = `config/phases.json: phase '${phase.name}'`;
+  if (!Array.isArray(phase.targets)) throw new Error(`${where}: \`targets\` must be an array of project names`);
+  const bad = phase.targets.filter((t) => typeof t !== 'string' || !/^[^\s/]+$/.test(t.trim()));
+  if (bad.length) {
+    throw new Error(`${where} names target(s) no project can match: ${bad.map((t) => JSON.stringify(t)).join(', ')}. `
+      + 'A target is the last path segment of GITLAB_REPO_URL, like `erp`.');
+  }
+}
+
+/** Configured phases the active target leaves out, with the targets each one names. */
+export function phasesOutsideTarget(): Array<{ name: string; targets: string[] }> {
+  return loadJson<{ phases: PhaseConfig[] }>('phases.json').phases
+    .filter((p) => !runsForTarget(p, PROJECT_TARGET))
+    .map((p) => ({ name: p.name, targets: p.targets ?? [] }));
+}
+
 let _phases: PhaseConfig[] | null = null;
 export function phases(): PhaseConfig[] {
   if (!_phases) {
     const skip = new Set(
       envOr('ONESHOT_SKIP_PHASES').split(',').map((s) => s.trim()).filter(Boolean),
     );
-    _phases = loadJson<{ phases: PhaseConfig[] }>('phases.json').phases
+    const all = loadJson<{ phases: PhaseConfig[] }>('phases.json').phases;
+    all.forEach(assertTargets);
+    _phases = all
       .filter((p) => !skip.has(p.name))
       // A phase that names targets belongs to those targets only. An empty
       // array is read the same as naming none of them: the phase never runs,
       // which is a switched-off phase rather than an unrestricted one.
-      .filter((p) => !p.targets || p.targets.includes(PROJECT_TARGET))
+      .filter((p) => runsForTarget(p, PROJECT_TARGET))
       .sort((a, b) => a.n - b.n);
   }
   return _phases;
