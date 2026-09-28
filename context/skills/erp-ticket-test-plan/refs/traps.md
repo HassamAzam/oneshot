@@ -1,4 +1,4 @@
-# Traps — edge cases QA has had to ask for
+# Test-case traps — revisions QA has had to send back
 
 Every entry here was a revision request on a real ticket: a case that failed on a
 correct build, passed on an unchanged one, or was never written at all. Walk this
@@ -7,6 +7,26 @@ list before you present a plan, and again before you re-present a revised one.
 Each entry is generalised past the ticket that produced it — the point is to catch
 the same shape on a different screen, not to re-run one ticket's cases. `Learned
 from` is there so an entry can be audited and deleted when it stops being true.
+
+## Scope — this file is about AUTHORING A CASE, nothing else
+
+The test for an entry is narrow and it is the only one: **does it change how a
+test case is written?** If the answer needs a sentence about how the code should
+be built, how the repo should be configured, or how a plan should be reviewed,
+the entry belongs to another phase and not here.
+
+So this file deliberately does NOT carry:
+
+- coding or style standards — `.claude/rules/` owns those, and `implement` reads them
+- plan-quality rules — `planning-methodology` owns those
+- environment or bring-up facts — `local-browser-verify` owns those, and `verify`
+  is the phase that meets them
+- general engineering advice true of any artifact
+
+Where a repo fact matters here it appears only in its **authoring consequence** —
+"a case whose only runner is this command can never pass" — never as a standalone
+fact about the repo. A reader should be able to apply every entry with nothing in
+front of them but a draft case list.
 
 ---
 
@@ -32,14 +52,20 @@ period fails whenever the period holds more rows than one page. The listing load
 already shows how — or count only the rows actually rendered and say so.
 *Learned from: workstreamai#259 (TC-04)*
 
-### A3. A command that needs environment setup, run bare
-The linter cannot parse a source file unless the development environment setting
-is exported first, exactly as the project's own pre-commit script does. Run bare it
-exits non-zero on every file, including correct ones — and if that command is the
-case's only runner, the case can never pass.
+### A3. A case whose only runner is a command you have not confirmed executes
+A case that asserts through a command inherits every way that command already
+fails. Two ways it bit the same list: the linter was named bare, when the
+project's own pre-commit script exports a development environment setting first —
+run bare it exits non-zero on every file including correct ones. And a case
+described the known-broken unit-test toolchain as "21 unrelated suites" when in
+fact every suite in the repository fails, 189 of 189, including the new tests the
+change itself adds.
 
-**Instead:** name the command the way the project's own scripts invoke it. Check
-how the repo runs it before writing a case around it.
+**Instead:** before writing a case around a command, confirm it runs, and name it
+the way the repo's own scripts invoke it. Where the runner is known-broken, put
+the true scale in the case so the tester does not read a wall of failures as new
+breakage — and find a second assertion, because a case with only that runner can
+never pass.
 *Learned from: workstreamai#259 (TC-12, TC-21)*
 
 ### A4. A case that contradicts a conditional step in the plan
@@ -158,7 +184,11 @@ input and note the branch is unreachable through the UI.
 
 ---
 
-## D. Expected values that are not measurements
+## D. What the case tells the tester
+
+A tester has the case and the screen, nothing else. An expected value they cannot
+measure, or a note that sends them somewhere pointless, costs the same cycle as a
+missing case.
 
 ### D1. Legibility asserted in adjectives
 "Legible, visible, not washed out" is passed by a tester on a badge whose measured
@@ -169,22 +199,15 @@ the shortfall is knowingly accepted, say so in the case rather than letting a pa
 imply compliance.
 *Learned from: workstreamai#259 (TC-03)*
 
-### D2. A stated cause nobody verified
-A case explained a broken toolchain by saying no lock file is tracked. True, but
-not the cause — the manifest pins the version exactly, so producing a lock file
-changes nothing, and a reader following that explanation loses a cycle.
+### D2. A diagnosis in the case notes that nobody verified
+A case explained its known-broken runner by saying no lock file is tracked. True,
+but not the cause — the manifest pins the version exactly, so a lock file changes
+nothing, and a tester who follows that line loses a cycle chasing a fix that
+cannot work.
 
-**Instead:** state a cause only if you checked it. "Cause not established" is a
-better line than a confident wrong one.
-*Learned from: workstreamai#259 (TC-12, TC-21)*
-
-### D3. Known-broken tooling described at the wrong scale
-Two cases put the broken unit-test toolchain at "21 unrelated suites" when in fact
-every suite in the repository fails — 189 of 189, including the new tests the
-change itself adds.
-
-**Instead:** state the true scale, so a tester meeting a wall of failures does not
-read it as new breakage. See also A3.
+**Instead:** a case's notes exist to tell a tester what to expect, not to diagnose
+the repo. State the observable ("this runner fails on every file, including
+correct ones") and leave the cause out unless you checked it.
 *Learned from: workstreamai#259 (TC-12, TC-21)*
 
 ---
@@ -200,13 +223,16 @@ it.
 state in the case rather than assuming it.
 *Learned from: workstreamai#259 (TC-01)*
 
-### E2. A file list that does not match the diff
-Cases filtered the console to errors from "the four files this ticket changes".
-The change touched six; the list named one file that was not changed and omitted
-two that were, so an error from either would have been filtered away unseen.
+### E2. A filter inside a case that hides the failure the case is looking for
+Cases narrowed the console to errors from "the four files this ticket changes".
+The change touched six: the filter named one file that was not changed and omitted
+two that were, so an error raised from either would have been filtered away unseen
+and the case would have passed.
 
-**Instead:** build the file list from the actual diff. Keep an unmodified file in
-the list only deliberately, and say why it is being watched.
+**Instead:** any filter a case applies — file list, selector scope, row subset —
+has to be derived from the diff, and it is worth asking of every one of them what
+a failure it hides would look like. Keep an unmodified file in the filter only
+deliberately, and say in the case why it is being watched.
 *Learned from: workstreamai#259 (TC-06, TC-08)*
 
 ### E3. A new helper with no direct check
