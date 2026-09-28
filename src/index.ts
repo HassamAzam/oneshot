@@ -339,7 +339,12 @@ async function preflight(): Promise<boolean> {
   }
 
   const readAccess = await checkReadAccess(repo);
-  if (!readAccess.ok) {
+  if (readAccess.rejected) {
+    log.error(`GITLAB_READ_TOKEN cannot read ${readAccess.project} — ${readAccess.reason}.`);
+    log.error('  Reads prefer that token, so every board read is refused. Replace it, or unset');
+    log.error('  GITLAB_READ_TOKEN so reads fall back to this desk\'s own credential.');
+    fatal = true;
+  } else if (!readAccess.ok) {
     log.error(`GITLAB_READ_TOKEN cannot see ${readAccess.project} — ${readAccess.reason}.`);
     log.error('  Reads prefer that token, so the board comes back empty and this desk claims');
     log.error('  nothing, while the banner above reports a project and an identity resolved');

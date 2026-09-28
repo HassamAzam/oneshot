@@ -9,7 +9,7 @@
  */
 import { envOr, projectConfig, repoIdentity, DRY_RUN } from './config.js';
 import type { GitlabRepo } from './repourl.cjs';
-import { resolveToken, setupHint } from './token.js';
+import { resolveToken, setupHint, type ResolvedToken } from './token.js';
 import { log } from './log.js';
 import type { MrDiscussion } from '../mrfeedback/types.js';
 
@@ -150,6 +150,11 @@ export interface ReadAccessCheck {
   scoped: boolean;
   /** `group/project`, or '' when GITLAB_REPO_URL names none. */
   project: string;
+  /**
+   * GitLab refused the read token itself (401). Preflight advises differently:
+   * access to the project cannot help a token GitLab no longer accepts.
+   */
+  rejected?: boolean;
   reason?: string;
 }
 
@@ -173,15 +178,32 @@ export interface ReadAccessCheck {
  * would break desks that work. An empty answer is only damning when the desk
  * credential, asked the same question, sees issues the read token does not.
  *
- * A 404 or 403 is fatal: GitLab reached, and that is how it tells a non-member
- * a private project is not there. A network error, a 5xx or a 401 is not. The
- * conductor already survives an offline laptop, and refusing to boot because a
- * VPN was down would trade a silent failure for a noisy one that is just as
- * wrong. Neither is a GITLAB_REPO_URL that names no project: preflight already
- * refuses on that, and asking `projectConfig().gitlab` for one throws.
+ * A 404 or 403 to the read token's probe is fatal: GitLab reached, and that is
+ * how it tells a non-member a private project is not there. A 401 is fatal for
+ * the same reason — GitLab reached, and turned the token itself away as
+ * revoked, expired or mistyped. Booting on one fails every board read, and the
+ * only sign after boot is the watcher's scan error, which blames GITLAB_TOKEN:
+ * the wrong variable. A network error, a 5xx or any other failure is not
+ * fatal. The conductor already survives an offline laptop, and refusing to
+ * boot because a VPN was down would trade a silent failure for a noisy one
+ * that is just as wrong. Neither is a GITLAB_REPO_URL that names no project:
+ * preflight already refuses on that, and asking `projectConfig().gitlab` for
+ * one throws.
+ *
+ * Nothing the desk credential's probe answers is fatal — it is only the
+ * yardstick for an empty answer — so every warning names whose probe failed.
+ * A bare "(notfound, HTTP 404)" read the same for either probe, and a 404 to
+ * the desk passed for the read token's own: the answer that, by the rule
+ * above, refuses. `deskCredential` is resolveToken(), the chain writeToken()
+ * authenticates the desk's probe with, asked first so a warning can say where
+ * that credential lives, and so a desk with none is told so plainly rather
+ * than "(network, HTTP 0)" — which is how call() reports writeToken() throwing.
+ * Tests pass a desk with no credential through it, since no variable can
+ * promise that on a machine with a token file or a keychain entry.
  */
 export async function checkReadAccess(
   repo: GitlabRepo | null = repoIdentity().repo,
+  deskCredential: () => ResolvedToken = resolveToken,
 ): Promise<ReadAccessCheck> {
   const project = repo?.project ?? '';
   const scoped = Boolean(envOr('GITLAB_READ_TOKEN'));
@@ -190,18 +212,38 @@ export async function checkReadAccess(
 
   const probe = (useWriteToken: boolean): Promise<GitlabResult<unknown[]>> =>
     call<unknown[]>('GET', `/projects/${projectId()}/issues?per_page=1`, undefined, useWriteToken);
-  const unverified = (res: GitlabResult<unknown>): ReadAccessCheck =>
-    ({ ok: true, scoped, project, reason: `could not be verified (${res.kind}, HTTP ${res.status})` });
+  const unverified = (why: string): ReadAccessCheck =>
+    ({ ok: true, scoped, project, reason: `could not be verified: ${why}` });
+  const failed = (res: GitlabResult<unknown>): string => `failed (${res.kind}, HTTP ${res.status})`;
 
   const read = await probe(false);
+  if (read.status === 401) {
+    return {
+      ok: false,
+      scoped,
+      project,
+      rejected: true,
+      reason: 'GitLab rejected the token itself (HTTP 401): it is revoked, expired or mistyped',
+    };
+  }
   if (read.kind === 'notfound' || read.status === 403) {
     return { ok: false, scoped, project, reason: `GitLab answered HTTP ${read.status} to it` };
   }
-  if (!read.ok) return unverified(read);
+  if (!read.ok) return unverified(`the probe made with GITLAB_READ_TOKEN ${failed(read)}`);
   if (read.data?.length) return { ok: true, scoped, project };
 
+  // The read token listed nothing. From here only the desk is being asked, so
+  // whatever goes wrong is the desk's, and the warning says so.
+  const deskToken = deskCredential();
+  if (!deskToken.token) {
+    return unverified('this desk has no GitLab token of its own, so GITLAB_READ_TOKEN\'s empty answer '
+      + 'could not be compared against one');
+  }
   const desk = await probe(true);
-  if (!desk.ok) return unverified(desk);
+  if (!desk.ok) {
+    return unverified(`the probe made with the desk credential (${deskToken.where}) ${failed(desk)}, `
+      + 'so GITLAB_READ_TOKEN\'s empty answer could not be compared against it');
+  }
   if (desk.data?.length) {
     return {
       ok: false,

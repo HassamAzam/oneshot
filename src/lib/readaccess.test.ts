@@ -21,6 +21,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkReadAccess } from './gitlab.js';
 import type { ReadAccessCheck } from './gitlab.js';
+import type { ResolvedToken } from './token.js';
 
 const VAR = 'GITLAB_READ_TOKEN';
 const DESK_VAR = 'ONESHOT_GITLAB_TOKEN';
@@ -49,11 +50,16 @@ const jsonReply = (body: unknown, status = 200): Response =>
  *
  * The returned `attempts` are what make "asks nothing" provable — a check that
  * dialled GitLab and then discarded the answer returns the same shape.
+ *
+ * `desk` stands in for resolveToken() where a case needs a desk with no
+ * credential at all. No variable can promise that: resolveToken() goes on to a
+ * token file, the keychain and glab, and this machine may have any of them.
  */
 async function check(
   token: string | undefined,
   reply: (attempt: Attempt) => Response | Promise<Response> = () => jsonReply([]),
   repo?: null,
+  desk?: () => ResolvedToken,
 ): Promise<{ result: ReadAccessCheck; attempts: Attempt[] }> {
   const vars: Record<string, string | undefined> = { [VAR]: token, [DESK_VAR]: DESK_TOKEN };
   const before = new Map(Object.keys(vars).map((k) => [k, process.env[k]]));
@@ -72,7 +78,7 @@ async function check(
   }) as typeof fetch;
 
   try {
-    return { result: await (repo === null ? checkReadAccess(null) : checkReadAccess()), attempts };
+    return { result: await checkReadAccess(repo, desk), attempts };
   } finally {
     globalThis.fetch = realFetch;
     for (const [k, v] of before) {
@@ -127,17 +133,24 @@ test('a GitLab nobody can reach is reported as unverified rather than answered',
   });
   assert.equal(result.ok, true);
   assert.equal(result.scoped, true);
-  assert.match(result.reason ?? '', /could not be verified \(network, HTTP 0\)/);
+  assert.match(result.reason ?? '', /probe made with GITLAB_READ_TOKEN failed \(network, HTTP 0\)/);
 });
 
-test('a revoked token and a 5xx are unverified too, and name what happened', async () => {
-  const rejected = await check(READ_TOKEN, () => jsonReply({ message: '401 Unauthorized' }, 401));
-  assert.equal(rejected.result.ok, true);
-  assert.match(rejected.result.reason ?? '', /could not be verified \(auth, HTTP 401\)/);
+test('a 5xx is unverified too, and the warning says it was the read token\'s probe that failed', async () => {
+  const { result } = await check(READ_TOKEN, () => jsonReply({ message: '503' }, 503));
+  assert.equal(result.ok, true);
+  assert.match(result.reason ?? '', /probe made with GITLAB_READ_TOKEN failed \(server, HTTP 503\)/);
+});
 
-  const down = await check(READ_TOKEN, () => jsonReply({ message: '503' }, 503));
-  assert.equal(down.result.ok, true);
-  assert.match(down.result.reason ?? '', /could not be verified \(server, HTTP 503\)/);
+test('a 401 on the read token\'s probe refuses, since GitLab was reached and turned the token itself away', async () => {
+  // Booting on it fails every board read, and the only sign after boot is the
+  // watcher's scan error, which blames GITLAB_TOKEN: the wrong variable.
+  const { result, attempts } = await check(READ_TOKEN, () => jsonReply({ message: '401 Unauthorized' }, 401));
+  assert.equal(result.ok, false);
+  assert.equal(result.rejected, true);
+  assert.equal(result.project, PROJECT);
+  assert.match(result.reason ?? '', /rejected .*revoked, expired or mistyped/);
+  assert.equal(attempts.length, 1);
 });
 
 test('a 404 or 403 on the project refuses, since that is how a private project hides from a non-member', async () => {
@@ -175,11 +188,29 @@ test('a project with no issues at all is not failed on the read token\'s account
   passing(result);
 });
 
-test('when the desk credential cannot be asked, an empty read is unverified, not refused', async () => {
-  const { result } = await check(READ_TOKEN, (a) =>
-    (a.token === READ_TOKEN ? jsonReply([]) : jsonReply({ message: '502' }, 502)));
+test('when the desk credential cannot be asked, an empty read is unverified, not refused, and the desk is named', async () => {
+  // A bare "(notfound, HTTP 404)" here read as the read token's own 404, which
+  // refuses. A 401 to the desk is the desk's problem too, so it only warns.
+  for (const status of [502, 404, 401]) {
+    const { result } = await check(READ_TOKEN, (a) =>
+      (a.token === READ_TOKEN ? jsonReply([]) : jsonReply({ message: String(status) }, status)));
+    const reason = result.reason ?? '';
+    assert.equal(result.ok, true, `HTTP ${status} to the desk must not refuse`);
+    assert.match(reason, new RegExp(`desk credential \\(.*${DESK_VAR}.*\\) failed \\(\\w+, HTTP ${status}\\)`));
+    assert.match(reason, /empty answer could not be compared/);
+    assert.doesNotMatch(reason, /probe made with GITLAB_READ_TOKEN/);
+  }
+});
+
+test('with no desk credential at all, an empty read says so plainly instead of "(network, HTTP 0)"', async () => {
+  // call() reports writeToken() throwing as a network failure, which blamed a
+  // dead link for a desk that simply has no token to compare with.
+  const noDesk = (): ResolvedToken => ({ token: '', source: 'none', where: 'nowhere', shared: false });
+  const { result, attempts } = await check(READ_TOKEN, byToken([], [{ iid: 1 }]), undefined, noDesk);
   assert.equal(result.ok, true);
-  assert.match(result.reason ?? '', /could not be verified \(server, HTTP 502\)/);
+  assert.match(result.reason ?? '', /this desk has no GitLab token of its own/);
+  assert.doesNotMatch(result.reason ?? '', /network|HTTP 0/);
+  assert.deepEqual(attempts.map((a) => a.token), [READ_TOKEN]);
 });
 
 test('the project is probed with the read token itself, which is the one doing the reads', async () => {
