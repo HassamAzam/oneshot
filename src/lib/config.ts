@@ -375,7 +375,7 @@ export interface RequiredLabel { name: string; why: string }
  */
 export function requiredLabels(
   labels: ProjectConfig['labels'],
-  phaseList: Pick<PhaseConfig, 'name' | 'labelSkills'>[],
+  phaseList: Pick<PhaseConfig, 'name' | 'labelSkills' | 'labelGated'>[],
   bugReproduction: boolean,
 ): RequiredLabel[] {
   const out = new Map<string, string>();
@@ -391,6 +391,10 @@ export function requiredLabels(
   need(labels.inReview, 'in-review marker');
   if (bugReproduction) need(labels.notABug, 'bug reproduction verdict');
   for (const ph of phaseList) {
+    // Before the routing loop, so a label doing both jobs reports under the
+    // worse consequence: a missing routing key loses a skill, a missing gate
+    // label loses the phase and the human sign-off that goes with it.
+    need(ph.labelGated, `gates the '${ph.name}' phase — without it the phase never runs, and nothing says so`);
     for (const [label, skill] of Object.entries(ph.labelSkills ?? {})) {
       need(label, `routes '${skill}' to ${ph.name}`);
     }

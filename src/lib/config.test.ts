@@ -32,7 +32,8 @@ const labels = (over: Partial<Labels> = {}): Labels => ({
   inReview: 'In Review', ...over,
 } as Labels);
 
-const phase = (name: string, labelSkills?: Record<string, string>): Phase => ({ name, labelSkills });
+const phase = (name: string, labelSkills?: Record<string, string>, labelGated?: string): Phase =>
+  ({ name, labelSkills, labelGated });
 
 const names = (l: ReturnType<typeof requiredLabels>): string[] => l.map((x) => x.name);
 
@@ -67,6 +68,23 @@ test('one label used twice is reported once, by its first reason', () => {
   const got = requiredLabels(labels({ review: 'Loop' }), [], false);
   assert.equal(got.filter((l) => l.name === 'Loop').length, 1);
   assert.match(got.find((l) => l.name === 'Loop')!.why, /^entry/);
+});
+
+test('a label a phase is gated on is required', () => {
+  // The one that fails worse than a routing key: an unmatched labelGated does
+  // not lose a skill, it drops the phase from every run and disarms the human
+  // gate that goes with it, while doctor still prints PASS.
+  const got = requiredLabels(labels(), [phase('design', undefined, 'Design')], false);
+  assert.ok(names(got).includes('Design'));
+  assert.match(got.find((l) => l.name === 'Design')!.why, /gates the 'design' phase/);
+});
+
+test('a label that both gates and routes is reported under the gating reason', () => {
+  // Dedupe keeps the first reason, so the order inside the loop decides which
+  // consequence the operator is told about. It should be the worse one.
+  const got = requiredLabels(labels(), [phase('design', { Design: 'frontend-design' }, 'Design')], false);
+  assert.equal(got.filter((l) => l.name === 'Design').length, 1);
+  assert.match(got.find((l) => l.name === 'Design')!.why, /gates the 'design' phase/);
 });
 
 test('a phase with no labelSkills contributes nothing', () => {
