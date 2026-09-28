@@ -126,7 +126,7 @@ function runGuard(script: string, input: unknown, env: Record<string, string>): 
 const WRITE_TOOLS = '^(Write|Edit|NotebookEdit)$';
 const BASH = '^Bash$';
 const MR_TOOLS = '^mcp__gitlab__(create|update)_merge_request$';
-const READ_OR_BASH = '^(Read|NotebookRead|Bash)$';
+const READ_OR_BASH = '^(Read|NotebookRead|Grep|Bash)$';
 
 /**
  * Build the hook set for one phase.

@@ -1775,9 +1775,11 @@ Push this run's branch and open the merge request.
      target: ${baseBranch()}   <- this exact branch, NOT the project's GitLab default branch
    Follow the \`mr-metadata\` skill for the title and for how the closing ticket is referenced.
    If that skill cannot be resolved here, the rules it carries still apply: a title that names
-   the change rather than the ticket number, and a closing reference to #${ctx.ticket.iid} in the
-   description. Set squash off and delete-source-branch off — the conductor owns the merge, and
-   the branch is this run's record.
+   the change rather than the ticket number, and this line on its own in the description:
+     [closes ${GITLAB_PROJECT_URL()}/-/issues/${ctx.ticket.iid}]
+   — the full URL in brackets; the mr-gate hook refuses \`Closes #${ctx.ticket.iid}\`. Set squash
+   off and delete-source-branch off — the conductor owns the merge, and the branch is this run's
+   record.
 
 The description is the durable engineering record, and it has one audience: a reviewer who has
 not read this ticket.
@@ -1883,6 +1885,11 @@ Fair game, all of it: a credential that is missing, wrong or expired; an account
 permission a feature is gated behind; a service that is down or wedged; a dependency that will
 not start; test data that does not exist; a stale lock, an orphaned row, a leaked lease; a
 config value that is wrong for THIS machine.
+
+One exception inside that: a credential in Oneshot's OWN \`.env\` (\`$ONESHOT_HOME/.env\` —
+GITLAB_TOKEN and the rest) is a human fix, never yours. The secret-guard hook denies reading or
+writing that file, shell redirects included, and working around it is not a repair. Name the
+variable and what is wrong with it in \`humanNeeded\` — never its value — with \`fixed: false\`.
 
 Not yours at any severity: a failing test, a defect the review found, a case whose \`expected\`
 the code does not produce, a migration that errors on its own logic. Those belong to

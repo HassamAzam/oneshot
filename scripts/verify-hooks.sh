@@ -223,6 +223,34 @@ expect_allow "grepping the source for a name"  secret-guard.cjs \
     '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"grep -rn GITLAB_TOKEN src/"}}'
 expect_allow "reading an ordinary file"        secret-guard.cjs \
     '{"tool_name":"Read","tool_input":{"file_path":"/tmp/notes.md"}}'
+# The shell expands these; the guard has to as well. HOME is pointed at the
+# repo's parent so a ~ path can name it wherever this checkout lives.
+expect_deny  "cat \$ONESHOT_HOME/.env"          secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat $ONESHOT_HOME/.env"}}'
+expect_deny  "cat \${ONESHOT_HOME}/.env"        secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat \"${ONESHOT_HOME}/.env\""}}'
+HOME="$(dirname "$ROOT")" expect_deny "cat by a ~ path" secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat ~/%s/.env"}}' "$(basename "$ROOT")")"
+HOME="$(dirname "$ROOT")" expect_deny "grep by a \$HOME path" secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"grep TOKEN $HOME/%s/.env"}}' "$(basename "$ROOT")")"
+expect_deny  "Grep tool on this repo's .env"    secret-guard.cjs \
+    "$(printf '{"tool_name":"Grep","tool_input":{"pattern":"TOKEN","path":"%s/.env","output_mode":"content"}}' "$ROOT")"
+# A redirect write is as much a hazard as sed -i: one > blanks GITLAB_TOKEN.
+expect_deny  "> truncating this repo's .env"   secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"printf %%s GITLAB_TOKEN=x > %s/.env"}}' "$ROOT")"
+expect_deny  ">> appending to this repo's .env" secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"echo GITLAB_TOKEN=x >> .env"}}' "$ROOT")"
+expect_deny  "tee into this repo's .env"       secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"echo A=1 | tee -a .env"}}' "$ROOT")"
+# .env.example is the tracked list of variables, and it holds no secrets.
+expect_allow "cat .env.example by bare name"   secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env.example"}}' "$ROOT")"
+expect_allow "cat .env.example by absolute path" secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat %s/.env.example"}}' "$ROOT")"
+expect_allow "cat .env.local and .env.sample"  secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env.local .env.sample"}}' "$ROOT")"
+expect_allow "redirect out of .env.example"    secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"grep -c = < .env.example > /tmp/n"}}' "$ROOT")"
 
 # migration-standards is PostToolUse, so it answers with {"decision":"block"}
 # rather than a permissionDecision — the allow/deny helpers cannot read it.
