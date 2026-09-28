@@ -1,6 +1,6 @@
 # Handoff — running Oneshot
 
-Everything needed to take a GitLab ticket from the `Loop` label to `merged`
+Everything needed to take a GitLab ticket from the `Loop` label to `Merged`
 without anyone watching. The pipeline ends at the merge: nothing is deployed,
 nothing is QA'd on a running build, and deploying is a person's job.
 
@@ -25,7 +25,7 @@ detached, then report — that is the whole decision.
 Stop and ask a human ONLY for something this document does not cover: a
 destructive action (deleting data, rewriting published history, changing another
 person's credentials), spending outside the configured budgets, or a change to a
-system that is not `arbisoft/workstreamai` or this repo. A run that
+system that is not the GitLab project `GITLAB_REPO_URL` names or this repo. A run that
 BLOCKS is not one of those — it tries to repair itself first, and if it hands the
 block back, read the ticket note, fix the cause and carry on.
 
@@ -43,7 +43,8 @@ Never commit these; they belong in `.env` and nowhere else.
 |---|---|
 | `GITLAB_TOKEN` | project access token — reads tickets, opens and merges MRs |
 | `BOARD_INGEST_TOKEN` | 64 hex characters; the telemetry board's write credential |
-| `WORK_REPO`, `CONTEXT_REPO`, `ONESHOT_GITLAB_PROJECT` | which repos, and where they are on *your* disk |
+| `GITLAB_REPO_URL` | which GitLab project Oneshot works on — the one line that decides it; today `https://gitlab.arbisoft.com/arbisoft/erp` |
+| `WORK_REPO`, `CONTEXT_REPO` | where the repos are on *your* disk, when not at the defaults |
 | `SLACK_BOT_TOKEN` | optional — progress cards. Oneshot runs without it |
 | a board login | separate from the ingest token; ask for one |
 
@@ -82,7 +83,16 @@ cd ~/Documents/oneshot && npm install
 ```
 
 `WORK_REPO` (what Oneshot commits to) and `CONTEXT_REPO` (read for prior art) must
-also exist on disk.
+also exist on disk. `WORK_REPO` has to be a clone of the project `GITLAB_REPO_URL`
+names — boot refuses a clone of any other project — and it defaults to
+`~/Documents/<name>`, where `<name>` is the URL's last path segment:
+
+```sh
+git clone git@gitlab.arbisoft.com:arbisoft/erp.git ~/Documents/erp
+```
+
+With ERP as the work project, `CONTEXT_REPO`'s default (`~/Documents/erp`) is that
+same clone, so one checkout serves both.
 
 ### 4. Configure
 
@@ -90,20 +100,62 @@ also exist on disk.
 npm run setup
 ```
 
-An interactive wizard; every prompt has a working default, and `npm start` runs it
-automatically when there is no `.env`. It writes `.env` at mode 600 and offers to
-install the guardrail hooks into `~/.claude/settings.json` — **say yes**. Those hooks
+An interactive wizard, which `npm start` runs automatically when there is no `.env`.
+It asks first for `GITLAB_REPO_URL` — it has no default, because it is the one fact
+the machine cannot guess — and derives the clone location's default from it. The
+later prompts default or can be skipped, but `GITLAB_TOKEN` defaults only when
+`~/.claude.json` already holds a token: skip it otherwise and boot refuses until you
+paste one in. It writes `.env` at mode 600 and
+offers to install the guardrail hooks into `~/.claude/settings.json` — **say yes**. Those hooks
 are what stop a phase pushing to a protected branch or reaching a host it should not.
 
 Then paste in the values you were sent. If you were handed a whole `.env`, check
-these three point at **your** home directory — a copied path is the most common way
-a working config fails:
+it names the project and that its paths point at **your** home directory — a copied
+path is the most common way a working config fails:
 
 ```
-ONESHOT_HOME=/Users/<you>/Documents/oneshot
-WORK_REPO=/Users/<you>/Documents/<work repo>
-WT_ROOT=/Users/<you>/Documents/oneshot-wt
+GITLAB_REPO_URL=https://gitlab.arbisoft.com/arbisoft/erp
+# Only when yours are not at the defaults derived from GITLAB_REPO_URL:
+# WORK_REPO=/Users/<you>/Documents/erp
+# WT_ROOT=/Users/<you>/Documents/erp-wt
 ```
+
+An `.env` from before `GITLAB_REPO_URL` may still carry `ONESHOT_PROJECT`,
+`ONESHOT_GITLAB_PROJECT`, `ONESHOT_GITLAB_API` or `ONESHOT_PROJECT_ID`, and a
+`WORK_REPO`, `WT_ROOT` or `ONESHOT_SEED_FROM` pointing at the previous project's
+clone. Delete them. The selectors select nothing now. Boot refuses one that
+disagrees with the URL, and refuses a `WORK_REPO` or seed whose `origin` is
+another project. A stale `WT_ROOT` has no origin of its own, so boot judges the
+worktrees on disk, each by its clone's `origin` — by project, never by which
+clone. It refuses a `WT_ROOT` that already holds another project's worktrees
+(worktrees of a second clone of this project are fine), and one that points
+away from `~/Documents/<name>-wt` while that default root still holds this
+project's worktrees, which nothing would manage after the move. Whether an old
+`ONESHOT_PROJECT` line is still set makes no difference to either. Delete the
+`WT_ROOT` line to go back to the default, or finish or remove those worktrees
+first. `npm run setup` does all of this for you on a reconfigure, and saves the
+`.env` it started from as `.env.bak-<timestamp>`.
+
+If `WORK_REPO`'s `origin` is your fork, boot refuses it and names the remote
+that is the project, with the two `git remote rename` commands that swap them.
+If a check is wrong and you cannot fix it right now, `ONESHOT_SKIP_REPO_CHECK=1`
+turns these refusals into warnings (not a missing `GITLAB_REPO_URL`); boot and
+`doctor` remind you on every run until you remove it. `scripts/app.cjs` still
+refuses to check out into an `app-<port>` worktree of another project (judged by
+its `origin`, like boot — any clone of this project is fine), so fix a `WT_ROOT`
+shared with another project before the app can warm.
+
+The run journals under `state/runs/` are keyed by ticket iid alone, so the previous
+project's are still there under the same numbers. Oneshot never resumes one: each
+new journal records its project, and a journal that is not this project's is
+archived and the ticket started fresh when that iid is claimed; `npm run unblock`
+refuses it. A journal written before the stamp is judged by the issue URL it
+recorded. Its worktree never makes a journal foreign: one cut from another clone of
+this project is resumed in place, and one whose `origin` is another project is left
+on disk while the run resumes in a fresh worktree from `WORK_REPO`. Boot and `doctor`
+warn while any foreign journals are left, and print the one command that
+moves exactly those aside. Do not move `state/runs/*`: that takes this project's live
+runs with it, and a fresh run cannot lease a branch the old worktree still holds.
 
 Add the board, two lines in the same file:
 
@@ -134,7 +186,7 @@ npm run preflight        # exit 0 = READY. Fix anything it FAILs before starting
 npm start                # watch mode: claims any ticket labelled `Loop`, every 60s
 ```
 
-Then label a ticket `Loop` in `arbisoft/workstreamai` and leave it alone.
+Then label a ticket `Loop` in the project `GITLAB_REPO_URL` names and leave it alone.
 
 For one specific ticket instead of watching:
 
@@ -166,8 +218,8 @@ FAILs on it with that wording.
 **`GITLAB_TOKEN` should be a project access token, not yours.** Preflight WARNs
 while it is a personal token, because every note, MR, merge and label change is
 attributed to whoever owns it — which makes "did I do this or did the pipeline"
-unanswerable later. Create one at *Settings → Access Tokens* on
-`arbisoft/workstreamai` with role **Maintainer** (the merge phase needs to merge
+unanswerable later. Create one at *Settings → Access Tokens* on the project
+`GITLAB_REPO_URL` names, with role **Maintainer** (the merge phase needs to merge
 into a protected `dev`) and scopes `api` + `write_repository`, then:
 
 ```sh
@@ -362,7 +414,8 @@ Without it a gate posts its question and never hears the reply, so every run par
 
 To go back to gating only the tickets that ask for it — the `Review` label, or a diff
 touching `highScrutinyPaths` — set `reviewAllRuns: false`. Both of those keep working
-either way.
+either way, but the label only once `labels.review` names one: it is empty for ERP,
+which has no such label.
 
 ---
 

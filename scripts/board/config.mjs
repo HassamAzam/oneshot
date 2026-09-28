@@ -19,8 +19,8 @@ for (const p of [join(ROOT, '.env')]) {
   }
 }
 
-// An empty value in .env means "unset", not "empty string" — ONESHOT_HOME= is
-// present-but-blank in the shipped .env.example, and ?? would hand back ''.
+// An empty value in .env means "unset", not "empty string": a `KEY=` line left
+// blank would otherwise reach ?? as '' and win over the default.
 const env = (k, d = '') => { const v = process.env[k]; return v === undefined || v === '' ? d : v; };
 const num = (k, d) => { const n = Number(process.env[k]); return Number.isFinite(n) && n > 0 ? n : d; };
 const flag = (k) => /^(1|true|yes)$/i.test(process.env[k] ?? '');
