@@ -573,6 +573,98 @@ expect_clean "Write keeps a committed comment" py-lint.cjs "$(py_payload "$ONESH
 printf '    # and a new one\n' >> "$ONESHOT_WORKTREE/apps/demo/commented.py"
 expect_block "Write that adds a comment" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/commented.py")"
 
+echo
+echo "js-standards"
+FE="$ONESHOT_WORKTREE/frontend/src"
+mkdir -p "$FE/common/utils" "$FE/components/demo"
+
+cat > "$FE/components/demo/Bad.js" <<'JSEOF'
+import axios from "axios";
+
+export const Row = () => <div style={{ marginLeft: 0 }}>hi</div>;
+JSEOF
+
+cat > "$FE/components/demo/Dynamic.js" <<'JSEOF'
+import S from "./styles/demoStyles";
+
+export const Row = ({ statusColor, isActive }) => (
+    <div style={{ color: statusColor }}>
+        <span sx={{ ...S.tab, ...isActive ? S.tabActive : {} }} />
+    </div>
+);
+JSEOF
+
+cat > "$FE/components/demo/Commented.js" <<'JSEOF'
+const note = "we do not import axios here";
+
+export const Row = () => <div>{note}</div>;
+JSEOF
+
+cat > "$FE/components/demo/Schema.js" <<'JSEOF'
+import * as yup from "yup";
+
+export const schema = yup.object({ name: yup.string() });
+JSEOF
+
+cat > "$FE/components/demo/Progress.js" <<'JSEOF'
+export const Bar = ({ progress }) => <div style={{ width: `${progress}%` }} />;
+JSEOF
+
+cp "$FE/components/demo/Schema.js" "$FE/components/demo/formValidations.js"
+cat > "$FE/common/utils/serverCalls.js" <<'JSEOF'
+import axios from "axios";
+
+export const apiGet = url => axios.get(url);
+JSEOF
+
+js_payload() {
+    printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":true}}' "$1"
+}
+
+expect_block "axios outside the allowlist"  js-standards.cjs "$(js_payload "$FE/components/demo/Bad.js")"
+expect_block "yup outside formValidations"  js-standards.cjs "$(js_payload "$FE/components/demo/Schema.js")"
+expect_clean "axios in serverCalls.js"      js-standards.cjs "$(js_payload "$FE/common/utils/serverCalls.js")"
+expect_clean "yup in formValidations.js"    js-standards.cjs "$(js_payload "$FE/components/demo/formValidations.js")"
+expect_clean "dynamic style and spread sx"  js-standards.cjs "$(js_payload "$FE/components/demo/Dynamic.js")"
+expect_clean "axios named only in a string" js-standards.cjs "$(js_payload "$FE/components/demo/Commented.js")"
+expect_clean "template-literal style value" js-standards.cjs "$(js_payload "$FE/components/demo/Progress.js")"
+
+# Outside frontend/ the React rules do not apply: a root webpack.config.js may
+# require axios for the dev-server proxy.
+printf 'const axios = require("axios");\n' > "$ONESHOT_WORKTREE/webpack.config.js"
+expect_clean "axios outside frontend/"      js-standards.cjs "$(js_payload "$ONESHOT_WORKTREE/webpack.config.js")"
+
+# Only the lines a write added are judged, so a legacy file stays editable.
+# A real repo, because a Write is diffed against HEAD.
+cat > "$FE/components/demo/Legacy.js" <<'JSEOF'
+export const Row = ({ n }) => (
+    <div>
+        <span style={{ marginLeft: 4 }} />
+        <b>{n}</b>
+    </div>
+);
+JSEOF
+git -C "$ONESHOT_WORKTREE" init -q
+git -C "$ONESHOT_WORKTREE" add frontend/src/components/demo/Legacy.js
+git -C "$ONESHOT_WORKTREE" -c user.name=verify -c user.email=verify@localhost commit -qm legacy
+
+edit_payload() {
+    "$NODE" -e 'process.stdout.write(JSON.stringify({tool_name:"Edit",tool_input:{file_path:process.argv[1],old_string:process.argv[2],new_string:process.argv[3]},tool_response:{success:true}}))' "$@"
+}
+
+sed -i.bak 's/<b>{n}<\/b>/<b>{n + 1}<\/b>/' "$FE/components/demo/Legacy.js"
+expect_clean "Edit near a legacy inline style" \
+                                            js-standards.cjs "$(edit_payload "$FE/components/demo/Legacy.js" '<b>{n}</b>' '<b>{n + 1}</b>')"
+expect_clean "Write that keeps a legacy inline style" \
+                                            js-standards.cjs "$(js_payload "$FE/components/demo/Legacy.js")"
+sed -i.bak 's/<b>{n + 1}<\/b>/<b style={{ fontWeight: 700 }}>{n + 1}<\/b>/' "$FE/components/demo/Legacy.js"
+expect_block "Edit that adds an inline style" \
+                                            js-standards.cjs "$(edit_payload "$FE/components/demo/Legacy.js" '<b>{n + 1}</b>' '<b style={{ fontWeight: 700 }}>{n + 1}</b>')"
+expect_block "Write that adds an inline style" \
+                                            js-standards.cjs "$(js_payload "$FE/components/demo/Legacy.js")"
+
+rm -f "$FE"/components/demo/*.bak
+
 rm -rf "$ONESHOT_WORKTREE"
 
 echo
