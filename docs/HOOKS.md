@@ -68,10 +68,22 @@ between phases).
 failure, a 15s timeout or non-JSON stdout resolves to `{}`, which the SDK reads as allow. That
 is right for guards whose subject matter the pipeline can survive being wrong about, and it
 keeps a broken guard from wedging a 90-minute phase. It is wrong for a guard standing between a
-confused agent and an irreversible action, so `hooks.ts` keeps a `FAIL_CLOSED` set and turns any
-failure of a script in it into a `PreToolUse` **deny** payload instead. That set is **empty**
-today — its only member was `deploy-guard` — and it is kept because the rule outlives the guard
-that needed it.
+session and something it must not do unchecked, so `hooks.ts` keeps a `FAIL_CLOSED` set and turns
+any failure of a script in it into a refusal instead — missing script, spawn error, timeout,
+non-JSON, and for these guards also empty stdout or JSON that carries no verdict. The refusal is
+in the shape the event understands (`failClosedPayload`): a `PreToolUse` **deny**, or
+`{decision:'block'}` on `UserPromptSubmit`, because a deny in the wrong event's shape is read as a
+hook error and lets the call through. Its one member today is `automation-ready` (below); its
+earlier member, `deploy-guard`, went with the deploy phase.
+
+The in-session copy of `automation-ready` is **best effort**. Every failure of the *script*
+fails closed, but the CLI can still fail the *callback* open: a reply that fails its hook schema,
+a callback that throws, or one that outlives its matcher timeout is logged as `Error in hook
+callback` and replaced by `{}`. `hooks.ts` closes each one — every reply is rebuilt from
+schema-valid parts (`userPromptSubmitSafe`), the callback never throws, and the timeouts nest
+(script 20s < `runGuard` kill 30s < SDK 45s) — and the hard gate is elsewhere: the conductor runs
+the same script through the same `runGuard` before it spends a session
+(`runAutomationReadyGuard`), which never passes through the CLI.
 
 ### PostToolUse
 
@@ -87,6 +99,12 @@ that needed it.
 |---|---|---|
 | `budget-gate` | Refuses the session if the phase's or the run's weighted-token ceiling is blown. **Per-phase ceilings now, not per-loop** — an `implement` that burned 3 laps is refused a 4th before the model starts. Four Opus phases per ticket makes this load-bearing. | **P0** |
 | `run-context` | Injects immutable run facts as `additionalContext`: run id, iid, leased branch, worktree path, port, lap number, outstanding findings. Uniform across all phases and present even if prompt assembly has a bug. | **P1 (M1)** |
+
+### UserPromptSubmit
+
+| Hook | Enforces | P |
+|---|---|---|
+| `automation-ready` | Registered for the on-demand `automation-testcases` phase **only**, so no Loop phase can be blocked by it. Blocks the prompt (`decision:'block'` alone — adding `continue:false` makes the CLI count a turn and hides the block) unless the ticket is ready for automation test cases: `Ready For Automation` is on it and either `Ready For Deployment` was added before the latest trigger add or the ticket is closed; **and** a merge request linked to it is in the same project, merged, and not a branch promotion (source not a protected or `Adhoc-YYYY-MM-DD` branch). Open leftover MRs are a warning. **The only fail-closed guard**: a missing token, GitLab down or answering 401/500, too many label events, or a bug all block. Its JSON also carries `automationReadiness`, the machine verdict the conductor's pre-run reads. | **P0** |
 
 ### SessionEnd
 

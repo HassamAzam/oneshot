@@ -665,6 +665,152 @@ expect_block "Write that adds an inline style" \
 
 rm -f "$FE"/components/demo/*.bak
 
+# ------------------------------------------------------------ automation-ready
+#
+# The one FAIL-CLOSED guard: every way it can fail to judge a ticket has to
+# block. It is the only guard that talks to GitLab, so it gets a fixture GitLab
+# on a free local port and never sees the real one. Label names come from the
+# real config/project.json, because ONESHOT_HOME is this checkout.
+echo
+echo "automation-ready"
+
+AR_TOKEN="verify-token-$$"
+AR_PAYLOAD='{"hook_event_name":"UserPromptSubmit","session_id":"verify","transcript_path":"","cwd":"/tmp","prompt":"write the cases"}'
+AR_PORT_FILE="$(mktemp "${TMPDIR:-/tmp}/oneshot-verify-gitlab.XXXXXX")"
+"$NODE" -e '
+const http = require("node:http");
+const fs = require("node:fs");
+const path = require("node:path");
+const [portFile, token] = process.argv.slice(1);
+const { trigger: T, deployed: D } =
+  require(path.join(process.env.ONESHOT_HOME, "config", "project.json")).automation.labels;
+const add = (name, at) => ({ action: "add", created_at: at, label: { name } });
+const mr = (iid, state, source, target) => ({
+  iid, project_id: 7, state, source_branch: source, target_branch: target,
+  merged_at: state === "merged" ? "2026-01-02T10:00:00Z" : null,
+  title: "fixture " + iid, web_url: "http://127.0.0.1/mr/" + iid,
+});
+const tickets = {
+  1: { issue: { iid: 1, project_id: 7, state: "closed", labels: [T], updated_at: "2026-01-03T00:00:00Z" },
+       events: [add(T, "2026-01-03T00:00:00Z")],
+       mrs: [mr(11, "merged", "fix/x", "dev"), mr(12, "merged", "stage", "dev")] },
+  2: { issue: { iid: 2, project_id: 7, state: "opened", labels: [T, D], updated_at: "2026-01-05T00:00:00Z" },
+       events: [add(T, "2026-01-03T00:00:00Z"), add(D, "2026-01-04T00:00:00Z")],
+       mrs: [mr(21, "opened", "fix/y", "dev")] },
+};
+const server = http.createServer((req, res) => {
+  const send = (status, body, headers) => {
+    res.writeHead(status, { "Content-Type": "application/json", ...(headers || {}) });
+    res.end(JSON.stringify(body));
+  };
+  const m = /^\/api\/v4\/projects\/acme%2Ferp\/issues\/(\d+)(\/resource_label_events|\/related_merge_requests)?(\?|$)/
+    .exec(req.url);
+  if (!m) return send(404, { message: "404 Not Found" });
+  const iid = Number(m[1]);
+  if (iid === 3) return send(500, { message: "500 Internal Server Error" });
+  if (iid === 4 || req.headers["private-token"] !== token) return send(401, { message: "401 Unauthorized" });
+  const t = tickets[iid];
+  if (!t) return send(404, { message: "404 Not Found" });
+  if (m[2] === "/resource_label_events") return send(200, t.events, { "X-Total-Pages": "1" });
+  if (m[2] === "/related_merge_requests") return send(200, t.mrs);
+  return send(200, t.issue);
+});
+server.listen(0, "127.0.0.1", () => fs.writeFileSync(portFile, String(server.address().port)));
+// A fixture orphaned by an interrupted run must not outlive it for long.
+setTimeout(() => process.exit(0), 120000);
+' "$AR_PORT_FILE" "$AR_TOKEN" &
+AR_PID=$!
+for _ in $(seq 1 50); do [ -s "$AR_PORT_FILE" ] && break; sleep 0.1; done
+AR_PORT="$(cat "$AR_PORT_FILE" 2>/dev/null || true)"
+
+# expect_ready <label> <hook> <json> — the readiness guard let the prompt through, WITH a verdict.
+expect_ready() {
+    local out; out="$(run "$2" "$3")"
+    if printf '%s' "$out" | grep -q '"verdict":"ready"' && ! printf '%s' "$out" | grep -q '"decision":"block"'; then
+        green "  PASS  ready: $1"; PASS=$((PASS+1))
+    else
+        red   "  FAIL  should have been READY: $1"; FAIL=$((FAIL+1))
+    fi
+}
+
+# ar_shape <label> <stdout> [text ...] — what every readiness answer must also be.
+# A block is decision:block ALONE: with `continue` or `stopReason` beside it the
+# CLI keeps the prompt and reports a turn, and the conductor can no longer tell
+# the block from a short session. The token is never printed or logged. Each
+# <text> must appear. Counts only a failure, so the section still reports one
+# line per case.
+ar_shape() {
+    local label="$1" out="$2" bad="" want; shift 2
+    printf '%s' "$out" | grep -q '"continue"' && bad="$bad a-continue-key"
+    printf '%s' "$out" | grep -q '"stopReason"' && bad="$bad a-stopReason-key"
+    printf '%s' "$out" | grep -qF -- "$AR_TOKEN" && bad="$bad the-token-on-stdout"
+    cat "$ROOT/state/hook-events.jsonl" "$ROOT/state/hook-errors.log" 2>/dev/null \
+        | grep -qF -- "$AR_TOKEN" && bad="$bad the-token-in-a-log"
+    for want in "$@"; do printf '%s' "$out" | grep -qF -- "$want" || bad="$bad missing:$want"; done
+    if [ -n "$bad" ]; then red "  FAIL  $label:$bad"; FAIL=$((FAIL+1)); fi
+}
+
+# The fixture's address and the token stay set for the section; each case names
+# its phase and ticket in front of the helper, which exports them to the hook.
+export ONESHOT_AUTOMATION_API="http://127.0.0.1:${AR_PORT:-9}/api/v4"
+export ONESHOT_AUTOMATION_PROJECT="acme/erp"
+export ONESHOT_AUTOMATION_TOKEN="$AR_TOKEN"
+AR_PHASE="automation-testcases"
+
+ONESHOT_PHASE=implement ONESHOT_TICKET=1 \
+    expect_clean "outside the automation phase it says nothing" automation-ready.cjs "$AR_PAYLOAD"
+ar_shape "outside the automation phase it says nothing" \
+    "$(ONESHOT_PHASE=implement ONESHOT_TICKET=1 run automation-ready.cjs "$AR_PAYLOAD")"
+
+if [ -n "$AR_PORT" ]; then
+    L="closed ticket with a merged fix MR"
+    ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=1 expect_ready "$L" automation-ready.cjs "$AR_PAYLOAD"
+    ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=1 run automation-ready.cjs "$AR_PAYLOAD")" \
+        '"hookEventName":"UserPromptSubmit"' 'merged !11 (fix/x → dev).'
+
+    L="open ticket, deployed after the trigger, MR still open"
+    ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=2 expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+    ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=2 run automation-ready.cjs "$AR_PAYLOAD")" \
+        '"code":"rfd-order"' '"code":"mr-not-merged"' '!21 is still open'
+
+    L="GitLab answering 500 fails closed"
+    ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=3 expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+    ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=3 run automation-ready.cjs "$AR_PAYLOAD")" \
+        '"verdict":"unknown"' '"errorKind":"server"'
+else
+    red "  FAIL  the fixture GitLab did not start, so the cases that need it cannot run"; FAIL=$((FAIL+1))
+    skip "closed ticket with a merged fix MR" "no fixture"
+    skip "open ticket, deployed after the trigger, MR still open" "no fixture"
+    skip "GitLab answering 500 fails closed" "no fixture"
+fi
+
+# Port 9 is on fetch's blocked-port list: refused before any packet leaves.
+L="GitLab unreachable fails closed"
+ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=1 ONESHOT_AUTOMATION_API=http://127.0.0.1:9/api/v4 \
+    expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=1 ONESHOT_AUTOMATION_API=http://127.0.0.1:9/api/v4 \
+    run automation-ready.cjs "$AR_PAYLOAD")" '"verdict":"unknown"' '"errorKind":"network"'
+
+L="no token fails closed"
+ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=1 ONESHOT_AUTOMATION_TOKEN= \
+    expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=1 ONESHOT_AUTOMATION_TOKEN= \
+    run automation-ready.cjs "$AR_PAYLOAD")" '"verdict":"unknown"' '"errorKind":"config"'
+
+if [ -n "$AR_PORT" ]; then
+    L="a rejected token fails closed and says auth"
+    ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=4 expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+    ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=4 run automation-ready.cjs "$AR_PAYLOAD")" \
+        '"verdict":"unknown"' '"errorKind":"auth"'
+else
+    skip "a rejected token fails closed and says auth" "no fixture"
+fi
+
+unset ONESHOT_AUTOMATION_API ONESHOT_AUTOMATION_PROJECT ONESHOT_AUTOMATION_TOKEN
+kill "$AR_PID" 2>/dev/null
+wait "$AR_PID" 2>/dev/null
+rm -f "$AR_PORT_FILE"
+
 rm -rf "$ONESHOT_WORKTREE"
 
 echo

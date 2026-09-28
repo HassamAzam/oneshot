@@ -18,10 +18,13 @@
  *     state/hook-errors.log. A guard that crashes closed would wedge every
  *     session on this machine, including Hassam's own.
  *
- * Every guard here is fail-open. The exception that used to live here —
- * deploy-guard, which failed CLOSED — went with the deploy phase; the runner
- * keeps the mechanism for whatever guard next needs it (FAIL_CLOSED in
- * src/conductor/hooks.ts).
+ * Every guard here is fail-open, with ONE exception: automation-ready.cjs,
+ * the Ready For Automation mode's UserPromptSubmit guard, fails CLOSED — every
+ * error it catches becomes a block, and src/conductor/hooks.ts (FAIL_CLOSED)
+ * turns its not running, silence or garbage into a block too. It is registered
+ * for the automation-testcases phase only, so the rule above still holds for
+ * every session the Loop runs. (deploy-guard, the earlier fail-closed guard,
+ * went with the deploy phase.)
  */
 
 const fs = require('node:fs');

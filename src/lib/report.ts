@@ -140,7 +140,7 @@ function knownSecrets(): string[] {
   return out.sort((a, b) => b.length - a.length);
 }
 
-function redact(value: string): string {
+export function redact(value: string): string {
   let out = value;
   // Literals first: a shape rule that fires afterwards can only re-mark text
   // that is already a marker, and the ordering note above explains why that is

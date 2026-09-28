@@ -70,7 +70,7 @@ export interface PromptCtx {
  * which is only safe because of the addendum: the gate is the edit, not the
  * forecast. See skillsFor() for the half of this that runs in code.
  */
-const SKILL_LINE = (skills: string[], lazy = false): string => {
+export const SKILL_LINE = (skills: string[], lazy = false): string => {
   if (!skills.length) return '';
   const head = lazy
     ? `\n## Skills\nThese are the method, and they are the current version of it. Read the plan ` +
@@ -236,7 +236,7 @@ environment that is down, a decision only a human can make. Say what would unblo
 ${SKILL_LINE(skillsFor(cfg, ctx), cfg.name === 'implement')}`;
 }
 
-function ticketBlock(t: Ticket): string {
+export function ticketBlock(t: Ticket): string {
   return `## Ticket #${t.iid} — ${t.title}
 ${GITLAB_PROJECT_URL()}/-/issues/${t.iid}
 Labels: ${t.labels.join(', ') || 'none'}

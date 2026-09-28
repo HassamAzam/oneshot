@@ -358,6 +358,76 @@ on-demand `mr-feedback` phase, and the run takes one **review round**:
 - `npm run mr-feedback:probe -- <mrIid> [ticketIid]` prints exactly which threads would be acted
   on right now. The feature is off under `DRY_RUN`.
 
+## Ready For Automation mode
+
+A second, independent mode in the same conductor. It writes **automation test cases** for tickets
+whose change has already shipped, gets them approved by QA on the ticket, and files the approved
+list in the team's Google Sheet. It is off unless a desk switches it on, and it never touches the
+Loop's labels, runs, claims or ports.
+
+```
+ "Ready For Automation" (open or closed, any assignee, not "Automation Done")
+   │
+   ├─ readiness hook ── not ready ──▶ one comment per distinct reason ("No merged MR — !400 is
+   │                                  still open"), labels untouched; re-checked when the ticket
+   │                                  changes and at least every 30 minutes
+   ▼ ready
+ one session writes v1 ──▶ comment with the table + CSV, label "Automation Test Case Review"
+   │
+   ├─ a QA approver asks for changes ──▶ one session writes v2 with ONLY those changes, and the
+   │                                     comment says what changed ──▶ back to review
+   ▼ a QA approver comments `approved`
+ sheet (module tab + tracker row, read back) ──▶ "Automation Test Case Review" off,
+                                                  "Automation Done" on, a done comment with both links
+```
+
+- **Switching it on.** `ONESHOT_AUTOMATION=1` in `.env`, on **one desk only**: the per-ticket lock
+  is a local file, so two desks would each spend a session on the same ticket. Boot runs a
+  preflight (config, the service-account key, the phase and its schema, the hook, the QA list,
+  this desk's GitLab read token, and one read of the sheet); any problem turns the mode off for
+  that process and leaves the Loop as it was. `npm start -- --automation <iid>` runs one pass for
+  one ticket and exits, with or without the switch, and refuses to start on a preflight problem.
+- **Ready means both rules hold** (`hooks/automation-ready.cjs`): `Ready For Deployment` was added
+  before the latest `Ready For Automation`, or the ticket is closed and still carries
+  `Ready For Automation`; and at least one MR in the same project that is not a branch promotion
+  (`dev`/`stage`/`master`, `Adhoc-YYYY-MM-DD`) is merged. An open leftover MR is a warning, never a
+  blocker. The conductor runs the hook itself before every session and again before the sheet
+  write, and it is also the session's `UserPromptSubmit` guard, which fails closed. GitLab
+  unreachable is a silent hold. Removing `Ready For Automation` stops the mode for that ticket
+  with no comment; adding it back resumes where it was.
+- **The session only reads, and only its prompt.** Before it starts, the conductor reads the
+  ticket, the comments people wrote on it and the diff of every merged fix MR over REST, and puts
+  them in the prompt, fenced as untrusted data. The diff is bounded: lockfiles, minified,
+  generated and binary files are named but not shown, a migration shows only its head, and each
+  file and the whole change are capped, every cut marked `[truncated N lines]`. The session runs
+  at the conductor root with the `automation-testcases` skill and **without** the GitLab MCP
+  server; it has no file, shell or web tools either. The conductor posts, labels and writes the
+  sheet in code. Every string it returns is redacted before anything is
+  posted, and a list holding a private key is refused. Two failed attempts in a row post one
+  "could not be written" comment and stop; a QA approver's comment (e.g. "retry") starts it again.
+- **Who approves.** Only `config/reviewers.json` `qa`, only comments posted after the current
+  version's, and only the single word `approved`. A change request in the same round wins over
+  `approved`. "Approved." or "approved ✅" gets a short reply explaining the one-word rule instead
+  of a session. Comments that arrive while a revision is being written go into the next version.
+  The cases comment @mentions every approver, but GitLab never notifies a person of their own
+  comment — the desk token posts as its operator, so on a desk whose operator is a QA approver
+  only the other approvers are notified.
+- **The sheet** is `automation.sheet` in `config/project.json`, written with the service account
+  in `ONESHOT_GOOGLE_SA_FILE` (default `~/.claude/google-service-account.json`), which must be an
+  **Editor** on it. The cases go to the module's existing tab (matched by name, whatever its
+  prefix), or a new orange `TestCases_<Module>` tab; the year's tracker gets a row in the module's
+  section with the ticket link, `Done`, the automation status and a deep link to the block. Oneshot
+  tags the rows it writes with developer metadata, so a retried write never duplicates them and
+  the team's own rows for the same ticket are never mistaken for its own. Everything is read back
+  before the labels move. A failure that will not clear by waiting (permission, a merged range in
+  the way, a read-back mismatch) is reported on the ticket once, with what to do.
+- **`DRY_RUN`** runs the whole ticket in one pass in `state-dry/`: a real session is still spent,
+  comments and label changes are logged instead of made, QA's approval is assumed, and the sheet
+  is read but not written.
+- **State** lives in `state/automation/<iid>/` (journal, each version as posted, transcripts),
+  never in `state/runs`. A finished ticket is not redone by itself: to redo one, move its
+  `state/automation/<iid>` aside and delete its block and tracker row from the sheet.
+
 ## Mobilizing agents
 
 Sixteen phases deep, and most of them spend their time waiting — on a webpack build, on a
@@ -624,14 +694,18 @@ The guards (`npm run hooks:verify` — offline assertions, no network, no sessio
   `--no-verify` is deliberately allowed — the husky pre-commit hook is broken locally.
 - **`budget-gate`** — refuses a phase whose per-phase, per-ticket, per-window or per-day weighted
   token ceiling is already spent.
-**Every guard fails open, and the exception is kept for the next one that must not.** A guard
-that crashes must not wedge a 90-minute phase, so a spawn error, a timeout or non-JSON output
-from `pause-check`, `write-scope`, `git-guard` or `budget-gate` is logged loudly and treated as
-allow — they are policy on operations the pipeline is otherwise structured to survive. The one
-guard that failed CLOSED was `deploy-guard`, which stood between a confused phase and a live
-demo server; it went with the deploy phase. `src/conductor/hooks.ts` still keeps the
-`FAIL_CLOSED` set, empty, because the asymmetry is the load-bearing idea: a guard standing in
-front of an irreversible action must deny when it cannot run.
+**Every guard fails open, except the one that must not.** A guard that crashes must not wedge a
+90-minute phase, so a spawn error, a timeout or non-JSON output from `pause-check`, `write-scope`,
+`git-guard` or `budget-gate` is logged loudly and treated as allow — they are policy on operations
+the pipeline is otherwise structured to survive. The exception is `automation-ready`, the
+Ready For Automation mode's `UserPromptSubmit` guard: a session that writes test cases for a
+ticket nobody has proven ready wastes the session and puts a wrong list in front of QA, so a
+missing script, a timeout, empty or non-JSON output, or an answer that is neither a block nor an
+explicit `ready` blocks the prompt. It is registered for the `automation-testcases` phase only,
+so it can never touch a Loop phase, and the conductor also runs the same script before every
+session, where no CLI can swallow its answer. `src/conductor/hooks.ts` keeps these in the
+`FAIL_CLOSED` set, because the asymmetry is the load-bearing idea: a guard standing in front of
+something that must not happen unchecked denies when it cannot run.
 
 **Guards are passed to the SDK in-process, not installed into `~/.claude/settings.json`.** They
 travel with the repo, so a fresh clone is protected with no install step, and your own
@@ -701,11 +775,12 @@ problem, and letting it trip the breaker would make a wrong `GITLAB_TOKEN` look 
 | `src/conductor/` | watcher, queue, phase runner, the `merge` code phase, schemas, hook wiring, teardown |
 | `src/phases/` | one module per phase: prompt, schema, tool policy |
 | `src/lib/` | config + session env, SQLite, GitLab, worktrees, promotion mutex, quota, reachability, memory |
+| `src/automation/` | the Ready For Automation mode — readiness verdict, state machine, comments, Google Sheets writer |
 | `config/` | project + labels, per-phase model/tools/skills/groups, budgets, reviewers, Slack |
 | `hooks/` | guardrails — passed to the SDK in-process, never installed globally |
 | `scripts/` | hook verify, `doctor`, preflight, dependency probe, unblock, report |
 | `docs/` | [PLAN.md](docs/PLAN.md) · [HOOKS.md](docs/HOOKS.md) |
-| `state/` | gitignored — runs, artifacts, memory, SQLite |
+| `state/` | gitignored — runs, artifacts, memory, SQLite, and `automation/<iid>` for the Ready For Automation mode |
 
 ## Status
 

@@ -1,7 +1,9 @@
 /**
- * GitLab REST helpers used by the conductor itself. Phase sessions talk to
- * GitLab through the MCP server instead; this is the code path, and it is the
- * only one that performs label writes, merges and promotions.
+ * GitLab REST helpers used by the conductor itself. Loop phase sessions talk to
+ * GitLab through the MCP server instead (the automation session does not: the
+ * conductor reads its ticket and diff here, src/automation/context.ts); this is
+ * the code path, and it is the only one that performs label writes, merges and
+ * promotions.
  *
  * Every call classifies its failure, because "the VPN is down" and "your token
  * is wrong" and "that issue does not exist" demand completely different
@@ -42,6 +44,14 @@ function token(): string {
   const t = resolveToken();
   if (!t.token) throw new Error(`No GitLab token for this desk. ${setupHint()}`);
   return t.token;
+}
+
+/**
+ * The read token (GITLAB_READ_TOKEN, else this desk's). Exported so the readiness guard, a child
+ * process, asks as the same account every read here does. Throws like token().
+ */
+export function readToken(): string {
+  return token();
 }
 
 function writeToken(): string {
@@ -136,6 +146,25 @@ export async function issuesWithEntryLabel(): Promise<GitlabResult<Issue[]>> {
     'GET',
     `/projects/${projectId()}/issues?state=opened&labels=${label}&per_page=50&order_by=updated_at&sort=asc`,
   );
+}
+
+/**
+ * Issues carrying `label` (exact name), newest-updated first, one page of 100.
+ *
+ * Unlike issuesWithEntryLabel this takes the label and the state as arguments:
+ * the Ready For Automation mode reads CLOSED tickets too (a ticket is often
+ * closed by the time QA asks for automation cases), and excludes its own done
+ * label server-side with `not[labels]` so finished tickets never fill the page.
+ * `state` defaults to 'all'.
+ */
+export async function issuesWithLabel(
+  label: string,
+  opts: { state?: 'opened' | 'closed' | 'all'; notLabel?: string } = {},
+): Promise<GitlabResult<Issue[]>> {
+  const params = [`labels=${encodeURIComponent(label)}`, `state=${opts.state ?? 'all'}`];
+  if (opts.notLabel) params.push(`not%5Blabels%5D=${encodeURIComponent(opts.notLabel)}`);
+  params.push('per_page=100', 'order_by=updated_at', 'sort=desc');
+  return call<Issue[]>('GET', `/projects/${projectId()}/issues?${params.join('&')}`);
 }
 
 export interface IssueNote {
@@ -380,6 +409,33 @@ export async function swapLabel(
   );
 }
 
+/**
+ * Add and remove labels in ONE server-side step: PUT /projects/:id/issues/:iid with
+ * `add_labels` / `remove_labels` (comma-joined). Unlike swapLabel (GET, then a full `labels` PUT),
+ * a label a human changes between the two calls cannot be lost. Idempotent: adding a present label
+ * or removing an absent one is a no-op. DRY_RUN logs `[dry-run] would edit labels on #<iid>` and
+ * returns ok without a call. Uses writeToken(), like swapLabel.
+ *
+ * A change with nothing in it makes no call at all: a write that changes
+ * nothing is still a write made as this desk.
+ */
+export async function editIssueLabels(
+  iid: number,
+  change: { add?: string[]; remove?: string[] },
+): Promise<GitlabResult<Issue>> {
+  const add = (change.add ?? []).filter((l) => l !== '');
+  const remove = (change.remove ?? []).filter((l) => l !== '');
+  if (DRY_RUN) {
+    log.warn(`[dry-run] would edit labels on #${iid}`, { add, remove });
+    return { ok: true, kind: 'ok', status: 200, data: null };
+  }
+  if (add.length === 0 && remove.length === 0) return { ok: true, kind: 'ok', status: 200, data: null };
+  const body: Record<string, string> = {};
+  if (add.length) body.add_labels = add.join(',');
+  if (remove.length) body.remove_labels = remove.join(',');
+  return call<Issue>('PUT', `/projects/${projectId()}/issues/${iid}`, body, true);
+}
+
 export interface Branch { name: string; protected: boolean; commit: { id: string } }
 
 export function getBranch(name: string): Promise<GitlabResult<Branch>> {
@@ -486,6 +542,49 @@ export function findMergeRequests(q: {
 /** One page (100) of an MR's discussions — the merge block message and the review-feedback loop read it. */
 export function mrDiscussions(mrIid: number): Promise<GitlabResult<MrDiscussion[]>> {
   return call<MrDiscussion[]>('GET', `/projects/${projectId()}/merge_requests/${mrIid}/discussions?per_page=100`);
+}
+
+/** One changed file of a merge request, as GET …/merge_requests/:iid/diffs returns it. */
+export interface MrDiff {
+  old_path: string;
+  new_path: string;
+  /** Unified diff text. Empty when GitLab withheld it (`too_large`, `collapsed`) or nothing but the mode changed. */
+  diff: string;
+  new_file: boolean;
+  renamed_file: boolean;
+  deleted_file: boolean;
+  /** A file the project marks as generated (`gitlab-generated` in .gitattributes). Absent on older instances. */
+  generated_file?: boolean | null;
+  too_large?: boolean | null;
+  collapsed?: boolean | null;
+}
+
+/** Enough for any real fix (3,000 files); only here so a misbehaving API cannot loop forever. */
+const MAX_DIFF_PAGES = 30;
+
+/**
+ * Every changed file of one merge request, with its diff: GET …/diffs (GitLab
+ * 15.7+), a hundred files a page, until a short page.
+ *
+ * All or nothing, like allIssueNotes: a change read half-way looks exactly like
+ * a smaller change, and test cases written from it would silently miss whatever
+ * the missing pages held. `complete` is false only when MAX_DIFF_PAGES ran out,
+ * which the caller says out loud rather than hides.
+ */
+export async function mergeRequestDiffs(
+  mrIid: number,
+): Promise<GitlabResult<{ files: MrDiff[]; complete: boolean }>> {
+  const files: MrDiff[] = [];
+  for (let page = 1; page <= MAX_DIFF_PAGES; page++) {
+    const res = await call<MrDiff[]>(
+      'GET', `/projects/${projectId()}/merge_requests/${mrIid}/diffs?per_page=100&page=${page}`,
+    );
+    if (!res.ok || !res.data) return { ...res, data: null };
+    files.push(...res.data);
+    if (res.data.length < 100) return { ...res, data: { files, complete: true } };
+  }
+  log.warn(`!${mrIid}: more than ${MAX_DIFF_PAGES * 100} changed files; reading only the first ${files.length}`);
+  return { ok: true, kind: 'ok', status: 200, data: { files, complete: false } };
 }
 
 /** What a comparison actually tells us, with the payload that can be megabytes left behind. */

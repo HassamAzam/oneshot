@@ -58,6 +58,27 @@
       "auto": false
     }
   ],
+  "automation": {
+    "_why": "The Ready For Automation mode (src/automation). It runs only on a desk with ONESHOT_AUTOMATION=1, or by hand with --automation <iid>. It reads tickets carrying `labels.trigger` (open or closed, any assignee), proves them ready with hooks/automation-ready.cjs, has one session write the automation test cases, waits for a QA approver (config/reviewers.json qa) to comment `approved`, then writes them to the sheet below and swaps `labels.review` for `labels.done`. It never touches the Loop's labels or state.",
+    "_why_labels": "Exact, case-sensitive names that must already exist on the project. Oneshot never creates labels. Verified on 2026-09-28 against arbisoft/erp: 'Ready For Automation' (1338, renamed from 'Ready for Automation'), 'Ready For Deployment' (423), 'Automation Test Case Review' (1340) and 'Automation Done' (1339). `deployed` is read, never written. It is the label that must have been ADDED before the trigger on an open ticket.",
+    "labels": {
+      "trigger": "Ready For Automation",
+      "deployed": "Ready For Deployment",
+      "review": "Automation Test Case Review",
+      "done": "Automation Done"
+    },
+    "_why_releaseBranchPattern": "Source branches that make an MR a branch PROMOTION, not a fix. Together with branches.protected: a 'stage \u2192 dev' MR that mentions a ticket is not the change that fixed it. Release branches are named Adhoc-YYYY-MM-DD. The hook compiles this source with the 'i' flag, so adhoc-\u2026 matches too.",
+    "releaseBranchPattern": "^Adhoc-\\d{4}-\\d{2}-\\d{2}$",
+    "_why_sheet": "Where approved cases go. `trackerTab` is a title pattern: {year} is replaced with the year QA approved, and the tab is created with its header on row 1 if missing. The real team sheet uses 'Test Cases Updates [{year}]' with its header on row 2, two frozen rows and strict status validation; a tracker this mode creates has none of that, so copy the format across once a year. `moduleTabPrefix` names a module tab this mode has to CREATE. Existing tabs are found by normalised name whatever their prefix. `sectionAliases` maps a module name to the tracker's column-A text when the two are spelt differently and the module tab's own links do not reveal the section. Oneshot marks the rows it writes with developer metadata (key oneshot-automation), so it never mistakes the team's own rows for its own. The service account in ONESHOT_GOOGLE_SA_FILE must be an Editor on this spreadsheet.",
+    "sheet": {
+      "spreadsheetId": "1w3ciN_dla8zsjxVzaR35JlTOXqUMO3mG6A9YRRxyb50",
+      "trackerTab": "TestCases year {year}",
+      "moduleTabPrefix": "TestCases_",
+      "sectionAliases": {}
+    },
+    "_why_recheckMinutes": "A not-ready ticket is re-checked when it changes, and otherwise at this interval. Merging an MR does not touch the ticket's updated_at, so waiting for a change alone would miss the most common fix.",
+    "recheckMinutes": 30
+  },
   "_comment_concurrency": "In-flight TICKET cap. The old MUST-STAY-1 constraint is now carried by the promotion mutex (src/lib/promotion.ts): the deploy script ships the TIP of dev, so exactly one run may occupy the merge\u2192deploy\u2192qa window at a time \u2014 that is where attribution lives, and the mutex enforces it while every other phase pipelines freely. Residual cap reasons: worktrees symlink ONE shared node_modules/venv (a second webpack build during another run's verify contends on the babel cache), and the port pool (PORT_POOL, default 3) bounds server-holding phases. Raise toward the pool size once shared-cache contention is observed to be tolerable. Set to 1 deliberately: the operator runs one ticket per loop and scales by starting more conductors, so the fleet-wide ceiling is PORT_POOL and each process holds exactly one run \u2014 which also keeps the shared node_modules/venv contention this comment warns about at one build per conductor.",
   "concurrency": 1
 }
