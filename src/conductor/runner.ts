@@ -1640,7 +1640,8 @@ export async function runTicket(
       // unfixed base branch. A complete not-reproduced verdict is acted on by
       // the Not a Bug gate at the top of the loop, which a person resolves; all
       // that is left here is saying why an incomplete one did not arm it, and
-      // posting a reproduced verdict on the ticket before the fix is planned.
+      // posting a complete reproduced verdict on the ticket before the fix is
+      // planned (declareReproduced checks the same bar and logs what it skips).
       if (r.cfg.name === 'research' && bugReproductionEnabled()) {
         const decision = notABugDecision(r.out.data);
         if (!decision.stop && decision.note) log.warn(`research: ${decision.note}`);

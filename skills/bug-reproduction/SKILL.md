@@ -158,7 +158,9 @@ Fill `reproduction` in the research output: `kind`, `verdict`, `testedCommit`,
 
 The conductor turns that record into a ticket comment, with the screenshots
 attached, for both `reproduced` (straight away) and `not-reproduced` (the Not a Bug
-gate's request first, then the closing comment once QA confirms). The wording is in
+gate's request first, then the closing comment once QA confirms). A verdict with
+no `.png` in `evidence`, no `steps`, no `observed` or no `testedCommit` posts
+nothing, and a `not-reproduced` one is treated as `inconclusive`. The wording is in
 [templates/](templates/README.md), which also shows which field fills which line.
 Anything you leave out of the record is missing from the comment too.
 

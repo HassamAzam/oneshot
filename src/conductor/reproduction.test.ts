@@ -2,7 +2,8 @@ import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  notABugApprovalRequestBody, notABugDecision, notABugSlackText, reproductionComment, reproductionOf,
+  declareReproduced, incompleteness, notABugApprovalRequestBody, notABugDecision, notABugSlackText,
+  reproductionComment, reproductionOf,
 } from './reproduction.js';
 import { gateApprovedText, gateAskText } from './reviewgate.js';
 import type { RunJournal } from '../lib/artifacts.js';
@@ -35,8 +36,9 @@ test('research with no reproduction block does not stop the run', () => {
   assert.deepEqual(notABugDecision(null), { stop: false });
 });
 
-test('not-reproduced without executed steps, an observation or a commit is downgraded, not a stop', () => {
-  for (const gap of [{ steps: [] }, { observed: '' }, { testedCommit: '' }, { kind: 'feature' }]) {
+test('not-reproduced without executed steps, an observation, a commit or a screenshot is downgraded, not a stop', () => {
+  for (const gap of [{ steps: [] }, { observed: '' }, { testedCommit: '' }, { kind: 'feature' }, { evidence: [] },
+    { evidence: ['overlap 0px on 12/12 rows'] }]) {
     const d = notABugDecision({ reproduction: { ...complete, ...gap } });
     assert.equal(d.stop, false);
     assert.match((d as { note?: string }).note ?? '', /treated as inconclusive/);
@@ -92,13 +94,46 @@ test('a reproduced verdict gets its own comment with the screenshots and no over
   assert.doesNotMatch(body, /\n{3,}/);
 });
 
-test('a comment with no screenshot says so rather than going quiet', () => {
+test('a comment whose screenshot did not upload says so rather than going quiet', () => {
   for (const verdict of ['reproduced', 'not-reproduced']) {
-    const repro = reproductionOf({ reproduction: { ...complete, verdict, evidence: [] } })!;
+    const repro = reproductionOf({ reproduction: { ...complete, verdict, evidence: ['repro-1.png'] } })!;
     const body = reproductionComment(repro, { screenshots: [], label: 'Not a Bug', entryLabel: 'Loop', runId: 'r' });
     assert.match(body, /No screenshot was attached/);
     assert.doesNotMatch(body, /Measurements/);
   }
+});
+
+test('inconclusive and not-applicable have no comment: rendering one throws', () => {
+  for (const verdict of ['inconclusive', 'not-applicable']) {
+    const repro = reproductionOf({ reproduction: { ...complete, verdict } })!;
+    assert.throws(() => reproductionComment(repro, { screenshots: [] }), new RegExp(`${verdict} does not post`));
+  }
+});
+
+test('a reproduced verdict is incomplete without a screenshot, or on a feature ticket', () => {
+  assert.deepEqual(incompleteness(reproductionOf({ reproduction: reproduced })!), []);
+  assert.deepEqual(
+    incompleteness(reproductionOf({ reproduction: { ...reproduced, evidence: ['filter blur(2px) on 1/18 rows'] } })!),
+    ['no screenshot was recorded'],
+  );
+  assert.deepEqual(
+    incompleteness(reproductionOf({ reproduction: { ...reproduced, kind: 'feature' } })!),
+    ['the ticket was classed a feature, not a bug'],
+  );
+});
+
+test('an incomplete reproduced verdict posts nothing on the ticket', async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => { calls++; throw new Error('no network in tests'); }) as typeof fetch;
+  try {
+    for (const gap of [{ evidence: [] }, { kind: 'feature' }, { steps: [], observed: '', testedCommit: '' }]) {
+      await declareReproduced(123, reproductionOf({ reproduction: { ...reproduced, ...gap } })!);
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(calls, 0);
 });
 
 test('the Slack post names the ticket, the commit and the label', () => {

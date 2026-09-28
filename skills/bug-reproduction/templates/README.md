@@ -24,5 +24,9 @@ comment can say is limited by what you record there:
 | `{{screenshots}}` | `evidence` entries ending `.png`, found in the run's artifacts dir and uploaded (first 3) |
 | `{{labelClause}}`, `{{labelRef}}`, `{{entryLabel}}`, `{{runId}}` | the conductor (not-reproduced only) |
 
-A placeholder with nothing to say renders empty. When no screenshot is attached,
-the comment says so in place of the images.
+A verdict whose `evidence` names no `.png` posts nothing: the conductor treats it
+as incomplete (a `not-reproduced` one as `inconclusive`, so it never reaches the Not
+a Bug gate), the same as one missing its steps, observation or commit.
+
+A placeholder with nothing to say renders empty. When a listed screenshot is not in
+the artifacts dir or fails to upload, the comment says so in place of the images.

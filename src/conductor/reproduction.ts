@@ -10,9 +10,9 @@
  * The decision is deliberately lopsided. Stopping a real bug as "Not a Bug"
  * is the expensive mistake — it silently drops a defect someone reported —
  * so only a complete 'not-reproduced' (a bug, steps actually executed, the
- * correct behaviour observed on a recorded commit) stops anything. A
- * not-reproduced verdict that is missing any of that is treated as
- * inconclusive, and the run carries on as it always did.
+ * correct behaviour observed on a recorded commit, with a screenshot) stops
+ * anything. A not-reproduced verdict that is missing any of that is treated
+ * as inconclusive, and the run carries on as it always did.
  *
  * Even a complete verdict does not label anything on its own. It arms the
  * `notABug` gate (reviewgate.ts): the evidence goes on the ticket and a QA
@@ -21,9 +21,9 @@
  * with it. A machine that could not reproduce something is not the same as a
  * person agreeing there is nothing to fix.
  *
- * A 'reproduced' verdict stops nothing, but it is posted on the ticket too,
- * with its screenshots, so QA sees the bug was confirmed before the fix is
- * planned. That comment and the one posted once QA confirms Not a Bug are
+ * A 'reproduced' verdict stops nothing, but a complete one is posted on the
+ * ticket too, with its screenshots, so QA sees the bug was confirmed before
+ * the fix is planned. That comment and the one posted once QA confirms Not a Bug are
  * rendered from the skill's templates/ folder.
  */
 import { existsSync, readFileSync } from 'node:fs';
@@ -78,17 +78,31 @@ export function reproductionOf(research: Record<string, unknown> | null | undefi
   };
 }
 
+/**
+ * What a verdict must carry before it is asserted on the ticket: the ticket is a
+ * bug, steps were actually executed, something was observed, on a recorded
+ * commit, with a screenshot someone can look at.
+ *
+ * Shared by both verdicts on purpose. The cost of an unevidenced claim differs
+ * between them — one stops the run, one is read by the reporter — but neither is
+ * a claim this pipeline should make without the evidence behind it.
+ */
+export function incompleteness(repro: Reproduction): string[] {
+  return [
+    repro.kind !== 'bug' ? 'the ticket was classed a feature, not a bug' : '',
+    repro.steps.length === 0 ? 'no executed steps were recorded' : '',
+    !repro.observed ? 'nothing observed was recorded' : '',
+    !repro.testedCommit ? 'no tested commit was recorded' : '',
+    !repro.evidence.some((e) => /\.png$/i.test(e)) ? 'no screenshot was recorded' : '',
+  ].filter(Boolean);
+}
+
 /** Whether research's verdict ends the run as Not a Bug. */
 export function notABugDecision(research: Record<string, unknown> | null | undefined): ReproductionDecision {
   const repro = reproductionOf(research);
   if (!repro || repro.verdict !== 'not-reproduced') return { stop: false };
 
-  const missing = [
-    repro.kind !== 'bug' ? 'the ticket was classed a feature, not a bug' : '',
-    repro.steps.length === 0 ? 'no executed steps were recorded' : '',
-    !repro.observed ? 'nothing observed was recorded' : '',
-    !repro.testedCommit ? 'no tested commit was recorded' : '',
-  ].filter(Boolean);
+  const missing = incompleteness(repro);
   if (missing.length) {
     return {
       stop: false,
@@ -108,12 +122,17 @@ const TEMPLATES = join(ROOT, 'skills', 'bug-reproduction', 'templates');
  * The wording lives in the skill folder (templates/<verdict>.md) so the skill
  * owns what the ticket is told; this only fills the placeholders. A placeholder
  * with nothing to say renders empty, and the blank lines it leaves collapse.
+ * Any other verdict posts nothing, so asking for its comment throws rather than
+ * rendering the wrong headline.
  */
 export function reproductionComment(
   repro: Reproduction,
   opts: { screenshots: Upload[]; runId?: string; label?: string; entryLabel?: string },
 ): string {
-  const verdict = repro.verdict === 'not-reproduced' ? 'not-reproduced' : 'reproduced';
+  if (repro.verdict !== 'reproduced' && repro.verdict !== 'not-reproduced') {
+    throw new Error(`reproductionComment: ${repro.verdict} does not post a comment`);
+  }
+  const verdict = repro.verdict;
   const measurements = repro.evidence.filter((e) => !/\.png$/i.test(e));
   const values: Record<string, string> = {
     reason: repro.reason || '(no reason recorded)',
@@ -229,10 +248,16 @@ async function postComment(
 
 /**
  * Tell the ticket the bug was reproduced, with the screenshots, before the fix
- * is planned. The run carries on; nothing is labelled.
+ * is planned. The run carries on; nothing is labelled. An incomplete verdict
+ * posts nothing: it would put an unevidenced claim in front of the reporter.
  */
 export async function declareReproduced(iid: number, repro: Reproduction): Promise<void> {
   if (DRY_RUN) return;
+  const missing = incompleteness(repro);
+  if (missing.length) {
+    log.warn(`reproduction said reproduced, but ${missing.join('; ')} — nothing posted on #${iid}`);
+    return;
+  }
   await postComment(iid, repro, {});
   log.info(`#${iid} — reproduced on ${repro.testedCommit.slice(0, 8)}`);
 }
