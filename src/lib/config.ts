@@ -244,7 +244,8 @@ export interface PhaseConfig {
    */
   onDemand?: boolean;
   /**
-   * Restrict this phase to named ONESHOT_PROJECT targets.
+   * Restrict this phase to named targets — PROJECT_TARGET, the last path
+   * segment of GITLAB_REPO_URL.
    *
    * Absent — which is every phase that shipped before this field — means the
    * phase runs for every target and for no target at all, so adding the field

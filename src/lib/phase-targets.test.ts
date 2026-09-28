@@ -11,13 +11,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const VAR = 'ONESHOT_PROJECT';
+const VAR = 'GITLAB_REPO_URL';
 
-/** See target.test.ts: the empty string, never `delete` — dotenv fills a missing key. */
+/**
+ * The target is the last path segment of GITLAB_REPO_URL. The empty string for
+ * no target, never `delete` — dotenv fills a missing key (see target.test.ts).
+ */
 async function phasesWith(value: string): Promise<Array<{ name: string; targets?: string[] }>> {
   const had = Object.prototype.hasOwnProperty.call(process.env, VAR);
   const before = process.env[VAR];
-  process.env[VAR] = value;
+  process.env[VAR] = value ? `https://gitlab.example.com/acme/${value}` : '';
   try {
     const m = await import(`./config.js?phases=${encodeURIComponent(value)}-${Date.now()}`);
     return (m.phases as () => Array<{ name: string; targets?: string[] }>)();
@@ -55,7 +58,7 @@ test('an untargeted phase runs under every target', async () => {
     const list = await phasesWith(value);
     const untargeted = list.filter((p) => !p.targets).map((p) => p.name);
     for (const core of ['research', 'plan', 'implement', 'testcases', 'mr', 'merge']) {
-      assert.ok(untargeted.includes(core), `${core} missing with ONESHOT_PROJECT='${value}'`);
+      assert.ok(untargeted.includes(core), `${core} missing with target '${value}'`);
     }
   }
 });

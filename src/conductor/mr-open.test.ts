@@ -10,11 +10,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CODE_PHASES } from './runner.js';
 
-const VAR = 'ONESHOT_PROJECT';
+const VAR = 'GITLAB_REPO_URL';
 
 /**
  * `mr-open` belongs to the erp target, so every ordering assertion below has to
- * select that target first — under no target the phase is correctly absent, and
+ * select that target first, through GITLAB_REPO_URL — under no target the phase is correctly absent, and
  * asserting its position would be asserting the opposite of what it now means.
  * The empty string, never `delete`: config.js runs dotenv at load, which fills
  * in any key that is missing (see target.test.ts).
@@ -23,7 +23,7 @@ async function phaseList(target: string): Promise<Array<{ name: string; n: numbe
   kind: string; onFail: string }>> {
   const had = Object.prototype.hasOwnProperty.call(process.env, VAR);
   const before = process.env[VAR];
-  process.env[VAR] = target;
+  process.env[VAR] = target ? `https://gitlab.example.com/acme/${target}` : '';
   try {
     const m = await import(`../lib/config.js?mropen=${encodeURIComponent(target)}-${Date.now()}`);
     return (m.phases as () => Array<{ name: string; n: number; kind: string; onFail: string }>)();
