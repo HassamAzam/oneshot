@@ -52,8 +52,13 @@ test('a legacy ONELOOP_ spelling satisfies the ONESHOT_ key and is not an extra'
   assert.deepEqual(d.unknown, []);
 });
 
-test('export prefixes and inline comments read as dotenv reads them', () => {
-  const d = envDrift(`export ${FILLED.replace('glpat-abc', 'glpat-abc # the bot token')}`, TEMPLATE);
+test('an export prefix is not part of the key, so an exported .env is neither missing keys nor carrying extras', () => {
+  const d = envDrift(FILLED.split('\n').map((line) => `export ${line}`).join('\n'), TEMPLATE);
+  assert.deepEqual(d, { missing: [], stale: [], placeholders: [], unknown: [] });
+});
+
+test('an inline comment is not part of the value, so a stand-in path quoted in one is not unfilled', () => {
+  const d = envDrift(FILLED.replace('ONESHOT_SEED_FROM=~/Documents/erp', 'ONESHOT_SEED_FROM=~/Documents/erp # was ~/their/path/erp'), TEMPLATE);
   assert.deepEqual(d, { missing: [], stale: [], placeholders: [], unknown: [] });
 });
 
