@@ -8,20 +8,12 @@ Each entry is generalised past the ticket that produced it — the point is to c
 the same shape on a different screen, not to re-run one ticket's cases. `Learned
 from` is there so an entry can be audited and deleted when it stops being true.
 
-## Scope — this file is about AUTHORING A CASE, nothing else
+## Scope — authoring a case, nothing else
 
 The test for an entry is narrow and it is the only one: **does it change how a
 test case is written?** If the answer needs a sentence about how the code should
 be built, how the repo should be configured, or how a plan should be reviewed,
-the entry belongs to another phase and not here.
-
-So this file deliberately does NOT carry:
-
-- coding or style standards — `.claude/rules/` owns those, and `implement` reads them
-- plan-quality rules — `planning-methodology` owns those
-- environment or bring-up facts — `local-browser-verify` owns those, and `verify`
-  is the phase that meets them
-- general engineering advice true of any artifact
+the entry belongs to another phase.
 
 Where a repo fact matters here it appears only in its **authoring consequence** —
 "a case whose only runner is this command can never pass" — never as a standalone
@@ -53,12 +45,14 @@ already shows how — or count only the rows actually rendered and say so.
 *Learned from: workstreamai#259 (TC-04)*
 
 ### A3. A case whose only runner is a command you have not confirmed executes
-A case that asserts through a command inherits every way that command already
-fails. Two ways it bit the same list: the linter was named bare, when the
-project's own pre-commit script exports a development environment setting first —
-run bare it exits non-zero on every file including correct ones. And a case
-described the known-broken unit-test toolchain as "21 unrelated suites" when in
-fact every suite in the repository fails, 189 of 189, including the new tests the
+Some cases assert through a command rather than through the screen — "run this,
+expect a clean exit" — and then the command's own exit code IS the verdict. Such
+a case inherits every way that command already fails, and two did on the same
+list. One named the linter bare, where the project's own pre-commit script
+exports a development environment setting first: run bare it exits non-zero on
+every file, correct ones included, so the case fails on a good build. The other
+described the known-broken unit-test toolchain as "21 unrelated suites" when
+every suite in the repository fails — 189 of 189, including the new tests the
 change itself adds.
 
 **Instead:** before writing a case around a command, confirm it runs, and name it
