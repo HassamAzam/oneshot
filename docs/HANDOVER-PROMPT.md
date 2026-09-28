@@ -9,7 +9,7 @@ parts that go stale.
 ---
 
 You are picking up Oneshot, an unattended pipeline that drives a GitLab ticket
-from a `Loop` label to `merged`. It ENDS AT THE MERGE — there is no deploy, no
+from a `Loop` label to `Merged`. It ENDS AT THE MERGE — there is no deploy, no
 QA against a running build and no demo; those phases were removed. Read this
 whole brief before you touch anything.
 
@@ -21,10 +21,16 @@ reaps, and a model only ever runs *inside* a phase. Each phase is one fresh Agen
 SDK session with a prompt from `src/phases/prompts.ts`, a model tier from
 `config/models.json`, and a turn cap and timeout from `config/phases.json`.
 
-It works on `arbisoft/workstreamai`, a **mirror** used as the evaluation bench.
-The real repo, `arbisoft/erp`, is read-only context. The app under test is a
-Django + React ERP; `~/Documents/workstreamai` is the checkout, and phases run in
-git worktrees under `~/Documents/oneshot-wt/`.
+It works on the GitLab project `GITLAB_REPO_URL` names in `.env` — today
+`arbisoft/erp`. That one line is the only thing that says which project: host, API,
+project path and the default paths are all derived from it, and a leftover
+`ONESHOT_PROJECT`-style selector that disagrees with it refuses boot. The app under
+test is a Django + React ERP; `WORK_REPO` is the checkout (default
+`~/Documents/<name>`, so `~/Documents/erp`, and its `origin` must be a clone of that
+URL or boot refuses), and phases run in git worktrees under `WT_ROOT` (default
+`~/Documents/erp-wt/`). `CONTEXT_REPO` is unchanged — read for prior art,
+write-denied to every phase, and still `~/Documents/erp` by default, which on ERP is
+the same clone as `WORK_REPO`.
 
 State lives in `state/`: `oneshot.db` (sqlite: runs, phase_runs, quota_usage,
 events), `state/runs/<iid>/run.json` (the journal), per-phase artifacts, and
