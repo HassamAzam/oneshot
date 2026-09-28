@@ -634,12 +634,13 @@ function approvedDesignBlock(ctx: PromptCtx): string {
       + `  - design: \`${join(dir, x.mockupHtml)}\`\n`
       + `  - rendered: \`${join(dir, x.screenshot)}\`${x.note ? `\n  - ${x.note}` : ''}`)
     .join('\n');
-  const approved = ctx.journal.designApproval?.approved === true;
+  const approved = ctx.journal.designApproval?.approved === true
+    && approvalCovers(ctx.journal.designApproval, ctx.prior.design);
 
   return `\n## The approved design — this is the specification
 ${approved
     ? 'A human approved these screens on the ticket before any of this was planned.'
-    : 'These screens were designed for this ticket. (No approval is recorded yet.)'}
+    : 'These screens were designed for this ticket. (No approval covers this version of them yet.)'}
 Build to them: the same layout, the same states, the same copy, and the same values from
 \`${join(dir, d.tokensFile ?? 'tokens.css')}\` rather than new ones. Where the design and your own
 judgement disagree, the design won the argument already — if it is genuinely wrong, say so

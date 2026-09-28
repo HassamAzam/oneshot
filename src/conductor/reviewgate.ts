@@ -66,7 +66,8 @@
  */
 import { DRY_RUN, phases, projectConfig, reviewersConfig } from '../lib/config.js';
 import {
-  gateSubjectDigest, readArtifact, readJournal, updateJournal, writeArtifact,
+  approvedDigestFor, gateSubjectDigest, readArtifact, readJournal, requestCovers, updateJournal,
+  writeArtifact,
   type ReviewGateState, type RunJournal,
 } from '../lib/artifacts.js';
 import {
@@ -453,6 +454,15 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
 
   let state = stateOf(journal, gate);
 
+  // The artifact was rewritten while this request stood. A reply on it is a
+  // verdict on what it showed, so re-ask about what is there now; feedback
+  // history carries over, as it does in rearmGate().
+  if (!requestCovers(state, subject)) {
+    log.warn(`${gate} artifact changed since its request on #${iid} — re-asking`, { iid, note: state.requestNoteId });
+    state = { ...state, requestNoteId: null, requestedDigest: undefined };
+    persist(iid, gate, state);
+  }
+
   // requestNoteId, never requestTs: a journal written before the gates moved
   // to GitLab carries a Slack ts here, and treating that as a note id would
   // compare every note against a number no note will ever exceed. Absent
@@ -468,7 +478,11 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
       log.warn(`${gate} approval request could not be posted to the ticket — will retry next tick`, { iid });
       return { verdict: 'pending' };
     }
-    state = { ...state, requestNoteId: posted.data.id };
+    state = {
+      ...state,
+      requestNoteId: posted.data.id,
+      ...(subject === undefined ? {} : { requestedDigest: gateSubjectDigest(subject) }),
+    };
     persist(iid, gate, state);
     await setBoardLabel(iid, gate, true);
     // Broadcast: the dev or QA who has to act on this is not the person
@@ -535,7 +549,7 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
       ...state,
       approved: true,
       feedback: feedback ? [...state.feedback, feedback] : state.feedback,
-      ...(subject === undefined ? {} : { approvedDigest: gateSubjectDigest(subject) }),
+      ...(subject === undefined ? {} : { approvedDigest: approvedDigestFor(state, subject) }),
     };
     persist(iid, gate, state);
     await setBoardLabel(iid, gate, false);

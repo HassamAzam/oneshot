@@ -120,6 +120,18 @@ export interface ReviewGateState {
    * run's gate on upgrade would be a worse bug than the one this closes.
    */
   approvedDigest?: string;
+  /**
+   * Digest of the artifact the standing request SHOWED, stamped when it posts.
+   *
+   * The approval is read off that request's replies some ticks later, and the
+   * artifact can be rewritten in between -- a remediation resume or a forced
+   * re-run of the phase. Digesting the artifact on the tick that sees the
+   * `approved` would stamp the rewrite with a sign-off given for what the
+   * request showed, and the drift `approvedDigest` exists to catch would be
+   * invisible from then on. ABSENT means a request posted before this field
+   * existed -- see `requestCovers()`.
+   */
+  requestedDigest?: string;
 }
 
 /**
@@ -155,6 +167,31 @@ export function approvalCovers(state: ReviewGateState | undefined, subject: unkn
   if (!state?.approved) return true;
   if (!state.approvedDigest) return true;
   return state.approvedDigest === gateSubjectDigest(subject);
+}
+
+/**
+ * Whether the standing request still shows `subject`.
+ *
+ * True when nothing is standing, when the gate tracks no subject, or when the
+ * request predates `requestedDigest`. False only on a PROVEN mismatch, which
+ * means a reply on that request is a verdict on something else and the gate
+ * has to ask again.
+ */
+export function requestCovers(state: ReviewGateState, subject: unknown): boolean {
+  if (state.requestNoteId == null) return true;
+  if (subject === undefined || !state.requestedDigest) return true;
+  return state.requestedDigest === gateSubjectDigest(subject);
+}
+
+/**
+ * The digest an approval landing on `state`'s request is stamped with: what
+ * the request showed, never what the artifact holds by the time the reply is
+ * read. A request posted before `requestedDigest` existed falls back to the
+ * current artifact, the same upgrade allowance `approvalCovers()` makes.
+ */
+export function approvedDigestFor(state: ReviewGateState, subject: unknown): string | undefined {
+  if (subject === undefined) return undefined;
+  return state.requestedDigest ?? gateSubjectDigest(subject);
 }
 
 export interface RunJournal {

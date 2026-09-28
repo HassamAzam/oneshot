@@ -164,6 +164,28 @@ test('an approval predating digests still pairs, so upgrades do not regress', ()
   assert.match(uiEvidencePrompt(gate, DESIGN), /is this what I approved/);
 });
 
+test('plan does not tell itself a stale design was approved', () => {
+  const gate = {
+    requestTs: 'x', approved: true, feedback: [],
+    approvedDigest: gateSubjectDigest({ ...DESIGN, screens: [] }),
+  };
+  const planDesign = {
+    applicable: true,
+    screens: [{ id: 's1', name: 'Completed list', purpose: 'p', mockupHtml: 's1.html', screenshot: 's1.png' }],
+  };
+  const stale = promptFor(cfg('plan'), {
+    ...ctx(ticket()), journal: { designApproval: gate }, prior: { design: planDesign },
+  } as unknown as PromptCtx);
+  assert.ok(!stale.includes('A human approved these screens'));
+  assert.match(stale, /No approval covers this version/);
+
+  const covering = { ...gate, approvedDigest: gateSubjectDigest(planDesign) };
+  const fresh = promptFor(cfg('plan'), {
+    ...ctx(ticket()), journal: { designApproval: covering }, prior: { design: planDesign },
+  } as unknown as PromptCtx);
+  assert.match(fresh, /A human approved these screens/);
+});
+
 // ------------------------------------------- plan does not order frontend unit tests
 
 test('plan is told not to put a Jest or other frontend unit test in a step', () => {
