@@ -160,6 +160,15 @@ export function approvalCovers(state: ReviewGateState | undefined, subject: unkn
 export interface RunJournal {
   runId: string;
   iid: number;
+  /**
+   * Which GitLab project the run belongs to: repoKey(GITLAB_REPO_URL),
+   * `<host>/<group>/<project>` lower-cased. The directory is keyed by iid
+   * alone, and iids are only unique within a project — so after the URL moves
+   * to another project, issue #237's journal would otherwise be resumed for the
+   * new project's #237, worktree, MR iid and all. See journalproject.ts.
+   * Absent on journals written before it existed.
+   */
+  project?: string;
   title: string;
   url: string;
   createdAt: number;
@@ -193,6 +202,13 @@ export interface RunJournal {
   planApproval?: ReviewGateState;
   /** Test-case approval gate state (Review label, between `testcases` and `review`). */
   testcasesApproval?: ReviewGateState;
+  /**
+   * Not a Bug confirmation gate state (between `research` and the phase after
+   * it). Armed only when research could not reproduce a reported bug: a QA
+   * reviewer's `approved` labels the ticket Not a Bug and stops the run; any
+   * other reply is fed back into a fresh `research` that reproduces again.
+   */
+  notABugApproval?: ReviewGateState;
   /**
    * When the `merge` phase last asked GitLab whether a human has merged the
    * MR. A Review-labelled ticket is never merged by Oneshot, so this phase is
