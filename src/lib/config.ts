@@ -17,8 +17,8 @@ import { homedir, userInfo } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
 import { deskUsername } from './identity.js';
 import {
-  LEGACY_SELECTOR_KEYS, REPO_URL_VAR, SKIP_REPO_CHECK_VAR, expandPath as expandPathFrom, readEnv, repoCheckOverride,
-  resolvePath, resolveTarget, scopedEnvName as scopedEnvNameFor, spellings,
+  LEGACY_SELECTOR_KEYS, REPO_URL_VAR, SKIP_REPO_CHECK_VAR, expandPath as expandPathFrom, isTargetName, readEnv,
+  repoCheckOverride, resolvePath, resolveTarget, scopedEnvName as scopedEnvNameFor, spellings,
   type GitlabRepo, type ResolvedPath,
 } from './repourl.cjs';
 import { parseMrFeedbackConfig } from '../mrfeedback/config.js';
@@ -368,17 +368,23 @@ export function runsForTarget(phase: Pick<PhaseConfig, 'targets'>, target: strin
 }
 
 /**
- * Refuses a `targets` list that no GITLAB_REPO_URL could ever select: not an
- * array, or an entry that is blank or carries a slash or whitespace, which a
- * project's last path segment never does. There is no list of known projects
- * to check a spelling against, so a well-formed typo still drops the phase;
- * doctor names every phase the active target leaves out so that is visible.
+ * Refuses a `targets` list that no project's GITLAB_REPO_URL could ever select:
+ * not an array, or an entry that, trimmed and lower-cased as runsForTarget
+ * compares it, is not a name resolveTarget can derive for a project. The test
+ * is repourl.cjs isTargetName, the URL parser's own rule rather than a copy of
+ * it. It fails an entry that is blank or carries a slash or whitespace, which a
+ * project's last path segment never does; one the parser refuses as a path
+ * segment (`.erp`, `erp.`, `erp?`); and one ending in the `.git` it strips from
+ * a clone URL (`erp.git`). Any of those would drop its phase on every project
+ * without a word. There is no list of known projects to check a spelling
+ * against, so a well-formed typo still drops the phase; doctor names every
+ * phase the active target leaves out so that is visible.
  */
 export function assertTargets(phase: Pick<PhaseConfig, 'name' | 'targets'>): void {
   if (phase.targets === undefined) return;
   const where = `config/phases.json: phase '${phase.name}'`;
   if (!Array.isArray(phase.targets)) throw new Error(`${where}: \`targets\` must be an array of project names`);
-  const bad = phase.targets.filter((t) => typeof t !== 'string' || !/^[^\s/]+$/.test(t.trim()));
+  const bad = phase.targets.filter((t) => typeof t !== 'string' || !isTargetName(t.trim().toLowerCase()));
   if (bad.length) {
     throw new Error(`${where} names target(s) no project can match: ${bad.map((t) => JSON.stringify(t)).join(', ')}. `
       + 'A target is the last path segment of GITLAB_REPO_URL, like `erp`.');

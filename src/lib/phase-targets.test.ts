@@ -83,6 +83,26 @@ test('a target name no project could match is refused, not silently dropped', as
   }
 });
 
+test('erp.git, .erp, erp. and erp? are refused by name: no project URL selects them', async () => {
+  // The URL parser strips a clone URL's .git before naming the target, and
+  // refuses the other three as a path segment. A valid sibling is not named.
+  const { assertTargets } = await import('./config.js');
+  for (const entry of ['erp.git', '.erp', 'erp.', 'erp?']) {
+    assert.throws(() => assertTargets({ name: 'p', targets: ['erp', entry] }), (err: Error) => {
+      assert.match(err.message, /phase 'p' names target\(s\) no project can match/, entry);
+      assert.ok(err.message.includes(`no project can match: ${JSON.stringify(entry)}. `), err.message);
+      return true;
+    });
+  }
+});
+
+test('erp-v2, my_app, my.app and ERP are accepted: a project URL can select each', async () => {
+  const { assertTargets } = await import('./config.js');
+  for (const entry of ['erp-v2', 'my_app', 'my.app', 'ERP']) {
+    assert.doesNotThrow(() => assertTargets({ name: 'p', targets: [entry] }));
+  }
+});
+
 test('every targets list shipped in phases.json is well formed', async () => {
   const { assertTargets } = await import('./config.js');
   const { readFileSync } = await import('node:fs');
