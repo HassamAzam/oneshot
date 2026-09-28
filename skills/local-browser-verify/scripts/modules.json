@@ -2,7 +2,8 @@
   "schemaVersion": 1,
   "generatedAt": "2026-09-10",
   "source": {
-    "repo": "/Users/hassam.azam/Documents/workstreamai",
+    "repo": "WORK_REPO",
+    "repoNote": "Provenance only; nothing reads this block. The routes, nav and apiUrls files below are paths relative to the checkout of the project GITLAB_REPO_URL names. Generated on 2026-09-10 from a mirror of that codebase, not from the project itself.",
     "routes": "frontend/src/common/constants/routes.js",
     "nav": "frontend/src/common/constants/sidebarLinks.js",
     "apiUrls": "frontend/src/common/constants/apiUrls.js"

@@ -14,15 +14,24 @@
  * not-reproduced verdict that is missing any of that is treated as
  * inconclusive, and the run carries on as it always did.
  *
+ * Even a complete verdict does not label anything on its own. It arms the
+ * `notABug` gate (reviewgate.ts): the evidence goes on the ticket and a QA
+ * reviewer decides. `approved` is what calls `declareNotABug`; any other reply
+ * is treated as the context the reproduction missed, and `research` runs again
+ * with it. A machine that could not reproduce something is not the same as a
+ * person agreeing there is nothing to fix.
+ *
  * A 'reproduced' verdict stops nothing, but it is posted on the ticket too,
  * with its screenshots, so QA sees the bug was confirmed before the fix is
- * planned. Both comments are rendered from the skill's templates/ folder.
+ * planned. That comment and the one posted once QA confirms Not a Bug are
+ * rendered from the skill's templates/ folder.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { DRY_RUN, ROOT, artifactDir, projectConfig } from '../lib/config.js';
 import { addIssueNote, issueUrl, swapLabel, uploadFile, type Upload } from '../lib/gitlab.js';
 import { log } from '../lib/log.js';
+import { approverLine, type GateAttachment } from './reviewgate.js';
 import { thread } from '../lib/slack.js';
 
 export interface Reproduction {
@@ -128,11 +137,68 @@ export function reproductionComment(
     .trim();
 }
 
+/** Steps, expected, observed and measurements — the evidence half of the gate's request. */
+function evidenceBody(repro: Reproduction): string[] {
+  const steps = repro.steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
+  const extraEvidence = repro.evidence.filter((e) => !/\.png$/i.test(e));
+  return [
+    '**What was run**',
+    `- Code: \`${repro.testedCommit}\` (unfixed base branch)`,
+    `- Account: ${repro.account || '(not recorded)'}`,
+    '',
+    steps,
+    '',
+    `**Expected (from the ticket):** ${repro.expected || '(not recorded)'}`,
+    '',
+    `**Observed:** ${repro.observed}`,
+    ...(extraEvidence.length ? ['', '**Measurements**', ...extraEvidence.map((e) => `- ${e}`)] : []),
+  ];
+}
+
+/**
+ * The `notABug` gate's request, posted when research could not reproduce the
+ * bug and before anything is labelled. The screenshots are attached below it
+ * by the gate. Written for QA: what was tried, and the two ways to answer.
+ */
+export function notABugApprovalRequestBody(repro: Reproduction, label?: string): string {
+  return [
+    '**Oneshot pauses here** — research could not reproduce this bug on the unfixed base branch. ' +
+      `Nothing has been labelled yet: a person confirms before this ticket is closed as ${label ? `**${label}**` : 'not a bug'}.`,
+    '',
+    `**Why:** ${repro.reason || '(no reason recorded)'}`,
+    '',
+    ...evidenceBody(repro),
+    '',
+    '---',
+    '',
+    approverLine('notABug'),
+    '',
+    `Comment the single word **\`approved\`** to confirm${label ? ` — the ticket is labelled **${label}**` : ''} and the run stops.`,
+    '',
+    'Any other comment from those accounts is treated as FEEDBACK and research reproduces the bug again ' +
+      'with it — so say what the attempt above missed: the data, role, steps, browser or environment ' +
+      'the bug needs. There is no limit on how many rounds this takes. Comments from anyone else are ' +
+      'ignored by this gate.',
+  ].join('\n');
+}
+
 /** The Slack channel post. */
 export function notABugSlackText(iid: number, title: string, repro: Reproduction, label?: string): string {
   return `:mag: *#${iid} ${title}* — could not reproduce on \`${repro.testedCommit.slice(0, 8)}\`` +
     `${label ? `, labelled *${label}*` : ''}. The run stopped before planning.\n` +
     `>${(repro.reason || repro.observed).slice(0, 300)}\n${issueUrl(iid)}`;
+}
+
+/**
+ * Up to MAX_SCREENSHOTS of research's screenshots, as gate attachments. The
+ * gate re-uploads them each round, which is right: a round exists because
+ * research ran again and took new ones.
+ */
+export function reproAttachments(iid: number, evidence: string[]): GateAttachment[] {
+  return evidence.filter((e) => /\.png$/i.test(e)).slice(0, MAX_SCREENSHOTS)
+    .map((name) => join(artifactDir(iid), basename(name)))
+    .filter((path) => existsSync(path))
+    .map((path) => ({ name: basename(path), content: readFileSync(path), mime: 'image/png' }));
 }
 
 /** Upload up to MAX_SCREENSHOTS evidence screenshots research wrote to the run's artifacts dir. */

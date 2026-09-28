@@ -1,4 +1,4 @@
-**Oneshot could not reproduce this bug** — the run has stopped before planning a fix{{labelClause}}.
+**Oneshot could not reproduce this bug, and QA confirmed it** — the run has stopped before planning a fix{{labelClause}}.
 
 **Why:** {{reason}}
 

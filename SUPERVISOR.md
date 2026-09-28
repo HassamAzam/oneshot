@@ -229,7 +229,7 @@ Work top to bottom. The first row that matches is your answer.
 | `error_max_turns` in the journal | `config/phases.json` `maxTurns` | Turn cap too small for the work. **A human must edit it** (§5) |
 | Phase `warned` with `timed out after Nm while still working` | journal | `timeoutMin` too small. Same fix, same restart requirement |
 | Run `blocked`, `blockedWhy` set | journal + §6 | Read the vocabulary table in §6 |
-| Ticket labelled `Loop` never claimed | watcher skip ladder | Carries `merged` or `Needs Human`; or already claimed; or no free slot; or in block cooldown |
+| Ticket labelled `Loop` never claimed | watcher skip ladder | Carries `labels.exit` (`Merged`) or `labels.blocked` (`Needs Human`); or already claimed; or no free slot; or in block cooldown |
 | `at capacity — N run(s) in flight here` every tick | §7 | **Normal.** Not a fault |
 | Run owned by a conductor not in your live set | §1a | Orphan. Reclaimable — a live conductor picks it up, or `npm run unblock` |
 
@@ -271,20 +271,37 @@ it re-prices every future ticket. (It is also inert while `enabled: false`.)
 
 ## 6. Block-reason vocabulary
 
-Generated in `afterFailure()` (`src/conductor/runner.ts:843-890`). A block sets status `blocked`,
-swaps the ticket to `Needs Human`, and starts a **60-minute cooldown** before any resume.
+Most reasons come from `afterFailure()` in `src/conductor/runner.ts`; the MR-feedback ones come
+from `feedbackRound()` in the same file and from the merge phase's review-thread hooks
+(`src/mrfeedback/mergehooks.ts`). Match on the whole reason, not its tail — two different
+mechanisms both end in `gave up after N attempts`. A block sets status `blocked`, swaps the ticket
+to `Needs Human`, and starts a **60-minute cooldown** before any resume.
 
 | Reason text | Means | Who fixes it |
 |---|---|---|
-| `gave up after N attempts` | A `retry` phase exhausted `maxRetries` | You — read the last lap's error |
+| `<phase>: … — gave up after N attempts`, where `<phase>` is `onFail: retry` | That phase exhausted `maxRetries` | You — read the last lap's error |
+| `merge: could not finish answering review threads on !M: … — gave up after N attempts` (or `merge: cannot read the head of !M … — gave up after N attempts`) | GitLab refused a reply or resolve on the run's MR for `MAX_RESPOND_ATTEMPTS` (3) merge passes. `merge` has no `maxRetries` and is `onFail: blocked`; the count is `respondAttempts` in the journal's `mrFeedback` ledger, not `failed` journal records | You — check the thread is not locked or deleted and that the operator's `GITLAB_TOKEN` can write notes on the project, then `npm run unblock`. Replies already posted are journaled and are not re-posted |
+| `mr-feedback: N new review thread(s) on !M after K round(s) — a person takes the review from here` | A full-auto run hit `maxRounds` in `config/mr-feedback.json`. `noRemediation` — `remediate` will not touch it | A person — take the review over on the MR. (A Review-mode run **parks** with the same text plus `; still awaiting a human merge` instead of blocking) |
 | `still outstanding after N laps through <phase>` | A `cycle` phase hit `maxLaps` | You — findings the loop cannot satisfy |
+| `<phase>: … — died of infrastructure N times in a row. A code change cannot fix that…` | The phase was killed or cancelled (hang, network, disk, quota) more than `MAX_INFRA_ATTEMPTS` times running; infra deaths spend no lap, so this is the only thing that stops them | You — check network (VPN / IPv6 route), `df` on the data volume and quota, then unblock |
 | `cycleTo '<x>' is not in the phase list` | Config error | You — fix `config/phases.json` |
+| `mr-feedback: the phase is missing from config/phases.json` / `mr-feedback: implement is not in the phase list` | Config error, `noRemediation` | You — fix `config/phases.json`, restart the conductor (§5), unblock |
 | `paused mid-phase — resumes when unpaused` | A pause file landed mid-run | Clear the pause (read §1b first) |
+
+**`parked` is not `blocked`.** A run whose status is `parked` is waiting on a person by design —
+the Review label's plan approval or human merge, or a Review-mode run past the MR-feedback round
+cap. It has no cooldown and needs no unblock; it resumes on its own once the person acts.
+
+**A full-auto run can block at merge on unresolved threads.** On a project that requires all
+discussions resolved before merge, a full-auto run under `resolve: never` — or with `question` /
+`decline` threads under `resolve: fixed` — leaves those threads open for a person (README 'MR review
+feedback'), so the merge cannot land until someone resolves them.
 
 Laps are counted by `failedLapsOf()` (`src/lib/artifacts.ts:165`) from **the journal**, counting
 only `status === 'failed'` — **`warned` does not count**. To answer "how many attempts left",
 count `failed` records for that phase and compare against `maxLaps`/`maxRetries` in
-`config/phases.json`.
+`config/phases.json`. This does not apply to the `merge: … review threads` row above — that count
+lives in the `mrFeedback` ledger.
 
 ---
 
@@ -300,9 +317,11 @@ count `failed` records for that phase and compare against `maxLaps`/`maxRetries`
    (`src/lib/reachability.ts`, `let state = 'ok'`), so a restart resets it to `ok` and
    `clearPause()` is never reached. A file written by a dead conductor **never self-clears**.
    It only means anything if `checked_at` is **under 15 minutes** old (`NETWORK_PAUSE_STALE_MS`,
-   `hooks/_common.cjs:120`). Confirm independently:
-   `curl -s -o /dev/null -w '%{http_code}\n' https://gitlab.arbisoft.com/api/v4/version` — **401
-   means reachable** (the server answered; the breaker treats 401/403 as auth, not outage).
+   `hooks/_common.cjs:120`). Confirm independently against the API root derived from
+   `GITLAB_REPO_URL` — the host is never written down anywhere else, so ask the same parser the
+   conductor uses:
+   `cd ~/Documents/oneshot && curl -s -o /dev/null -w '%{http_code}\n' "$(node -e "require('dotenv').config({quiet:true});console.log(require('./src/lib/repourl.cjs').parseRepoUrl(process.env.GITLAB_REPO_URL).apiUrl)")/version"`
+   — **401 means reachable** (the server answered; the breaker treats 401/403 as auth, not outage).
 3. **Conductor rows with `heartbeat_at = 0` / dated 1970.** Cleanly retired. `endConductor()`
    zeroes the heartbeat on purpose.
 4. **A `done` run still carrying an `owner`.** Normal — the owner is not cleared on completion.

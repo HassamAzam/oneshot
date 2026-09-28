@@ -1,14 +1,16 @@
 # Ticket comment templates
 
-The conductor posts one of these on the ticket when research returns a verdict
-(`src/conductor/reproduction.ts` fills them in; the session never posts):
+The conductor posts one of these on the ticket (`src/conductor/reproduction.ts`
+fills them in; the session never posts):
 
 | Verdict | Template | The run |
 |---|---|---|
-| `reproduced` | `reproduced.md` | carries on to planning |
-| `not-reproduced` | `not-reproduced.md` | stops, ticket labelled Not a Bug |
+| `reproduced` | `reproduced.md`, as soon as research returns | carries on to planning |
+| `not-reproduced` | `not-reproduced.md`, once a QA reviewer comments `approved` on the Not a Bug gate | stops, ticket labelled Not a Bug |
 
-`inconclusive` and `not-applicable` post nothing.
+`inconclusive` and `not-applicable` post nothing. The Not a Bug gate's own request
+(the evidence plus how QA answers) is not a template: the conductor writes it, since
+its wording belongs to the gate rather than to this skill.
 
 Every value comes from the `reproduction` block in research.json, so what the
 comment can say is limited by what you record there:
