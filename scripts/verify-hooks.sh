@@ -197,8 +197,8 @@ expect_allow "Read while paused"       pause-check.cjs '{"tool_name":"Read","too
 rm -f "$ROOT/state/PAUSE"
 expect_allow "Bash when not paused"    pause-check.cjs "$(bash_payload 'npm test')"
 
-# PostToolUse hooks answer with {"decision":"block"} rather than a
-# permissionDecision — the allow/deny helpers above cannot read it.
+# PostToolUse hooks answer with {"decision":"block"}
+# rather than a permissionDecision — the allow/deny helpers cannot read it.
 expect_block() {
     local out; out="$(run "$2" "$3")"
     if printf '%s' "$out" | grep -q '"decision":"block"'; then
@@ -220,6 +220,7 @@ expect_clean() {
 py_payload() {
     printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":true}}' "$1"
 }
+scr_payload() { py_payload "$@"; }
 
 mig_payload() {
     printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":true}}' "$1"
@@ -332,6 +333,87 @@ rm -f "$MIG/max_migration.txt"
 expect_block "missing max_migration.txt"    migration-standards.cjs "$(mig_payload "$MIG/0005_schema_only.py")"
 
 expect_clean "non-migration python file"    migration-standards.cjs "$(mig_payload "$ONESHOT_WORKTREE/apps/demo/models.py")"
+
+echo
+echo "script-standards"
+mkdir -p "$ONESHOT_WORKTREE/tmp_scripts" "$ONESHOT_WORKTREE/scripts"
+
+cat > "$ONESHOT_WORKTREE/tmp_scripts/good.py" <<'SCREOF'
+"""Seed a handful of demo people. Run: python manage.py shell < tmp_scripts/good.py"""
+
+from apps.core.models import Person
+
+# ===== Scope =====================================
+HOW_MANY = 3
+
+for index in range(HOW_MANY):
+    Person.objects.create(email="test-seed-%d@example.com" % index)
+SCREOF
+
+cat > "$ONESHOT_WORKTREE/tmp_scripts/bootstrapped.py" <<'SCREOF'
+"""A script that sets Django up for itself."""
+
+import argparse
+import os
+import sys
+
+import django
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "hrdb.settings")
+sys.path.insert(0, ".")
+django.setup()
+
+
+def main():
+    print(sys.argv)
+
+
+if __name__ == "__main__":
+    main()
+SCREOF
+
+cat > "$ONESHOT_WORKTREE/tmp_scripts/bad_email.py" <<'SCREOF'
+"""Seed people on a domain that is not example.com."""
+
+from apps.core.models import Person
+
+Person.objects.create(email="test-seed-1@example.invalid")
+Person.objects.create(email=f"seed-{2}@arbisoft.com")
+SCREOF
+
+cat > "$ONESHOT_WORKTREE/tmp_scripts/real_user.py" <<'SCREOF'
+"""Provision the missing User row for a real employee, address supplied by the operator."""
+
+from apps.core.models import Person
+
+# ===== Scope =====================================
+REAL_EMAIL = "ayesha.khan@arbisoft.com"
+
+Person.objects.create(email=REAL_EMAIL)
+SCREOF
+
+# "test" mid-word is not a fabrication marker: the check reads the start of the local part.
+cat > "$ONESHOT_WORKTREE/tmp_scripts/mid_word.py" <<'SCREOF'
+"""Point the digest at the real mailboxes, addresses supplied by the operator."""
+
+from apps.core.models import Person
+
+Person.objects.create(email="latest@arbisoft.com")
+Person.objects.create(email="contest.team@arbisoft.com")
+SCREOF
+
+# The same file in scripts/: tracked utility code, where a CLI shape is correct.
+cp "$ONESHOT_WORKTREE/tmp_scripts/bootstrapped.py" "$ONESHOT_WORKTREE/scripts/cli_tool.py"
+cp "$ONESHOT_WORKTREE/tmp_scripts/bad_email.py" "$ONESHOT_WORKTREE/scripts/seeder.py"
+
+expect_clean "shell-shaped script"          script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/good.py")"
+expect_block "bootstrap in tmp_scripts"     script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/bootstrapped.py")"
+expect_block "fabricated email off-domain"  script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/bad_email.py")"
+expect_clean "a real person's real address" script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/real_user.py")"
+expect_clean "test mid-word in local part"  script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/mid_word.py")"
+expect_clean "CLI shape in tracked scripts" script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/scripts/cli_tool.py")"
+expect_block "fabricated email in scripts"  script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/scripts/seeder.py")"
+expect_clean "app code is not a script"     script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/apps/core/models.py")"
 
 echo
 echo "py-lint"

@@ -83,7 +83,8 @@ import {
 } from '../lib/db.js';
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
 import {
-  declareNotABug, notABugApprovalRequestBody, notABugDecision, reproAttachments,
+  declareNotABug, declareReproduced, notABugApprovalRequestBody, notABugDecision, reproAttachments,
+  reproductionOf,
 } from './reproduction.js';
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
@@ -1638,10 +1639,14 @@ export async function runTicket(
       // Research reproduced (or failed to reproduce) the reported bug on the
       // unfixed base branch. A complete not-reproduced verdict is acted on by
       // the Not a Bug gate at the top of the loop, which a person resolves; all
-      // that is left here is saying why an incomplete one did not arm it.
+      // that is left here is saying why an incomplete one did not arm it, and
+      // posting a complete reproduced verdict on the ticket before the fix is
+      // planned (declareReproduced checks the same bar and logs what it skips).
       if (r.cfg.name === 'research' && bugReproductionEnabled()) {
         const decision = notABugDecision(r.out.data);
         if (!decision.stop && decision.note) log.warn(`research: ${decision.note}`);
+        const repro = reproductionOf(r.out.data);
+        if (repro?.verdict === 'reproduced') await declareReproduced(iid, repro);
       }
       if (r.cfg.name === 'implement' && activeRound(j.mrFeedback)?.status === 'fixing') {
         const addressed = addressedFeedbackOf(r.out.data);
