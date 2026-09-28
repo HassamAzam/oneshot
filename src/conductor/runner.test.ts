@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  codePhaseStatus, decideClaim, mergePollWait, nextIndex, salvagedReview, testcaseGateRoute,
-  uiEvidenceRefusal,
+  applyBaseCheck, codePhaseStatus, decideClaim, failedCases, mergePollWait, nextIndex,
+  salvagedReview, testcaseGateRoute, uiEvidenceRefusal,
 } from './runner.js';
+import type { CaseResult } from '../phases/types.js';
 import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
 import type { RunJournal } from '../lib/artifacts.js';
 import type { JournalOwner } from '../lib/journalproject.js';
@@ -286,4 +287,80 @@ test('a partial whose findings is not an array salvages nothing instead of throw
   }
   // Non-object entries inside an array are dropped, not dereferenced.
   assert.equal(salvagedReview([null, 'x', finding('F-01', 'blocker')], null)?.findings.length, 1);
+});
+
+// ------------------------------------------------ pre-existing verify failures
+
+const verified = (...results: Array<{ id: string; result: string; evidence?: string }>) => ({
+  results: results.map((r) => ({ evidence: 'e', screenshot: '', ...r })),
+});
+
+// #258 and #259 both failed a TC-15 that verify itself called a pre-existing
+// backend bug; #259 failed it again on its second lap and blocked.
+test('a pre-existing failure alone does not fail verify, so the run does not cycle', () => {
+  const data = verified(
+    { id: 'TC-01', result: 'pass' },
+    { id: 'TC-15', result: 'pre-existing', evidence: 'fails on dev too: apps/x/views.py:40' },
+  );
+  assert.equal(failedCases('verify', data), null);
+});
+
+test('a real fail beside a pre-existing one still fails verify, and names only the real one', () => {
+  const why = failedCases('verify', verified(
+    { id: 'TC-02', result: 'fail' },
+    { id: 'TC-15', result: 'pre-existing', evidence: 'fails on dev too' },
+  ));
+  assert.match(why ?? '', /1 failing case\(s\) of 2: TC-02$/);
+});
+
+test('a pre-existing label with no evidence is counted as the fail it would hide', () => {
+  const why = failedCases('verify', verified({ id: 'TC-15', result: 'pre-existing', evidence: '  ' }));
+  assert.match(why ?? '', /TC-15/);
+});
+
+// ------------------------------------------------ base-check proves the label
+
+const res = (id: string, result: CaseResult['result'], evidence = 'fails on dev: views.py:40'): CaseResult =>
+  ({ id, result, evidence, screenshot: '' });
+
+test('a pre-existing case the base branch also fails keeps its label', () => {
+  const out = applyBaseCheck([res('TC-01', 'pass'), res('TC-15', 'pre-existing')],
+    { baseCommit: 'abcdef1234', results: [{ id: 'TC-15', onBase: 'fails', evidence: '500 on save' }] }, 'dev');
+  assert.deepEqual(out.confirmed, ['TC-15']);
+  assert.equal(out.results[1]!.result, 'pre-existing');
+  assert.match(out.results[1]!.evidence, /confirmed on dev @ abcdef12: 500 on save/);
+  assert.equal(failedCases('verify', { results: out.results }), null);
+});
+
+test('a case that passes on the base goes back to fail — the change broke it', () => {
+  const out = applyBaseCheck([res('TC-15', 'pre-existing')],
+    { results: [{ id: 'TC-15', onBase: 'passes', evidence: 'saved fine' }] }, 'dev');
+  assert.deepEqual(out.rejected, ['TC-15']);
+  assert.equal(out.results[0]!.result, 'fail');
+  assert.match(out.results[0]!.evidence, /NOT confirmed — passes on dev/);
+  assert.match(failedCases('verify', { results: out.results }) ?? '', /TC-15/);
+});
+
+test('unproven is not proven: inconclusive, a missing entry, or no check at all are fails', () => {
+  const inconclusive = applyBaseCheck([res('TC-15', 'pre-existing')],
+    { results: [{ id: 'TC-15', onBase: 'inconclusive', evidence: 'E_NO_PORTS' }] }, 'dev');
+  assert.equal(inconclusive.results[0]!.result, 'fail');
+  const missing = applyBaseCheck([res('TC-15', 'pre-existing')], { results: [] }, 'dev');
+  assert.equal(missing.results[0]!.result, 'fail');
+  const none = applyBaseCheck([res('TC-15', 'pre-existing')], null, 'dev');
+  assert.equal(none.results[0]!.result, 'fail');
+  assert.match(none.results[0]!.evidence, /no base-branch check ran/);
+});
+
+test('a label with no evidence is not rescued by the base check', () => {
+  const out = applyBaseCheck([res('TC-15', 'pre-existing', '')],
+    { results: [{ id: 'TC-15', onBase: 'fails', evidence: 'x' }] }, 'dev');
+  assert.equal(out.results[0]!.result, 'fail');
+});
+
+test('results that are not pre-existing pass through untouched', () => {
+  const input = [res('TC-01', 'pass'), res('TC-02', 'fail'), res('TC-03', 'blocked')];
+  const out = applyBaseCheck(input, null, 'dev');
+  assert.deepEqual(out.results, input);
+  assert.deepEqual([out.confirmed, out.rejected], [[], []]);
 });

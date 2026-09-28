@@ -102,7 +102,7 @@ import {
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
-import type { Ticket, TestCase } from '../phases/types.js';
+import { countsAsFailure, type CaseResult, type Ticket, type TestCase } from '../phases/types.js';
 import {
   activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
   roundsUsed, startRound,
@@ -482,16 +482,57 @@ export function salvagedReview(
  * stays where it is as a backstop: it re-derives the same fact deterministically
  * at the merge, and a check that only runs early is a check a resumed run skips.
  */
-function failedCases(name: string, data: Record<string, unknown> | null | undefined): string | null {
+export function failedCases(name: string, data: Record<string, unknown> | null | undefined): string | null {
   if (name !== 'verify') return null;
   const results = (data as { results?: Array<{ id?: string; result?: string }> } | null)?.results;
   if (!Array.isArray(results) || results.length === 0) return null;
-  const failed = results.filter((r) => r.result === 'fail');
+  const failed = results.filter(countsAsFailure);
   if (failed.length === 0) return null;
   const ids = failed.map((r) => r.id ?? '?').join(', ');
   const other = results.filter((r) => r.result === 'blocked' || r.result === 'skipped').length;
   const tail = other ? ` (${other} further case(s) blocked or never run)` : '';
   return `${name} recorded ${failed.length} failing case(s) of ${results.length}: ${ids}${tail}`;
+}
+
+/** base-check.json, as far as applyBaseCheck reads it. */
+export interface BaseCheck {
+  baseCommit?: string;
+  results?: Array<{ id?: string; onBase?: string; evidence?: string }>;
+}
+
+/**
+ * Keep a 'pre-existing' label only where the base branch confirmed it.
+ *
+ * The label lets a failing case past both the verify cycle and the merge gate,
+ * and until now it rested on verify's word alone. `base-check` re-ran those
+ * cases on the base branch; a case keeps the label only if it failed there
+ * too. Everything else — it passed on the base, the check could not run it, or
+ * no check ran at all (`check` null) — goes back to 'fail', which is exactly
+ * what it was before the label existed. Unproven is not proven.
+ *
+ * The evidence is rewritten either way, so the MR note and implement's fix
+ * list say what the base showed rather than what verify guessed.
+ */
+export function applyBaseCheck(
+  results: CaseResult[], check: BaseCheck | null, base: string,
+): { results: CaseResult[]; confirmed: string[]; rejected: string[] } {
+  const confirmed: string[] = [];
+  const rejected: string[] = [];
+  const at = check?.baseCommit ? ` @ ${check.baseCommit.slice(0, 8)}` : '';
+  const out = results.map((r) => {
+    if (r.result !== 'pre-existing') return r;
+    const seen = (check?.results ?? []).find((c) => c.id === r.id);
+    if (seen?.onBase === 'fails' && String(r.evidence ?? '').trim()) {
+      confirmed.push(r.id);
+      return { ...r, evidence: `confirmed on ${base}${at}: ${seen.evidence ?? ''} — verify: ${r.evidence}` };
+    }
+    rejected.push(r.id);
+    const why = seen
+      ? `${seen.onBase === 'passes' ? `passes on ${base}${at}` : `could not be checked on ${base}`}: ${seen.evidence ?? ''}`
+      : `no base-branch check ran for it`;
+    return { ...r, result: 'fail' as const, evidence: `claimed pre-existing, NOT confirmed — ${why} — verify: ${r.evidence}` };
+  });
+  return { results: out, confirmed, rejected };
 }
 
 /**
@@ -1380,10 +1421,13 @@ export async function runTicket(
           }
         } else if (res.length > 0 && passes === 0) {
           const failed = res.filter((x) => x.result === 'fail').length;
+          const blocked = res.filter((x) => x.result === 'blocked').length;
+          const preExisting = res.filter((x) => x.result === 'pre-existing').length;
           r.out.ok = false;
           overruled.add(r);
           r.hardStop = `verify recorded ${res.length} case(s) — ${failed} failed, ` +
-            `${res.length - failed - skipped} blocked, ${skipped} skipped — and NONE passed. An ` +
+            `${blocked} blocked, ${skipped} skipped` +
+            `${preExisting ? `, ${preExisting} pre-existing` : ''} — and NONE passed. An ` +
             'all-negative local run means the environment or the change is broken end to end, and ' +
             'neither is something a merge should ride through. A human decides whether the ' +
             'demo-server QA gate alone is acceptable for this ticket.';
@@ -1433,6 +1477,29 @@ export async function runTicket(
           r.out.ok = true;
           writeArtifact(iid, r.cfg.artifact ?? `${r.cfg.name}.json`, r.out.data);
           log.warn(`${r.cfg.name} salvaged from partial results — ${recorded.length} recorded, ${skipped.length} skipped`);
+        }
+      }
+
+      // A 'pre-existing' label is verify's claim that a failure is not this
+      // change's. It lets the case past the cycle and the merge gate, so it is
+      // checked here, on the base branch, before failedCases() reads the
+      // results — and a label the base does not confirm is a fail again. After
+      // the salvage above on purpose: a salvaged partial can carry the label too.
+      if (r.cfg.name === 'verify' && r.out.ok && !overruled.has(r)) {
+        const res = (r.out.data?.results ?? []) as CaseResult[];
+        if (res.some((x) => x.result === 'pre-existing')) {
+          const check = res.some((x) => x.result === 'pre-existing' && !countsAsFailure(x))
+            ? await runBaseCheck()
+            : null;
+          const applied = applyBaseCheck(res, check, cfg.branches.base);
+          r.out.data = { ...r.out.data, results: applied.results };
+          writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
+          if (applied.confirmed.length) {
+            log.ok(`base-check confirmed pre-existing on ${cfg.branches.base}: ${applied.confirmed.join(', ')}`);
+          }
+          if (applied.rejected.length) {
+            log.warn(`base-check did not confirm ${applied.rejected.join(', ')} — scored as fail`);
+          }
         }
       }
 
@@ -2062,6 +2129,48 @@ export async function runTicket(
       return { kind: 'cycle', jumpTo, windowEnd: mergeIndex };
     }
     return { kind: 'retry', at: mergeIndex };
+  }
+
+  /**
+   * Run the on-demand `base-check` session and return its artifact, or null.
+   *
+   * Null for every way it can fail to answer — the phase switched off, no port,
+   * no quota, a session that died — and null means "not confirmed" to
+   * applyBaseCheck(), so none of these can wave a failure through. Recorded in
+   * the journal and ledger like any phase: it spends budget and holds a browser.
+   */
+  async function runBaseCheck(): Promise<BaseCheck | null> {
+    const cfgB = list.find((q) => q.name === 'base-check');
+    if (!cfgB || !isImplemented(cfgB.name)) return null;
+    if (ensureLeases(cfgB)) return null;
+    const lap = lapsOf(iid, cfgB.name);
+    if (!checkQuota(runId, cfgB.name, lap).allowed) return null;
+
+    const startedAt = Date.now();
+    await updateCard(j.slackTs ?? '', cardState(j, [cfgB.name]));
+    updateRun(runId, { phase: cfgB.name, status: 'running', owner_seen_at: Date.now() });
+
+    const ctx: PromptCtx = { ticket, runId, lap, branch, worktree, port, prior, journal: j };
+    const rowId = phaseStart(runId, cfgB.name, lap, modelFor(cfgB));
+    const out = await runPhase({
+      iid, runId, lap, cfg: cfgB,
+      prompt: promptFor(cfgB, ctx),
+      systemPrompt: systemPromptFor(cfgB, ctx),
+      worktree, port, branch,
+      signal: opts.signal,
+    });
+    const status = out.ok ? 'ok' : statusForFailure(cfgB, out.infra);
+    phaseEnd(rowId, status, {
+      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+      detail: out.error ?? out.blocked ?? undefined,
+    });
+    recordPhase(iid, {
+      phase: cfgB.name, lap, status, startedAt, endedAt: Date.now(), model: modelFor(cfgB),
+      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+      error: out.accountAction ?? out.error ?? out.blocked ?? undefined,
+    });
+    j = readJournal(iid) ?? j;
+    return out.ok ? (out.data as BaseCheck | undefined) ?? null : null;
   }
 
   /**

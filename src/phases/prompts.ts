@@ -29,7 +29,7 @@ import { readArtifact, type Remediation, type RunJournal } from '../lib/artifact
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import {
-  GITLAB_PROJECT_URL,
+  GITLAB_PROJECT_URL, countsAsFailure,
   type CaseResult, type DesignArtifact, type Finding, type Screenshot, type TestCase,
   type Ticket, type TicketDoc,
 } from './types.js';
@@ -555,7 +555,7 @@ function findingsOf(ctx: PromptCtx): Finding[] {
  */
 function verifyFailuresOf(ctx: PromptCtx): CaseResult[] {
   const a = readArtifact<{ results?: CaseResult[] }>(ctx.ticket.iid, 'verify.json');
-  return (a?.results ?? []).filter((r) => r.result === 'fail');
+  return (a?.results ?? []).filter(countsAsFailure);
 }
 
 
@@ -1433,7 +1433,8 @@ are the only phase positioned to see it. Anything that passed on lap ${ctx.lap -
 now goes in \`regressions\` as well as in \`results\`.
 
 A case blocked last lap for an environment reason — server down, data missing — is not carried
-forward as a failure. Re-run it honestly.
+forward as a failure. Re-run it honestly. The same for a case recorded 'pre-existing' last lap:
+re-run it, and keep that label only if the proof still holds.
 `
       : '';
 
@@ -1556,6 +1557,33 @@ the reason in \`evidence\` — never a silent omission, and never a 'pass'.
 \`evidence\` for a fail is ACTUAL vs EXPECTED, in that order, in one line. "Did not work" is not
 evidence and the next \`implement\` lap cannot act on it.
 
+## A failure this change did not cause is 'pre-existing', not 'fail'
+
+A 'fail' sends the run back to \`implement\` and blocks the merge. That is right for a defect in
+this diff and wrong for a bug that was already on \`origin/${baseBranch()}\`: no lap can fix it,
+and the run burns its laps and blocks on something that was never this ticket's. Record such a
+case as 'pre-existing'. It does not cycle and does not block; it is listed on the MR for the
+reviewer to confirm and ticket.
+
+'pre-existing' is a claim you must PROVE, in \`evidence\`, after the actual vs expected:
+  - you observed the same failure on \`origin/${baseBranch()}\` (a base-branch app instance, or the
+    base-branch endpoint/shell), or
+  - you name the \`file:line\` on the base branch that produces it, and \`git diff
+    origin/${baseBranch()}...HEAD --stat\` shows the diff does not touch that file or anything it
+    calls on this path.
+"Looks unrelated" is not proof, and a label with no proof is scored as a 'fail'.
+
+Never 'pre-existing':
+  - a case exercising an acceptance criterion of THIS ticket, or the behaviour the ticket reports
+    as broken — on a bug ticket the bug is pre-existing by definition and fixing it is the job;
+  - a case that passed on an earlier lap of this run (that is a regression);
+  - a failure the diff makes worse, even if some of it was already there.
+When you cannot tell, it is a 'fail'.
+
+The conductor does not take your word for it: every 'pre-existing' case is re-run on
+\`${baseBranch()}\` by a separate check, and one that does not fail there the same way goes back
+to 'fail'. A wrong label saves nothing — it costs that check's time and ends as a fail anyway.
+
 ## Turn economy — this is what killed the last session, so it is a protocol, not advice
 
 A session that dies at its turn cap produces NO artifact, and no artifact costs the pipeline a
@@ -1601,6 +1629,65 @@ the evidence the cycle runs on.
 
 A failing case is not a block. \`blocked\` is for: the server never came up, or logging in is
 impossible.`;
+  },
+
+  'base-check': (ctx) => {
+    const claimed = (readArtifact<{ results?: CaseResult[] }>(ctx.ticket.iid, 'verify.json')?.results ?? [])
+      .filter((r) => r.result === 'pre-existing');
+    const ids = new Set(claimed.map((r) => r.id));
+    const cases = testCases(ctx).filter((c) => ids.has(c.id));
+
+    return `${ticketHead(ctx.ticket)}
+
+\`verify\` ran this ticket's case list against the branch and said the cases below fail for a
+reason this change did NOT cause — that they fail the same way on \`origin/${baseBranch()}\`.
+That label lets them past the merge gate, so it has to be proven, and you are the proof.
+
+## What verify claimed
+${claimed.map((r) => `  - ${r.id}: ${r.evidence}`).join('\n') || '  (nothing — say so in `summary`)'}
+
+## The cases — run ONLY these, on the base branch
+${caseList(cases, { steps: true })}
+
+## Bring up the base branch, not this one
+
+Your worktree holds the CHANGE. Do not run the cases there, and do not check anything out in it —
+you cannot write to it, and the git guard refuses checkout/restore/stash/reset. Bring up a second
+app on \`${baseBranch()}\` in its own checkout, exactly as \`ui-evidence\` takes its 'before' shots:
+
+1. \`node $ONESHOT_HOME/scripts/app.cjs list\` — if an instance that is healthy with bundleReady
+   is already at \`origin/${baseBranch()}\`, use its \`baseUrl\`.
+2. Otherwise:
+   \`env -u ONESHOT_WORKTREE -u ONESHOT_PORT -u ONESHOT_TICKET -u ONESHOT_IID
+   ONESHOT_RUN_DIR=$ONESHOT_HOME/state/runs/$ONESHOT_TICKET/base-app node
+   $ONESHOT_HOME/scripts/app.cjs ensure --ref ${baseBranch()}\`
+   and use the \`baseUrl\` it prints. A named error code (\`E_NO_PORTS\`, …) means you cannot
+   check anything: report every case 'inconclusive' with that code, and stop.
+
+Record \`git -C <that checkout> rev-parse HEAD\` as \`baseCommit\`.
+
+${testLoginBlock()}
+
+Drive it with Playwright from Bash with \`node\`, one script for all the cases, the same way
+\`verify\` did. Arrange data with \`erp-ticket-test-data\` exactly as verify's rules say: the
+database is the one local Postgres every worktree shares.
+
+## How to score each case
+
+- **fails** — you ran it on the base and it failed the SAME way verify recorded (the same wrong
+  value, error or missing behaviour). A different failure is not a match: that is 'inconclusive'.
+- **passes** — on the base it did what \`expected\` says. The change broke it, and it goes back to
+  being a fail. This is a valuable answer, not a disappointing one.
+- **inconclusive** — anything that stopped you from running it to the end on the base.
+
+An 'inconclusive' is treated as a failure of the change, the same as 'passes'. So never guess
+'fails' to be kind to the run: only what you observed on the base counts.
+
+${ORACLE}
+
+Screenshot each case you score 'fails' as \`base-<case-id>.png\`. ${artifactsBlock(ctx)}
+
+Do not change a line of code anywhere. You are checking a claim, not fixing anything.`;
   },
 
   'ui-evidence': (ctx) => {
@@ -1740,6 +1827,7 @@ saying why, not a block — ship the pack you have and name the gap in \`summary
     const v = artifact<{ results: CaseResult[]; regressions: string[] }>(ctx, 'verify');
     const vAll = v.results ?? [];
     const vPassed = vAll.filter((x) => x.result === 'pass').length;
+    const vPreExisting = vAll.filter((x) => x.result === 'pre-existing');
 
     return `${ticketBlock(ctx.ticket)}
 
@@ -1761,6 +1849,8 @@ findings deliberately left open:
 ${open.map((f) => `  - ${f.id} [${f.severity}] ${f.what}`).join('\n') || '  (none)'}
 local browser run: ${vPassed}/${vAll.length} cases passed
 regressions found: ${(v.regressions ?? []).join('; ') || 'none'}
+pre-existing failures (fail on ${baseBranch()} too — not caused by this change):
+${vPreExisting.map((x) => `  - ${x.id}: ${x.evidence}`).join('\n') || '  (none)'}
 
 Push this run's branch and open the merge request.
 
@@ -1804,6 +1894,9 @@ not read this ticket.
   - How it was verified: lint ${i.lintClean === true}, tests "${i.testsRun || 'none'}", local
     browser run ${vPassed}/${vAll.length}. Link nothing you have not confirmed exists.
   - Any review finding deliberately left open, with its id and why.
+  - Every pre-existing failure listed above, under its own heading, with its case id and the
+    evidence that it is not this change — the merge did not wait on them, so the reviewer is
+    the one who confirms that and raises a ticket for each.
 
 Do NOT put the acceptance criteria or the test-case list in the MR description. Those live on
 the TICKET, and \`document\` puts them there. An MR that restates the AC turns the ticket into a

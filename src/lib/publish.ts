@@ -150,6 +150,7 @@ interface CaseResult {
 function resultTable(results: CaseResult[]): string {
   const icon: Record<string, string> = {
     pass: ':white_check_mark:', fail: ':x:', blocked: ':warning:', skipped: ':heavy_minus_sign:',
+    'pre-existing': ':leftwards_arrow_with_hook:',
   };
   return ['| Case | Result | Evidence |', '|---|---|---|',
     ...results.map((r) => `| ${r.id} | ${icon[r.result] ?? ''} ${r.result} | ${
@@ -305,10 +306,17 @@ const SPECS: Spec[] = [
       const results = (data.results as CaseResult[]) ?? [];
       if (!results.length) return null;
       const regressions = (data.regressions as string[]) ?? [];
+      const preExisting = results.filter((r) => r.result === 'pre-existing');
       return {
         body: `**Local verification** — ${tally(results)}.\n\n${resultTable(results)}\n\n` +
           (regressions.length
             ? `**Regressions**\n${regressions.map((r) => `- ${r}`).join('\n')}\n\n`
+            : '') +
+          (preExisting.length
+            ? '**Pre-existing failures — not caused by this change**\n'
+              + 'These fail on the base branch too, so they did not hold this MR. Please confirm '
+              + 'each one is genuinely not this diff, and raise a ticket for it.\n'
+              + `${preExisting.map((r) => `- ${r.id}: ${mdText(r.evidence ?? '').replace(/\s*\n\s*/g, ' ')}`).join('\n')}\n\n`
             : '') +
           `_Run ${ctx.runId} · executed in a real browser against the branch._`,
         attachments: screenshotsFrom(ctx.iid, results, 10),

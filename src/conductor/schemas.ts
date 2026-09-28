@@ -305,8 +305,19 @@ const CASE_RESULT = {
     additionalProperties: false,
     properties: {
       id: str('Case id from testcases.json'),
-      result: { type: 'string', enum: ['pass', 'fail', 'blocked', 'skipped'] },
-      evidence: str('What you observed. For a fail, the actual vs expected.'),
+      result: {
+        type: 'string',
+        enum: ['pass', 'fail', 'blocked', 'skipped', 'pre-existing'],
+        description:
+          "pre-existing: the case fails, and it fails the same way on the base branch without " +
+          'this change — it neither cycles to implement nor blocks the merge, and is listed for ' +
+          'the MR reviewer. Never for a case covering what this ticket asks to change.',
+      },
+      evidence: str(
+        'What you observed. For a fail, the actual vs expected. For pre-existing, the actual vs ' +
+        'expected AND the proof it is not this change: the base-branch observation, or the ' +
+        'file:line on the base that produces it and that the diff does not touch.',
+      ),
       screenshot: str('Filename under artifacts/, or empty string.'),
     },
     required: ['id', 'result', 'evidence', 'screenshot'],
@@ -319,6 +330,33 @@ export const VERIFY_SCHEMA = phaseSchema({
   results: CASE_RESULT,
   regressions: strArr('Things that worked before this change and no longer do.'),
 }, ['serverStarted', 'port', 'results', 'regressions']);
+
+/** The on-demand `base-check` phase: do verify's pre-existing cases fail on the base branch too? */
+export const BASE_CHECK_SCHEMA = phaseSchema({
+  baseCommit: str('git rev-parse of the base-branch checkout the app ran on. Empty if it never ran.'),
+  results: {
+    type: 'array',
+    description: 'One entry per case you were given, by its id.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: str('Case id from the list you were given'),
+        onBase: {
+          type: 'string',
+          enum: ['fails', 'passes', 'inconclusive'],
+          description:
+            'fails: you ran the case on the base branch and it failed the same way verify saw. ' +
+            'passes: it behaved as expected on the base — so this change broke it. ' +
+            'inconclusive: you could not run it to the end on the base (app, login, data).',
+        },
+        evidence: str('What you observed on the base, actual vs expected, in one line.'),
+        screenshot: str('Filename under artifacts/, or empty string.'),
+      },
+      required: ['id', 'onBase', 'evidence', 'screenshot'],
+    },
+  },
+}, ['baseCommit', 'results']);
 
 export const DESIGN_SCHEMA = phaseSchema({
   applicable: {
@@ -519,6 +557,7 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   implement: IMPLEMENT_SCHEMA,
   review: FINDINGS_SCHEMA,
   verify: VERIFY_SCHEMA,
+  'base-check': BASE_CHECK_SCHEMA,
   'ui-evidence': UI_EVIDENCE_SCHEMA,
   mr: MR_SCHEMA,
   remediate: REMEDIATE_SCHEMA,

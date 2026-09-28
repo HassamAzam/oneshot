@@ -40,6 +40,7 @@ import {
   type MergeRequest, type ProjectSettings,
 } from '../lib/gitlab.js';
 import type { CodePhaseCtx } from './runner.js';
+import { countsAsFailure } from '../phases/types.js';
 import { mergeHooksFor, mrFeedbackActive } from '../mrfeedback/wire.js';
 import type { MergeHooks } from '../mrfeedback/mergehooks.js';
 import type { MrFeedbackSignal } from '../mrfeedback/types.js';
@@ -840,9 +841,13 @@ async function resolveMrIid(ctx: CodePhaseCtx, journal: RunJournal): Promise<num
  * the fact itself and overrules the phase rather than believing its verdict.
  */
 function qualityGate(iid: number): string | null {
-  const verify = readArtifact<{ results?: Array<{ id?: string; result?: string }> }>(iid, 'verify.json');
+  const verify = readArtifact<{
+    results?: Array<{ id?: string; result?: string; evidence?: string }>;
+  }>(iid, 'verify.json');
   const results = verify?.results ?? [];
-  const failed = results.filter((r) => r.result === 'fail');
+  // 'pre-existing' is deliberately not a refusal: it fails on the base branch
+  // too, and the MR note lists it for the reviewer (lib/publish.ts).
+  const failed = results.filter(countsAsFailure);
   if (failed.length) {
     const ids = failed.map((r) => r.id ?? '?').join(', ');
     const other = results.filter((r) => r.result === 'blocked' || r.result === 'skipped').length;
@@ -1084,6 +1089,7 @@ function verifyLine(verify: Record<string, unknown> | null): string {
   if (tally('fail')) parts.push(`${tally('fail')} failed`);
   if (tally('blocked')) parts.push(`${tally('blocked')} blocked`);
   if (tally('skipped')) parts.push(`${tally('skipped')} skipped`);
+  if (tally('pre-existing')) parts.push(`${tally('pre-existing')} pre-existing (not this change)`);
   const regressions = aField(verify, 'regressions').length;
   return `${parts.join(', ')}${regressions ? ` · ${regressions} regression(s)` : ''}`;
 }
