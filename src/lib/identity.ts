@@ -33,15 +33,20 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { resolveToken, SETUP_HINT, type ResolvedToken } from './token.js';
+import { repoFromEnv } from './repourl.cjs';
+import { resolveToken, setupHint, type ResolvedToken } from './token.js';
 
 /**
- * Deliberately not imported from ./config.js. config.ts consumes this module to
- * resolve GITLAB_USERNAME, and a cycle between them would leave whichever loaded
- * first holding an undefined binding. The read is one line; the cycle is a bug
- * waiting for a refactor to expose it.
+ * The API root comes from repourl.cjs directly, deliberately not from
+ * ./config.js. config.ts consumes this module to resolve GITLAB_USERNAME, and a
+ * cycle between them would leave whichever loaded first holding an undefined
+ * binding. repourl.cjs imports nothing, so it is the one place both can read
+ * GITLAB_REPO_URL from without that risk — and it is the same parse config.ts
+ * uses, so the account this asks about is on the same GitLab the conductor works on.
  */
-const envOr = (name: string, fallback = ''): string => process.env[name]?.trim() || fallback;
+function apiUrl(): string | null {
+  return repoFromEnv(process.env).repo?.apiUrl ?? null;
+}
 
 /**
  * Read the account Claude Code is signed in as.
@@ -95,12 +100,12 @@ export interface TokenIdentity {
  */
 export async function tokenIdentity(): Promise<TokenIdentity | null> {
   const resolved = resolveToken();
-  if (!resolved.token) return null;
-  const apiUrl = envOr('ONESHOT_GITLAB_API') || 'https://gitlab.arbisoft.com/api/v4';
+  const api = apiUrl();
+  if (!resolved.token || !api) return null;
   const ac = new AbortController();
   const killer = setTimeout(() => ac.abort(), 15_000);
   try {
-    const res = await fetch(`${apiUrl}/user`, {
+    const res = await fetch(`${api}/user`, {
       headers: { 'PRIVATE-TOKEN': resolved.token },
       signal: ac.signal,
     });
@@ -156,11 +161,14 @@ export async function checkIdentity(): Promise<IdentityCheck> {
 
   if (!token) {
     const resolved = resolveToken();
-    warning = resolved.token
-      ? `A token was found in ${resolved.where}, but GitLab did not accept it or could not be `
-        + 'reached. Assigned tickets will be skipped until it answers.'
-      : `This desk has no GitLab token, so it has no identity and will skip every ASSIGNED `
-        + `ticket.\n${SETUP_HINT}`;
+    warning = !resolved.token
+      ? `This desk has no GitLab token, so it has no identity and will skip every ASSIGNED `
+        + `ticket.\n${setupHint()}`
+      : !apiUrl()
+        ? `A token was found in ${resolved.where}, but GITLAB_REPO_URL is unset or invalid, so `
+          + 'there is no GitLab to ask whose it is. Assigned tickets will be skipped until it is set.'
+        : `A token was found in ${resolved.where}, but GitLab did not accept it or could not be `
+          + 'reached. Assigned tickets will be skipped until it answers.';
   } else {
     cachedUsername = token.username;
     // A token in .env is only a PROBLEM when it is not this operator's own. The
@@ -175,7 +183,7 @@ export async function checkIdentity(): Promise<IdentityCheck> {
       warning = `Acting as "${token.username}" using the token in this repo's .env, but this desk is `
         + `signed into Claude as "${claudeUsername ?? 'nobody'}". That is somebody else's credential `
         + `doing your work: it will claim ${token.username}'s tickets and comment, push and merge as `
-        + `them.\n${SETUP_HINT}`;
+        + `them.\n${setupHint()}`;
     } else if (ownTokenInEnv) {
       warning = `Your own token works fine where it is. Note only that .env has leaked into a run `
         + 'transcript before; ~/.config/oneshot/gitlab-token is outside every repo. '

@@ -1,5 +1,7 @@
 # One Loop v2 — "Conductor"
 
+*Superseded 2026-09-24: the work project is no longer fixed; it is whatever `GITLAB_REPO_URL` in `.env` names (today arbisoft/erp). The body below is the original design record.*
+
 A single-orchestrator, per-ticket pipeline. One label in, `Ready For Deployment` out, fully
 autonomous, one Slack voice.
 

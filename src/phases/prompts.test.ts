@@ -1,8 +1,9 @@
+import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
-import { phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { ROOT, phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Ticket } from './types.js';
 
@@ -78,6 +79,34 @@ test('plan always gets the skills that are its method', () => {
   assert.ok(names(prompt).includes('util-reuse-methodology'));
 });
 
+// ------------------------------------------------ recall has a method now
+
+test('recall is given a method, not just a prompt', () => {
+  // Phase 0 was the last session phase carrying its whole method inline. The
+  // scoring ladder in particular was four lines of prompt with no room to say
+  // why each rung outranks the next.
+  assert.deepEqual(names(systemPromptFor(cfg('recall'), ctx(ticket()))), ['prior-art-recall']);
+});
+
+test('the skill recall declares actually ships in this repo', () => {
+  // recall runs at cwd 'conductor', so it resolves skills from the .claude that
+  // ensureClaudeDir composes at the Oneshot root. A name in config with no
+  // directory behind it fails silently — the phase just runs without it.
+  assert.ok(existsSync(join(ROOT, 'skills', 'prior-art-recall', 'SKILL.md')));
+});
+
+test('the recall prompt still stands alone if the skill does not resolve', () => {
+  // Skills are an upgrade, never a dependency (see SKILL_LINE): the prompt has
+  // to carry enough to run correctly by itself. The empty-memory stop is the
+  // part that must survive — without it the phase explores a filesystem that
+  // has nothing to find, on the tightest budget in the pipeline.
+  const p = promptFor(cfg('recall'), ctx(ticket()));
+  assert.match(p, /prior-art-recall/, 'the prompt must name the skill');
+  assert.match(p, /STOP IMMEDIATELY and return an empty list and an empty brief/);
+  assert.match(p, /file-path overlap first/, 'the ladder must survive in the short form');
+  assert.match(p, /then module, then label, then\s+title-token overlap/);
+});
+
 // --------------------------------------------- implement's gating is unchanged
 
 test('implement keeps a plan-gated skill when there is no plan to gate on', () => {
@@ -94,6 +123,23 @@ test('implement drops a plan-gated skill the plan rules out', () => {
   assert.ok(!got.includes('script-writing-standards'));
 });
 
+// ------------------------------------------- plan does not order frontend unit tests
+
+test('plan is told not to put a Jest or other frontend unit test in a step', () => {
+  // testcases and verify both already refuse Jest -- the toolchain has rotted and
+  // CI never runs it. plan did not, so it could still order one, and implement
+  // would then write code that nothing downstream will ever execute.
+  const prompt = promptFor(cfg('plan'), ctx(ticket()));
+  assert.match(prompt, /No step writes a Jest test, or any other frontend unit test/);
+});
+
+test('plan says where frontend behaviour is covered instead', () => {
+  // A prohibition with no alternative reads as "skip frontend coverage". It is
+  // Playwright, written by testcases against the real app.
+  const prompt = promptFor(cfg('plan'), ctx(ticket()));
+  assert.match(prompt, /Playwright cases/);
+});
+
 // ------------------------------------------- research's reproduction is gated
 
 test('the bug label puts the reproduction skill in front of research', () => {
@@ -102,8 +148,8 @@ test('the bug label puts the reproduction skill in front of research', () => {
 });
 
 test('without the bug label research is not offered the reproduction skill', () => {
-  // #91 is the case: an accessibility ticket carrying no labels at all spent 57
-  // turns failing to bring the app up, for a verdict of 'inconclusive'.
+  // The case that forced this: an accessibility ticket carrying no labels at all
+  // spent 57 turns failing to bring the app up, for a verdict of 'inconclusive'.
   const prompt = systemPromptFor(cfg('research'), ctx(ticket({ labels: ['Loop'] })));
   assert.ok(!names(prompt).includes('bug-reproduction'));
 });
@@ -127,12 +173,46 @@ test('an unlabelled ticket is never told to bring the app up', () => {
   assert.ok(!/app\.cjs ensure/.test(without));
 });
 
-// -------------------------------------- verify failures reach implement (#35)
+// ------------------------------------------ verify is told how to make data
+
+test('verify carries a data method, not just a browser one', () => {
+  // The phase drives a real app against a real database. Declaring only
+  // local-browser-verify gave it bring-up and case-driving with nothing to say
+  // about the STATE a case asserts against, and every session improvised one.
+  const got = names(systemPromptFor(cfg('verify'), ctx(ticket())));
+  assert.ok(got.includes('local-browser-verify'));
+  assert.ok(got.includes('erp-ticket-test-data'));
+});
+
+test('the data-setup boundaries travel with the skill that needs them', () => {
+  // erp-ticket-test-data was written for a person on dev/stage with a webshell
+  // and someone to paste output back. Loading it into an autonomous local phase
+  // without reframing it is how a verify session ends up writing to a shared
+  // server, or waiting for a human who is not there. Both halves or neither.
+  const p = promptFor(cfg('verify'), ctx(ticket()));
+  assert.match(p, /erp-ticket-test-data/, 'the prompt must name the skill it is reframing');
+  assert.match(p, /no\s+dev\/stage server/, 'the local-database boundary must be stated');
+  assert.match(p, /Nobody will paste a script's output back to you/, 'the no-human boundary must be stated');
+  assert.match(p, /OUTLIVES your session/, 'cleanup is the half that a later lap pays for');
+});
+
+test('verify is told the database is shared now, and that browser-visible data must commit', () => {
+  // Every worktree gets the same hrdb/local_settings.py, so concurrent runs write one
+  // Postgres. And a rollback in a separate `manage.py shell` process never reaches the
+  // server the browser talks to, so "rollback" is only for what the shell measures.
+  const p = promptFor(cfg('verify'), ctx(ticket()));
+  assert.match(p, /ONE database, shared by\s+every worktree/);
+  assert.match(p, /at the same moment you are/);
+  assert.match(p, /SEE in the browser must commit/);
+  assert.ok(!/not\s+hypothetical/.test(p), 'no incident is asserted to the model as fact');
+});
+
+// ------------------------------------------- verify failures reach implement
 
 /**
  * A verify failure is a measurement; a review finding is a reader's hypothesis
  * about a diff. When a run cycles back to `implement` carrying both, the prompt
- * used to render only the review findings — so #194 spent both of its cycle laps
+ * used to render only the review findings — so a run spent both of its cycle laps
  * closing a rebase and a test-file move while a reproducible h3 duplication went
  * untouched, and the run blocked on a defect nothing had ever shown it.
  *

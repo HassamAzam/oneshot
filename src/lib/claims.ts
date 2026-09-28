@@ -122,7 +122,7 @@ export function parseClaims(notes: IssueNote[]): Claim[] {
  * resumed keeps its id and posts a fresh claim. A bare "this run stopped" set
  * read that fresh claim as dead too, so a resumed-then-parked run never saw its
  * own claim live and posted another one on every re-entry — one after another
- * down #168's thread in half an hour.
+ * down a single ticket's thread in half an hour.
  */
 export function stoppedRuns(notes: IssueNote[]): Map<string, number> {
   const done = new Map<string, number>();

@@ -15,7 +15,10 @@
         "run"
       ],
       "onFail": "skip",
-      "skills": [],
+      "_why_skills": "This phase was the last one whose whole method lived in a prompt string, and the method it held was the scoring ladder \u2014 file-path overlap, then module, then label, then title token \u2014 stated once, in four lines, with no room for what makes each rung worth its place. prior-art-recall carries it properly: that the ladder is ORDERED rather than summed (one shared file beats a label-plus-title match), that a title match alone is never enough because ERP titles repeat the same nouns across unrelated modules, that a card is read for its gotcha and its what-NOT-to-reuse rather than its summary (a later phase can re-derive what changed from the diff and can never re-derive what the last run abandoned), and that the brief is pasted VERBATIM into research, plan and implement, so its length is paid three times. It also states the one thing nothing else did: the index and the card store can disagree \u2014 this machine's memory has more cards under tickets/ than lines in index.jsonl \u2014 and the phase handles both directions without exploring. The prompt keeps the full short form, so a session that cannot resolve the skill still runs correctly; that is the same split reproductionBlock uses for bug-reproduction.",
+      "skills": [
+        "prior-art-recall"
+      ],
       "artifact": "recall.json"
     },
     {
@@ -35,7 +38,7 @@
       "labelSkills": {
         "Bug": "bug-reproduction"
       },
-      "_why_skills": "Reproduction is the `Bug` label's job, the same way `frontend-accessibility` is the `Accessibility` label's at plan \u2014 see that phase's `_why_skills`. It was an every-ticket skill until #91, an accessibility ticket carrying no Bug label, spent 57 turns and 528k weighted tokens failing to bring the app up for a verdict of 'inconclusive': asking a session to decide bug-vs-feature from the ticket's prose costs the app bring-up whether or not the answer is yes, and triage already knows. An absent label is the answer, not a missing signal. Moving this line back into `skills` restores the old behaviour, prose included \u2014 src/phases/prompts.ts gates the instructions on this same resolved list.",
+      "_why_skills": "Reproduction is the `Bug` label's job, the same way `frontend-accessibility` is the `Accessibility` label's at plan \u2014 see that phase's `_why_skills`. It was an every-ticket skill until an accessibility ticket carrying no Bug label spent 57 turns and 528k weighted tokens failing to bring the app up for a verdict of 'inconclusive': asking a session to decide bug-vs-feature from the ticket's prose costs the app bring-up whether or not the answer is yes, and triage already knows. An absent label is the answer, not a missing signal. Moving this line back into `skills` restores the old behaviour, prose included \u2014 src/phases/prompts.ts gates the instructions on this same resolved list.",
       "artifact": "research.json"
     },
     {
@@ -141,7 +144,7 @@
       ],
       "onFail": "abort",
       "group": "check",
-      "_why_skills": "The phase authors the list a QA reviewer signs off on and the list `verify` later executes, and until now it was the only session phase declaring no method at all \u2014 it wrote cases from the prompt alone while `plan` had planning-methodology and `verify` had local-browser-verify. erp-ticket-test-plan is where the scenario taxonomy (happy / negative / edge / boundary / side-effects) and the expected-value-from-business-logic rule live, so declaring it makes the authored list answerable to the same standard a person would apply. It is also where the feedback-intent routing added in PR #78 lives \u2014 the rule that a correction edits a case in place instead of being appended as a new one. That rule had no reader on this path: the skill was reachable in the worktree but nothing required it, so the phase never consulted it.",
+      "_why_skills": "The phase authors the list a QA reviewer signs off on and the list `verify` later executes, and until now it was the only session phase declaring no method at all \u2014 it wrote cases from the prompt alone while `plan` had planning-methodology and `verify` had local-browser-verify. erp-ticket-test-plan is where the scenario taxonomy (happy / negative / edge / boundary / side-effects) and the expected-value-from-business-logic rule live, so declaring it makes the authored list answerable to the same standard a person would apply. It is also where the feedback-intent routing lives \u2014 the rule that a correction edits a case in place instead of being appended as a new one. That rule had no reader on this path: the skill was reachable in the worktree but nothing required it, so the phase never consulted it.",
       "skills": [
         "erp-ticket-test-plan"
       ],
@@ -197,8 +200,10 @@
       "maxLaps": 2,
       "coding": true,
       "needsPort": true,
+      "_why_skills": "local-browser-verify is how the app comes up and how a case is driven; erp-ticket-test-data is how the state a case asserts against is MADE. Only the first was declared, so the phase had a method for the browser and none for the database \u2014 and it improvised one per session. The case rests on structure, not on any one incident: verify drives a real app against ONE local Postgres that every worktree shares (hrdb/local_settings.py is copied unchanged into each, and up to three app ports can be live at once), so whatever a session writes outlives it and can collide with a concurrent run. The verify.json artifacts show the shape, described here by behaviour because run iids live in each machine's own ledger and do not resolve on another: a drag case's persisted move left a later case unable to reach the empty column it needed; several cases blocked together on pre-existing incomplete day-log rows that a session tried to hand-fix and ran out of budget on; a case was skipped because the combination of rows it needed was not fabricated within the turn budget. Discovery-first, transaction rollback for a measurement, idempotent get_or_create and marker-plus-cleanup tracking answer exactly those, and they are already written down in that skill. It is shaped for a person on dev/stage with a webshell, which this phase is not \u2014 src/phases/prompts.ts carries the boundaries that reframe it (the one shared local DB via the venv shell, committed-and-marked data for anything the browser must see, and no user to hand a script to), the same way research's prose and its skill are gated together.",
       "skills": [
-        "local-browser-verify"
+        "local-browser-verify",
+        "erp-ticket-test-data"
       ],
       "artifact": "verify.json"
     },
@@ -282,7 +287,10 @@
       ],
       "onFail": "blocked",
       "onDemand": true,
-      "skills": [],
+      "skills": [
+        "mr-feedback"
+      ],
+      "_why_skills": "The dispositions' definitions and the output contract are owned by the prompt (src/mrfeedback/prompts.ts triagePrompt); the skill's table only restates them. What the skill adds is the JUDGEMENT the prompt does not carry \u2014 what clears the bar for `decline`, why a merely inconvenient request is a `fix`, how small a `plan` has to stay, and the fact that a reply cannot @mention anyone because respond.ts neutralises it. That is skill-shaped, and it was prose nobody could edit without touching TypeScript.",
       "artifact": "mr-feedback.json",
       "_why": "ON DEMAND: the merge phase finds new review threads on the run's MR and the runner invokes this to decide what each one needs \u2014 fix, already-done, question or decline. HEAVY because declining a reviewer or answering a question from the code is judgement, and a wrong 'fix' costs a full implement\u2192verify lap. cwd 'worktree' so it reads the actual diff; writes 'run' only and no GitLab write tools (phase.ts), so it can neither change the code nor post \u2014 the conductor replies after the fixes are verified. onFail 'blocked' because an untriaged comment is a reviewer nobody answered; infra deaths still retry for free, since re-entering merge re-detects the same threads. See src/mrfeedback and config/mr-feedback.json."
     }

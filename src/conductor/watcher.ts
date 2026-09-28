@@ -129,8 +129,8 @@ const STALLED_STATUSES = new Set(['parked', 'blocked']);
  * park is not an "active" run, so nothing filters it out — and sorted by
  * updated_at it can sit at the head indefinitely, where every conductor keeps
  * re-claiming and re-parking it and no fresh ticket behind it is ever reached.
- * #87 parked on plan approval did exactly that to #235 and #237, and adding
- * conductors did not help because they all piled onto the same head ticket.
+ * One ticket parked on plan approval did exactly that to the two queued behind
+ * it, and adding conductors did not help: they all piled onto the same head.
  *
  * A stable partition — ready first, stalled last, original order preserved within
  * each half — fixes it while keeping a parked ticket claimable: it is still tried

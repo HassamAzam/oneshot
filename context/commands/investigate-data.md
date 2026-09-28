@@ -99,7 +99,7 @@ Write a single standalone Python script that:
 
 ### Script Requirements
 
-- **Location:** Ask the user where they want the script saved, or default to a scratch location like `/tmp/investigate_<short_name>.py` and let them move it. Do not assume a fixed repo path.
+- **Location:** Ask the user where they want the script saved, or default to `tmp_scripts/investigate_<short_name>.py` in the worktree (`mkdir -p tmp_scripts` first — it is gitignored).
 - **Self-contained** — all imports at the top, no external arguments (hardcode the scope at the top of the file as constants the CEO can edit if needed).
 - **READ ONLY** — no `save()`, no `.update()`, no `.delete()`, no `.create()`. If you catch yourself writing one of these, stop.
 - **Django ORM only** — no raw SQL (`cursor.execute()`, `connection.execute()`, `RawSQL`). Use QuerySet methods exclusively. If the user explicitly asks for raw SQL, comply only then.
@@ -114,7 +114,7 @@ Write a single standalone Python script that:
 """
 Investigation script for <bug description>.
 
-Run on prod via: python manage.py shell < investigate_<name>.py
+Run on prod via: python manage.py shell < tmp_scripts/investigate_<name>.py
 Or:              python manage.py runscript investigate_<name>
 
 Purpose: <1-2 line explanation>
@@ -133,7 +133,7 @@ from django.db.models import Q, Count, F
 from apps.<module>.models import <Model>
 # ... other imports
 
-def main():
+def _investigate():
     print("=" * 60)
     print("INVESTIGATION: <bug short description>")
     print(f"Scope: {DATE_FROM} to {DATE_TO}")
@@ -199,7 +199,7 @@ def main():
             span = timestamps[-1] - timestamps[0]
             print(f"\nTimestamp span: {span} (hint: tight cluster = code flow, wide spread = manual)")
 
-main()
+_investigate()
 ```
 
 ### Manual vs Code Hints
@@ -220,7 +220,7 @@ Always include these in the output — they are the whole point of the investiga
 
 ## Sidecar Context File (for resuming in a new session)
 
-Alongside the script, write a sidecar markdown file at the same path with `.context.md` appended (e.g., `/tmp/investigate_leave_balance.py` → `/tmp/investigate_leave_balance.py.context.md`). This file captures everything needed to resume analysis later if the CEO doesn't run the script immediately.
+Alongside the script, write a sidecar markdown file at the same path with `.context.md` appended (e.g., `tmp_scripts/investigate_leave_balance.py` → `tmp_scripts/investigate_leave_balance.py.context.md`). This file captures everything needed to resume analysis later if the CEO doesn't run the script immediately.
 
 The sidecar must contain:
 

@@ -20,7 +20,8 @@
  *    attributed to this ticket.
  */
 import {
-  STATE, artifactDir, bugReproductionEnabled, envOr, phaseByName, phases, projectConfig, runDir,
+  DEFAULT_MAX_TURNS, STATE, artifactDir, bugReproductionEnabled, envOr, phaseByName, phases,
+  projectConfig, runDir,
   type PhaseConfig,
 } from '../lib/config.js';
 import { join } from 'node:path';
@@ -313,6 +314,16 @@ function budgetMin(phase: string, fallback: number): number {
   return phaseByName(phase)?.timeoutMin ?? fallback;
 }
 
+/**
+ * Same contract as budgetMin() for the turn cap: quoted from config, never typed
+ * in. The fallback is the runtime's own default rather than a parameter, because
+ * `maxTurns` is optional on a row and a prompt that quotes a bigger number than
+ * phase.ts enforces teaches the session to pace past the cap it is killed at.
+ */
+function budgetTurns(phase: string): number {
+  return phaseByName(phase)?.maxTurns ?? DEFAULT_MAX_TURNS;
+}
+
 function testCases(ctx: PromptCtx): TestCase[] {
   return artifact<{ cases: TestCase[] }>(ctx, 'testcases').cases ?? [];
 }
@@ -471,10 +482,22 @@ Load the \`bug-reproduction\` skill and follow it. In short:
   Worktree ${ctx.worktree ?? '(none leased)'}, port ${ctx.port ?? '(none leased)'} (also
   \`$ONESHOT_PORT\`). Reach it with \`node $ONESHOT_HOME/scripts/app.cjs ensure\` — no
   arguments, never \`--ref\` — and log in with the harness exactly as the skill says.
+- That \`ensure\` also reports \`disabledIntegrations\`: the things this environment
+  cannot reach, read from the app's own settings. If the behaviour the ticket describes
+  depends on one of them, you cannot run it here — record 'inconclusive', name the
+  integration, and go back to the trace. Do not spend turns proving it is unreachable;
+  that answer is the same on every run and is already in front of you.
+- Before driving the browser, plan: the role/flag/data the bug needs and one query that
+  finds that data, the route to the screen, and the value that means buggy vs correct.
 - Follow the ticket's steps, measure what the bug is about, screenshot into the run's
-  artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`.
+  artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`. Screenshot for EITHER
+  verdict: a 'reproduced' or 'not-reproduced' verdict is posted on the ticket with those
+  screenshots attached, and one with no \`.png\` in \`evidence\` posts nothing (a
+  'not-reproduced' one is treated as 'inconclusive'). Finish with the skill's checklist.
 
-**'not-reproduced' stops this run** and labels the ticket Not a Bug on the ticket and in Slack.
+**'not-reproduced' pauses this run for a QA reviewer**: your evidence is posted on the ticket and in
+Slack, and only if QA confirms is the ticket taken out of the loop (labelled Not a Bug when the project
+configures that label). If QA disagrees, their reply comes back to you and you reproduce again.
 Use it ONLY when the app ran on this unfixed code, you were logged in with access to the screen,
 you executed every reported step, and you observed the correct behaviour — with evidence. A
 different browser, device, data set, role or environment from the one the ticket describes, a
@@ -483,6 +506,27 @@ Reading code is never evidence that a bug does not exist.
 
 Do not let reproduction starve the rest of this phase: if bring-up or login is still failing
 after a reasonable wait, record 'inconclusive' with the error and finish the research.
+${notABugFeedbackBlock(ctx)}`;
+}
+
+/**
+ * QA's replies to an earlier not-reproduced verdict, for a research that runs
+ * again because of them. A reply that is not `approved` is the context the
+ * last attempt missed, so it outranks your own reading of the ticket.
+ */
+function notABugFeedbackBlock(ctx: PromptCtx): string {
+  const rounds = ctx.journal.notABugApproval?.feedback;
+  if (!rounds?.length) return '';
+  return `
+## QA did not confirm Not a Bug — reproduce again with their feedback
+An earlier research on this run recorded 'not-reproduced'. A QA reviewer read that evidence on the
+ticket and, instead of confirming, replied with what it missed. Treat each reply as part of the bug
+report: use the data, role, account, steps, browser or environment it names, and run the reproduction
+again from the start. Do not repeat the earlier attempt unchanged. Record 'not-reproduced' again only
+if you followed the feedback and still observed the correct behaviour — and say in \`reason\` how you
+applied each point.
+
+${rounds.map((f, i) => `### Round ${i + 1}\n${f}`).join('\n\n')}
 `;
 }
 
@@ -491,8 +535,8 @@ function findingsOf(ctx: PromptCtx): Finding[] {
   if (fromPrior) return fromPrior;
   // On a resumed run `implement` is built before `review` is reached, so
   // prior.review is not loaded yet and a review that sent the work back is
-  // invisible to the lap meant to fix it (#179: two implement laps finished in
-  // a minute with nothing to do). Read it off disk, as verifyFailuresOf does —
+  // invisible to the lap meant to fix it (observed: two implement laps finished
+  // in a minute with nothing to do). Read it off disk, as verifyFailuresOf does —
   // only when it asked for changes, so an approved review's minor notes never
   // turn an ordinary lap into a fix lap.
   const onDisk = readArtifact<{ verdict?: string; findings?: Finding[] }>(ctx.ticket.iid, 'findings.json');
@@ -709,20 +753,22 @@ export const PROMPTS: Record<string, (ctx: PromptCtx) => string> = {
 
 Search this system's memory of past completed runs for tickets that overlap this one.
 
-The memory lives at \`${STATE}/memory/\` — that ABSOLUTE path, not a path under any other
-repo this session can see. \`index.jsonl\` there has one line per completed run
-({iid, title, labels, modules, files, symbols, mr, verdict, tags, ts}), and
-\`tickets/<iid>.md\` holds each full card. Read the index, score candidates on file-path
-overlap first (in a monorepo that is the strongest signal for "similar ticket"), then module,
-label and title-token overlap. Read the top 3 cards at most.
+The method is the \`prior-art-recall\` skill — load it and follow it. In short:
 
-FIRST, check whether \`${STATE}/memory/index.jsonl\` exists at all. If it does not, or it is
-empty, STOP IMMEDIATELY and return an empty list and an empty brief. Do not search the
-filesystem for alternatives, do not look for other memory formats, do not explore. On a
-system with no completed runs yet this is the expected answer and it costs one tool call.
-
-Otherwise produce a prior-art brief short enough to sit inside three later prompts: what was
-done, what broke, what to reuse. An empty brief is a correct answer, not a failure.`,
+- The memory lives at \`${STATE}/memory/\` — that ABSOLUTE path, not a path under any other
+  repo this session can see. \`index.jsonl\` there has one line per completed run
+  ({iid, title, labels, modules, files, symbols, mr, verdict, tags, ts}), and
+  \`tickets/<iid>.md\` holds each full card.
+- FIRST, check whether \`${STATE}/memory/index.jsonl\` exists at all. If it does not, or it
+  is empty, STOP IMMEDIATELY and return an empty list and an empty brief. Do not search the
+  filesystem for alternatives, do not look for other memory formats, do not explore. On a
+  system with no completed runs yet this is the expected answer and it costs one tool call.
+- Otherwise score candidates on the ladder IN ORDER: file-path overlap first (in a monorepo
+  that is the strongest signal for "similar ticket"), then module, then label, then
+  title-token overlap — which on its own is never enough, because ERP titles repeat the same
+  nouns across unrelated modules. Read the top 3 cards at most.
+- Produce a prior-art brief short enough to sit inside three later prompts: what was done,
+  what broke, what to reuse. An empty brief is a correct answer, not a failure.`,
 
   research: (ctx) => `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 
@@ -839,6 +885,11 @@ Produce an implementation plan an engineer could follow without re-deriving the 
 - Reuse before writing. Search \`common/\`, the app's \`utils.py\`, and
   \`frontend/src/**/utils/\` for helpers that already do this, and name them.
 - Steps are ordered and each names the files it touches and its layer.
+- No step writes a Jest test, or any other frontend unit test. This repo's Jest toolchain has
+  rotted (Babel/enzyme/ESM drift) and CI never runs it, so such a step is unpassable by
+  construction -- \`testcases\` and \`verify\` are both already instructed to refuse it.
+  Frontend behaviour is covered by the Playwright cases \`testcases\` writes against the real
+  app; a plan step asking for one anyway spends \`implement\` on code nothing will ever run.
 - Set \`migrations\` true if any model, field, constraint or relation changes.
 - Risks are concrete: what breaks, and the mitigation.
 - Every item in research's \`unknowns\` ends in exactly one place: resolved (say how, with
@@ -1029,7 +1080,7 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
     // the ones that matter: a review finding is a reader's hypothesis about a
     // diff, a verify failure is a measurement taken against a running build.
     // This used to discard the failures whenever review had anything to say, so
-    // #194 spent both cycle laps closing a rebase and a test-file move while a
+    // a run spent both cycle laps closing a rebase and a test-file move while a
     // reproducible h3 duplication — observed, with evidence — went untouched.
     const verifyFailures = verifyFailuresOf(ctx);
 
@@ -1178,6 +1229,13 @@ them. Do not edit anything outside your worktree.`;
     const prev = findingsOf(ctx);
     const files = i.filesChanged ?? [];
     const layers = layersOf(files);
+    const mins = budgetMin('review', 30);
+    const turns = budgetTurns('review');
+    // The landing mark is counted in turns, not minutes: the session is handed
+    // no start instant (phaseEnv sets none, and review gets the bare system
+    // prompt with no date line), so a minute mark is one it cannot find. Its
+    // own tool calls it can count — the same yardstick testcases and verify use.
+    const landAt = Math.round(turns * 0.7);
 
     const agents = [
       layers.backend ? '`backend-reviewer-agent`' : '',
@@ -1187,17 +1245,55 @@ them. Do not edit anything outside your worktree.`;
       '`spec-conformance-agent`',
     ].filter(Boolean);
 
-    // Both layers changed is the case worth spelling out: three sequential
-    // Task calls is three times the wall clock for exactly the same signal,
-    // and this phase's cap is the tightest of any that dispatches subagents.
+    // Parallel was never the hard part — UNABANDONABLE was. A blocking Task
+    // call hands this phase's whole clock to its slowest child and cannot take
+    // it back, and that is how review became the pipeline's most reliable way
+    // to produce nothing: two recorded overruns, both killed at the 30-minute
+    // mark while still working (33.3 and 32.4 minutes, kill plus teardown),
+    // each returning no findings and costing an infra re-attempt of the same
+    // fan-out. Backgrounded children invert the
+    // ownership: the session holds the clock, collects what has landed when the
+    // deadline arrives, and names what did not in `summary` instead of dying
+    // with it. `dead-code-sweep` is deliberately NOT a sixth child — the skill
+    // tells an interactive caller to dispatch it through general-purpose, which
+    // inside this budget is one more process competing for the same minutes.
     const agentBlock = `Delegate to ${agents.join(', ')} — they carry the standards this repo is
-reviewed against and they resolve from your worktree's \`.claude/agents\`. Dispatch ALL OF THEM
-IN ONE MESSAGE so they run in parallel; issuing them one at a time multiplies your wall clock
-for identical output. If the Task tool cannot resolve one of them, review that layer yourself
-against \`.claude/rules/\` and say in \`summary\` which agent was unavailable.
+reviewed against and they resolve from your worktree's \`.claude/agents\`.
+
+Dispatch ALL OF THEM IN ONE MESSAGE, each with \`run_in_background: true\`. One message because
+issuing them one at a time multiplies your wall clock for identical output; backgrounded because
+a blocking dispatch gives your budget away to the slowest child and you cannot get it back —
+that is what kills this phase more often than anything it reviews.
+
+Then collect them with \`TaskOutput\`, \`block: true\`, and a \`timeout\` in milliseconds, at most
+600000 — the tool's maximum; a larger value is rejected and costs you a turn. If a collect
+returns \`retrieval_status: timeout\` and you are not at your landing mark, collect that agent
+again. At the mark, stop waiting: an agent still running is not collected again.
+
+An agent you stopped waiting for does not make its dimension clean. Before you land, cover that
+dimension yourself — review the diff against the same \`.claude/rules/\` the agent would have —
+and say in \`summary\` which agent did not land and that you covered it in-session. If you cannot
+cover it, record it as NOT REVIEWED in \`summary\`, naming the agent — and then your verdict may
+NOT be 'approve': 'approve' requires every dispatched dimension to have landed or been covered
+by you, otherwise the verdict is 'changes-requested'.
+
 Give \`spec-conformance-agent\` the ticket's title, description and acceptance criteria from
 above as its \`ticket_context\`: it is the one agent that says whether the change — and each
-thing a finding asks for — is inside this ticket's scope.`;
+thing a finding asks for — is inside this ticket's scope.
+
+\`util-reuse-agent\` earns a child only if this diff ADDS a helper-shaped function — a formatter,
+validator, sorter, calculator, API wrapper, permission check. If it does not, skip it and say so
+in one line: a dispatch with nothing to find still costs you the wait.
+
+\`dead-code-sweep\` is a skill, not an agent. Run it YOURSELF in review-only mode over the diff
+you have already read — detection and findings only, no deletions, no re-lint, no commit. Do not
+dispatch it as another child. Where \`erp-code-review\` tells you to send it through
+\`general-purpose\`, this phase overrides that deliberately: that skill is written for an
+interactive session with no deadline, and a sixth process competing for ${mins} minutes has
+already cost this phase a whole lap.
+
+If the Task tool cannot resolve one of them, review that layer yourself against
+\`.claude/rules/\` and say in \`summary\` which agent was unavailable.`;
 
     const lapBlock = ctx.lap > 0 && prev.length
       ? `## This is review lap ${ctx.lap}
@@ -1283,15 +1379,35 @@ approve or send back.
 
 ${agentBlock}
 
-\`verdict\` is 'changes-requested' if ANY finding is a blocker or a major; otherwise 'approve'.
+## Your clock — a review killed at its cap returns nothing, so this is a protocol, not advice
+
+Your budget is ${mins} minutes and ${turns} turns. A session that overruns returns NO findings
+and NO verdict: the conductor reads it as an infrastructure death, re-attempts the same fan-out,
+and the ticket pays another ${mins} minutes for the same nothing.
+
+- LAND THE PLANE at ~${landAt} turns — about 70% of your ${turns}. Keep a rough count of your
+  own tool calls; you are not told the time, so the count is your clock. Stop collecting,
+  aggregate what you have, write the verdict. A review that is missing one dimension and says
+  which is worth more than three laps that each said nothing at all.
+- WRITE AS YOU GO — the backstop for everything above. Each time an agent lands, and after each
+  pass of your own, rewrite \`${runDir(ctx.ticket.iid)}/review-partial.json\` as
+  \`{"findings": [<Finding so far>]}\` — the same shape as your final \`findings\` field. If this
+  session dies anyway, the conductor salvages a recorded blocker or major out of that file
+  instead of throwing the lap away, so a session that kept it current has already succeeded.
+- Do not re-derive what you were handed. The diff, implement's file list and the case list above
+  are your inputs; a survey of the repo is not, and it is the other way this phase runs out.
+
+\`verdict\` is 'changes-requested' if ANY finding is a blocker or a major, or if a dispatched
+dimension was neither landed nor covered by you (above); otherwise 'approve'.
 Minors and suggestions alone do not send a change back — the run has a lap cap, and spending it
 on style is how a correct change fails to ship.${ctx.lap > 0 ? `\nOn this lap in particular: do not raise a new cosmetic-only finding. If it was acceptable on\nlap 0 it is acceptable now, and raising it costs the ticket a whole lap.` : ''}
 
 A defect you found is not a block. 'changes-requested' is your normal negative verdict;
 \`blocked\` is for a diff you could not read at all.
 
-Do not change a line of code. You have no Write tool this phase, deliberately: a reviewer who
-fixes what they find has reviewed nothing.`;
+Do not change a line of code, and do not edit a file in the worktree: a reviewer who fixes
+what they find has reviewed nothing. Your one legal write is the review-partial.json backstop
+above, under the run directory — nothing else.`;
   },
 
   verify: (ctx) => {
@@ -1402,6 +1518,35 @@ something to fix by installing into the shared tree. Never write or run a Jest t
 repo: the Jest toolchain is rotted and CI does not run it, and an hour repairing it is an hour
 not spent verifying anything.
 
+## Test data — the method is a skill, the boundaries are here
+
+A case passes only against the state it claims to test, and this phase has no way to invent
+that state safely from first principles. \`erp-ticket-test-data\` is loaded for you: discovery
+before any write, the transaction-rollback pattern for something you only need to MEASURE,
+idempotent \`get_or_create\`, the \`exec()\` scope traps, markers and cleanup tracking. Use it.
+Two things it cannot know, because it was written for a person testing a deployed server:
+
+- The database is the local seeded Postgres the worktree points at — ONE database, shared by
+  every worktree and by any other run executing at this moment — reached through the venv
+  Django shell (\`import ssl, hashlib\` first, exactly as above). There is no webshell in this
+  phase and no dev/stage server — never create data on one, and never navigate to one.
+  \`baseUrl\` is the only app you touch.
+- Nobody will paste a script's output back to you. Where that skill hands a script to a user,
+  you run it yourself and read the output.
+
+Its cleanup half is not housekeeping here — this database OUTLIVES your session, and the next
+lap, \`ui-evidence\` and every later run execute against what you leave behind, while another
+run may be reading and writing it at the same moment you are. So prefer a rollback for anything
+you only need to MEASURE in the shell; data a case has to SEE in the browser must commit, so
+create the minimum, mark it, and name it in \`summary\`.
+
+Arranging data is still BOUNDED: batch it into ONE script that inspects and fixes every case's
+preconditions at once, not a few calls per case. Because the database is shared, that script
+changes only rows it created or marked itself; it never edits a row another run or the seed
+left there. A precondition you cannot arrange inside those limits is 'blocked' with one line
+naming exactly what was missing — data archaeology is where whole sessions quietly go to die,
+and an honest 'blocked' costs the pipeline far less than a session that died mid-list.
+
 ## The case list — execute it id for id (phase 4)
 ${caseList(cases, { steps: true })}
 
@@ -1423,10 +1568,6 @@ full implement+review lap for what was only your own budgeting. A partial result
   never one write-run-read round trip per case.
 - Blast order. Execute high-blast cases first, then medium, then low. If anything must be
   dropped, it is a low-blast case — 'skipped', with the reason.
-- Data setup is bounded. Arrange preconditions with at most a few Django-shell calls TOTAL,
-  batched — one script that inspects and fixes up every case's data at once. A case whose data
-  cannot be arranged inside that budget is 'blocked' with one line saying what was missing.
-  Data archaeology is where whole sessions quietly go to die.
 - Do not re-derive the change. \`implement\`'s file list above is authoritative; the diff is
   context you already have, not something to reconstruct commit by commit.
 - LAND THE PLANE. Keep a rough count of your own tool calls; at ~70% of your turn budget, stop
@@ -1536,8 +1677,16 @@ Produce the screenshot pack a reviewer will look at INSTEAD of checking out the 
 pack is what verify's shots do not show:
 
   - a BEFORE/AFTER pair for each changed screen whose change you can SEE. The 'before' is the
-    base branch's behaviour; if you cannot produce one without a second checkout, say so in the
-    caption rather than passing off an unchanged region as a before.
+    base branch's behaviour, taken from a SECOND app instance on its own port — never by moving
+    files in this checkout. The \`ui-evidence-pack\` skill gives the steps; if it does not
+    resolve: run \`node $ONESHOT_HOME/scripts/app.cjs list\` and continue only if an instance
+    that is healthy with bundleReady is already at \`origin/${baseBranch()}\` or is ours with
+    dirty 0; then run \`env -u ONESHOT_WORKTREE -u ONESHOT_PORT -u ONESHOT_TICKET -u ONESHOT_IID
+    ONESHOT_RUN_DIR=$ONESHOT_HOME/state/runs/$ONESHOT_TICKET/base-app node
+    $ONESHOT_HOME/scripts/app.cjs ensure --ref ${baseBranch()}\`, shoot the 'before' at the
+    \`baseUrl\` it prints, and the 'after' on \`$ONESHOT_PORT\`. Caption the omission only if
+    that instance will not come up cheaply; never pass an unchanged region of this branch off as
+    a before.
   - the states a passing test never reaches: empty, loading, error, and the permission-denied
     view if the change touches a gated screen.
   - one shot per high-blast case that PASSED${highPassed.length ? ` (${highPassed.map((x) => x.id).join(', ')})` : ''}, so the pack shows the feature
@@ -1570,8 +1719,8 @@ ${conformance}
 
 - Do not inject anything into the page before a screenshot: no overlay, banner, label, style or
   script. \`page.evaluate\` may READ the DOM, never write it. A caption painted onto the page is
-  text you wrote, presented as something the app rendered — and on #189 it covered the very
-  header a reviewer would check. Say it in \`caption\` instead.
+  text you wrote, presented as something the app rendered — and a banner drawn over the layout
+  hides the very header a reviewer would check. Say it in \`caption\` instead.
 - Do not change the worktree to produce a 'before'. You have no write access to it, and the git
   guard refuses \`checkout\`/\`restore\`/\`stash\`/\`reset\` from this phase: the files on disk are the
   change under review, and anything left altered there is what \`mr\` pushes.
@@ -1636,9 +1785,11 @@ Push this run's branch and open the merge request.
      target: ${baseBranch()}   <- this exact branch, NOT the project's GitLab default branch
    Follow the \`mr-metadata\` skill for the title and for how the closing ticket is referenced.
    If that skill cannot be resolved here, the rules it carries still apply: a title that names
-   the change rather than the ticket number, and a closing reference to #${ctx.ticket.iid} in the
-   description. Set squash off and delete-source-branch off — the conductor owns the merge, and
-   the branch is this run's record.
+   the change rather than the ticket number, and this line on its own in the description:
+     [closes ${GITLAB_PROJECT_URL()}/-/issues/${ctx.ticket.iid}]
+   — the full URL in brackets; the mr-gate hook refuses \`Closes #${ctx.ticket.iid}\`. Set squash
+   off and delete-source-branch off — the conductor owns the merge, and the branch is this run's
+   record.
 
 The description is the durable engineering record, and it has one audience: a reviewer who has
 not read this ticket.
@@ -1744,6 +1895,11 @@ Fair game, all of it: a credential that is missing, wrong or expired; an account
 permission a feature is gated behind; a service that is down or wedged; a dependency that will
 not start; test data that does not exist; a stale lock, an orphaned row, a leaked lease; a
 config value that is wrong for THIS machine.
+
+One exception inside that: a credential in Oneshot's OWN \`.env\` (\`$ONESHOT_HOME/.env\` —
+GITLAB_TOKEN and the rest) is a human fix, never yours. The secret-guard hook denies reading or
+writing that file, shell redirects included, and working around it is not a repair. Name the
+variable and what is wrong with it in \`humanNeeded\` — never its value — with \`fixed: false\`.
 
 Not yours at any severity: a failing test, a defect the review found, a case whose \`expected\`
 the code does not produce, a migration that errors on its own logic. Those belong to

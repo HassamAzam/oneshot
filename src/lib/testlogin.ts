@@ -1,7 +1,7 @@
 /**
  * Is the managed local login real, before `verify` spends a lap finding out?
  *
- * Ticket #189 lost a whole verify lap, and then a remediation session, to an
+ * A run once lost a whole verify lap, and then a remediation session, to an
  * account that did not exist: ONESHOT_TEST_LOGIN named a user the worktree's
  * database had never held, and the only thing that could discover it was a
  * model, logging in through a browser, after bringing the app up. None of that

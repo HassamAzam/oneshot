@@ -41,7 +41,7 @@ Write a single standalone Python script that safely corrects the bad data.
 
 ### Script Requirements
 
-- **Location:** Ask the user where to save it, or default to `/tmp/fix_<short_name>.py`.
+- **Location:** Ask the user where to save it, or default to `tmp_scripts/fix_<short_name>.py` in the worktree (`mkdir -p tmp_scripts` first — it is gitignored).
 - **DRY_RUN flag — ASK before adding.** Do not add `DRY_RUN` on your own. The script is normally tested locally before being handed to the CEO, so a single-run script (no flag) is the default. If you think a DRY_RUN flag would help, ask the user — only add it if they confirm. If they want one, default it to `True` and the CEO must flip to `False` to apply.
 - **Atomic transaction** — wrap the fix in `transaction.atomic()` so partial failures roll back.
 - **Print every change** — before/after values for every record touched, printed to stdout. The CEO sends this output back, so it must be self-contained evidence of what happened.
@@ -58,7 +58,7 @@ Write a single standalone Python script that safely corrects the bad data.
 """
 Fix script for <inconsistency description>.
 
-Run on prod via: python manage.py shell < fix_<name>.py
+Run on prod via: python manage.py shell < tmp_scripts/fix_<name>.py
 
 Purpose: <1-2 line explanation>
 Root cause: <manual entry / code loophole — reference the related investigation>
@@ -104,7 +104,7 @@ def verify_fixed(record):
     # <same check as the investigation script, but on a single record>
     return True, ""
 
-def main():
+def _apply_fix():
     print("=" * 60)
     print(f"FIX: <inconsistency description>")
     print("=" * 60)
@@ -174,7 +174,7 @@ def main():
     print(f"\nTotal updated: {len(changes)}")
     print(f"Verification: all {len(changes)} records passed re-check.")
 
-main()
+_apply_fix()
 ```
 
 ## Rules

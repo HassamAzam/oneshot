@@ -83,7 +83,7 @@ import { artifactDir } from '../lib/config.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
-export type Gate = 'plan' | 'testcases' | 'design';
+export type Gate = 'plan' | 'testcases' | 'design' | 'notABug';
 export type GateVerdict = 'approved' | 'feedback' | 'pending' | 'unavailable';
 
 export interface GateResult {
@@ -126,8 +126,9 @@ export function reviewAllRuns(): boolean {
  *
  * Substring matching against repo-relative paths, deliberately: `apps/payroll/`
  * should catch everything beneath it, and a pattern list is easier to audit
- * than a set of regexes nobody can read. Configured per project, and an empty
- * list turns the whole behaviour off.
+ * than a set of regexes nobody can read. Configured per project, and derived at
+ * load from the `paths` of every module in config/risk-modules.json — dropping a
+ * module's `paths` there is what disarms it.
  */
 export function highScrutinyHits(files: string[]): string[] {
   const guarded = projectConfig().highScrutinyPaths ?? [];
@@ -200,7 +201,10 @@ function isApprovedReply(text: string): boolean {
  * pipeline they were not asked to own.
  */
 export type ReviewRole = 'dev' | 'qa';
-const GATE_ROLE: Record<Gate, ReviewRole> = { plan: 'dev', testcases: 'qa', design: 'dev' };
+// `notABug` is QA's: whether a reported defect really does not happen is a
+// testing judgement, and the people who own the case list are the ones who
+// know which data, role or environment the reproduction may have missed.
+const GATE_ROLE: Record<Gate, ReviewRole> = { plan: 'dev', testcases: 'qa', design: 'dev', notABug: 'qa' };
 
 /**
  * Does the DESIGN gate apply to this run?
@@ -298,10 +302,12 @@ function blankState(): ReviewGateState {
   return { requestTs: null, requestNoteId: null, approved: false, feedback: [] };
 }
 
-const GATE_STATE: Record<Gate, keyof Pick<RunJournal, 'planApproval' | 'testcasesApproval' | 'designApproval'>> = {
+const GATE_STATE: Record<Gate, keyof Pick<RunJournal,
+  'planApproval' | 'testcasesApproval' | 'designApproval' | 'notABugApproval'>> = {
   plan: 'planApproval',
   testcases: 'testcasesApproval',
   design: 'designApproval',
+  notABug: 'notABugApproval',
 };
 
 function stateOf(j: RunJournal, gate: Gate): ReviewGateState {
@@ -638,7 +644,7 @@ async function mentionOrName(username: string): Promise<string> {
  * Slack reserves `&`, `<` and `>` in message text, and `|` additionally
  * terminates the label inside a link — so a ticket called
  * "Payroll | increments not applied" would render as a link reading
- * "#42 Payroll" with the rest spilled out, and one containing `<` can break
+ * "#123 Payroll" with the rest spilled out, and one containing `<` can break
  * the link outright. Titles are written by whoever opened the issue, so this
  * is data, not a constant, and the gate ask is the one message that puts a
  * title inside a link label rather than beside one.
@@ -664,6 +670,11 @@ const ASK_WORDS: Record<Gate, { what: string; next: string; other: string }> = {
     what: 'the proposed design',
     next: '`plan`',
     other: 'what to change, to have the design redrawn',
+  },
+  notABug: {
+    what: 'a *Not a Bug* verdict (research could not reproduce it)',
+    next: '*Not a Bug* — the ticket is labelled and the run stops',
+    other: 'what was missed (data, role, steps, environment) to have it reproduced again',
   },
 };
 
@@ -699,8 +710,11 @@ export function gateAskText(
  * Slack lookup happens before it is called.
  */
 export function gateApprovedText(journal: RunJournal, gate: Gate, approver: string): string {
-  return `:white_check_mark: *${gate} approved* by ${approver} on `
-    + `<${issueUrl(journal.iid)}|#${journal.iid} ${linkLabel(journal.title)}> — the run continues.`;
+  const link = `<${issueUrl(journal.iid)}|#${journal.iid} ${linkLabel(journal.title)}>`;
+  if (gate === 'notABug') {
+    return `:white_check_mark: *Not a Bug confirmed* by ${approver} on ${link} — the run stops.`;
+  }
+  return `:white_check_mark: *${gate} approved* by ${approver} on ${link} — the run continues.`;
 }
 
 // -------------------------------------------------------------- plan gate
@@ -814,7 +828,7 @@ function renderPlanForTicket(plan: Record<string, unknown> | null): string {
  * would pile one on each reviewer per round. The list is here to answer "may I
  * approve this" without opening a config file, not to nag.
  */
-function approverLine(gate: Gate): string {
+export function approverLine(gate: Gate): string {
   const who = approversFor(gate).map((u) => `\`@${u}\``).join(', ');
   return `Only ${GATE_ROLE[gate].toUpperCase()} may sign this off: ${who || '_(nobody configured)_'}.`;
 }
