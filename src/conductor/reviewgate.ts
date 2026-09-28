@@ -351,19 +351,22 @@ export interface CheckGateOpts {
    */
   requestBody: string;
   /**
+   * The artifact this gate is asking a human to sign off on.
+   *
+   * Digested when the request posts and compared on every check after it: a
+   * request whose artifact is rewritten while it stands is re-asked, and an
+   * approval is stamped with the digest the request showed, never with what
+   * the artifact holds on the tick the reply is read. That is what lets a later
+   * rewrite be told apart from the version that was actually approved. Omit it
+   * and the gate behaves exactly as before.
+   */
+  subject?: unknown;
+  /**
    * Invoked once, exactly on the transition into 'approved' — the caller's
    * chance to leave the ticket its audit record (`addIssueNote`) now that the
    * decision has been made. Distinct from the request comment above: that one
    * asks, this one records what was agreed, so the ticket reads in order.
    */
-  /**
-   * The artifact this gate is asking a human to sign off on.
-   *
-   * Digested and stamped onto the gate state when the approval lands, so a
-   * later rewrite of that artifact can be told apart from the one that was
-   * actually approved. Omit it and the gate behaves exactly as before.
-   */
-  subject?: unknown;
   onApproved?: () => Promise<void>;
   /**
    * Invoked with the round's non-`approved` replies, BEFORE `onApproved` —
