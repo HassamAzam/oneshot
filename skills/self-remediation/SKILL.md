@@ -33,7 +33,7 @@ repairable without a person.
 |---|---|---|
 | `environment` | config drift, a cap that was never large enough, a stale lock, a wedged process, a leased port nobody freed | Fix it |
 | `provisioning` | data or a permission that simply does not exist on the target | Arrange the smallest version of it |
-| `credentials` | a secret that is stale, unwired, or pointing at the wrong host | Fix it if it exists; a human if it does not |
+| `credentials` | a secret that is stale, unwired, or pointing at the wrong host | Fix it if it exists; a human if it does not. A credential in Oneshot's own `.env` is always a human's — `secret-guard` denies reading or writing that file, so name the variable in `humanNeeded` |
 | `infrastructure` | the box, the tunnel or the registry is down | Not yours. Hand back |
 | `code` | the ticket's own change is wrong | Never fix. Send it back through the pipeline |
 | `unknown` | you cannot place it | Say so, `fixed: false`, hand back quickly |

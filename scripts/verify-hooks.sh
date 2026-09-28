@@ -197,6 +197,66 @@ expect_allow "Read while paused"       pause-check.cjs '{"tool_name":"Read","too
 rm -f "$ROOT/state/PAUSE"
 expect_allow "Bash when not paused"    pause-check.cjs "$(bash_payload 'npm test')"
 
+echo
+echo "mr-gate"
+mr_payload() {
+    printf '{"tool_name":"%s","tool_input":%s}' "$1" "$2"
+}
+
+expect_deny  "conventional-commit prefix in title" mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__create_merge_request '{"title":"chore: remove unused celery task","description":"[closes https://gitlab.example.com/g/p/-/issues/1]"}')"
+expect_deny  "create with no closes line"          mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__create_merge_request '{"title":"Remove Unused Celery Task","description":"Does a thing."}')"
+expect_allow "plain title plus closes line"        mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__create_merge_request '{"title":"Remove Unused Celery Task","description":"Does a thing.\n\n[closes https://gitlab.example.com/g/p/-/issues/1]"}')"
+expect_allow "update that touches neither field"   mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__update_merge_request '{"labels":"ready"}')"
+expect_deny  "update sending a closes-less body"   mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__update_merge_request '{"description":"Rewritten body."}')"
+
+echo
+echo "secret-guard"
+expect_deny  "Read of this repo's .env"        secret-guard.cjs \
+    "$(printf '{"tool_name":"Read","tool_input":{"file_path":"%s/.env"}}' "$ROOT")"
+expect_deny  "cat of this repo's .env"         secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env"}}' "$ROOT")"
+expect_deny  "grep TOKEN by absolute path"     secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"grep TOKEN %s/.env"}}' "$ROOT")"
+expect_allow "the work repo's own .env"        secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env"}}' "$ONESHOT_WORKTREE")"
+expect_allow "grepping the source for a name"  secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"grep -rn GITLAB_TOKEN src/"}}'
+expect_allow "reading an ordinary file"        secret-guard.cjs \
+    '{"tool_name":"Read","tool_input":{"file_path":"/tmp/notes.md"}}'
+# The shell expands these; the guard has to as well. HOME is pointed at the
+# repo's parent so a ~ path can name it wherever this checkout lives.
+expect_deny  "cat \$ONESHOT_HOME/.env"          secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat $ONESHOT_HOME/.env"}}'
+expect_deny  "cat \${ONESHOT_HOME}/.env"        secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat \"${ONESHOT_HOME}/.env\""}}'
+HOME="$(dirname "$ROOT")" expect_deny "cat by a ~ path" secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat ~/%s/.env"}}' "$(basename "$ROOT")")"
+HOME="$(dirname "$ROOT")" expect_deny "grep by a \$HOME path" secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"grep TOKEN $HOME/%s/.env"}}' "$(basename "$ROOT")")"
+expect_deny  "Grep tool on this repo's .env"    secret-guard.cjs \
+    "$(printf '{"tool_name":"Grep","tool_input":{"pattern":"TOKEN","path":"%s/.env","output_mode":"content"}}' "$ROOT")"
+# A redirect write is as much a hazard as sed -i: one > blanks GITLAB_TOKEN.
+expect_deny  "> truncating this repo's .env"   secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"printf %%s GITLAB_TOKEN=x > %s/.env"}}' "$ROOT")"
+expect_deny  ">> appending to this repo's .env" secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"echo GITLAB_TOKEN=x >> .env"}}' "$ROOT")"
+expect_deny  "tee into this repo's .env"       secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"echo A=1 | tee -a .env"}}' "$ROOT")"
+# .env.example is the tracked list of variables, and it holds no secrets.
+expect_allow "cat .env.example by bare name"   secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env.example"}}' "$ROOT")"
+expect_allow "cat .env.example by absolute path" secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat %s/.env.example"}}' "$ROOT")"
+expect_allow "cat .env.local and .env.sample"  secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env.local .env.sample"}}' "$ROOT")"
+expect_allow "redirect out of .env.example"    secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"grep -c = < .env.example > /tmp/n"}}' "$ROOT")"
+
 # PostToolUse hooks answer with {"decision":"block"}
 # rather than a permissionDecision — the allow/deny helpers cannot read it.
 expect_block() {
