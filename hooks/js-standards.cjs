@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * PostToolUse: the three mechanical React rules, on every .js/.jsx write.
+ * PostToolUse: the three mechanical React rules, on every frontend/ .js/.jsx write.
  *
  *   1. axios is importable in three files and nowhere else.
  *   2. No literal-only inline `style={{…}}` / `sx={{…}}`.
@@ -27,10 +27,17 @@
  * fires on the word `axios` inside a comment would be worse than no rule,
  * because the fix for it is not obvious to the session it blocks.
  *
+ * ONLY THE LINES THIS WRITE ADDED ARE JUDGED. Dozens of legacy files already
+ * break these rules; judging the whole file would block an unrelated one-line
+ * edit to one of them until the phase refactored styles the ticket never
+ * touched. An Edit is judged on its new_string; a Write on the lines HEAD does
+ * not have (the whole file when it is new).
+ *
  * Fail-open, like every guard here.
  */
 const path = require('node:path');
 const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
 const C = require(path.join(__dirname, '_common.cjs'));
 
 C.bailIfNotOneshot();
@@ -92,6 +99,47 @@ function lineOf(src, index) {
   return src.slice(0, index).split('\n').length;
 }
 
+/**
+ * The line numbers this write added to `src`, or null for "every line".
+ *
+ * An Edit's new_string is found in the file as written; with several
+ * occurrences and no replace_all we cannot tell which one was edited, so all of
+ * them count. A Write is diffed line-by-line against HEAD, as a multiset so a
+ * moved line is not "added"; an untracked file, or any git failure, is new.
+ */
+function addedLines(src, input, tool, target) {
+  if (tool === 'Edit') {
+    const added = new Set();
+    const text = input.new_string || '';
+    if (!text) return added;
+    const span = text.split('\n').length - 1;
+    for (let at = src.indexOf(text); at !== -1; at = src.indexOf(text, at + text.length)) {
+      const first = lineOf(src, at);
+      for (let l = first; l <= first + span; l += 1) added.add(l);
+    }
+    return added;
+  }
+  const head = spawnSync('git', ['show', `HEAD:./${path.basename(target)}`], {
+    cwd: path.dirname(target), encoding: 'utf8', timeout: 10_000,
+  });
+  if (head.status !== 0) return null;
+  const before = new Map();
+  for (const line of head.stdout.split('\n')) before.set(line, (before.get(line) || 0) + 1);
+  const added = new Set();
+  src.split('\n').forEach((line, i) => {
+    const left = before.get(line) || 0;
+    if (left) before.set(line, left - 1); else added.add(i + 1);
+  });
+  return added;
+}
+
+/** True when any line of [from, to] is one this write added. */
+function touched(added, from, to = from) {
+  if (!added) return true;
+  for (let l = from; l <= to; l += 1) if (added.has(l)) return true;
+  return false;
+}
+
 /** Walk from the `{{` of a JSX attribute to its matching close, on scrubbed text. */
 function braceSpan(scrubbed, openIndex) {
   let depth = 0;
@@ -110,17 +158,18 @@ function braceSpan(scrubbed, openIndex) {
  *
  * Keys are removed first, then anything that can only come from a variable —
  * a spread, a template placeholder, a member access, a bare identifier — marks
- * the object dynamic and therefore allowed.
+ * the object dynamic and therefore allowed. `${` is looked for in the ORIGINAL
+ * text: scrub() blanks a template literal's placeholders along with the rest.
  */
-function literalOnly(objectText) {
+function literalOnly(objectText, original) {
   const body = objectText.replace(/^\{+|\}+$/g, '');
   if (!body.trim()) return false;
-  if (body.includes('...') || body.includes('${')) return false;
+  if (body.includes('...') || original.includes('${')) return false;
   const values = body.replace(/(^|[,{])\s*(?:'[^']*'|"[^"]*"|[A-Za-z_$][\w$]*)\s*:/g, '$1');
   return !/[A-Za-z_$]/.test(values);
 }
 
-function checkAxios(src, scrubbed, target) {
+function checkAxios(src, scrubbed, target, added) {
   if (AXIOS_ALLOWED.some((allowed) => target.endsWith(allowed))) return null;
   const re = /(?:from\s*['"]axios['"]|require\(\s*['"]axios['"]\s*\))/g;
   // The quotes were blanked by scrub(), so match the original for the module
@@ -129,7 +178,8 @@ function checkAxios(src, scrubbed, target) {
   let m = re.exec(src);
   while (m) {
     const stillThere = scrubbed.slice(Math.max(0, m.index - 8), m.index + m[0].length);
-    if (/from|require/.test(stillThere)) hits.push(lineOf(src, m.index));
+    const line = lineOf(src, m.index);
+    if (/from|require/.test(stillThere) && touched(added, line)) hits.push(line);
     m = re.exec(src);
   }
   if (!hits.length) return null;
@@ -140,15 +190,17 @@ function checkAxios(src, scrubbed, target) {
     'bypassing it fragments the API surface.';
 }
 
-function checkInlineStyles(src, scrubbed) {
+function checkInlineStyles(src, scrubbed, added) {
   const re = /\b(style|sx)=\{\{/g;
   const hits = [];
   let m = re.exec(scrubbed);
   while (m) {
     const open = m.index + m[0].length - 2;
     const close = braceSpan(scrubbed, open);
-    if (close !== -1 && literalOnly(scrubbed.slice(open, close + 1))) {
-      hits.push({ line: lineOf(src, m.index), attr: m[1], text: src.slice(m.index, close + 1) });
+    const line = lineOf(src, m.index);
+    if (close !== -1 && touched(added, line, lineOf(src, close))
+      && literalOnly(scrubbed.slice(open, close + 1), src.slice(open, close + 1))) {
+      hits.push({ line, attr: m[1], text: src.slice(m.index, close + 1) });
     }
     m = re.exec(scrubbed);
   }
@@ -161,12 +213,16 @@ function checkInlineStyles(src, scrubbed) {
     'a variable, a template literal or a spread, which this object has none of.';
 }
 
-function checkYup(src, scrubbed, target) {
+function checkYup(src, scrubbed, target, added) {
   if (/formvalidations\.js$/i.test(path.basename(target))) return null;
   const re = /\b[Yy]up\s*\.\s*(object|string|number|array|boolean|date|mixed)\s*\(/g;
   const hits = [];
   let m = re.exec(scrubbed);
-  while (m) { hits.push(lineOf(src, m.index)); m = re.exec(scrubbed); }
+  while (m) {
+    const line = lineOf(src, m.index);
+    if (touched(added, line)) hits.push(line);
+    m = re.exec(scrubbed);
+  }
   if (!hits.length) return null;
   return `Yup schema built at ${hits.map((l) => `line ${l}`).join(', ')}.\n` +
     'Validation schemas live in the module\'s `formValidations.js`, not beside the form. ' +
@@ -182,17 +238,18 @@ try {
 
   const relevant = WRITE_TOOLS.has(data.tool_name || '')
     && response.success !== false
-    && /\.jsx?$/.test(target)
+    && /(^|\/)frontend\/.*\.jsx?$/.test(target)
     && worktree && C.isInside(target, worktree)
     && fs.existsSync(target);
 
   if (relevant) {
     const src = fs.readFileSync(target, 'utf8');
     const scrubbed = scrub(src);
+    const added = addedLines(src, input, data.tool_name, target);
     const problems = [
-      checkAxios(src, scrubbed, target),
-      checkInlineStyles(src, scrubbed),
-      checkYup(src, scrubbed, target),
+      checkAxios(src, scrubbed, target, added),
+      checkInlineStyles(src, scrubbed, added),
+      checkYup(src, scrubbed, target, added),
     ].filter(Boolean);
 
     if (problems.length) {
