@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { extractDesignTokens } from './designtokens.js';
+import { extractDesignTokens, type TokenExtraction } from './designtokens.js';
 
 interface Fixture {
   theme?: string;
@@ -304,4 +304,88 @@ test('a scss value only sass can evaluate is named in unresolved, never emitted'
   assert.equal(scss.quoted, '"darken(x)"');
   assert.doesNotMatch(css, /--scss-[\w-]+: [^;]*\$/);
   assert.match(css, /UNRESOLVED \(7\)/);
+});
+
+/** Kept out of the css and named in unresolved: withheld out loud, never dropped quietly. */
+function assertWithheld({ scss, css, unresolved }: TokenExtraction, keys: string[]): void {
+  for (const key of keys) {
+    assert.equal(scss[key], undefined, key);
+    assert.ok(unresolved.includes(`scss.${key}`), `${key} missing from unresolved`);
+    assert.ok(!css.includes(`--scss-${key}:`), `${key} emitted`);
+  }
+  assert.doesNotMatch(css, /UNRESOLVED: none/);
+}
+
+test('a colour handed to rgb() or rgba() is sass-only and lands in unresolved', (t) => {
+  const scssSource = [
+    '$veil: rgba(#000, 0.5);',
+    '$mist: rgb(#fff, .2);',
+    '$shadow: rgba(black, .5);',
+    '$overlay: $veil;',
+  ].join('\n');
+  const result = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assertWithheld(result, ['veil', 'mist', 'shadow', 'overlay']);
+});
+
+test('arithmetic outside parentheses lands in unresolved, since css only computes it in calc()', (t) => {
+  const scssSource = [
+    '$double: 16px * 2;',
+    '$packed: 16px*2;',
+    '$grown: 10px + 4px;',
+    '$shrunk: 20px - 4px;',
+    '$remainder: 10 % 3;',
+  ].join('\n');
+  const result = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assertWithheld(result, ['double', 'packed', 'grown', 'shrunk', 'remainder']);
+});
+
+test('a sass map or parenthesised list lands in unresolved', (t) => {
+  const scssSource = [
+    '$breakpoints: (sm: 576px, md: 768px);',
+    '$gutters: (',
+    '  4px,',
+    '  8px',
+    ');',
+  ].join('\n');
+  const result = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assertWithheld(result, ['breakpoints', 'gutters']);
+});
+
+test('numbers joined only by a slash land in unresolved, since sass divides a variable that is nothing else', (t) => {
+  const scssSource = [
+    '$line: 12px/1.5;',
+    '$ratio: 16 / 9;',
+    '$area: 1 / 3 / 2;',
+  ].join('\n');
+  const result = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assertWithheld(result, ['line', 'ratio', 'area']);
+});
+
+test('valid css that only looks like sass is still emitted as written', (t) => {
+  const valid: Record<string, string> = {
+    legacy: 'rgba(0,0,0,.5)',
+    modern: 'rgb(0 0 0 / 50%)',
+    themed: 'rgb(var(--x))',
+    inset: 'calc(100% - 8px)',
+    ref: 'var(--x)',
+    low: 'min(10px, 2vw)',
+    high: 'max(10px, 2vw)',
+    fluid: 'clamp(1rem, 2vw + 1rem, 3rem)',
+    fade: 'linear-gradient(to right, rgba(0, 0, 0, 0.5), #fff)',
+    stack: `"Helvetica Neue", 'Segoe UI', sans-serif`,
+    caption: '"a - b"',
+    nudge: '-4px',
+    offset: '0 -4px',
+    font: '12px/1.5 sans-serif',
+  };
+  const scssSource = Object.entries(valid).map(([key, value]) => `$${key}: ${value};`).join('\n');
+  const { scss, css, unresolved } = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assert.deepEqual(scss, valid);
+  assert.deepEqual(unresolved.filter((name) => name.startsWith('scss.')), []);
+  assert.match(css, /--scss-font: 12px\/1\.5 sans-serif;/);
 });

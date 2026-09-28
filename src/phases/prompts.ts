@@ -612,11 +612,12 @@ ${d.newPatterns?.length ? `\nApproved as NEW to the design system: ${d.newPatter
 `;
 }
 
-/** How a phase names a screenshot the schema will only carry as a bare filename. */
+/** Where writeDesignTokens writes tokens.css, so the prompt cannot name a file it never wrote. */
 function designTokensPath(ctx: PromptCtx): string {
   return join(artifactDir(ctx.ticket.iid), DESIGN_DIR, TOKENS_FILE);
 }
 
+/** How a phase names a screenshot the schema will only carry as a bare filename. */
 function artifactsBlock(ctx: PromptCtx): string {
   return `Everything you capture goes in ${artifactDir(ctx.ticket.iid)} (create it if it is not
 there). The schema carries only the BARE FILENAME, so a path in that field breaks the phase

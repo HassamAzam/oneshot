@@ -308,20 +308,47 @@ const CSS_FUNCTIONS = new Set([
   'linear-gradient', 'radial-gradient', 'conic-gradient',
 ]);
 
+/** `rgba(#000, .5)` and `rgba(black, .5)` are Sass's `rgba($color, $alpha)`; CSS wants channels. */
+const SASS_RGBA = /\brgba?\(\s*(?:#[0-9a-f]+|[a-z]+)\s*,/i;
+
+/** Sass's arithmetic, less `/`, which only divides a value made of nothing else (SASS_DIVISION). */
+const SASS_OPERATORS = new Set(['+', '-', '*', '%']);
+
+/**
+ * Numbers joined only by `/`, like `12px/1.5` or `16 / 9`. Sass divides these
+ * when they are a variable's whole value (Dart Sass deprecates it but still
+ * does it), so `$x: 12px/1.5` renders 8px, not the `12px/1.5` a copy would
+ * emit. In a list (`12px/1.5 sans-serif`) or inside a function
+ * (`rgb(0 0 0 / 50%)`) the slash survives, so those stay values.
+ */
+const SASS_DIVISION = /^-?(?:\d+\.?\d*|\.\d+)[a-z%]*(?:\s*\/\s*-?(?:\d+\.?\d*|\.\d+)[a-z%]*)+$/i;
+
 /**
  * A Sass value made valid CSS, or null. Copying `$x: $y;` or `darken($y, 5%)`
  * through verbatim emits CSS no browser can read under a header claiming
  * every token resolved — the quiet drop this module exists to refuse. So a
  * bare `$other` takes that token's value, one hop, as the JS aliases do, and
  * any other `$` or a function only Sass knows goes to `unresolved`.
+ *
+ * Some Sass has no `$` and no unknown function, so its shape gives it away
+ * instead: a colour handed to rgb()/rgba(), arithmetic outside parentheses
+ * (`16px * 2` is CSS only inside calc()), numbers joined only by `/`, which
+ * Sass divides, and a map or parenthesised list, `(sm: 576px)`. `*` is
+ * arithmetic wherever it sits; `+`, `-` and `%` only with
+ * space on both sides, because unspaced they are a sign (`-4px`), a hyphen
+ * (`sans-serif`) or a unit (`50%`).
  */
 function scssValue(value: string, raw: Record<string, string>): string | null {
   if (!value) return null;
   const alias = /^\$([A-Za-z0-9_-]+)$/.exec(value);
   const resolved = alias ? raw[alias[1] as string] : value;
   if (!resolved || resolved.includes('$')) return null;
-  const calls = [...stripQuoted(resolved).matchAll(/([A-Za-z_-][A-Za-z0-9_-]*)\s*\(/g)];
+  const text = stripQuoted(resolved);
+  const calls = [...text.matchAll(/([A-Za-z_-][A-Za-z0-9_-]*)\s*\(/g)];
   if (calls.some((call) => !CSS_FUNCTIONS.has((call[1] as string).toLowerCase()))) return null;
+  if (SASS_RGBA.test(text) || SASS_DIVISION.test(text) || text.startsWith('(')) return null;
+  const spaced = (at: number) => /\s/.test(text[at - 1] ?? '') && /\s/.test(text[at + 1] ?? '');
+  if (topLevelIndexes(text, SASS_OPERATORS).some((at) => text[at] === '*' || spaced(at))) return null;
   return resolved;
 }
 
