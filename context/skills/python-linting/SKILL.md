@@ -1,24 +1,37 @@
 ---
 name: python-linting
-description: Judgement calls around Python linting in this ERP repo — what to do instead of an inline comment, when a lint disable is legitimate, how to break a circular import, and how to shorten an over-long test name. The flake8/pylint run and the inline-comment ban are enforced by the py-lint hook, not by this skill.
+description: Python linting in this ERP repo — the flake8/pylint commands, what to do instead of an inline comment, when a lint disable is legitimate, how to break a circular import, and how to shorten an over-long test name. Inside a Oneshot phase the py-lint hook runs the linters on Write/Edit; everywhere else run them yourself. Used by backend-agent and qa-agent after every Python file change.
 ---
 
 # Python Linting & Test Naming
 
 Shared rules for all agents that write or modify `.py` files in this repo.
 
-## What the hook already does
+## Running the linters
 
-`hooks/py-lint.cjs` runs flake8, pylint and an inline-comment scan on every
-`.py` file a phase writes, and blocks the write when any of them has something
-to say. You do not need to run the linters yourself, and there is no value in
-reporting that you did — a clean write means the gate passed.
+Inside a Oneshot phase, Oneshot's py-lint hook runs flake8, pylint and an
+inline-comment scan on every `.py` file written through Write or Edit, and
+blocks the write when any of them has something to say. For those writes you
+do not need to run the linters yourself — a clean write means the gate passed.
 
-What the hook cannot do is choose the fix. Everything below is that choice.
+Everywhere else — an interactive session, or a `.py` file created through Bash
+— nothing runs them for you. Run both on each changed file before reporting
+done; both rc files exclude `migrations/`, but only when the linter walks a
+directory, so do not pass migrations explicitly:
+
+```bash
+flake8 <file1.py> <file2.py> ...          # config in .flake8
+pylint <file1.py> <file2.py> ...          # config in .pylintrc
+```
+
+Zero findings from both is the bar, and no new `#` comments (see below).
+
+What neither the hook nor the linters can do is choose the fix. Everything
+below is that choice.
 
 ## Instead of an inline comment
 
-The hook rejects `#` comments, so the question is never *how to word one*. It is
+New `#` comments are not allowed, so the question is never *how to word one*. It is
 which of these the comment was trying to compensate for:
 
 1. A variable or function whose name does not say what it holds — rename it so
