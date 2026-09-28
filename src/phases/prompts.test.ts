@@ -1,7 +1,7 @@
 import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
+import { mrOpenNote, promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
 import { ROOT, phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -277,4 +277,17 @@ test('a passing verify contributes no failure block', () => {
     assert.doesNotMatch(p, /## Verify failed these cases/);
     assert.match(p, /## Review findings to fix/);
   });
+});
+
+// ------------------------------------------------------------ mr-open's draft
+
+test('the mr prompt tells the erp pipeline a Draft is waiting from mr-open', () => {
+  const prompt = promptFor(cfg('mr'), ctx(ticket()));
+  assert.match(prompt, /`mr-open` opened a \*\*Draft\*\*/);
+  assert.match(prompt, /LOOK FOR AN EXISTING MR/);
+});
+
+test('without mr-open in the pipeline the mr prompt makes no claim about it', () => {
+  assert.equal(mrOpenNote(false), '');
+  assert.match(mrOpenNote(true), /`Draft:` prefix off the title/);
 });

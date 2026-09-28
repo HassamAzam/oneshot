@@ -584,6 +584,20 @@ export function touchesRenderedUi(files: string[]): boolean {
     && !/\.test\.[jt]sx?$/.test(f));
 }
 
+/**
+ * What the `mr` prompt may say about an MR opened before it. Only a pipeline
+ * that carries `mr-open` has one waiting as a Draft; on any other target the
+ * claim would send the session hunting for an MR that cannot exist.
+ */
+export function mrOpenNote(mrOpenRuns: boolean): string {
+  if (!mrOpenRuns) return '';
+  return ` There will USUALLY be one: \`mr-open\` opened a **Draft** the moment
+   the code existed, so the gates before you had a diff to read. Updating it is the normal path
+   and creating a second one is the mistake. Two things you own that it could not:
+   the real description, and taking the \`Draft:\` prefix off the title — a draft cannot be
+   merged, so leaving it is how this run ends parked at \`merge\`.`;
+}
+
 /** Highest F-NN already issued, so a later lap continues the numbering. */
 function maxFindingId(list: Finding[]): number {
   return list.reduce((m, f) => Math.max(m, Number(String(f.id).replace(/\D+/g, '')) || 0), 0);
@@ -1765,11 +1779,7 @@ regressions found: ${(v.regressions ?? []).join('; ') || 'none'}
 Push this run's branch and open the merge request.
 
 1. LOOK FOR AN EXISTING MR for source branch \`${ctx.branch ?? '(unleased)'}\` before you create
-   anything. There will USUALLY be one: \`mr-open\` opened a **Draft** the moment the code
-   existed, so the gates before you had a diff to read. Updating it is the normal path and
-   creating a second one is the mistake. Two things you own that it could not:
-   the real description, and taking the \`Draft:\` prefix off the title — a draft cannot be
-   merged, so leaving it is how this run ends parked at \`merge\`. This run may be a resumption${ctx.journal.mrIid ? ` — the journal already records !${ctx.journal.mrIid}` : ''}, and a second MR for one branch is a mess
+   anything.${mrOpenNote(Boolean(phaseByName('mr-open')))} This run may be a resumption${ctx.journal.mrIid ? ` — the journal already records !${ctx.journal.mrIid}` : ''}, and a second MR for one branch is a mess
    a human has to clean up. If one exists, you are updating it, not opening another: return ITS
    iid and url and say so in \`summary\`.
 
