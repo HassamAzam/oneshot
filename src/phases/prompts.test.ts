@@ -3,9 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
 import { ROOT, phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Ticket } from './types.js';
+import { PRIOR_ART_KINDS, RESEARCH_SCHEMA } from '../conductor/schemas.js';
 
 function ticket(over: Partial<Ticket> = {}): Ticket {
   return {
@@ -73,10 +74,13 @@ test('the mapping is config, so any label can carry any skill', () => {
   );
 });
 
-test('plan always gets the skills that are its method', () => {
+test('plan always gets the skill that is its method', () => {
+  // Was the planning-methodology + util-reuse-methodology pair. The discovery
+  // half of that method now runs in research, where the files are already open;
+  // change-scoping is what is left, and it is a different job — confirm what
+  // arrived in codePath, then search only what this approach introduces.
   const prompt = systemPromptFor(cfg('plan'), ctx(ticket()));
-  assert.ok(names(prompt).includes('planning-methodology'));
-  assert.ok(names(prompt).includes('util-reuse-methodology'));
+  assert.ok(names(prompt).includes('change-scoping'));
 });
 
 // ------------------------------------------------ recall has a method now
@@ -277,4 +281,101 @@ test('a passing verify contributes no failure block', () => {
     assert.doesNotMatch(p, /## Verify failed these cases/);
     assert.match(p, /## Review findings to fix/);
   });
+});
+
+// --------------------------------- the prior-art hunt moved from plan to research
+
+test('research is given the prior-art survey on every ticket, label or not', () => {
+  // Not label-gated, unlike bug-reproduction beside it: the survey is a use for
+  // files this phase already opens to build the trace, so there is no ticket it
+  // costs enough to withhold from.
+  assert.deepEqual(names(systemPromptFor(cfg('research'), ctx(ticket()))), ['prior-art-survey']);
+});
+
+test('plan declares change-scoping, and not the discovery pair it replaced', () => {
+  const got = names(systemPromptFor(cfg('plan'), ctx(ticket())));
+  assert.ok(got.includes('change-scoping'));
+  // The discovery half of these now runs in research. util-reuse-methodology is
+  // NOT deleted from the context repo — util-reuse-agent still loads it under
+  // erp-code-review — it is just no longer this phase's method.
+  assert.ok(!got.includes('util-reuse-methodology'));
+  assert.ok(!got.includes('planning-methodology'));
+});
+
+test('both skills these phases declare actually ship in this repo', () => {
+  // A name in config with no directory behind it fails SILENTLY — the phase
+  // just runs without it, and the prompt's short form is all that survives.
+  assert.ok(existsSync(join(ROOT, 'skills', 'prior-art-survey', 'SKILL.md')));
+  assert.ok(existsSync(join(ROOT, 'skills', 'change-scoping', 'SKILL.md')));
+});
+
+test('the research prompt still stands alone if the skill does not resolve', () => {
+  // Skills are an upgrade, never a dependency (see SKILL_LINE). The parts that
+  // must survive are the three the measurement showed were load-bearing.
+  const p = promptFor(cfg('research'), ctx(ticket()));
+  assert.match(p, /looking for FOUR kinds, not one/, 'the four kinds must survive the short form');
+  assert.match(p, /Spell every noun TWICE/, 'the two-spelling rule must survive');
+  assert.match(p, /Resolve every hit to its enclosing DEFINITION/, 'the resolve step must survive');
+  // Without this the prompt describes the kinds but never says the role has to
+  // carry one, and the only remaining carrier is the schema description.
+  assert.match(p, /PREFIXED with its kind/, 'the prefix must be required, not just described');
+  // The greps are the step that lapses, so they ship as commands rather than a
+  // habit — and a template literal eats a single backslash, which would leave
+  // the pattern matching a literal 's' instead of whitespace.
+  assert.match(p, /grep -n "\^\\s\*\\\(def\\\|class\\\) " <file>/, 'the python variant');
+  // Both variants, or a frontend ticket gets a Python-only command for the one
+  // step this change calls load-bearing.
+  assert.match(p, /grep -n "\^\\s\*\\\(export \\\|async \\\)\*\\\(function\\\|const\\\|class\\\) " <file>/, 'the js/ts variant');
+});
+
+test('the plan prompt still stands alone if the skill does not resolve', () => {
+  const p = promptFor(cfg('plan'), ctx(ticket()));
+  assert.match(p, /The prior art ARRIVES/, 'confirm-not-rediscover must survive the short form');
+  assert.match(p, /still yours to search/, 'the approach residual must survive');
+  assert.match(p, /Place a new unit where its MIRROR lives/, 'placement must survive');
+});
+
+test('research paces itself against its own configured budget', () => {
+  // It was the last long session phase with no landing mark at all. The number
+  // is quoted from config, never typed in, or the prompt teaches a session to
+  // pace past the cap phase.ts actually kills it at.
+  const p = promptFor(cfg('research'), ctx(ticket()));
+  const turns = cfg('research').maxTurns ?? 0;
+  assert.match(p, new RegExp(`LAND THE PLANE at ~${Math.round(turns * 0.7)} turns`));
+  assert.match(p, new RegExp(`about 70% of your ${turns}`));
+});
+
+test('the plan keeps its measured budget rather than growing to fit the method', () => {
+  // Seven replays measured 26-39 turns against a cap of 50, and the 39 was the
+  // run that DISCOVERED the prior art — the cost this change moves to research.
+  // A ceiling raised to cover a method is read as a target.
+  const c = cfg('plan');
+  assert.equal(c.maxTurns, 50);
+  assert.equal(c.timeoutMin, 20);
+  assert.ok((c as unknown as { _why_turns?: string })._why_turns, 'the decision not to raise is recorded');
+});
+
+test('the prior-art kinds are one set, in every place that names them', () => {
+  // The measured failure this guards: a rule authored in two places diverges
+  // invisibly. Three skill edits were once silently contradicted by prompts.ts
+  // carrying its own compressed copy of the same rule, and nothing flagged it.
+  // Here the producer (research's skill + the schema the model writes against)
+  // and the consumer (plan's prompt + skill) must agree on the SAME vocabulary,
+  // or plan is handed a prefix it was never told to expect.
+  const read = (...p: string[]): string => readFileSync(join(ROOT, ...p), 'utf8');
+  const sources: Array<[string, string]> = [
+    ['research schema', JSON.stringify(RESEARCH_SCHEMA)],
+    // The research prompt is the artefact that lost a token last time, so it is
+    // the one the guard most needs: without this row, trimming its bullet back
+    // to four kinds leaves the test green because the schema still names six.
+    ['research prompt', promptFor(cfg('research'), ctx(ticket()))],
+    ['plan prompt', promptFor(cfg('plan'), ctx(ticket()))],
+    ['prior-art-survey skill', read('skills', 'prior-art-survey', 'SKILL.md')],
+    ['change-scoping skill', read('skills', 'change-scoping', 'SKILL.md')],
+  ];
+  for (const [where, text] of sources) {
+    for (const kind of PRIOR_ART_KINDS) {
+      assert.ok(text.includes(kind), `${where} is missing the '${kind}' kind`);
+    }
+  }
 });

@@ -15,6 +15,22 @@ import { ADDRESSED_FEEDBACK_PROP, MR_FEEDBACK_PROPS } from '../mrfeedback/schema
 
 export type JsonSchema = Record<string, unknown>;
 
+/**
+ * The `role` prefixes research uses to mark a `codePath` entry as prior art
+ * rather than a step in the trace.
+ *
+ * Exported because this vocabulary is authored in four places — this schema,
+ * research's prompt, plan's prompt, and the two SKILL.md files — and the one
+ * measured failure of that shape is a rule that diverges in one of them
+ * invisibly. The first four are the kinds a survey goes LOOKING for; the last
+ * two are findings it picks up on the way (a constant the change must use, and
+ * the test already covering the surface). prompts.test.ts asserts every one of
+ * those four artefacts names the whole set.
+ */
+export const PRIOR_ART_KINDS = [
+  'reuse:', 'mirror:', 'duplicate:', 'fragment:', 'constant:', 'test-sibling:',
+] as const;
+
 const str = (description: string) => ({ type: 'string', description });
 const strArr = (description: string) => ({ type: 'array', items: { type: 'string' }, description });
 
@@ -83,14 +99,32 @@ export const RESEARCH_SCHEMA = phaseSchema({
   acceptanceCriteria: strArr('Explicit criteria, including any amended in ticket COMMENTS.'),
   codePath: {
     type: 'array',
-    description: 'The trace through the code, in execution order.',
+    description:
+      'Locations that matter, each with a role. The trace through the code in execution ' +
+      'order FIRST, then the prior art you found while reading those files — what already ' +
+      'exists that this change could call, extend, mirror or is better off leaving alone. ' +
+      'A helper found here and not listed is a helper the next phase writes from scratch.',
     items: {
       type: 'object',
       additionalProperties: false,
       properties: {
         file: str('Repo-relative path'),
-        line: { type: 'number', description: '1-indexed anchor line' },
-        role: str('What this location does in the flow'),
+        line: {
+          type: 'number',
+          description:
+            "1-indexed line of the DEFINITION — the `def`, `class`, `function` or `const` " +
+            'line, never the line a search matched. The next phase opens what you cite, and ' +
+            'a match line drops it into the middle of a function it cannot see the shape of. ' +
+            'For a fragment, which has no definition of its own, this is the line of the ' +
+            'function CONTAINING it, and the role names the inner span.',
+        },
+        role: str(
+          'What this location does in the flow. For prior art, prefix the kind — ' +
+          `${PRIOR_ART_KINDS.map((k) => `'${k}'`).join(', ')} — then the signature (for a ` +
+          'fragment, the inner span the `line` above points into) and, in the same line, ' +
+          'which bar it clears: call it, extend it (naming the callers you counted), ' +
+          "mirror it, or leave it. 'Might be relevant' is not a role.",
+        ),
       },
       required: ['file', 'line', 'role'],
     },
@@ -129,7 +163,11 @@ export const RESEARCH_SCHEMA = phaseSchema({
     },
     required: ['reachable', 'route', 'entryPoint', 'gate', 'vocabulary'],
   },
-  unknowns: strArr('What you could NOT determine. State these rather than guessing.'),
+  unknowns: strArr(
+    'What you could NOT determine. State these rather than guessing. A noun you searched ' +
+    'and did not find belongs here too: it stops the next phase repeating a search you ' +
+    'already paid for, and stops it inventing a near-match to fill the gap.',
+  ),
   module: str('Primary module, e.g. Payroll, Leaves, Project Logs.'),
   reproduction: {
     type: 'object',
@@ -171,7 +209,15 @@ export const RESEARCH_SCHEMA = phaseSchema({
 
 export const PLAN_SCHEMA = phaseSchema({
   approach: str('The chosen approach and, in one line, why over the alternative.'),
-  reuse: strArr('Existing helpers/components to extend instead of writing new ones.'),
+  reuse: strArr(
+    'Existing code this change builds on, each as `file:function` or `file:line-line` for ' +
+    'a fragment with no name. One of four verdicts per entry: reuse it, extend it, ' +
+    'collapse a duplicate onto it, or rejected — and a rejection stays here with its ' +
+    'reason on the same line, because a candidate silently dropped is indistinguishable ' +
+    'from one nobody found. Read by implement, not by the plan approver: a choice they ' +
+    "must be able to decline goes in approach, openQuestions, outOfScope or a step's " +
+    'what instead.',
+  ),
   steps: {
     type: 'array',
     items: {
@@ -187,15 +233,20 @@ export const PLAN_SCHEMA = phaseSchema({
     },
   },
   migrations: { type: 'boolean', description: 'True if any model/schema change is required.' },
-  risks: strArr('What could break, and the mitigation. Not a place for undecided scope — that is openQuestions.'),
+  risks: strArr(
+    'What could break, the mitigation, AND the check that would catch it before this ' +
+    'lands. A risk naming no check is unease rather than a finding. Not a place for ' +
+    'undecided scope — that is openQuestions.',
+  ),
   openQuestions: strArr(
     'Decisions only a person (requester, PM, dev) can make — a scope or product choice the ' +
     'ticket does not state. Each: the question, the default this plan assumes if nobody ' +
     'answers, and what changes if the answer differs. Empty when nothing is undecided.',
   ),
   outOfScope: strArr(
-    'Related problems found and deliberately NOT fixed here. Each: what, why excluded, and ' +
-    'where it belongs (e.g. a separate ticket).',
+    'Related problems found and deliberately NOT fixed here. Each: what, why excluded, ' +
+    'how you ruled it out (with `file:line`), and where it belongs (e.g. a separate ' +
+    'ticket).',
   ),
   acceptanceCoverage: {
     type: 'array',

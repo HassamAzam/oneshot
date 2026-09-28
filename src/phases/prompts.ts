@@ -770,7 +770,15 @@ The method is the \`prior-art-recall\` skill — load it and follow it. In short
 - Produce a prior-art brief short enough to sit inside three later prompts: what was done,
   what broke, what to reuse. An empty brief is a correct answer, not a failure.`,
 
-  research: (ctx) => `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
+  research: (ctx) => {
+    const mins = budgetMin('research', 70);
+    const turns = budgetTurns('research');
+    // Counted in turns, not minutes, for the same reason review and verify are:
+    // the session is handed no start instant, so its own tool calls are the only
+    // clock it can read. Research was the last long session phase with no pacing
+    // line at all, which is affordable right up until the survey above lands.
+    const landAt = Math.round(turns * 0.7);
+    return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 
 Work out what this ticket actually requires, and trace the code that implements it.
 
@@ -784,6 +792,40 @@ Work out what this ticket actually requires, and trace the code that implements 
   unopened document says.
 - Trace the real execution path and cite \`file:line\` for each step. Do not describe the
   architecture in general terms — follow THIS ticket's path.
+- While you are in those files, record what ALREADY EXISTS that this change could build on,
+  into \`codePath\` alongside the trace, each such entry's \`role\` PREFIXED with its kind so
+  the next phase can tell prior art from the trace. Go looking for FOUR kinds, not one:
+  \`reuse:\` the **callable** a change can import and call; \`mirror:\` the opposite-direction
+  sibling (start/end, grant/revoke, the read of the thing being written), found by searching
+  the antonym of the ticket's verb; \`duplicate:\` the same logic already written twice, found
+  by searching a distinctive LINE of it rather than its name; and \`fragment:\` arithmetic or
+  a predicate inside a larger function with no identifier at all, reachable only through the
+  constants it uses. A search for a plausible helper name finds the first and none of the
+  other three. Two more prefixes are for what you pick up on the way rather than hunt:
+  \`constant:\` a value the change must use, and \`test-sibling:\` the test already covering
+  this surface. An existing IMPORT between two modules and a \`TODO\`/\`FIXME\` in code you
+  traced are both findings — the first says the connection is already sanctioned, the second
+  names its own fix.
+- Spell every noun TWICE before concluding it does not exist. A stored thing is reached by its
+  TYPE and by the FIELD or RELATION pointing at it, and working code usually mentions only one:
+  CamelCase class → snake_case field → reverse accessor → manager/queryset → column, on the
+  backend; component → route constant → testid constant → DISPLAY_STRINGS key, on the frontend.
+  One spelling returning nothing is half a search. A noun searched both ways and still not
+  found goes in \`unknowns\`, so the next phase neither repeats it nor invents a near-match.
+- Resolve every hit to its enclosing DEFINITION before you judge it, and cite the definition's
+  own line — never the line the search matched. One command per FILE, not per hit:
+  \`grep -n "^\\s*\\(def\\|class\\) " <file>\` for python,
+  \`grep -n "^\\s*\\(export \\|async \\)*\\(function\\|const\\|class\\) " <file>\` for js/ts;
+  the enclosing definition of a hit at line N is the last entry at or before N. Stop a noun
+  after two definitions you have actually READ, and tighten any pattern returning more than
+  ~30 hits rather than skimming it. An unresolved hit is a location, not evidence: never
+  report one on its own, and never promote a signature you skimmed to a definition you read.
+  A fabricated near-match costs the next phase more than an empty answer would have.
+- Say which bar each candidate clears, never a percentage: **call it**, **extend it** (naming
+  the callers you counted), **mirror it** (not callable, but its shape and tests are the
+  pattern), or **leave it** (close but not close enough — two honest functions beat one with
+  a boolean). "Nothing clears a bar" is a real and cheap answer. You are reporting what the
+  code can support, not choosing the approach — the plan phase decides.
 - Determine the blast radius. Consult the module-linkage table in CLAUDE.md: payroll↔leaves,
   payroll↔costing, costing↔invoices, allowances↔payroll, leaves↔costing, payroll↔odoo. A
   change inside one of those pairs affects the other side.
@@ -798,8 +840,15 @@ Work out what this ticket actually requires, and trace the code that implements 
   the rest empty when the change genuinely has no UI surface.
 - List what you could NOT determine. An explicit unknown is worth more than a confident
   guess — the plan phase can work around a stated gap and cannot work around a wrong claim.
+- LAND THE PLANE at ~${landAt} turns — about 70% of your ${turns}. Keep a rough count of your
+  own tool calls; you are not told the time, so the count is your clock. The trace, the
+  acceptance criteria and \`uiPath\` are the deliverable and they come first; the prior-art
+  survey is what you pick up while producing them, not a second job to finish. An artifact
+  that is complete on the trace and thin on prior art beats ${mins} minutes that ended with
+  neither, because a run that dies here has produced nothing for any later phase to use.
 ${reproductionBlock(ctx)}
-Do not write or modify any code.`,
+Do not write or modify any code.`;
+  },
 
   design: (ctx) => `${ticketBlock(ctx.ticket)}
 ${reviewGateFeedbackBlock(ctx.journal.designApproval?.feedback, 'Reviewer feedback on an earlier design', 'Design')}
@@ -882,20 +931,62 @@ ${JSON.stringify(ctx.prior.research ?? {}, null, 2)}
 
 Produce an implementation plan an engineer could follow without re-deriving the research.
 
-- Reuse before writing. Search \`common/\`, the app's \`utils.py\`, and
-  \`frontend/src/**/utils/\` for helpers that already do this, and name them.
-- Steps are ordered and each names the files it touches and its layer.
+- The prior art ARRIVES. Research recorded what already exists in \`codePath\`, each entry
+  prefixed with its kind (\`reuse:\`, \`mirror:\`, \`duplicate:\`, \`fragment:\`, \`constant:\`,
+  \`test-sibling:\`). Do not run that search again — CONFIRM it. A handed \`file:line\` is a
+  claim written before your approach existed, so open every location you lean on and read the
+  function around it. Each entry also carries the bar research judged it against — translate
+  it rather than inheriting it: "call it" → reuse, "extend it" → extend and recount the
+  callers yourself, "leave it" → reject, "mirror it" → not a reuse verdict at all, it is the
+  placement signal below. End on one of four verdicts: reuse, extend, collapse a duplicate
+  onto, or reject — and a rejection stays in \`reuse\` with its reason on the same line. Never
+  write "no prior art" against a trace you did not open; \`implement\` reads that as permission.
+- What your APPROACH introduces is still yours to search, because research could not trace it.
+  That residual is: the unit you are about to add (search the identifiers it reads or writes —
+  never the name you would have chosen), its mirror, the second site already carrying the same
+  logic, and the tests already covering this surface.
+- Place a new unit where its MIRROR lives, and have the step say so by name. No mirror, then
+  count the CALLERS it will have: exactly one and clearly never a second → inline at that call
+  site, and say so or the next phase invents a file for it; several but all inside one module →
+  that module's \`utils/\` or \`managers.py\`/\`querysets.py\`; callers in more than one module →
+  \`common/\` or \`frontend/src/common/**\`. A test file's location is derived from the sibling
+  already testing this surface. Naming a directory you did not search is what makes a placement
+  feel decided when nothing was.
+- Count the CONSUMERS of every value you alter, by name, never by estimate — everything that
+  renders, persists, exports, snapshots, emails, logs or keys off it. Weight hardest the
+  values a person or an outside system receives: no test asserts them and nothing fails loudly.
+- Steps are ordered and each names the files it touches and its layer. \`files\` and \`layer\`
+  are machinery, not prose: they decide which standards \`implement\` loads and what the review
+  gate is scoped to, so a file left off a step is a file nobody is scoped to.
 - No step writes a Jest test, or any other frontend unit test. This repo's Jest toolchain has
   rotted (Babel/enzyme/ESM drift) and CI never runs it, so such a step is unpassable by
   construction -- \`testcases\` and \`verify\` are both already instructed to refuse it.
   Frontend behaviour is covered by the Playwright cases \`testcases\` writes against the real
   app; a plan step asking for one anyway spends \`implement\` on code nothing will ever run.
-- Set \`migrations\` true if any model, field, constraint or relation changes.
-- Risks are concrete: what breaks, and the mitigation.
+- Set \`migrations\` true if any model, field, constraint or relation changes. A schema change
+  and a data change are SEPARATE migrations — say which you need and in which order. And a
+  lookup inside a loop is an N+1: where the approach needs per-record data on a bulk path,
+  name where that data is prefetched and how it reaches the helper, or the plan has moved a
+  performance defect into the implementation for \`review\` to find a whole lap later.
+- Risks are concrete: what breaks, the mitigation, AND the check that would catch it before
+  this lands — an assertion against a known-good value, a query count, a named test. A risk
+  that names no check is unease rather than a finding, and the approver cannot weigh it.
+- Breadth is never the default. Where your approach also changes behaviour for records, people
+  or periods the ticket does not name, the steps implement the NARROW version — gated to what
+  the ticket describes — and the wider one becomes an \`openQuestions\` entry with that gating
+  as its stated default. Filing the consequence under \`risks\` instead does not license the
+  steps to take it.
 - Every item in research's \`unknowns\` ends in exactly one place: resolved (say how, with
   \`file:line\`), an \`openQuestions\` entry with the default you assume, or an \`outOfScope\`
-  entry. Never decide one silently. A scope or product choice the ticket does not state is an
-  open question, not a risk — the approver reads open questions first and can overrule them.
+  entry saying how you ruled it out, with \`file:line\` — an out-of-scope entry carrying no
+  evidence is one the approver can only accept or reject whole. Never decide one silently. A
+  scope or product choice the ticket does not state is an open question, not a risk — the
+  approver reads open questions first and can overrule them. So does anything THIS phase
+  discovers that research did not raise: a consequence you found while planning is under the
+  same obligation as one you were handed.
+- Where a step is severable, say so as an \`openQuestions\` entry and state the default
+  plainly: ALL STEPS SHIP unless the approver says otherwise. \`implement\` reads
+  \`openQuestions\` too, and takes silence there as room to drop one.
 - \`acceptanceCoverage\` has one entry per research acceptance criterion. Mark a criterion
   \`not-satisfiable\` when no change can demonstrate it as written, and say what is done instead.
 - \`feedbackResponse\` answers the LATEST feedback round point by point. \`where\` must name the part

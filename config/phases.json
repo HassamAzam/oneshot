@@ -34,11 +34,13 @@
         "run"
       ],
       "onFail": "abort",
-      "skills": [],
+      "skills": [
+        "prior-art-survey"
+      ],
       "labelSkills": {
         "Bug": "bug-reproduction"
       },
-      "_why_skills": "Reproduction is the `Bug` label's job, the same way `frontend-accessibility` is the `Accessibility` label's at plan \u2014 see that phase's `_why_skills`. It was an every-ticket skill until an accessibility ticket carrying no Bug label spent 57 turns and 528k weighted tokens failing to bring the app up for a verdict of 'inconclusive': asking a session to decide bug-vs-feature from the ticket's prose costs the app bring-up whether or not the answer is yes, and triage already knows. An absent label is the answer, not a missing signal. Moving this line back into `skills` restores the old behaviour, prose included \u2014 src/phases/prompts.ts gates the instructions on this same resolved list.",
+      "_why_skills": "Reproduction is the `Bug` label's job, the same way `frontend-accessibility` is the `Accessibility` label's at plan \u2014 see that phase's `_why_skills`. It was an every-ticket skill until an accessibility ticket carrying no Bug label spent 57 turns and 528k weighted tokens failing to bring the app up for a verdict of 'inconclusive': asking a session to decide bug-vs-feature from the ticket's prose costs the app bring-up whether or not the answer is yes, and triage already knows. An absent label is the answer, not a missing signal. Moving this line back into `skills` restores the old behaviour, prose included \u2014 src/phases/prompts.ts gates the instructions on this same resolved list. `skills` is no longer empty: prior-art-survey rides along with the trace on EVERY ticket, because the survey is not a second job but a use for files this phase has already paid to open. It moved here from plan, which had 50 turns and the whole reuse hunt while this phase has 180 and the code already in front of it. The measurement that moved it: across seven dry replays of one ticket, a plan sent to DISCOVER the helper found it once in two attempts and spent 39 turns doing it, while the same helper handed over in `codePath` was used twice out of two, at 17 turns and for less money. Searching was never the failure \u2014 every run ran the right search; resolving a hit to the function containing it is what lapsed, which is why the skill makes that a command rather than a habit. The skill also carries the part no prompt had room for: that a name search finds a callable and misses the mirror, the duplicate and the unnamed fragment entirely.",
       "artifact": "research.json"
     },
     {
@@ -80,13 +82,13 @@
       ],
       "onFail": "abort",
       "skills": [
-        "planning-methodology",
-        "util-reuse-methodology"
+        "change-scoping"
       ],
       "labelSkills": {
         "Accessibility": "frontend-accessibility"
       },
-      "_why_skills": "`skills` is this phase's method, loaded for every ticket. `labelSkills` is the domain knowledge a particular ticket calls for, keyed by the label triage puts on it \u2014 reuse and approach are decided here, so an accessibility ticket needs that standard at plan time and not first at implement. One line adds the next pair; nothing in code changes.",
+      "_why_skills": "`skills` is this phase's method, loaded for every ticket. `labelSkills` is the domain knowledge a particular ticket calls for, keyed by the label triage puts on it \u2014 reuse and approach are decided here, so an accessibility ticket needs that standard at plan time and not first at implement. One line adds the next pair; nothing in code changes. change-scoping replaces the vendored pair (planning-methodology, util-reuse-methodology) because the discovery half of their method now runs in research, where the files are already open: this phase CONFIRMS what arrived in `codePath` and searches only the residual its own approach introduces, which the vendored skills could not describe because they were written for a phase that was handed nothing. Neither vendored file is edited or deleted \u2014 util-reuse-agent still loads util-reuse-methodology under erp-code-review, and src/conductor/claudedir.ts is explicit that Oneshot fills gaps and never shadows the context repo. This is a reclaim at a different moment in the pipeline, discovery-time versus review-time, not a move.",
+      "_why_turns": "50 / 20m is KEPT deliberately, against an earlier proposal to take it to 70. Seven dry replays of one ticket measured 26, 34, 31, 39, 34, 17 and 35 turns \u2014 a maximum of 39 against a cap of 50, and that 39 was the single run that DISCOVERED the prior art rather than being handed it. Moving discovery into research is precisely the cost this change removes, so the budget should if anything trend down; raising it first would have bought headroom for work this phase no longer does, and a ceiling raised to cover a method is read as a target. Revisit only with a measurement that shows a confirm-and-residual plan hitting the cap.",
       "artifact": "plan.json"
     },
     {
@@ -141,7 +143,7 @@
       ],
       "onFail": "abort",
       "group": "check",
-      "_why_skills": "The phase authors the list a QA reviewer signs off on and the list `verify` later executes, and until now it was the only session phase declaring no method at all \u2014 it wrote cases from the prompt alone while `plan` had planning-methodology and `verify` had local-browser-verify. erp-ticket-test-plan is where the scenario taxonomy (happy / negative / edge / boundary / side-effects) and the expected-value-from-business-logic rule live, so declaring it makes the authored list answerable to the same standard a person would apply. It is also where the feedback-intent routing lives \u2014 the rule that a correction edits a case in place instead of being appended as a new one. That rule had no reader on this path: the skill was reachable in the worktree but nothing required it, so the phase never consulted it.",
+      "_why_skills": "The phase authors the list a QA reviewer signs off on and the list `verify` later executes, and until now it was the only session phase declaring no method at all \u2014 it wrote cases from the prompt alone while `plan` had a declared method (change-scoping, planning-methodology before it) and `verify` had local-browser-verify. erp-ticket-test-plan is where the scenario taxonomy (happy / negative / edge / boundary / side-effects) and the expected-value-from-business-logic rule live, so declaring it makes the authored list answerable to the same standard a person would apply. It is also where the feedback-intent routing lives \u2014 the rule that a correction edits a case in place instead of being appended as a new one. That rule had no reader on this path: the skill was reachable in the worktree but nothing required it, so the phase never consulted it.",
       "skills": [
         "erp-ticket-test-plan"
       ],
