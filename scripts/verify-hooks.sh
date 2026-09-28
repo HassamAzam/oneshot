@@ -15,6 +15,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE="${ONESHOT_NODE:-node}"
 PASS=0
 FAIL=0
+SKIP=0
 
 # Every hook self-gates on ONESHOT_PHASE; without it they exit 0 immediately.
 export ONESHOT_PHASE="implement"
@@ -34,6 +35,10 @@ mkdir -p "$ONESHOT_WORKTREE"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+
+# skip <label> <why> — a case that cannot be judged here is neither a pass nor a fail.
+skip() { yellow "  SKIP  $1 ($2)"; SKIP=$((SKIP+1)); }
 
 # run <hook> <json>  -> prints hook stdout
 run() { printf '%s' "$2" | "$NODE" "$ROOT/hooks/$1" 2>/dev/null; }
@@ -212,9 +217,10 @@ expect_clean() {
     fi
 }
 
-scr_payload() {
+py_payload() {
     printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":true}}' "$1"
 }
+scr_payload() { py_payload "$@"; }
 
 mig_payload() {
     printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":true}}' "$1"
@@ -409,13 +415,111 @@ expect_clean "CLI shape in tracked scripts" script-standards.cjs "$(scr_payload 
 expect_block "fabricated email in scripts"  script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/scripts/seeder.py")"
 expect_clean "app code is not a script"     script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/apps/core/models.py")"
 
+echo
+echo "py-lint"
+mkdir -p "$ONESHOT_WORKTREE/apps/demo/migrations"
+
+cat > "$ONESHOT_WORKTREE/apps/demo/clean.py" <<'PYEOF'
+"""A module that satisfies both linters."""
+
+
+def add_totals(first_total, second_total):
+    """Return the sum of two totals."""
+    return first_total + second_total
+PYEOF
+
+cat > "$ONESHOT_WORKTREE/apps/demo/commented.py" <<'PYEOF'
+"""A module whose only sin is an inline comment."""
+
+
+def add_totals(first_total, second_total):
+    """Return the sum of two totals."""
+    # add them up
+    return first_total + second_total
+PYEOF
+
+cat > "$ONESHOT_WORKTREE/apps/demo/allowed_comment.py" <<'PYEOF'
+"""A module whose only comment is an affirmed disable."""
+
+
+def add_totals(first_total, second_total):  # pylint: disable=invalid-name
+    """Return the sum of two totals."""
+    return first_total + second_total
+PYEOF
+
+cp "$ONESHOT_WORKTREE/apps/demo/commented.py" "$ONESHOT_WORKTREE/apps/demo/migrations/0001_initial.py"
+
+expect_block "inline comment"            py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/commented.py")"
+# Without both linters on PATH these two pass without either one running,
+# which would count a hook that never linted anything as a pass.
+if command -v flake8 >/dev/null && command -v pylint >/dev/null; then
+    expect_clean "clean file"              py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/clean.py")"
+    expect_clean "affirmed pylint disable" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/allowed_comment.py")"
+else
+    skip "clean file" "flake8/pylint not on PATH"
+    skip "affirmed pylint disable" "flake8/pylint not on PATH"
+fi
+expect_clean "migration is exempt"       py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/migrations/0001_initial.py")"
+expect_clean "non-python file"           py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/notes.md")"
+expect_clean "python outside worktree"   py-lint.cjs "$(py_payload "/tmp/oneshot-verify-outside.py")"
+expect_clean "failed write is not linted" py-lint.cjs "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":false}}' "$ONESHOT_WORKTREE/apps/demo/commented.py")"
+
+# From here the linters are shims in the worktree's venv/bin, which the hook
+# prefers over PATH: each case needs an exact exit code and output, not a
+# real linter's opinion of the file.
+SHIMS="$ONESHOT_WORKTREE/venv/bin"
+mkdir -p "$SHIMS"
+# shim <linter> <body>
+shim() { printf '#!/bin/sh\n%s\n' "$2" > "$SHIMS/$1"; chmod +x "$SHIMS/$1"; }
+shim pylint 'exit 0'
+
+shim flake8 'echo 0; exit 0'
+expect_clean "flake8 count=True prints 0 on a clean file" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/clean.py")"
+shim flake8 'echo "$1:1:1: E999 finding"; echo 1; exit 1'
+expect_block "flake8 finding (exit 1, stdout)" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/clean.py")"
+shim flake8 "echo \"ImportError: cannot import name 'flake8_docstrings'\" >&2; exit 1"
+expect_clean "flake8 crash is not a finding" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/clean.py")"
+shim flake8 'exit 0'
+shim pylint 'echo "usage: bad option" >&2; exit 32'
+expect_clean "pylint usage error is not a finding" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/clean.py")"
+shim pylint 'exit 0'
+
+cat > "$ONESHOT_WORKTREE/apps/demo/pragma.py" <<'PYEOF'
+"""A module whose only comment is a coverage pragma."""
+
+
+def add_totals(first_total, second_total):  # pragma: no cover
+    """Return the sum of two totals."""
+    return first_total + second_total
+PYEOF
+expect_clean "coverage pragma"           py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/pragma.py")"
+
+# edit_payload <file> <old_string> <new_string>
+edit_payload() {
+    printf '{"tool_name":"Edit","tool_input":{"file_path":"%s","old_string":%s,"new_string":%s},"tool_response":{"success":true}}' \
+        "$1" "$(printf '%s' "$2" | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(s)))')" \
+        "$(printf '%s' "$3" | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(s)))')"
+}
+expect_clean "Edit leaves a legacy comment alone" py-lint.cjs \
+    "$(edit_payload "$ONESHOT_WORKTREE/apps/demo/commented.py" '    return second_total + first_total' '    return first_total + second_total')"
+expect_block "Edit that adds a comment" py-lint.cjs \
+    "$(edit_payload "$ONESHOT_WORKTREE/apps/demo/commented.py" '    return first_total + second_total' "$(printf '    # add them up\n    return first_total + second_total')")"
+
+# A Write is judged against HEAD, so a comment already committed is not new.
+git -C "$ONESHOT_WORKTREE" init -q
+git -C "$ONESHOT_WORKTREE" add apps/demo/commented.py
+git -C "$ONESHOT_WORKTREE" -c user.name=verify -c user.email=verify@localhost commit -qm legacy
+expect_clean "Write keeps a committed comment" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/commented.py")"
+printf '    # and a new one\n' >> "$ONESHOT_WORKTREE/apps/demo/commented.py"
+expect_block "Write that adds a comment" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/commented.py")"
+
 rm -rf "$ONESHOT_WORKTREE"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
-    green "$PASS passed, 0 failed"
+    green "$PASS passed, 0 failed, $SKIP skipped"
     exit 0
 else
-    red "$PASS passed, $FAIL FAILED"
+    red "$PASS passed, $FAIL FAILED, $SKIP skipped"
     exit 1
 fi
