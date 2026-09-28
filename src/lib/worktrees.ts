@@ -476,3 +476,62 @@ export function reapWorktree(worktree: string, runId: string): void {
 export function contextRepoPresent(): boolean {
   return existsSync(CONTEXT_REPO);
 }
+
+// ------------------------------------------------------- re-running a phase
+//
+// The three below serve scripts that re-run a finished phase to measure a
+// harness change. They are separate from leaseWorktree() rather than options
+// on it because a lease is bookkeeping a run owns — a port, a branch, a row
+// reaped on completion — and a measurement owns none of that.
+
+/**
+ * A detached worktree at a fixed commit.
+ *
+ * Detached rather than on a branch: this exists to re-read code, and a
+ * detached HEAD has nothing to push. The original run's own worktree is not
+ * reused because later phases may have committed to it, which would show the
+ * re-run the answer.
+ */
+export function replayWorktree(name: string, sha: string): string {
+  mkdirSync(WT_ROOT, { recursive: true });
+  const worktree = join(WT_ROOT, name);
+  if (!existsSync(worktree)) git(['worktree', 'add', '--detach', worktree, sha]);
+  seedWorktree(worktree);
+  return worktree;
+}
+
+/**
+ * The commit a run's branch left the base at — where its phases started reading.
+ *
+ * Refuses, rather than answering, once the base already contains the branch.
+ * `merge-base` returns the best common ancestor, so for a branch that has
+ * landed that is the branch's own TIP: the replay would then build its worktree
+ * on the finished implementation and re-plan a change that is already sitting
+ * in front of it. Runs that finished are exactly the population a replay is
+ * for, non-squash merges leave the branch resolvable afterwards, and nothing
+ * downstream can tell a poisoned fork point from a good one — so this fails
+ * closed and names the way out.
+ */
+export function runForkPoint(branch: string, cwd = WORK_REPO): string {
+  const base = `origin/${projectConfig().branches.base}`;
+  try {
+    git(['merge-base', '--is-ancestor', branch, base], cwd);
+  } catch {
+    // Not an ancestor: the ordinary case, and merge-base is the real fork point.
+    return git(['merge-base', branch, base], cwd);
+  }
+  throw new Error(
+    `${branch} is contained in ${base} — merge-base would return its tip, not its fork point, `
+    + 'and the replay would read the implementation it is meant to plan. Pass --base <sha>.',
+  );
+}
+
+/** Counterpart to replayWorktree. No branch to preserve, and no port to release. */
+export function removeReplayWorktree(worktree: string): void {
+  if (!existsSync(worktree)) return;
+  try {
+    git(['worktree', 'remove', '--force', worktree]);
+  } catch (err) {
+    log.warn('replay worktree remove failed — leaving it on disk', { error: (err as Error).message });
+  }
+}
