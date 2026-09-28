@@ -487,8 +487,13 @@ Load the \`bug-reproduction\` skill and follow it. In short:
   depends on one of them, you cannot run it here — record 'inconclusive', name the
   integration, and go back to the trace. Do not spend turns proving it is unreachable;
   that answer is the same on every run and is already in front of you.
+- Before driving the browser, plan: the role/flag/data the bug needs and one query that
+  finds that data, the route to the screen, and the value that means buggy vs correct.
 - Follow the ticket's steps, measure what the bug is about, screenshot into the run's
-  artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`.
+  artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`. Screenshot for EITHER
+  verdict: a 'reproduced' or 'not-reproduced' verdict is posted on the ticket with those
+  screenshots attached, and one with no \`.png\` in \`evidence\` posts nothing (a
+  'not-reproduced' one is treated as 'inconclusive'). Finish with the skill's checklist.
 
 **'not-reproduced' pauses this run for a QA reviewer**: your evidence is posted on the ticket and in
 Slack, and only if QA confirms is the ticket taken out of the loop (labelled Not a Bug when the project
