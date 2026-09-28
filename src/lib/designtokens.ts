@@ -33,7 +33,8 @@
  * (or one more than a single hop away), a ternary on anything other than the
  * dark-mode parameter, a nested ternary, an entry that is not a plain
  * `key: value`, an empty string literal — an empty value is not a colour, and
- * `--color-x: ;` is not valid CSS — and a source file that is not there at all.
+ * `--color-x: ;` is not valid CSS — a Sass value that needs Sass to evaluate
+ * it, and a source file that is not there at all.
  *
  * Nothing here throws on bad input. It runs against arbitrary worktrees, and a
  * frontend that looks nothing like this one must come back empty and honest
@@ -46,6 +47,12 @@ import { artifactDir } from './config.js';
 const THEME_FILE = 'src/jss/Theme.js';
 const STYLE_FILE = 'src/jss/style.js';
 const SCSS_FILE = 'src/scss/_variables.scss';
+
+/** Where the design phase's mockups live, relative to the run's artifact dir. */
+export const DESIGN_DIR = 'design';
+export const TOKENS_FILE = 'tokens.css';
+/** Tokens the design phase proposes, kept apart so regenerating TOKENS_FILE never erases them. */
+export const NEW_TOKENS_FILE = 'new-tokens.css';
 
 const QUOTES = new Set(['"', "'", '`']);
 const OPENERS = new Set(['(', '[', '{']);
@@ -295,6 +302,33 @@ function parseScss(source: string): Record<string, string> {
   return tokens;
 }
 
+/** Functions a browser evaluates itself. Anything else in a value is Sass's to compute. */
+const CSS_FUNCTIONS = new Set([
+  'rgb', 'rgba', 'hsl', 'hsla', 'hwb', 'calc', 'var', 'min', 'max', 'clamp', 'url',
+  'linear-gradient', 'radial-gradient', 'conic-gradient',
+]);
+
+/**
+ * A Sass value made valid CSS, or null. Copying `$x: $y;` or `darken($y, 5%)`
+ * through verbatim emits CSS no browser can read under a header claiming
+ * every token resolved — the quiet drop this module exists to refuse. So a
+ * bare `$other` takes that token's value, one hop, as the JS aliases do, and
+ * any other `$` or a function only Sass knows goes to `unresolved`.
+ */
+function scssValue(value: string, raw: Record<string, string>): string | null {
+  if (!value) return null;
+  const alias = /^\$([A-Za-z0-9_-]+)$/.exec(value);
+  const resolved = alias ? raw[alias[1] as string] : value;
+  if (!resolved || resolved.includes('$')) return null;
+  const calls = [...stripQuoted(resolved).matchAll(/([A-Za-z_-][A-Za-z0-9_-]*)\s*\(/g)];
+  if (calls.some((call) => !CSS_FUNCTIONS.has((call[1] as string).toLowerCase()))) return null;
+  return resolved;
+}
+
+function stripQuoted(value: string): string {
+  return value.replace(/"[^"]*"|'[^']*'/g, '""');
+}
+
 /** Top-level `const font… = '…'` string consts, keyed without the prefix. */
 function parseFonts(source: string): Record<string, string> {
   const { literals } = collectBindings(source);
@@ -395,11 +429,11 @@ export function extractDesignTokens(frontendRoot: string): TokenExtraction {
     unresolved.push(`file:${SCSS_FILE} (missing)`);
   } else {
     sources.push(SCSS_FILE);
-    scss = parseScss(stripComments(scssSource));
-    for (const [key, value] of Object.entries(scss)) {
-      if (value) continue;
-      unresolved.push(`scss.${key}`);
-      delete scss[key];
+    const raw = parseScss(stripComments(scssSource));
+    for (const [key, value] of Object.entries(raw)) {
+      const css = scssValue(value, raw);
+      if (css === null) unresolved.push(`scss.${key}`);
+      else scss[key] = css;
     }
   }
 
@@ -428,6 +462,14 @@ export function extractDesignTokens(frontendRoot: string): TokenExtraction {
  * time, and a mockup's palette would drift between them for no reason a
  * reviewer could see.
  *
+ * It lands in `design/`, beside the mockups that import it as `./tokens.css`,
+ * and it is rewritten on every design lap. That is safe because it is
+ * deterministic: a retry or feedback round on an unchanged theme writes the
+ * same bytes, so round-one mockups keep their styling. What the phase ADDS — a
+ * token the product does not have yet — goes in `NEW_TOKENS_FILE` beside it,
+ * which nothing here touches; a model edit to this file would be reset, which
+ * is the point, since it is the one file that must say what the app renders.
+ *
  * Never throws and never fails the phase. The `design-proposal` skill's own
  * instruction to read the theme files stands as the fallback, and the CSS
  * header names every key this could not resolve so the phase knows when it has
@@ -435,9 +477,9 @@ export function extractDesignTokens(frontendRoot: string): TokenExtraction {
  */
 export function writeDesignTokens(iid: number, worktree: string): string | null {
   try {
-    const out = join(artifactDir(iid), 'design');
+    const out = join(artifactDir(iid), DESIGN_DIR);
     mkdirSync(out, { recursive: true });
-    const path = join(out, 'tokens.css');
+    const path = join(out, TOKENS_FILE);
     writeFileSync(path, extractDesignTokens(join(worktree, 'frontend')).css, 'utf8');
     return path;
   } catch {

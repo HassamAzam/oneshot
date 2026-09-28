@@ -25,6 +25,7 @@ import {
 } from '../lib/config.js';
 import { join } from 'node:path';
 import { readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
+import { DESIGN_DIR, NEW_TOKENS_FILE, TOKENS_FILE } from '../lib/designtokens.js';
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import {
@@ -602,8 +603,8 @@ ${approved
     ? 'A human approved these screens on the ticket before any of this was planned.'
     : 'These screens were designed for this ticket. (No approval is recorded yet.)'}
 Build to them: the same layout, the same states, the same copy, and the same values from
-\`${join(dir, d.tokensFile ?? 'tokens.css')}\` rather than new ones. Where the design and your own
-judgement disagree, the design won the argument already — if it is genuinely wrong, say so
+\`${join(dir, d.tokensFile || join(DESIGN_DIR, TOKENS_FILE))}\` rather than new ones. Where the design and
+your own judgement disagree, the design won the argument already — if it is genuinely wrong, say so
 rather than quietly improving it, because the reviewer approved what they saw.
 
 ${screens}
@@ -612,6 +613,10 @@ ${d.newPatterns?.length ? `\nApproved as NEW to the design system: ${d.newPatter
 }
 
 /** How a phase names a screenshot the schema will only carry as a bare filename. */
+function designTokensPath(ctx: PromptCtx): string {
+  return join(artifactDir(ctx.ticket.iid), DESIGN_DIR, TOKENS_FILE);
+}
+
 function artifactsBlock(ctx: PromptCtx): string {
   return `Everything you capture goes in ${artifactDir(ctx.ticket.iid)} (create it if it is not
 there). The schema carries only the BARE FILENAME, so a path in that field breaks the phase
@@ -795,10 +800,14 @@ of their attention to say "there was nothing here".
 A mockup succeeds when the reaction is "that's our app with the feature in it", and fails when it
 is "that's a nice generic dashboard". So, in order:
 
-1. Read the real tokens out of the frontend: \`frontend/src/jss/Theme.js\` (getColors,
-   getPalateColors), \`frontend/src/jss/style.js\` (Lato/Montserrat), \`frontend/src/scss/_variables.scss\`.
-   Distil them into one \`tokens.css\` that every mockup imports, so a system-level change is a
-   one-file edit.
+1. The real tokens are already extracted for you, at \`${designTokensPath(ctx)}\` — generated
+   from \`frontend/src/jss/Theme.js\`, \`frontend/src/jss/style.js\` and
+   \`frontend/src/scss/_variables.scss\` before this session started. Import it; do not rewrite
+   it, because it is regenerated every round and your edits to it would be lost. Read its header
+   first: it lists every token it could NOT resolve, and those are the only ones you read the
+   source for. A token the product does not have yet goes in \`${DESIGN_DIR}/${NEW_TOKENS_FILE}\`
+   and in \`newPatterns\`. Only if the file is absent do you read the three files above and
+   distil them yourself. Report \`tokensFile\` as \`${DESIGN_DIR}/${TOKENS_FILE}\`.
 2. Open the running app and screenshot the screens this ticket touches AS THEY ARE TODAY. That
    capture is the \`before\` on each screen, and it is also where you read the real shell — nav,
    header, density, spacing — which every mockup then reproduces.
@@ -806,7 +815,8 @@ is "that's a nice generic dashboard". So, in order:
 
 ## What to draw
 
-One self-contained \`.html\` per screen, importing \`../tokens.css\`. No CDN scripts, no external
+One self-contained \`.html\` per screen, in \`${DESIGN_DIR}/\` beside the tokens and importing
+\`./${TOKENS_FILE}\` (and \`./${NEW_TOKENS_FILE}\` if you made one). No CDN scripts, no external
 fonts or images — inline everything. Real content always: plausible names, dates, amounts and
 statuses for this product, 5-8 varied rows in any table, one long value that tests truncation.
 Never lorem ipsum and never "Item 1". Draw the states that matter — empty, error,

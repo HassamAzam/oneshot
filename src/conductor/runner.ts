@@ -1548,9 +1548,6 @@ export async function runTicket(
     const wt = p.cwd === 'worktree' ? worktree : undefined;
     const ctx: PromptCtx = { ticket, runId, lap, branch, worktree: wt, port, prior, journal: j };
 
-    // The ledger row is opened before the phase and closed after it, so an
-    // external watchdog can see a phase that has been 'running' for longer than
-    // its own timeout should allow — the one signal a wedged SDK spawn gives.
     // Hand `design` its palette rather than making it go and distil one. The
     // phase budgets ~10 of its 115 turns for this (config/phases.json), and the
     // work is a deterministic read of three frontend files. Best-effort by
@@ -1563,6 +1560,9 @@ export async function runTicket(
         : `design     could not generate tokens.css for #${iid} — the phase reads the theme itself`);
     }
 
+    // The ledger row is opened before the phase and closed after it, so an
+    // external watchdog can see a phase that has been 'running' for longer than
+    // its own timeout should allow — the one signal a wedged SDK spawn gives.
     const rowId = phaseStart(runId, p.name, lap, modelFor(p));
     const out = await runPhase({
       iid, runId, lap, cfg: p,

@@ -226,3 +226,13 @@ test('a passing verify contributes no failure block', () => {
     assert.match(p, /## Review findings to fix/);
   });
 });
+
+// ---------------------------------------------------------------- design tokens
+
+test('design is told the tokens are generated, where they are, and not to redo them', () => {
+  const prompt = promptFor(cfg('design'), ctx(ticket({ iid: 424242, labels: ['Design'] })));
+  assert.ok(prompt.includes(join(runDir(424242), 'artifacts', 'design', 'tokens.css')));
+  assert.ok(prompt.includes('./tokens.css'));
+  assert.ok(!prompt.includes('../tokens.css'), 'a mockup in design/ importing ../tokens.css misses the file');
+  assert.doesNotMatch(prompt, /Distil them into one/);
+});

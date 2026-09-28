@@ -35,12 +35,16 @@ about the feature and feedback about your colour choices.
 
 In order:
 
-1. **Use the tokens you were handed.** `tokens.css` is already in your artifact
-   directory, generated before this session started by a deterministic read of
-   `frontend/src/jss/Theme.js` (`getColors`), `frontend/src/jss/style.js`
+1. **Use the tokens you were handed.** `design/tokens.css` is already in your
+   artifact directory, generated before this session started by a deterministic
+   read of `frontend/src/jss/Theme.js` (`getColors`), `frontend/src/jss/style.js`
    (Lato/Montserrat) and `frontend/src/scss/_variables.scss`. Every mockup
    imports it, so a system-level change is a one-file edit instead of a
    find-and-replace across five files.
+
+   **Import it; never rewrite it.** It is regenerated at the start of every
+   round, so an edit to it is lost. A token the product does not have yet goes
+   in `design/new-tokens.css`, which is yours, and in `newPatterns`.
 
    **Read its header before you draw.** It names the files it read and lists
    every token it could NOT resolve. Those are the only ones you go to the
@@ -61,7 +65,8 @@ did not capture it.
 
 ## 3. Draw the screens
 
-One self-contained `.html` per screen, importing `../tokens.css`. No CDN
+One self-contained `.html` per screen, in `design/` beside the tokens and
+importing `./tokens.css` (and `./new-tokens.css` if you made one). No CDN
 scripts, no external fonts, no remote images: inline everything.
 
 - **Real content, always.** Plausible names, dates, amounts and statuses for

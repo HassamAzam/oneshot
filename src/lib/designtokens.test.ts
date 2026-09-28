@@ -277,3 +277,31 @@ test('the same input produces byte-identical css', (t) => {
 
   assert.equal(extractDesignTokens(root).css, extractDesignTokens(root).css);
 });
+
+test('a scss value that is another variable takes that variable\'s value', (t) => {
+  const { scss, unresolved } = extractDesignTokens(frontend(t, { scss: '$white: #fff;\n$bg: $white;\n' }));
+  assert.equal(scss.bg, '#fff');
+  assert.deepEqual(unresolved, ['file:src/jss/Theme.js (missing)', 'file:src/jss/style.js (missing)']);
+});
+
+test('a scss value only sass can evaluate is named in unresolved, never emitted', (t) => {
+  const scssSource = [
+    '$white: #fff;',
+    '$dim: darken($white, 5%);',
+    '$wide: $gutter * 2;',
+    '$chain: $dim;',
+    '$unknown: $neverDeclared;',
+    '$map: map-get($palette, primary);',
+    '$shade: rgba(0, 0, 0, 0.5);',
+    '$quoted: "darken(x)";',
+  ].join('\n');
+  const { scss, css, unresolved } = extractDesignTokens(frontend(t, { scss: scssSource }));
+  for (const key of ['dim', 'wide', 'chain', 'unknown', 'map']) {
+    assert.equal(scss[key], undefined, key);
+    assert.ok(unresolved.includes(`scss.${key}`), key);
+  }
+  assert.equal(scss.shade, 'rgba(0, 0, 0, 0.5)');
+  assert.equal(scss.quoted, '"darken(x)"');
+  assert.doesNotMatch(css, /--scss-[\w-]+: [^;]*\$/);
+  assert.match(css, /UNRESOLVED \(7\)/);
+});

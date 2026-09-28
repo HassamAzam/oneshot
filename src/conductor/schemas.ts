@@ -334,7 +334,7 @@ export const DESIGN_SCHEMA = phaseSchema({
       'True when the change spans more than one screen, or adds a step to an existing journey. ' +
       'Recorded so a later change can decide whether a multi-screen flow needs a prototype; it does not ask you to build one.',
   },
-  tokensFile: str('Artifact-relative path of the tokens.css distilled from the real frontend.'),
+  tokensFile: str('Artifact-relative path of the tokens.css the mockups import: design/tokens.css, generated before the session.'),
   screens: {
     type: 'array',
     description: 'One entry per screen designed. Empty when applicable is false.',
