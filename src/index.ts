@@ -338,7 +338,7 @@ async function preflight(): Promise<boolean> {
     fatal = true;
   }
 
-  const readAccess = await checkReadAccess();
+  const readAccess = await checkReadAccess(repo);
   if (!readAccess.ok) {
     log.error(`GITLAB_READ_TOKEN cannot see ${readAccess.project} — ${readAccess.reason}.`);
     log.error('  Reads prefer that token, so the board comes back empty and this desk claims');

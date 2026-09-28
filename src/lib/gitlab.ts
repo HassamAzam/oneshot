@@ -7,7 +7,8 @@
  * is wrong" and "that issue does not exist" demand completely different
  * responses, and a caller that blurs them retries forever against a dead link.
  */
-import { envOr, projectConfig, DRY_RUN } from './config.js';
+import { envOr, projectConfig, repoIdentity, DRY_RUN } from './config.js';
+import type { GitlabRepo } from './repourl.cjs';
 import { resolveToken, setupHint } from './token.js';
 import { log } from './log.js';
 import type { MrDiscussion } from '../mrfeedback/types.js';
@@ -143,10 +144,11 @@ export async function issuesWithEntryLabel(): Promise<GitlabResult<Issue[]>> {
 }
 
 export interface ReadAccessCheck {
-  /** False only when the read token is provably a non-member of the project. */
+  /** False only when the read token provably cannot see this project's issues. */
   ok: boolean;
   /** Whether GITLAB_READ_TOKEN is set at all — nothing to check when it is not. */
   scoped: boolean;
+  /** `group/project`, or '' when GITLAB_REPO_URL names none. */
   project: string;
   reason?: string;
 }
@@ -163,42 +165,52 @@ export interface ReadAccessCheck {
  * prints the project and an identity resolved from a DIFFERENT token. Every
  * line of that is green. This is the check that tells the two apart.
  *
- * `permissions.project_access` is the discriminator rather than the status
- * code: an internal-visibility project answers 200 to a non-member, and both
- * access fields come back null only when there is no membership behind the
- * token.
+ * It asks the question the board asks — can this token list the project's
+ * issues — rather than reading membership. `permissions.project_access` and
+ * `group_access` are both null for tokens that read the issues perfectly well:
+ * an admin or auditor, a member of a group the project is shared with, a
+ * non-member on an internal project whose issues are public. Refusing those
+ * would break desks that work. An empty answer is only damning when the desk
+ * credential, asked the same question, sees issues the read token does not.
  *
- * Deliberately NOT fatal on a network or auth failure. The conductor already
- * survives an offline laptop, and refusing to boot because a VPN was down would
- * trade a silent failure for a noisy one that is just as wrong.
+ * A 404 or 403 is fatal: GitLab reached, and that is how it tells a non-member
+ * a private project is not there. A network error, a 5xx or a 401 is not. The
+ * conductor already survives an offline laptop, and refusing to boot because a
+ * VPN was down would trade a silent failure for a noisy one that is just as
+ * wrong. Neither is a GITLAB_REPO_URL that names no project: preflight already
+ * refuses on that, and asking `projectConfig().gitlab` for one throws.
  */
-export async function checkReadAccess(): Promise<ReadAccessCheck> {
-  const project = projectConfig().gitlab.project;
-  if (!envOr('GITLAB_READ_TOKEN')) return { ok: true, scoped: false, project };
+export async function checkReadAccess(
+  repo: GitlabRepo | null = repoIdentity().repo,
+): Promise<ReadAccessCheck> {
+  const project = repo?.project ?? '';
+  const scoped = Boolean(envOr('GITLAB_READ_TOKEN'));
+  if (!scoped) return { ok: true, scoped, project };
+  if (!repo) return { ok: true, scoped, project, reason: 'not checked — GITLAB_REPO_URL names no project' };
 
-  const res = await call<{
-    permissions?: { project_access?: unknown; group_access?: unknown };
-  }>('GET', `/projects/${projectId()}`);
+  const probe = (useWriteToken: boolean): Promise<GitlabResult<unknown[]>> =>
+    call<unknown[]>('GET', `/projects/${projectId()}/issues?per_page=1`, undefined, useWriteToken);
+  const unverified = (res: GitlabResult<unknown>): ReadAccessCheck =>
+    ({ ok: true, scoped, project, reason: `could not be verified (${res.kind}, HTTP ${res.status})` });
 
-  if (!res.ok) {
-    return {
-      ok: true,
-      scoped: true,
-      project,
-      reason: `could not be verified (${res.kind}, HTTP ${res.status})`,
-    };
+  const read = await probe(false);
+  if (read.kind === 'notfound' || read.status === 403) {
+    return { ok: false, scoped, project, reason: `GitLab answered HTTP ${read.status} to it` };
   }
+  if (!read.ok) return unverified(read);
+  if (read.data?.length) return { ok: true, scoped, project };
 
-  const perms = res.data?.permissions;
-  if (perms && (perms.project_access ?? perms.group_access) == null) {
+  const desk = await probe(true);
+  if (!desk.ok) return unverified(desk);
+  if (desk.data?.length) {
     return {
       ok: false,
-      scoped: true,
+      scoped,
       project,
-      reason: 'the token has no membership on the project, so every board read returns empty',
+      reason: 'it lists no issues where the desk credential lists some, so every board read returns empty',
     };
   }
-  return { ok: true, scoped: true, project };
+  return { ok: true, scoped, project };
 }
 
 export interface IssueNote {

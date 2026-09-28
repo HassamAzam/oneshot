@@ -6,8 +6,8 @@
  * endpoints with 200 and an EMPTY ARRAY rather than 403. So
  * `issuesWithEntryLabel()` comes back clean and empty, the watcher reports "no
  * tickets carry the entry label", the desk claims nothing, and every line of
- * that is green. `permissions.project_access` is the field that tells it apart
- * from a genuinely empty board, and these cases pin the reading of it.
+ * that is green. What tells it apart from a genuinely empty board is the desk
+ * credential seeing issues the read token does not, and these cases pin that.
  *
  * The other half of the check is what it must NOT do. A VPN blip has to leave
  * the conductor running, and an unset variable has to cost nothing at all —
@@ -16,9 +16,9 @@
  * Nothing here touches the network or this machine's own credentials: both
  * tokens are pinned per case and restored afterwards, and fetch is a stub.
  */
+import './test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { projectConfig } from './config.js';
 import { checkReadAccess } from './gitlab.js';
 import type { ReadAccessCheck } from './gitlab.js';
 
@@ -29,7 +29,8 @@ const DESK_TOKEN = 'glpat-fake-desk-token';
 
 interface Attempt { url: string; token: string }
 
-const PROJECT = projectConfig().gitlab.project;
+const PROJECT = 'acme/erp';
+const ISSUES = `https://gitlab.example.com/api/v4/projects/${encodeURIComponent(PROJECT)}/issues?per_page=1`;
 const passing = (result: ReadAccessCheck): void =>
   assert.deepEqual(result, { ok: true, scoped: true, project: PROJECT });
 
@@ -51,7 +52,8 @@ const jsonReply = (body: unknown, status = 200): Response =>
  */
 async function check(
   token: string | undefined,
-  reply: () => Response | Promise<Response> = () => jsonReply({}),
+  reply: (attempt: Attempt) => Response | Promise<Response> = () => jsonReply([]),
+  repo?: null,
 ): Promise<{ result: ReadAccessCheck; attempts: Attempt[] }> {
   const vars: Record<string, string | undefined> = { [VAR]: token, [DESK_VAR]: DESK_TOKEN };
   const before = new Map(Object.keys(vars).map((k) => [k, process.env[k]]));
@@ -64,15 +66,13 @@ async function check(
   }
   globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
     const [input, init] = args;
-    attempts.push({
-      url: String(input),
-      token: new Headers(init?.headers).get('PRIVATE-TOKEN') ?? '',
-    });
-    return reply();
+    const attempt = { url: String(input), token: new Headers(init?.headers).get('PRIVATE-TOKEN') ?? '' };
+    attempts.push(attempt);
+    return reply(attempt);
   }) as typeof fetch;
 
   try {
-    return { result: await checkReadAccess(), attempts };
+    return { result: await (repo === null ? checkReadAccess(null) : checkReadAccess()), attempts };
   } finally {
     globalThis.fetch = realFetch;
     for (const [k, v] of before) {
@@ -81,6 +81,10 @@ async function check(
     }
   }
 }
+
+/** Answer the read token with `read` and the desk credential with `desk`. */
+const byToken = (read: unknown, desk: unknown) => (a: Attempt): Response =>
+  jsonReply(a.token === READ_TOKEN ? read : desk);
 
 test('an unset read token is not a scoped read, and asks GitLab nothing at all', async () => {
   // With no read token there is no second credential to be wrong about: the
@@ -103,73 +107,85 @@ test('a present-but-empty or placeholder read token reads as unset, not as a sco
   }
 });
 
+test('with no project named, a set read token is left unchecked instead of throwing', async () => {
+  // preflight already refuses an unset or placeholder GITLAB_REPO_URL with its
+  // own message; asking projectConfig().gitlab for the project would throw
+  // first and take the conductor down on an unhandled rejection instead.
+  const { result, attempts } = await check(READ_TOKEN, undefined, null);
+  assert.equal(result.ok, true);
+  assert.equal(result.scoped, true);
+  assert.equal(result.project, '');
+  assert.match(result.reason ?? '', /not checked/);
+  assert.equal(attempts.length, 0);
+});
+
 test('a GitLab nobody can reach is reported as unverified rather than answered', async () => {
   // Refusing to boot because the laptop is off the VPN trades a silent failure
   // for a noisy one that is just as wrong.
   const { result } = await check(READ_TOKEN, () => {
-    throw new Error('getaddrinfo ENOTFOUND gitlab.arbisoft.com');
+    throw new Error('getaddrinfo ENOTFOUND gitlab.example.com');
   });
   assert.equal(result.ok, true);
   assert.equal(result.scoped, true);
   assert.match(result.reason ?? '', /could not be verified \(network, HTTP 0\)/);
 });
 
-test('an auth failure and a 5xx are unverified too, and name what happened', async () => {
+test('a revoked token and a 5xx are unverified too, and name what happened', async () => {
   const rejected = await check(READ_TOKEN, () => jsonReply({ message: '401 Unauthorized' }, 401));
   assert.equal(rejected.result.ok, true);
-  assert.equal(rejected.result.scoped, true);
   assert.match(rejected.result.reason ?? '', /could not be verified \(auth, HTTP 401\)/);
 
   const down = await check(READ_TOKEN, () => jsonReply({ message: '503' }, 503));
   assert.equal(down.result.ok, true);
-  assert.equal(down.result.scoped, true);
   assert.match(down.result.reason ?? '', /could not be verified \(server, HTTP 503\)/);
 });
 
-test('a read token with no membership fails the check even though GitLab answered 200', async () => {
-  // The bug itself. An internal-visibility project answers 200 to a
-  // non-member, so the status code says nothing; both access fields coming
-  // back null is the only signal that every board read will be empty.
-  const { result } = await check(READ_TOKEN, () => jsonReply({
-    id: projectConfig().gitlab.projectId,
-    permissions: { project_access: null, group_access: null },
-  }));
+test('a 404 or 403 on the project refuses, since that is how a private project hides from a non-member', async () => {
+  for (const status of [404, 403]) {
+    const { result } = await check(READ_TOKEN, () => jsonReply({ message: String(status) }, status));
+    assert.equal(result.ok, false, `HTTP ${status} must refuse`);
+    assert.equal(result.project, PROJECT);
+    assert.match(result.reason ?? '', new RegExp(`HTTP ${status}`));
+  }
+});
+
+test('a read token that lists nothing where the desk credential lists issues fails, though GitLab answered 200', async () => {
+  // The bug itself. An internal project answers 200 and an empty list to a
+  // non-member, so the status code says nothing; the desk seeing what the read
+  // token cannot is the only signal that every board read will be empty.
+  const { result, attempts } = await check(READ_TOKEN, byToken([], [{ iid: 1 }]));
   assert.equal(result.ok, false);
   assert.equal(result.scoped, true);
   assert.equal(result.project, PROJECT);
-  assert.match(result.reason ?? '', /no membership/);
+  assert.match(result.reason ?? '', /lists no issues/);
+  assert.deepEqual(attempts.map((a) => a.token), [READ_TOKEN, DESK_TOKEN]);
 });
 
-test('membership passes whether it is held on the project or inherited from the group', async () => {
-  const direct = await check(READ_TOKEN, () => jsonReply({
-    permissions: { project_access: { access_level: 40 }, group_access: null },
-  }));
-  passing(direct.result);
-
-  const inherited = await check(READ_TOKEN, () => jsonReply({
-    permissions: { project_access: null, group_access: { access_level: 30 } },
-  }));
-  passing(inherited.result);
+test('a read token that lists issues passes without asking the desk, whatever its membership', async () => {
+  // Admin and auditor tokens, members of a group the project is shared with,
+  // and non-members on an internal project with public issues all carry null
+  // access fields and read the board fine. Seeing issues is what counts.
+  const { result, attempts } = await check(READ_TOKEN, byToken([{ iid: 1 }], []));
+  passing(result);
+  assert.equal(attempts.length, 1);
 });
 
-test('a payload carrying no permissions block at all is not failed closed', async () => {
-  // A shape nobody anticipated is not evidence of a scoping mistake, and
-  // blocking the desk on one would make an API change look like a bad token.
-  const { result } = await check(READ_TOKEN, () => jsonReply({
-    id: projectConfig().gitlab.projectId,
-    path_with_namespace: PROJECT,
-  }));
+test('a project with no issues at all is not failed on the read token\'s account', async () => {
+  const { result } = await check(READ_TOKEN, byToken([], []));
   passing(result);
 });
 
-test('the project is checked with the read token itself, which is the one doing the reads', async () => {
-  // Verifying the desk credential here would pass on exactly the machine the
+test('when the desk credential cannot be asked, an empty read is unverified, not refused', async () => {
+  const { result } = await check(READ_TOKEN, (a) =>
+    (a.token === READ_TOKEN ? jsonReply([]) : jsonReply({ message: '502' }, 502)));
+  assert.equal(result.ok, true);
+  assert.match(result.reason ?? '', /could not be verified \(server, HTTP 502\)/);
+});
+
+test('the project is probed with the read token itself, which is the one doing the reads', async () => {
+  // Verifying the desk credential alone would pass on exactly the machine the
   // check exists to catch, since that credential is a member.
-  const { attempts } = await check(READ_TOKEN, () => jsonReply({
-    permissions: { project_access: { access_level: 40 }, group_access: null },
-  }));
-  const { gitlab } = projectConfig();
-  assert.equal(attempts.length, 1);
+  const { attempts } = await check(READ_TOKEN, byToken([{ iid: 1 }], []));
   assert.equal(attempts[0]?.token, READ_TOKEN);
-  assert.equal(attempts[0]?.url, `${gitlab.apiUrl}/projects/${gitlab.projectId}`);
+  assert.equal(attempts[0]?.url, ISSUES);
 });
