@@ -4,7 +4,7 @@ import { skillsInvoked, transcriptResult } from './transcript.js';
 
 const frame = (o: Record<string, unknown>): string => JSON.stringify(o);
 
-test('transcriptResult reads the last result frame, not an earlier assistant line', () => {
+test('transcriptResult reads the result frame, not an earlier assistant line', () => {
   const jsonl = [
     frame({ type: 'assistant', structured_output: { plan: 'a draft nobody kept' } }),
     frame({ type: 'result', structured_output: { plan: 'final' }, num_turns: 27, total_cost_usd: 1.78 }),
@@ -15,6 +15,27 @@ test('transcriptResult reads the last result frame, not an earlier assistant lin
   assert.deepEqual(r.output, { plan: 'final' });
   assert.equal(r.turns, 27);
   assert.equal(r.costUsd, 1.78);
+});
+
+test('a trailing error_during_execution frame does not overwrite the real result', () => {
+  // Observed live and handled the same way in src/conductor/phase.ts: the SDK
+  // emits the success frame carrying the turns and usage, then an
+  // error_during_execution frame carrying zero of both. The conductor settles
+  // the phase on the FIRST frame for exactly this reason, and a reader that
+  // takes the last one records a session that cost $1.93 as free.
+  const jsonl = [
+    frame({
+      type: 'result', subtype: 'success', structured_output: { plan: 'final' },
+      num_turns: 41, total_cost_usd: 1.93,
+    }),
+    frame({ type: 'result', subtype: 'error_during_execution', num_turns: 0, total_cost_usd: 0 }),
+  ].join('\n');
+
+  const r = transcriptResult(jsonl);
+
+  assert.deepEqual(r.output, { plan: 'final' });
+  assert.equal(r.turns, 41);
+  assert.equal(r.costUsd, 1.93);
 });
 
 test('a transcript with no result frame reports zeroes instead of throwing', () => {

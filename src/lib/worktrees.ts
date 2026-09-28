@@ -500,9 +500,30 @@ export function replayWorktree(name: string, sha: string): string {
   return worktree;
 }
 
-/** The commit a run's branch left the base at — where its phases started reading. */
-export function runForkPoint(branch: string): string {
-  return git(['merge-base', branch, `origin/${projectConfig().branches.base}`]);
+/**
+ * The commit a run's branch left the base at — where its phases started reading.
+ *
+ * Refuses, rather than answering, once the base already contains the branch.
+ * `merge-base` returns the best common ancestor, so for a branch that has
+ * landed that is the branch's own TIP: the replay would then build its worktree
+ * on the finished implementation and re-plan a change that is already sitting
+ * in front of it. Runs that finished are exactly the population a replay is
+ * for, non-squash merges leave the branch resolvable afterwards, and nothing
+ * downstream can tell a poisoned fork point from a good one — so this fails
+ * closed and names the way out.
+ */
+export function runForkPoint(branch: string, cwd = WORK_REPO): string {
+  const base = `origin/${projectConfig().branches.base}`;
+  try {
+    git(['merge-base', '--is-ancestor', branch, base], cwd);
+  } catch {
+    // Not an ancestor: the ordinary case, and merge-base is the real fork point.
+    return git(['merge-base', branch, base], cwd);
+  }
+  throw new Error(
+    `${branch} is contained in ${base} — merge-base would return its tip, not its fork point, `
+    + 'and the replay would read the implementation it is meant to plan. Pass --base <sha>.',
+  );
 }
 
 /** Counterpart to replayWorktree. No branch to preserve, and no port to release. */

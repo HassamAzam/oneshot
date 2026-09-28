@@ -23,7 +23,8 @@
  *   from the session, the guards refuse pushes, and state goes to state-dry/.
  * - The ticket is re-read (read-only) keeping only comments posted BEFORE the
  *   original run started, so the plan it published and the feedback on that
- *   plan never reach the prompt. The snapshot is cached and reused.
+ *   plan never reach the prompt. The snapshot is cached per SOURCE RUN, since
+ *   that is what the cutoff comes from.
  * - The journal handed to the prompt is fresh: no planApproval, no feedback.
  * - The code is a detached worktree at the original run's fork point, so the
  *   session reads what the original read, not whatever implement committed.
@@ -103,6 +104,17 @@ function parseArgs(argv: string[]): Args {
   // against an empty journal.
   a.source ??= join(ROOT, 'state', 'runs', String(a.iid));
   a.skillsRoot ??= join(ROOT, 'context');
+  // Here rather than at the point of use, which is after the worktree is
+  // created and before the try/finally that removes it: a run that never
+  // reached research, or a mistyped --research, would otherwise die on a raw
+  // ENOENT and leave a detached worktree behind in the shared WT_ROOT.
+  if (a.from === 'plan') {
+    const research = a.research ?? join(a.source, 'research.json');
+    if (!existsSync(research)) {
+      throw new Error(`no research.json to plan from at ${research}\n`
+        + `pass --research <path>, or --from research to produce one\n${USAGE}`);
+    }
+  }
   return a as Args;
 }
 
@@ -117,6 +129,7 @@ process.env.DRY_RUN = '1';
 process.env.ONESHOT_SKILLS_ROOT = args.skillsRoot;
 
 const { phaseByName, runDir, WORK_REPO } = await import('../src/lib/config.js');
+const { transcriptPath } = await import('../src/lib/artifacts.js');
 
 const { fetchTicket } = await import('../src/conductor/runner.js');
 const { runPhase } = await import('../src/conductor/phase.js');
@@ -131,11 +144,35 @@ const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const outDir = join(replayRoot, `${stamp}-${args.label}`);
 mkdirSync(outDir, { recursive: true });
 
-// The ticket as the original run saw it.
-const ticketPath = join(replayRoot, 'ticket.json');
+// A previous replay's artifacts must not reach this one as `prior`. This is
+// safe to delete outright because DRY_RUN was set before config.ts loaded, so
+// ONESHOT_HOME — and every path under it, runDir included — is state-dry/.
+// The run being replayed is read from --source under the REAL state/ and is
+// never written to: a parked run can be replayed without disturbing it.
+//
+// Before the ticket fetch rather than after it: collectTicketDocs writes the
+// ticket's attachments under runDir and documentsBlock tells the session to
+// open them by local path, so wiping afterwards plans the ticket without its
+// own spec while the prompt still claims the files are there.
+rmSync(runDir(args.iid), { recursive: true, force: true });
+
+// Comments as of the original run; description and labels are whatever they are
+// now. Keyed by the SOURCE RUN, not the ticket: --source can name two runs of
+// one ticket whose createdAt cutoffs differ, and reusing the newer snapshot
+// would hand an earlier replay the comments it exists to withhold — including
+// the gate note carrying the whole previous plan.
+const ticketPath = join(replayRoot, `ticket-${journal.runId}.json`);
+// The rmSync above removed any attachment an earlier replay downloaded, so a
+// snapshot naming files that are gone is re-fetched rather than handed to a
+// session as dead paths it was told to Read.
+const docsPresent = (t: Ticket): boolean =>
+  (t.documents ?? []).every((d) => !d.path || existsSync(d.path));
+const cached = existsSync(ticketPath) && !args.refreshTicket
+  ? readJson<Ticket>(ticketPath)
+  : null;
 let ticket: Ticket;
-if (existsSync(ticketPath) && !args.refreshTicket) {
-  ticket = readJson<Ticket>(ticketPath);
+if (cached && docsPresent(cached)) {
+  ticket = cached;
 } else {
   const fetched = await fetchTicket(args.iid, { notesBefore: journal.createdAt });
   if (!fetched) throw new Error(`could not read ticket #${args.iid} from GitLab`);
@@ -148,13 +185,6 @@ if (!base) throw new Error('the journal names no branch to find the fork point f
 const oneshotSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
 const runId = `replay-${args.iid}-${stamp}`;
 const worktree = replayWorktree(runId, base);
-
-// A previous replay's artifacts must not reach this one as `prior`. This is
-// safe to delete outright because DRY_RUN was set before config.ts loaded, so
-// ONESHOT_HOME — and every path under it, runDir included — is state-dry/.
-// The run being replayed is read from --source under the REAL state/ and is
-// never written to: a parked run can be replayed without disturbing it.
-rmSync(runDir(args.iid), { recursive: true, force: true });
 
 console.log(`replay    #${args.iid} from ${args.from} at ${WORK_REPO}@${base.slice(0, 9)}`);
 console.log(`oneshot   ${oneshotSha}   skills ${args.skillsRoot}`);
@@ -188,16 +218,27 @@ try {
       prompt: promptFor(cfg, ctx), systemPrompt: systemPromptFor(cfg, ctx), worktree,
     });
 
-    const transcript = join(runDir(args.iid), 'transcripts', `${name}-lap0.jsonl`);
+    // transcriptPath, not a second copy of the convention: phase.ts writes the
+    // file through it, and a hand-rolled path that drifts fails silently —
+    // transcriptResult('') is $0 and skillsInvoked('') is [], so meta.json
+    // would report a session that cost money and loaded skills as neither.
+    const transcript = transcriptPath(args.iid, name, 0);
     const text = existsSync(transcript) ? readFileSync(transcript, 'utf8') : '';
     if (text) copyFileSync(transcript, join(outDir, `${name}.jsonl`));
     const { costUsd } = transcriptResult(text);
     const skills = skillsInvoked(text);
     (meta.phases as Record<string, unknown>)[name] = {
       ok: out.ok, turns: out.turns, costUsd, minutes: Math.round((Date.now() - started) / 6000) / 10,
+      // infra separates a dead harness from a configuration that could not
+      // plan. Everywhere else in the repo keeps that apart (PhaseRecord has its
+      // own 'infra' status); a rig that aggregates labelled replays is the last
+      // place it should collapse into a bare ok:false.
+      infra: out.infra ?? false, rateLimited: out.rateLimited ?? false,
       skillsInvoked: skills, blocked: out.blocked, error: out.error,
     };
-    console.log(`${name}  ${out.ok ? 'ok' : 'FAILED'} · ${out.turns} turns · $${costUsd.toFixed(2)} · skills: ${skills.join(', ') || 'none'}`);
+    const verdict = out.ok ? 'ok' : (out.infra ? 'INFRA' : 'FAILED');
+    console.log(`${name}  ${verdict} · ${out.turns} turns · $${costUsd.toFixed(2)} · skills: ${skills.join(', ') || 'none'}`);
+    if (!out.ok && out.error) console.log(`      ${out.error.split('\n')[0]}`);
     if (!out.ok || !out.data) {
       exitCode = 1;
       break;
