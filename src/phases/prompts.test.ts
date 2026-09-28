@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { labelledLayers, mrOpenNote, promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
 import { gateSubjectDigest } from '../lib/artifacts.js';
-import { ROOT, phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
+import { ROOT, phaseByName, phases, runDir, type PhaseConfig } from '../lib/config.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -786,4 +786,119 @@ test('the design prompt names the very file writeDesignTokens wrote, and tells a
   const prompt = promptFor(cfg('design'), ctx(ticket({ iid, labels: ['Design'] })));
   assert.ok(prompt.includes(written.path), 'the prompt must point at the file the writer produced');
   assert.match(prompt, /data-theme="dark"/);
+});
+
+// ------------------------------------------- Beta: a new version beside the old one
+
+const BETA = 'beta-version-toggle';
+
+/** The phases config/phases.json hands the Beta skill to, read from config. */
+const loadsBeta = (): string[] =>
+  phases().filter((p) => Object.values(p.labelSkills ?? {}).includes(BETA)).map((p) => p.name);
+
+const beta = (labels = ['Beta', 'Loop']): PromptCtx => ctx(ticket({ labels }));
+
+/** A prompt with its line wrapping undone, so re-wrapping prose cannot break an assertion. */
+const flat = (phase: string, c: PromptCtx = beta()): string => promptFor(cfg(phase), c).replace(/\s+/g, ' ');
+
+test('the Beta label reaches every phase that plans, builds, checks or shows the change', () => {
+  // verify executes testcases' list and nothing else, so a switch no case was
+  // written for is a switch nobody verified; review is where an edit to v1 is caught.
+  for (const phase of ['plan', 'implement', 'testcases', 'review', 'verify', 'ui-evidence', 'mr']) {
+    assert.ok(loadsBeta().includes(phase), `${phase} does not load ${BETA}`);
+  }
+});
+
+test('each of those phases is offered the skill and told its own part in the beta', () => {
+  for (const phase of loadsBeta()) {
+    assert.ok(names(systemPromptFor(cfg(phase), beta())).includes(BETA), `${phase}: skill not offered`);
+    const p = promptFor(cfg(phase), beta());
+    assert.match(p, /carries \*\*Beta\*\* — v2 beside v1, with a switch back/, `${phase}: no contract`);
+    assert.match(p, new RegExp(`### Your part, as \`${phase}\`\\n\\S`), `${phase}: contract with no job`);
+  }
+});
+
+test('without the label no phase is offered the skill or told to build a v2', () => {
+  for (const phase of loadsBeta()) {
+    const plain = ctx(ticket({ labels: ['Loop'] }));
+    assert.ok(!names(systemPromptFor(cfg(phase), plain)).includes(BETA), phase);
+    assert.doesNotMatch(promptFor(cfg(phase), plain), /carries \*\*Beta\*\*/, phase);
+  }
+});
+
+test('a Beta label typed in lower case still counts', () => {
+  assert.match(promptFor(cfg('plan'), beta(['beta'])), /carries \*\*Beta\*\*/);
+});
+
+test('a phase that does not load the skill is not told about the beta', () => {
+  // research traces the code as it is today; there is no v2 to hold it to yet.
+  assert.doesNotMatch(promptFor(cfg('research'), beta()), /carries \*\*Beta\*\*/);
+});
+
+test('the skill the Beta label loads ships in this repo', () => {
+  assert.ok(existsSync(join(ROOT, 'skills', BETA, 'SKILL.md')));
+});
+
+test('implement is told the v2 copy is the requirement, not duplication to fold away', () => {
+  // ponytail is always loaded and asks whether code needs to exist at all; on a
+  // Beta ticket its honest answer would collapse v2 back into an edit of v1.
+  const p = flat('implement');
+  assert.match(p, /`ponytail` never simplifies away anything explicitly requested, and the label is that request/);
+  assert.match(p, /"does this need to exist" does not fold v2's copy/);
+});
+
+test('review does not raise the v2 copies the label asked for as duplication', () => {
+  // review loads ponytail-review and dispatches util-reuse-agent, and both exist
+  // to flag exactly this shape; without the carve-out a correct beta comes back
+  // as findings and spends a lap undoing the requirement.
+  const p = flat('review');
+  assert.match(p, /v2's own copies of v1's COMPONENTS are what the label asked for/);
+  assert.match(p, /A copied HELPER \(a util, a constant, an API call\) is a finding as usual/);
+});
+
+test('review hands the beta contract to the agent that judges scope', () => {
+  // spec-conformance-agent reads scope off the ticket's own text, and a Beta
+  // ticket's description never mentions the switch — the label does.
+  assert.match(flat('review'), /into `spec-conformance-agent`'s `ticket_context`/);
+});
+
+test('review holds every edited v1 file to a backward-compatible extension', () => {
+  // Project Logs v2 extended seven v1 files (optional parameters, null guards), so
+  // "never touch v1" would fail the precedent the label follows; what it never did
+  // was change what a v1 call site does, or let v1 import v2.
+  const p = flat('review');
+  assert.match(p, /git diff --stat origin\/\S+\.\.\.HEAD/);
+  assert.match(p, /Anything else there — a changed behaviour, a rename, a move — is a `major` finding/);
+  assert.match(p, /v1 importing from `<module>_v2\/`/);
+});
+
+test('every phase is held to the Project Logs v2 layout, and told the switch is the new part', () => {
+  const p = flat('plan');
+  assert.match(p, /a sibling `<module>_v2\/` directory/);
+  assert.match(p, /a route wrapper like `LogsVersionRoute\.js`, on every route of the feature/);
+  assert.match(p, /the switch is what this label adds/);
+});
+
+test('testcases writes a v1 regression case and reaches each version by the switch', () => {
+  const p = flat('testcases');
+  assert.match(p, /the case that proves v1 was left alone/);
+  assert.match(p, /never by writing the stored choice directly/);
+  // The phase's own rule is that only the criteria and the ticket are an oracle;
+  // the switch appears in neither, so without this its cases have no source.
+  assert.match(p, /part of this ticket's oracle, alongside its acceptance criteria/);
+  assert.match(p, /a second account on the same browser not inheriting the first one's choice/);
+});
+
+test('verify reaches each version through the switch, never by writing the stored choice', () => {
+  const p = flat('verify');
+  assert.match(p, /THROUGH THE SWITCH/);
+  // Clearing storage is the obvious way to "log out" in a script, and it erases
+  // exactly the value the persistence case exists to measure.
+  assert.match(p, /Log out through the app's own logout, never by clearing browser storage/);
+});
+
+test('ui-evidence takes its before from v1 on its own instance and checks it against the base', () => {
+  const p = flat('ui-evidence');
+  assert.match(p, /v1, reached through the switch on YOUR instance/);
+  assert.match(p, /a difference between the two is v1 having changed/);
 });

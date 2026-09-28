@@ -88,12 +88,14 @@
       "labelSkills": {
         "Accessibility": "frontend-accessibility",
         "Backend": "django-backend-standards",
-        "Frontend": "react-frontend-standards"
+        "Frontend": "react-frontend-standards",
+        "Beta": "beta-version-toggle"
       },
       "_why_layer_skills": "Backend/Frontend are set at grooming by Jev (backend 93%, frontend 88%, 0 wrong skips on 42 tickets). Plan gets that layer's standards. At implement the labels only add an agent to the plan's forecast; where there is no plan, or it names no layer, the labels decide instead of listing both (labelledLayers in src/phases/prompts.ts).",
       "_why_skills": "`skills` is this phase's method, loaded for every ticket. `labelSkills` is the domain knowledge a particular ticket calls for, keyed by the label triage puts on it \u2014 reuse and approach are decided here, so an accessibility ticket needs that standard at plan time and not first at implement. One line adds the next pair; nothing in code changes. change-scoping replaces the vendored pair (planning-methodology, util-reuse-methodology) because the discovery half of their method now runs in research, where the files are already open: this phase CONFIRMS what arrived in `codePath` and searches only the residual its own approach introduces, which the vendored skills could not describe because they were written for a phase that was handed nothing. Neither vendored file is edited or deleted \u2014 util-reuse-agent still loads util-reuse-methodology under erp-code-review, and src/lib/claudedir.ts is explicit that Oneshot fills gaps and never shadows the context repo. This is a reclaim at a different moment in the pipeline, discovery-time versus review-time, not a move.",
       "_why_django_scheduled_jobs": "The only domain skill declared at plan, here because the mechanism it governs is chosen at plan time and is expensive to revisit later. ERP #8344 is the case: the plan proposed seeding `PeriodicTask`/`CrontabSchedule` rows in a data migration for a recurring reminder, citing `apps/costing/utils.py` as precedent \u2014 which is a per-entity one-off task, a different shape. Nothing the phase read said otherwise, so the wrong mechanism entered the plan and every later phase inherited it as a settled question. Scheduling is the rare case `implement` cannot recover: by then the migration is written, and `review` checks the diff against the plan rather than the plan against the repo. Deliberately NOT in `labelSkills`, which would be the tidier home \u2014 that needs triage to already know it is a scheduling ticket, and not knowing is the entire failure. 6KB against change-scoping's ~12KB, affordable only because the skill was split out of `django-management-commands`; the command-writing half stays at implement, reached through `django-backend-standards`.",
       "_why_turns": "50 / 20m is KEPT deliberately, against an earlier proposal to take it to 70. Seven dry replays of one ticket measured 26, 34, 31, 39, 34, 17 and 35 turns \u2014 a maximum of 39 against a cap of 50, and that 39 was the single run that DISCOVERED the prior art rather than being handed it. Moving discovery into research is precisely the cost this change removes, so the budget should if anything trend down; raising it first would have bought headroom for work this phase no longer does, and a ceiling raised to cover a method is read as a target. Those replays predate `django-scheduled-jobs` joining this phase's skills, so they measured plan without its ~6KB. Revisit only with a measurement that shows a confirm-and-residual plan hitting the cap.",
+      "_why_beta": "Beta is the one label mapped on every phase from plan to mr, because it changes how the change SHIPS rather than what one phase knows: plan lays out v1, v2 and the switch, implement builds them, testcases writes the switch and v1-regression cases that verify then executes and nothing else does, review holds the diff against v1's files, ui-evidence shows both versions, and mr tells the MR reviewer what retiring v1 takes. Dropping it from one phase breaks the chain after that phase \u2014 a switch no case covers is a switch nobody verified. The instructions are gated on this same resolved list in src/phases/prompts.ts (betaRequested), so removing the line from a phase removes the skill and its prose there together.",
       "artifact": "plan.json"
     },
     {
@@ -120,6 +122,9 @@
         "python-linting",
         "script-writing-standards"
       ],
+      "labelSkills": {
+        "Beta": "beta-version-toggle"
+      },
       "agents": [
         "backend-agent",
         "frontend-agent"
@@ -155,6 +160,9 @@
       "skills": [
         "erp-ticket-test-plan"
       ],
+      "labelSkills": {
+        "Beta": "beta-version-toggle"
+      },
       "artifact": "testcases.json",
       "_why": "Opus, and its own phase: the list is written once, reviewed as a list, and executed by verify against a real browser \u2014 which is what makes 'the change passes its own cases' a claim about something a person could re-run rather than about whatever the verifying session happened to think of. It runs AFTER implement so the cases can name the real symbols and routes the change actually produced \u2014 the cost of that is a list authored with the implementation in view, so the prompt makes the acceptance criteria, not the diff, the source of truth.",
       "_why_turns": "40 was never sized for this job \u2014 it is the number this phase was born with in 37f3978, when testcases was n:3 and ran BEFORE implement, authoring from the ticket and the plan with nothing to read. 0d64e2d moved the block to n:4 verbatim while the prompt gained implement's artifact, 'read git diff before you start' and 'read whatever you need to'. The job doubled; the budget did not move, and unlike verify (200->300->450) and research (60->120) it never got a measured raise. Run 237 (r-mtvacbt9-7a23b5) is where that came due: 40 turns spent entirely on context-gathering, 11,719 output tokens, not one case written, and onFail abort blocked the run. The driver is NOT diff size \u2014 that diff was 9 files and 211 insertions. It is whether the diff carries the UI vocabulary the cases need: run 8 changed loginTestIds.js and displayText.js and finished in 26 turns, run 19 was backend-only and finished in 18, and run 237 was a date-math fix behind a browser modal, so the routes, the permission gate and the PL_* labels all had to be excavated from files the diff never touched. research.uiPath now supplies that vocabulary, which is what makes 110 a real ceiling rather than a bigger number in front of an unbounded search. 30 minutes because the 15 was equally inherited, and this phase has already died on the CLOCK once (r-mtfu7ph1-e56363, 119 stream messages, no result)."
@@ -180,6 +188,9 @@
         "dead-code-sweep",
         "ponytail-review"
       ],
+      "labelSkills": {
+        "Beta": "beta-version-toggle"
+      },
       "agents": [
         "backend-reviewer-agent",
         "frontend-reviewer-agent",
@@ -212,6 +223,9 @@
         "local-browser-verify",
         "erp-ticket-test-data"
       ],
+      "labelSkills": {
+        "Beta": "beta-version-toggle"
+      },
       "artifact": "verify.json"
     },
     {
@@ -254,6 +268,9 @@
       "skills": [
         "ui-evidence-pack"
       ],
+      "labelSkills": {
+        "Beta": "beta-version-toggle"
+      },
       "artifact": "ui-evidence.json"
     },
     {
@@ -274,6 +291,9 @@
         "mr-metadata",
         "mr-change-logger"
       ],
+      "labelSkills": {
+        "Beta": "beta-version-toggle"
+      },
       "artifact": "mr.json"
     },
     {
