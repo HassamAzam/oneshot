@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { parseEdgeCases } from './edgecases.js';
 import { trailingInfraDeaths } from '../lib/artifacts.js';
 
-test('the #179 reply: conversation lines are not cases, bullets are, and the bullet is stripped', () => {
+test('a reviewer reply: conversation lines are not cases, bullets are, and the bullet is stripped', () => {
   const reply = [
     'Disapproved',
     '',

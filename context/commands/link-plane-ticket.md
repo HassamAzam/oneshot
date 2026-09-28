@@ -49,14 +49,18 @@ If an MR has no Plane reference, skip it (report it as skipped, don't error).
 
 ## Step 3 — Read the Plane ticket via MCP
 
+Requires PyPI `plane-mcp-server` >= 0.3.0, where every resource is dispatched by an `action`
+parameter; the deprecated npm `@makeplane/plane-mcp-server` (0.1.5) still exposes the old
+`get_issue_using_readable_identifier` / `get_state` and will not answer these calls.
+
 ```
-mcp__plane__get_issue_using_readable_identifier(
-    project_identifier=<group 1>, issue_identifier=<group 2>)
+mcp__plane__workitem(
+    action="retrieve_by_identifier", workitem_identifier="<KEY>")
 ```
 
 From the result keep: `name` (→ issue title), `description_html`, `priority`, `project` (UUID),
 and `state` (UUID). Resolve the state UUID to a human name with
-`mcp__plane__get_state` (pass the `project` UUID + `state` UUID). If the state lookup fails, fall
+`mcp__plane__state(action="retrieve", project_id=<project UUID>, state_id=<state UUID>)`. If the state lookup fails, fall
 back to `state_name: "unknown"` — do not block on it.
 
 ## Step 4 — Show the plan and confirm

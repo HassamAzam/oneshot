@@ -121,6 +121,27 @@ pytest is unaffected and is fine to run.
 - Retry a flaky step twice with a bounded timeout. Playwright flake is the
   largest source of false failures here. Passed on retry is a pass, with the
   retry noted; still failing after retries is a fail.
+- **Zero matches is a question, not an answer.** Before recording a failure on
+  an element you could not find, prove the element is genuinely absent: dump the
+  surrounding container's HTML and look for the same thing under a different
+  name. The admin runs **Grappelli**, which prefixes every class and id with
+  `grp-` — the save banner is `.grp-messagelist`, not `.messagelist`; the
+  history table is `#grp-change-history`, not `#change-history`. A selector
+  written from stock-Django docs matches nothing on a perfectly working page.
+  Ticket 244 filed two working features as product bugs exactly this way and
+  blocked the ticket for a week. If the feature turns out to work under a
+  corrected locator, that is a **pass** with the correction noted. If the dump
+  shows the element is genuinely absent under every name, that is a **fail** —
+  the product is broken. A `locator` block is only for a case you could not
+  express against this app at all, never for one you expressed and the page did
+  not satisfy: nothing re-runs a blocked case and no gate reads one. Either way
+  the dump's outcome goes in the case's `evidence` verbatim, one line per
+  selector tried:
+
+  ```
+  selector '.messagelist li': 0
+  selector '.grp-messagelist li': 1
+  ```
 - **Wait for data, not skeletons.** These reports paint MUI Skeleton
   placeholders while a drill-down's async call is in flight, and a modal's call
   can take tens of seconds on a cold DB. A fixed short wait reads the shimmer
@@ -138,6 +159,11 @@ pytest is unaffected and is fine to run.
 
 - Every case id from the list gets a result: pass, fail, blocked, or skipped.
   A silently omitted case is worse than a failing one.
+- **`fail` means the product misbehaved — nothing else.** A case you could not
+  express correctly against this app is `blocked`, with `locator:` as the first
+  word of `evidence`. A case whose account, record or screen does not exist here
+  is `blocked`, with `fixture:`. Neither is a defect in the branch, and calling
+  them `fail` stops a ticket that has nothing wrong with it.
 - Evidence is **actual vs expected**, in the case's own terms — not "looks
   right".
 - `skipped` requires a reason. `blocked` names the missing precondition.

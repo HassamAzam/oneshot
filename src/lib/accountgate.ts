@@ -8,8 +8,8 @@
  * copy prints an `[ACTION REQUIRED]` line and exits 1 without emitting a single
  * message. To the runner that is indistinguishable from any other session that
  * died before it began, so it was treated as infra and retried: every retry
- * dies the same way, and on #168 the retry that should have re-planned against
- * reviewer feedback was never re-run at all.
+ * dies the same way, and a retry that should have re-planned against reviewer
+ * feedback was never re-run at all.
  *
  * No retry helps. A person has to act, so the run stops and says how.
  *

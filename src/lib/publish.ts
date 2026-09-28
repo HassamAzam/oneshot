@@ -162,8 +162,8 @@ interface Observation { what: string; before: string; after: string; how: string
 /**
  * A measured value, verbatim. Values go in code spans and prose is entity-escaped,
  * so `<title>` and `<script>` survive GitLab's sanitizer as text. An empty value
- * is shown as empty rather than as a dash: for #189 the empty base-branch title
- * WAS the bug, and a dash reads as "not recorded".
+ * is shown as empty rather than as a dash: when a missing page title is the bug,
+ * the empty base-branch value IS the finding, and a dash reads as "not recorded".
  */
 /** One table cell as a code span, or an explicit `_(empty)_` — see `observationTable`. */
 function code(v: string): string {

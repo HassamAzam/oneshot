@@ -3,10 +3,10 @@
  *
  * Pure — no GitLab, no journal — so the rule is testable on its own.
  *
- * It used to be "every non-empty line is a case". On #179 a reviewer's reply
- * opened with "Disapproved", mentioned "@usman.nasir", and explained three
+ * It used to be "every non-empty line is a case". A reviewer's reply once
+ * opened with "Disapproved", @-mentioned a colleague, and explained three
  * corrections in prose; all of it became cases ("Verify that Disapproved",
- * "Verify that @usman.nasir", …), the bulleted ones read "Verify that -
+ * "Verify that @someone", …), the bulleted ones read "Verify that -
  * Verify that …", and none had a pass/fail criterion. A reviewer then has to
  * write a second comment asking for the first one to be cleaned up — which
  * itself turns into more cases.

@@ -19,7 +19,7 @@ test('a stop note after the claim ends it', () => {
   assert.deepEqual(activeClaims([claim(1, 'r-a', 10), stop(2, 'r-a', 5)], NOW), []);
 });
 
-// Ticket #168: blocked once, resumed under the same run id, then parked. The old
+// The case: blocked once, resumed under the same run id, then parked. The old
 // stop note killed every later claim too, so each re-entry posted another one.
 test('a stop note does not end a claim the same run posted after it', () => {
   const notes = [claim(1, 'r-a', 60), stop(2, 'r-a', 55), claim(3, 'r-a', 50)];

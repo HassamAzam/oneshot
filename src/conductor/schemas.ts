@@ -136,8 +136,9 @@ export const RESEARCH_SCHEMA = phaseSchema({
     additionalProperties: false,
     description:
       'Whether the reported defect actually happens on the base branch, established by running ' +
-      'it (skill: bug-reproduction). A verdict of not-reproduced STOPS the run and labels the ' +
-      'ticket Not a Bug, so it must rest on steps you executed, never on reading code.',
+      'it (skill: bug-reproduction). A verdict of not-reproduced PAUSES the run for a QA reviewer; if ' +
+      'they confirm, the ticket is taken out of the loop (labelled Not a Bug when the project ' +
+      'configures that label), so it must rest on steps you executed, never on reading code.',
     properties: {
       kind: {
         type: 'string',
@@ -161,7 +162,7 @@ export const RESEARCH_SCHEMA = phaseSchema({
       steps: strArr('The steps you actually executed, in order, each with what you did.'),
       expected: str('What the ticket says SHOULD happen.'),
       observed: str('What actually happened when you ran the steps — concrete values, not impressions.'),
-      evidence: strArr('Bare filenames of screenshots written to the run artifacts dir, plus any measurement.'),
+      evidence: strArr('Bare filenames of screenshots written to the run artifacts dir, plus any measurement. For reproduced and not-reproduced the screenshots are attached to the ticket comment.'),
       reason: str('Why this verdict. For inconclusive or not-applicable, what stopped you.'),
     },
     required: ['kind', 'verdict', 'testedCommit', 'account', 'steps', 'expected', 'observed', 'evidence', 'reason'],
