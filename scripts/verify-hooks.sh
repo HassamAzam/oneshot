@@ -386,6 +386,16 @@ REAL_EMAIL = "ayesha.khan@arbisoft.com"
 Person.objects.create(email=REAL_EMAIL)
 SCREOF
 
+# "test" mid-word is not a fabrication marker: the check reads the start of the local part.
+cat > "$ONESHOT_WORKTREE/tmp_scripts/mid_word.py" <<'SCREOF'
+"""Point the digest at the real mailboxes, addresses supplied by the operator."""
+
+from apps.core.models import Person
+
+Person.objects.create(email="latest@arbisoft.com")
+Person.objects.create(email="contest.team@arbisoft.com")
+SCREOF
+
 # The same file in scripts/: tracked utility code, where a CLI shape is correct.
 cp "$ONESHOT_WORKTREE/tmp_scripts/bootstrapped.py" "$ONESHOT_WORKTREE/scripts/cli_tool.py"
 cp "$ONESHOT_WORKTREE/tmp_scripts/bad_email.py" "$ONESHOT_WORKTREE/scripts/seeder.py"
@@ -394,6 +404,7 @@ expect_clean "shell-shaped script"          script-standards.cjs "$(scr_payload 
 expect_block "bootstrap in tmp_scripts"     script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/bootstrapped.py")"
 expect_block "fabricated email off-domain"  script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/bad_email.py")"
 expect_clean "a real person's real address" script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/real_user.py")"
+expect_clean "test mid-word in local part"  script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/mid_word.py")"
 expect_clean "CLI shape in tracked scripts" script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/scripts/cli_tool.py")"
 expect_block "fabricated email in scripts"  script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/scripts/seeder.py")"
 expect_clean "app code is not a script"     script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/apps/core/models.py")"

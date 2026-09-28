@@ -104,8 +104,8 @@ When a script needs to create a fabricated/test/sentinel `User` (e.g. so it can 
 **Why:** `@example.com` is reserved by IANA (RFC 2606) and will never deliver mail. Other made-up TLDs (`@example.invalid`, `@test`, `@local`) are not a stable convention across the team and make it hard to grep for "all the rows my seed scripts created" later. Standardising on `@example.com` means every script-generated test user is identifiable by a single grep, and we don't risk anyone accidentally setting up a real `@example.invalid` mailbox.
 
 **How to apply:** write `…@example.com`. The hook blocks a placeholder domain
-that is not `example.com`, and an address whose local part calls itself a test
-or a seed while sitting on some other domain. It applies anywhere a script
+that is not `example.com`, and an address whose local part opens by calling itself
+a test or a seed while sitting on some other domain. It applies anywhere a script
 writes a fabricated address — `personal_email`, secondary contacts, and the
 rest.
 

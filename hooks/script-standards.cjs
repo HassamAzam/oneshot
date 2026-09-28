@@ -21,8 +21,8 @@
  * provisioning a REAL user writes that person's real address, and that those
  * must never be rewritten to @example.com. So the check never fires on a
  * domain merely because it is real. It fires on two things it can be sure of:
- * a placeholder domain that is not example.com, and a local part that names
- * itself a test or a seed sitting on some other domain. An address with no
+ * a placeholder domain that is not example.com, and a local part that starts
+ * by calling itself a test or a seed, sitting on some other domain. An address with no
  * fabrication marker is left alone, which is the side to err on.
  *
  * Fail-open, like every guard here.
@@ -112,7 +112,9 @@ if defines_main and calls_main:
 PLACEHOLDER = re.compile(
     r"@(example\\.(invalid|org|net)|test(\\.[a-z]+)?|localhost|local|invalid|fake\\.[a-z]+|dummy\\.[a-z]+)\\b",
     re.I)
-FABRICATED_LOCAL = re.compile(r"(test|seed|sentinel|dummy|fake|placeholder)[^@\\s]*@([a-z0-9.-]+)", re.I)
+# Anchored to the start of the local part, so latest@ or contest.team@ is not a test address.
+FABRICATED_LOCAL = re.compile(
+    r"(?<![a-z0-9._%+-])(test|seed|sentinel|dummy|fake|placeholder)[^@\\s]*@([a-z0-9.-]+)", re.I)
 
 def literal(node):
     """A string constant, or an f-string flattened with {} standing in for the holes."""
@@ -177,7 +179,9 @@ function describe(scan) {
       '@example.com is reserved by RFC 2606 and will never deliver, and standardising on it ' +
       'is what makes every seeded row findable by one grep later.\n' +
       'If this address belongs to a REAL person the script must provision, that is the one ' +
-      'case this rule does not cover — keep the real address and say so in the docstring.',
+      'case this rule does not cover, and this check cannot tell. The write has landed: keep ' +
+      'the real address, do not disguise it to get past this message, and tell the user it ' +
+      'was flagged and why it stays.',
     );
   }
   return problems;
