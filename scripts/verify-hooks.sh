@@ -15,6 +15,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE="${ONESHOT_NODE:-node}"
 PASS=0
 FAIL=0
+SKIP=0
 
 # Every hook self-gates on ONESHOT_PHASE; without it they exit 0 immediately.
 export ONESHOT_PHASE="implement"
@@ -34,6 +35,10 @@ mkdir -p "$ONESHOT_WORKTREE"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+
+# skip <label> <why> — a case that cannot be judged here is neither a pass nor a fail.
+skip() { yellow "  SKIP  $1 ($2)"; SKIP=$((SKIP+1)); }
 
 # run <hook> <json>  -> prints hook stdout
 run() { printf '%s' "$2" | "$NODE" "$ROOT/hooks/$1" 2>/dev/null; }
@@ -192,13 +197,481 @@ expect_allow "Read while paused"       pause-check.cjs '{"tool_name":"Read","too
 rm -f "$ROOT/state/PAUSE"
 expect_allow "Bash when not paused"    pause-check.cjs "$(bash_payload 'npm test')"
 
+echo
+echo "mr-gate"
+mr_payload() {
+    printf '{"tool_name":"%s","tool_input":%s}' "$1" "$2"
+}
+
+expect_deny  "conventional-commit prefix in title" mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__create_merge_request '{"title":"chore: remove unused celery task","description":"[closes https://gitlab.example.com/g/p/-/issues/1]"}')"
+expect_deny  "create with no closes line"          mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__create_merge_request '{"title":"Remove Unused Celery Task","description":"Does a thing."}')"
+expect_allow "plain title plus closes line"        mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__create_merge_request '{"title":"Remove Unused Celery Task","description":"Does a thing.\n\n[closes https://gitlab.example.com/g/p/-/issues/1]"}')"
+expect_allow "update that touches neither field"   mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__update_merge_request '{"labels":"ready"}')"
+expect_deny  "update sending a closes-less body"   mr-gate.cjs \
+    "$(mr_payload mcp__gitlab__update_merge_request '{"description":"Rewritten body."}')"
+
+echo
+echo "secret-guard"
+expect_deny  "Read of this repo's .env"        secret-guard.cjs \
+    "$(printf '{"tool_name":"Read","tool_input":{"file_path":"%s/.env"}}' "$ROOT")"
+expect_deny  "cat of this repo's .env"         secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env"}}' "$ROOT")"
+expect_deny  "grep TOKEN by absolute path"     secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"grep TOKEN %s/.env"}}' "$ROOT")"
+expect_allow "the work repo's own .env"        secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env"}}' "$ONESHOT_WORKTREE")"
+expect_allow "grepping the source for a name"  secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"grep -rn GITLAB_TOKEN src/"}}'
+expect_allow "reading an ordinary file"        secret-guard.cjs \
+    '{"tool_name":"Read","tool_input":{"file_path":"/tmp/notes.md"}}'
+# The shell expands these; the guard has to as well. HOME is pointed at the
+# repo's parent so a ~ path can name it wherever this checkout lives.
+expect_deny  "cat \$ONESHOT_HOME/.env"          secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat $ONESHOT_HOME/.env"}}'
+expect_deny  "cat \${ONESHOT_HOME}/.env"        secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat \"${ONESHOT_HOME}/.env\""}}'
+HOME="$(dirname "$ROOT")" expect_deny "cat by a ~ path" secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat ~/%s/.env"}}' "$(basename "$ROOT")")"
+HOME="$(dirname "$ROOT")" expect_deny "grep by a \$HOME path" secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"grep TOKEN $HOME/%s/.env"}}' "$(basename "$ROOT")")"
+expect_deny  "Grep tool on this repo's .env"    secret-guard.cjs \
+    "$(printf '{"tool_name":"Grep","tool_input":{"pattern":"TOKEN","path":"%s/.env","output_mode":"content"}}' "$ROOT")"
+# A redirect write is as much a hazard as sed -i: one > blanks GITLAB_TOKEN.
+expect_deny  "> truncating this repo's .env"   secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"printf %%s GITLAB_TOKEN=x > %s/.env"}}' "$ROOT")"
+expect_deny  ">> appending to this repo's .env" secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"echo GITLAB_TOKEN=x >> .env"}}' "$ROOT")"
+expect_deny  "tee into this repo's .env"       secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"echo A=1 | tee -a .env"}}' "$ROOT")"
+# .env.example is the tracked list of variables, and it holds no secrets.
+expect_allow "cat .env.example by bare name"   secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env.example"}}' "$ROOT")"
+expect_allow "cat .env.example by absolute path" secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat %s/.env.example"}}' "$ROOT")"
+expect_allow "cat .env.local and .env.sample"  secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env.local .env.sample"}}' "$ROOT")"
+expect_allow "redirect out of .env.example"    secret-guard.cjs \
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"grep -c = < .env.example > /tmp/n"}}' "$ROOT")"
+
+# PostToolUse hooks answer with {"decision":"block"}
+# rather than a permissionDecision — the allow/deny helpers cannot read it.
+expect_block() {
+    local out; out="$(run "$2" "$3")"
+    if printf '%s' "$out" | grep -q '"decision":"block"'; then
+        green "  PASS  block: $1"; PASS=$((PASS+1))
+    else
+        red   "  FAIL  should have BLOCKED: $1"; FAIL=$((FAIL+1))
+    fi
+}
+
+expect_clean() {
+    local out; out="$(run "$2" "$3")"
+    if [ -z "$out" ] || ! printf '%s' "$out" | grep -q '"decision":"block"'; then
+        green "  PASS  clean: $1"; PASS=$((PASS+1))
+    else
+        red   "  FAIL  should have PASSED: $1"; FAIL=$((FAIL+1))
+    fi
+}
+
+py_payload() {
+    printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":true}}' "$1"
+}
+scr_payload() { py_payload "$@"; }
+
+mig_payload() {
+    printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":true}}' "$1"
+}
+
+echo
+echo "migration-standards"
+MIG="$ONESHOT_WORKTREE/apps/demo/migrations"
+mkdir -p "$MIG"
+
+cat > "$MIG/0001_good_data.py" <<'MIGEOF'
+"""Backfill the demo flag."""
+
+from django.db import migrations
+
+
+def backfill(apps, schema_editor):
+    _Thing = apps.get_model("demo", "Thing")
+    for row in _Thing._base_manager.all():
+        row.save()
+
+
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [migrations.RunPython(backfill, migrations.RunPython.noop)]
+MIGEOF
+
+cat > "$MIG/0002_wrong_manager.py" <<'MIGEOF'
+"""Backfill through the wrong manager."""
+
+from django.db import migrations
+
+
+def backfill(apps, schema_editor):
+    _Thing = apps.get_model("demo", "Thing")
+    for row in _Thing.active_objects.all():
+        row.save()
+
+
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [migrations.RunPython(backfill, migrations.RunPython.noop)]
+MIGEOF
+
+cat > "$MIG/0003_mixed.py" <<'MIGEOF'
+"""Schema and data in one file."""
+
+import django.db.models
+from django.db import migrations, models
+
+
+def backfill(apps, schema_editor):
+    _Thing = apps.get_model("demo", "Thing")
+    _Thing._base_manager.all().update(flag=True)
+
+
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [
+        migrations.AddField("thing", "flag", models.BooleanField(default=False)),
+        migrations.RunPython(backfill, migrations.RunPython.noop),
+    ]
+MIGEOF
+
+cat > "$MIG/0004_initial_schema_squashed_0003_mixed.py" <<'MIGEOF'
+"""A squash concatenates whatever history held."""
+
+from django.db import migrations, models
+
+
+def backfill(apps, schema_editor):
+    _Thing = apps.get_model("demo", "Thing")
+    _Thing._base_manager.all().update(flag=True)
+
+
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [
+        migrations.AddField("thing", "flag", models.BooleanField(default=False)),
+        migrations.RunPython(backfill, migrations.RunPython.noop),
+    ]
+MIGEOF
+
+cat > "$MIG/0005_schema_only.py" <<'MIGEOF'
+# Generated by Django 4.2 on 2026-09-24 10:00
+
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [
+        migrations.AddField("thing", "label", models.CharField(max_length=10)),
+    ]
+MIGEOF
+
+# The pointer names the highest-numbered file, so every case above is judged on
+# its own content rather than on a stale max_migration.txt.
+printf '0005_schema_only\n' > "$MIG/max_migration.txt"
+
+expect_clean "_base_manager in RunPython"   migration-standards.cjs "$(mig_payload "$MIG/0001_good_data.py")"
+expect_block "active_objects in RunPython"  migration-standards.cjs "$(mig_payload "$MIG/0002_wrong_manager.py")"
+expect_block "schema and RunPython mixed"   migration-standards.cjs "$(mig_payload "$MIG/0003_mixed.py")"
+expect_clean "squash may mix the two"       migration-standards.cjs "$(mig_payload "$MIG/0004_initial_schema_squashed_0003_mixed.py")"
+expect_clean "schema-only migration"        migration-standards.cjs "$(mig_payload "$MIG/0005_schema_only.py")"
+
+printf '0004_stale\n' > "$MIG/max_migration.txt"
+expect_block "stale max_migration.txt"      migration-standards.cjs "$(mig_payload "$MIG/0005_schema_only.py")"
+rm -f "$MIG/max_migration.txt"
+expect_block "missing max_migration.txt"    migration-standards.cjs "$(mig_payload "$MIG/0005_schema_only.py")"
+
+expect_clean "non-migration python file"    migration-standards.cjs "$(mig_payload "$ONESHOT_WORKTREE/apps/demo/models.py")"
+
+echo
+echo "script-standards"
+mkdir -p "$ONESHOT_WORKTREE/tmp_scripts" "$ONESHOT_WORKTREE/scripts"
+
+cat > "$ONESHOT_WORKTREE/tmp_scripts/good.py" <<'SCREOF'
+"""Seed a handful of demo people. Run: python manage.py shell < tmp_scripts/good.py"""
+
+from apps.core.models import Person
+
+# ===== Scope =====================================
+HOW_MANY = 3
+
+for index in range(HOW_MANY):
+    Person.objects.create(email="test-seed-%d@example.com" % index)
+SCREOF
+
+cat > "$ONESHOT_WORKTREE/tmp_scripts/bootstrapped.py" <<'SCREOF'
+"""A script that sets Django up for itself."""
+
+import argparse
+import os
+import sys
+
+import django
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "hrdb.settings")
+sys.path.insert(0, ".")
+django.setup()
+
+
+def main():
+    print(sys.argv)
+
+
+if __name__ == "__main__":
+    main()
+SCREOF
+
+cat > "$ONESHOT_WORKTREE/tmp_scripts/bad_email.py" <<'SCREOF'
+"""Seed people on a domain that is not example.com."""
+
+from apps.core.models import Person
+
+Person.objects.create(email="test-seed-1@example.invalid")
+Person.objects.create(email=f"seed-{2}@arbisoft.com")
+SCREOF
+
+cat > "$ONESHOT_WORKTREE/tmp_scripts/real_user.py" <<'SCREOF'
+"""Provision the missing User row for a real employee, address supplied by the operator."""
+
+from apps.core.models import Person
+
+# ===== Scope =====================================
+REAL_EMAIL = "ayesha.khan@arbisoft.com"
+
+Person.objects.create(email=REAL_EMAIL)
+SCREOF
+
+# "test" mid-word is not a fabrication marker: the check reads the start of the local part.
+cat > "$ONESHOT_WORKTREE/tmp_scripts/mid_word.py" <<'SCREOF'
+"""Point the digest at the real mailboxes, addresses supplied by the operator."""
+
+from apps.core.models import Person
+
+Person.objects.create(email="latest@arbisoft.com")
+Person.objects.create(email="contest.team@arbisoft.com")
+SCREOF
+
+# The same file in scripts/: tracked utility code, where a CLI shape is correct.
+cp "$ONESHOT_WORKTREE/tmp_scripts/bootstrapped.py" "$ONESHOT_WORKTREE/scripts/cli_tool.py"
+cp "$ONESHOT_WORKTREE/tmp_scripts/bad_email.py" "$ONESHOT_WORKTREE/scripts/seeder.py"
+
+expect_clean "shell-shaped script"          script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/good.py")"
+expect_block "bootstrap in tmp_scripts"     script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/bootstrapped.py")"
+expect_block "fabricated email off-domain"  script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/bad_email.py")"
+expect_clean "a real person's real address" script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/real_user.py")"
+expect_clean "test mid-word in local part"  script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/tmp_scripts/mid_word.py")"
+expect_clean "CLI shape in tracked scripts" script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/scripts/cli_tool.py")"
+expect_block "fabricated email in scripts"  script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/scripts/seeder.py")"
+expect_clean "app code is not a script"     script-standards.cjs "$(scr_payload "$ONESHOT_WORKTREE/apps/core/models.py")"
+
+echo
+echo "py-lint"
+mkdir -p "$ONESHOT_WORKTREE/apps/demo/migrations"
+
+cat > "$ONESHOT_WORKTREE/apps/demo/clean.py" <<'PYEOF'
+"""A module that satisfies both linters."""
+
+
+def add_totals(first_total, second_total):
+    """Return the sum of two totals."""
+    return first_total + second_total
+PYEOF
+
+cat > "$ONESHOT_WORKTREE/apps/demo/commented.py" <<'PYEOF'
+"""A module whose only sin is an inline comment."""
+
+
+def add_totals(first_total, second_total):
+    """Return the sum of two totals."""
+    # add them up
+    return first_total + second_total
+PYEOF
+
+cat > "$ONESHOT_WORKTREE/apps/demo/allowed_comment.py" <<'PYEOF'
+"""A module whose only comment is an affirmed disable."""
+
+
+def add_totals(first_total, second_total):  # pylint: disable=invalid-name
+    """Return the sum of two totals."""
+    return first_total + second_total
+PYEOF
+
+cp "$ONESHOT_WORKTREE/apps/demo/commented.py" "$ONESHOT_WORKTREE/apps/demo/migrations/0001_initial.py"
+
+expect_block "inline comment"            py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/commented.py")"
+# Without both linters on PATH these two pass without either one running,
+# which would count a hook that never linted anything as a pass.
+if command -v flake8 >/dev/null && command -v pylint >/dev/null; then
+    expect_clean "clean file"              py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/clean.py")"
+    expect_clean "affirmed pylint disable" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/allowed_comment.py")"
+else
+    skip "clean file" "flake8/pylint not on PATH"
+    skip "affirmed pylint disable" "flake8/pylint not on PATH"
+fi
+expect_clean "migration is exempt"       py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/migrations/0001_initial.py")"
+expect_clean "non-python file"           py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/notes.md")"
+expect_clean "python outside worktree"   py-lint.cjs "$(py_payload "/tmp/oneshot-verify-outside.py")"
+expect_clean "failed write is not linted" py-lint.cjs "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":false}}' "$ONESHOT_WORKTREE/apps/demo/commented.py")"
+
+# From here the linters are shims in the worktree's venv/bin, which the hook
+# prefers over PATH: each case needs an exact exit code and output, not a
+# real linter's opinion of the file.
+SHIMS="$ONESHOT_WORKTREE/venv/bin"
+mkdir -p "$SHIMS"
+# shim <linter> <body>
+shim() { printf '#!/bin/sh\n%s\n' "$2" > "$SHIMS/$1"; chmod +x "$SHIMS/$1"; }
+shim pylint 'exit 0'
+
+shim flake8 'echo 0; exit 0'
+expect_clean "flake8 count=True prints 0 on a clean file" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/clean.py")"
+shim flake8 'echo "$1:1:1: E999 finding"; echo 1; exit 1'
+expect_block "flake8 finding (exit 1, stdout)" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/clean.py")"
+shim flake8 "echo \"ImportError: cannot import name 'flake8_docstrings'\" >&2; exit 1"
+expect_clean "flake8 crash is not a finding" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/clean.py")"
+shim flake8 'exit 0'
+shim pylint 'echo "usage: bad option" >&2; exit 32'
+expect_clean "pylint usage error is not a finding" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/clean.py")"
+shim pylint 'exit 0'
+
+cat > "$ONESHOT_WORKTREE/apps/demo/pragma.py" <<'PYEOF'
+"""A module whose only comment is a coverage pragma."""
+
+
+def add_totals(first_total, second_total):  # pragma: no cover
+    """Return the sum of two totals."""
+    return first_total + second_total
+PYEOF
+expect_clean "coverage pragma"           py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/pragma.py")"
+
+# edit_payload <file> <old_string> <new_string>
+edit_payload() {
+    printf '{"tool_name":"Edit","tool_input":{"file_path":"%s","old_string":%s,"new_string":%s},"tool_response":{"success":true}}' \
+        "$1" "$(printf '%s' "$2" | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(s)))')" \
+        "$(printf '%s' "$3" | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(s)))')"
+}
+expect_clean "Edit leaves a legacy comment alone" py-lint.cjs \
+    "$(edit_payload "$ONESHOT_WORKTREE/apps/demo/commented.py" '    return second_total + first_total' '    return first_total + second_total')"
+expect_block "Edit that adds a comment" py-lint.cjs \
+    "$(edit_payload "$ONESHOT_WORKTREE/apps/demo/commented.py" '    return first_total + second_total' "$(printf '    # add them up\n    return first_total + second_total')")"
+
+# A Write is judged against HEAD, so a comment already committed is not new.
+git -C "$ONESHOT_WORKTREE" init -q
+git -C "$ONESHOT_WORKTREE" add apps/demo/commented.py
+git -C "$ONESHOT_WORKTREE" -c user.name=verify -c user.email=verify@localhost commit -qm legacy
+expect_clean "Write keeps a committed comment" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/commented.py")"
+printf '    # and a new one\n' >> "$ONESHOT_WORKTREE/apps/demo/commented.py"
+expect_block "Write that adds a comment" py-lint.cjs "$(py_payload "$ONESHOT_WORKTREE/apps/demo/commented.py")"
+
+echo
+echo "js-standards"
+FE="$ONESHOT_WORKTREE/frontend/src"
+mkdir -p "$FE/common/utils" "$FE/components/demo"
+
+cat > "$FE/components/demo/Bad.js" <<'JSEOF'
+import axios from "axios";
+
+export const Row = () => <div style={{ marginLeft: 0 }}>hi</div>;
+JSEOF
+
+cat > "$FE/components/demo/Dynamic.js" <<'JSEOF'
+import S from "./styles/demoStyles";
+
+export const Row = ({ statusColor, isActive }) => (
+    <div style={{ color: statusColor }}>
+        <span sx={{ ...S.tab, ...isActive ? S.tabActive : {} }} />
+    </div>
+);
+JSEOF
+
+cat > "$FE/components/demo/Commented.js" <<'JSEOF'
+const note = "we do not import axios here";
+
+export const Row = () => <div>{note}</div>;
+JSEOF
+
+cat > "$FE/components/demo/Schema.js" <<'JSEOF'
+import * as yup from "yup";
+
+export const schema = yup.object({ name: yup.string() });
+JSEOF
+
+cat > "$FE/components/demo/Progress.js" <<'JSEOF'
+export const Bar = ({ progress }) => <div style={{ width: `${progress}%` }} />;
+JSEOF
+
+cp "$FE/components/demo/Schema.js" "$FE/components/demo/formValidations.js"
+cat > "$FE/common/utils/serverCalls.js" <<'JSEOF'
+import axios from "axios";
+
+export const apiGet = url => axios.get(url);
+JSEOF
+
+js_payload() {
+    printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":true}}' "$1"
+}
+
+expect_block "axios outside the allowlist"  js-standards.cjs "$(js_payload "$FE/components/demo/Bad.js")"
+expect_block "yup outside formValidations"  js-standards.cjs "$(js_payload "$FE/components/demo/Schema.js")"
+expect_clean "axios in serverCalls.js"      js-standards.cjs "$(js_payload "$FE/common/utils/serverCalls.js")"
+expect_clean "yup in formValidations.js"    js-standards.cjs "$(js_payload "$FE/components/demo/formValidations.js")"
+expect_clean "dynamic style and spread sx"  js-standards.cjs "$(js_payload "$FE/components/demo/Dynamic.js")"
+expect_clean "axios named only in a string" js-standards.cjs "$(js_payload "$FE/components/demo/Commented.js")"
+expect_clean "template-literal style value" js-standards.cjs "$(js_payload "$FE/components/demo/Progress.js")"
+
+# Outside frontend/ the React rules do not apply: a root webpack.config.js may
+# require axios for the dev-server proxy.
+printf 'const axios = require("axios");\n' > "$ONESHOT_WORKTREE/webpack.config.js"
+expect_clean "axios outside frontend/"      js-standards.cjs "$(js_payload "$ONESHOT_WORKTREE/webpack.config.js")"
+
+# Only the lines a write added are judged, so a legacy file stays editable.
+# A real repo, because a Write is diffed against HEAD.
+cat > "$FE/components/demo/Legacy.js" <<'JSEOF'
+export const Row = ({ n }) => (
+    <div>
+        <span style={{ marginLeft: 4 }} />
+        <b>{n}</b>
+    </div>
+);
+JSEOF
+git -C "$ONESHOT_WORKTREE" init -q
+git -C "$ONESHOT_WORKTREE" add frontend/src/components/demo/Legacy.js
+git -C "$ONESHOT_WORKTREE" -c user.name=verify -c user.email=verify@localhost commit -qm legacy
+
+edit_payload() {
+    "$NODE" -e 'process.stdout.write(JSON.stringify({tool_name:"Edit",tool_input:{file_path:process.argv[1],old_string:process.argv[2],new_string:process.argv[3]},tool_response:{success:true}}))' "$@"
+}
+
+sed -i.bak 's/<b>{n}<\/b>/<b>{n + 1}<\/b>/' "$FE/components/demo/Legacy.js"
+expect_clean "Edit near a legacy inline style" \
+                                            js-standards.cjs "$(edit_payload "$FE/components/demo/Legacy.js" '<b>{n}</b>' '<b>{n + 1}</b>')"
+expect_clean "Write that keeps a legacy inline style" \
+                                            js-standards.cjs "$(js_payload "$FE/components/demo/Legacy.js")"
+sed -i.bak 's/<b>{n + 1}<\/b>/<b style={{ fontWeight: 700 }}>{n + 1}<\/b>/' "$FE/components/demo/Legacy.js"
+expect_block "Edit that adds an inline style" \
+                                            js-standards.cjs "$(edit_payload "$FE/components/demo/Legacy.js" '<b>{n + 1}</b>' '<b style={{ fontWeight: 700 }}>{n + 1}</b>')"
+expect_block "Write that adds an inline style" \
+                                            js-standards.cjs "$(js_payload "$FE/components/demo/Legacy.js")"
+
+rm -f "$FE"/components/demo/*.bak
+
 rm -rf "$ONESHOT_WORKTREE"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
-    green "$PASS passed, 0 failed"
+    green "$PASS passed, 0 failed, $SKIP skipped"
     exit 0
 else
-    red "$PASS passed, $FAIL FAILED"
+    red "$PASS passed, $FAIL FAILED, $SKIP skipped"
     exit 1
 fi
