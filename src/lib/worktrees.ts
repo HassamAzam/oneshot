@@ -476,3 +476,41 @@ export function reapWorktree(worktree: string, runId: string): void {
 export function contextRepoPresent(): boolean {
   return existsSync(CONTEXT_REPO);
 }
+
+// ------------------------------------------------------- re-running a phase
+//
+// The three below serve scripts that re-run a finished phase to measure a
+// harness change. They are separate from leaseWorktree() rather than options
+// on it because a lease is bookkeeping a run owns — a port, a branch, a row
+// reaped on completion — and a measurement owns none of that.
+
+/**
+ * A detached worktree at a fixed commit.
+ *
+ * Detached rather than on a branch: this exists to re-read code, and a
+ * detached HEAD has nothing to push. The original run's own worktree is not
+ * reused because later phases may have committed to it, which would show the
+ * re-run the answer.
+ */
+export function replayWorktree(name: string, sha: string): string {
+  mkdirSync(WT_ROOT, { recursive: true });
+  const worktree = join(WT_ROOT, name);
+  if (!existsSync(worktree)) git(['worktree', 'add', '--detach', worktree, sha]);
+  seedWorktree(worktree);
+  return worktree;
+}
+
+/** The commit a run's branch left the base at — where its phases started reading. */
+export function runForkPoint(branch: string): string {
+  return git(['merge-base', branch, `origin/${projectConfig().branches.base}`]);
+}
+
+/** Counterpart to replayWorktree. No branch to preserve, and no port to release. */
+export function removeReplayWorktree(worktree: string): void {
+  if (!existsSync(worktree)) return;
+  try {
+    git(['worktree', 'remove', '--force', worktree]);
+  } catch (err) {
+    log.warn('replay worktree remove failed — leaving it on disk', { error: (err as Error).message });
+  }
+}
