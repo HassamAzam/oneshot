@@ -85,10 +85,10 @@ Produce, in your own notes and in the MR description later:
 
 ## 2. Plan — reuse first, and keep it short
 
-Search before you write: this repo has `common/`, `apps/*/utils.py`,
-`frontend/src/common/` and `frontend/src/components/shared/` full of helpers that a new
-function will duplicate. The `planning-methodology` and `util-reuse-methodology` skills
-carry the search patterns.
+Search before you write: a repo this size is full of helpers a new function will
+duplicate, and the one you need is rarely under the name you would have given it. The
+`change-scoping` skill carries the method — search the identifiers the change reads and
+writes, not the name you would have chosen, and read what surrounds the hits.
 
 The plan is a handful of steps naming real files and real symbols. If it needs a schema
 migration, or it touches any path listed in `$ONESHOT_HOME/config/risk-modules.json`, **stop and confirm
