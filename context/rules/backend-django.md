@@ -56,3 +56,10 @@
 - Tasks must be idempotent.
 - Use `logging`, not `print()`.
 - Do not import models at module level inside task files if it causes circular imports — import inside the function.
+
+## Management Commands & Scheduling
+
+- Recurring/fixed-cadence work (weekly, monthly, "every N days") is a **management command registered on the server crontab by DevOps** — never a `django_celery_beat` `PeriodicTask`/`CrontabSchedule` row created in app code or a data migration. There is no precedent in this repo for the latter; every existing scheduled reminder works the former way.
+- A dynamically-timed, per-entity one-off task (e.g. "recalculate this person's cost N days after their raise") may still use `PeriodicTask(one_off=True)` — that's a different problem shape, not a recurring schedule.
+- Any MR that needs a new or changed crontab entry must add an explicit "Ops action required" item to the MR checklist **and** a matching comment on the ticket, stating the exact `manage.py` invocation and target servers.
+- Read the **`django-management-commands`** skill before writing or scheduling a command — it has the full command structure, the scheduling SOP, and worked examples.

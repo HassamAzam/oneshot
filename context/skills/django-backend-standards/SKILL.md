@@ -56,3 +56,7 @@ objects = models.Manager()
 ## Migrations
 
 Read and follow the **`django-migration-standards`** skill for all migration rules — one-migration-per-task consolidation (with HITL merge proposals), schema/data separation, `_base_manager` and other data-migration patterns, `max_migration.txt` discipline, crash-safety logging, reversibility, and the mandatory verification protocol.
+
+## Management Commands & Scheduling
+
+Read and follow the **`django-management-commands`** skill whenever writing a management command or implementing recurring/scheduled work (reminders, weekly/monthly jobs). Recurring work is a management command registered on the server crontab by DevOps — **not** a `django_celery_beat` `PeriodicTask`/`CrontabSchedule` row created in code or a migration; there is no precedent for that in this repo.
