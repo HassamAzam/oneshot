@@ -28,14 +28,23 @@ description: React coding rules, architecture patterns, and performance requirem
 
 ## Style & Schema Rules
 
-- NEVER inline styles — all styles in `styles/<module>Styles.js`
-  - Exception: truly dynamic values only e.g. `sx={{ width: \`${progress}%\` }}`
-- NEVER inline Yup schemas — all validation in `formValidations.js`
-- Named imports only from icon libraries — never `import *`
+The `js-standards` hook blocks a literal-only `style={{…}}` / `sx={{…}}` and a
+Yup schema written outside a `formValidations.js`, so those two need no
+vigilance from you. What it cannot decide:
+
+- **Where the style belongs.** `styles/<module>Styles.js` holds it; spread it in
+  with `sx={{ ...moduleStyles.thing }}`. Which module's file, and whether the
+  value deserves a name of its own, is yours.
+- **Whether a value is genuinely dynamic.** Inline is for values that can only
+  be known at render — `sx={{ width: \`${progress}%\` }}`, `style={{ color: statusColor }}`.
+  The hook allows anything non-literal, which means it will also allow a
+  dynamic-looking expression that should have been a named style. Do not use
+  that as the loophole.
+- Named imports only from icon libraries — never `import *`.
 
 ## API-Helper Rules
 
-- NEVER `import axios` (or call `axios.{get,post,put,patch,delete}`) inside helpers, containers, hooks, or components. The only files allowed to import axios are `common/utils/serverCalls.js`, `helper/helper.js`, and `login/loginHelpers.js`. Everywhere else, use the wrappers exported from `common/`: `apiGet`, `apiPost`, `apiPut`, `apiPatch`, `apiDelete`, `apiDestroy`, `apiGetBlobType`, `apiPostBlobType`.
+- The hook enforces the axios allowlist: only `common/utils/serverCalls.js`, `helper/helper.js` and `components/login/loginHelpers.js` may import it. Everywhere else use the wrappers exported from `common/`: `apiGet`, `apiPost`, `apiPut`, `apiPatch`, `apiDelete`, `apiDestroy`, `apiGetBlobType`, `apiPostBlobType`.
 - Before writing a new helper, scan a sibling helper file in the same module (or any file under `components/**/logic/helpers/`) to confirm the import shape and call style. If the new code does not match the existing pattern in similar files, you are doing it wrong — match the pattern, do not invent a new one.
 - If an existing wrapper does not fit the endpoint shape (e.g. a singleton DELETE without an id, a custom header, a non-standard URL composition), the correct fix is to extend the shared wrapper in `common/utils/serverCalls.js` in a backwards-compatible way — NOT to bypass it by importing axios inline. Bypassing the wrapper fragments the API surface and is forbidden.
 

@@ -43,10 +43,11 @@
  * continues from the phase remediation says to resume at.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, rmSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, modelFor,
+  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -56,6 +57,9 @@ import {
   claimMarker, claimNoteBody, isMachineNote, readOwnership, settleMs,
 } from '../lib/claims.js';
 import { collectTicketDocs } from '../lib/ticketdocs.js';
+import {
+  currentProjectKey, journalOwner, worktreeToResume, type JournalOwner,
+} from '../lib/journalproject.js';
 import {
   archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
   phaseSucceeded, phaseSettled, readArtifact,
@@ -78,7 +82,10 @@ import {
   claimOwnership, claimTicket, getRun, logEvent, phaseEnd, phaseStart, updateRun,
 } from '../lib/db.js';
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
-import { declareNotABug, notABugDecision } from './reproduction.js';
+import {
+  declareNotABug, declareReproduced, notABugApprovalRequestBody, notABugDecision, reproAttachments,
+  reproductionOf,
+} from './reproduction.js';
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
@@ -110,6 +117,15 @@ const exec = promisify(execFile);
  * human to reply in — so the wait would never end, and the one status that
  * deliberately alerts nobody would be the one that needs somebody.
  */
+/**
+ * The Not a Bug gate's own `unavailable`. Not GATE_UNAVAILABLE: this gate arms
+ * on any ticket research could not reproduce, Review label or not, and what it
+ * is missing is a QA list to ask — not Slack.
+ */
+const NOT_A_BUG_UNAVAILABLE =
+  'research could not reproduce this bug, but config/reviewers.json names no QA reviewer to '
+  + 'confirm Not a Bug — add one there and unblock, or remove the entry label to drop the ticket';
+
 const GATE_UNAVAILABLE =
   'this ticket carries the Review label, but Slack is not configured (token + channel), so its '
   + 'approval gates have nowhere to ask — configure Slack, or remove the Review label to run '
@@ -279,7 +295,7 @@ async function fetchTicket(iid: number): Promise<Ticket | null> {
 
 // -------------------------------------------------------------------- resuming
 
-type ResumeDecision =
+export type ResumeDecision =
   | { kind: 'fresh'; archive: string | null }
   | { kind: 'resume'; journal: RunJournal }
   | { kind: 'refuse'; reason: string };
@@ -316,6 +332,19 @@ function decideResume(existing: RunJournal | null): ResumeDecision {
   }
 
   return { kind: 'fresh', archive: existing.runId };
+}
+
+/**
+ * decideResume() for a journal journalOwner() has judged. One that is another
+ * project's by its own record is never resumed, whatever its status: it is
+ * archived after the claim and the ticket starts fresh. One that is ours is
+ * decided on its status alone — including when its worktree has to be dropped,
+ * which is a question for the resume (worktreeToResume()), never a reason to
+ * throw away its phases and open a second MR.
+ */
+export function decideClaim(existing: RunJournal | null, owner: JournalOwner | null): ResumeDecision {
+  if (existing && owner?.kind === 'foreign') return { kind: 'fresh', archive: existing.runId };
+  return decideResume(existing);
 }
 
 // -------------------------------------------------------------- control flow
@@ -384,6 +413,58 @@ export function mergePollWait(o: {
   return dueIn > 0 ? dueIn : null;
 }
 
+/** A finding as review-partial.json carries it — only `severity` is read here. */
+export interface PartialFinding { severity?: string; [k: string]: unknown }
+
+/**
+ * What a dead review session's partial file is worth, if anything.
+ *
+ * Only a blocker or a major is salvaged into a verdict, and the asymmetry is
+ * the whole point: 'approve' asserts that the entire diff was read, which a
+ * session that died cannot assert about the dimensions that never reported,
+ * while a recorded blocker is a fact about the code that an unfinished review
+ * does not make less true. A partial holding only minors is left alone — the
+ * infra re-attempt it would otherwise pre-empt is the better answer there.
+ *
+ * What the salvaged 'changes-requested' buys is a verdict ON RECORD, not an
+ * implement lap. The salvage marks the phase ok, and `failedCases()` only
+ * fails `verify`, so review's own `cycle → implement` does not fire and the
+ * run moves on. The recorded verdict then does two things: `findingsOf()`
+ * hands these findings to implement if a later verify cycle sends the run
+ * back there, and `qualityGate()` refuses the merge on it — so the run stops
+ * at the merge with the blocker named, instead of burning its infra attempts
+ * at review with nothing on record. An implement lap spent on the salvaged
+ * blocker itself would need `failedCases()` to fail review too; that is a
+ * separate change.
+ *
+ * Every finding is carried into the artifact, not just the serious ones: the
+ * verdict is decided by the serious ones, but a minor the session had already
+ * written down is still review output and implement reads the whole list.
+ *
+ * The file is freehand model output and `readArtifact`'s type is erasure, not
+ * validation, so `findings` is checked to be an array before it is touched: a
+ * partial that parses but holds an object or a string salvages nothing and
+ * falls back to the infra re-attempt, rather than throwing out of runTicket.
+ */
+export function salvagedReview(
+  findings: unknown, error: string | null,
+): { summary: string; blocked: null; verdict: string; findings: PartialFinding[] } | null {
+  if (!Array.isArray(findings) || findings.length === 0) return null;
+  const list = findings.filter((f): f is PartialFinding => typeof f === 'object' && f !== null);
+  const serious = list.filter((f) => f.severity === 'blocker' || f.severity === 'major');
+  if (!serious.length) return null;
+  const ids = serious.map((f) => `${String(f.id ?? '?')} [${String(f.severity)}]`).join(', ');
+  return {
+    summary: `Salvaged from review-partial.json: ${list.length} finding(s) recorded before `
+      + `the session died (${error ?? 'no error text'}), including ${serious.length} `
+      + `blocker/major: ${ids}. The review is PARTIAL — a dimension that never reported is `
+      + 'unreviewed, not clean.',
+    blocked: null,
+    verdict: 'changes-requested',
+    findings: list,
+  };
+}
+
 /**
  * A phase that executed its case list and recorded failures did NOT succeed.
  *
@@ -411,6 +492,61 @@ function failedCases(name: string, data: Record<string, unknown> | null | undefi
   const other = results.filter((r) => r.result === 'blocked' || r.result === 'skipped').length;
   const tail = other ? ` (${other} further case(s) blocked or never run)` : '';
   return `${name} recorded ${failed.length} failing case(s) of ${results.length}: ${ids}${tail}`;
+}
+
+/**
+ * Refuse a UI-evidence pack that reports success and proves nothing.
+ *
+ * `UI_EVIDENCE_SCHEMA` requires `screenshots` and `observations` to be PRESENT,
+ * and an empty array satisfies that. So a session can return both empty, record
+ * ok, and publish nothing at all: `publish.ts` returns null for a pack with no
+ * attachments, no observations and no conformance rows, which is silent by
+ * design — there is genuinely nothing to say. The hole is that nothing says it
+ * to anyone. The reviewer gets an MR with no evidence comment and the journal
+ * says the phase passed.
+ *
+ * Two shapes are refused, and only these two:
+ *
+ *   - nothing at all. Either kind of evidence on its own is complete: the
+ *     prompt promises a non-visual change that zero screenshots and a full
+ *     table is a whole pack, and that promise has to hold here too.
+ *   - an observation table in which no value moved. A row proving something
+ *     did NOT regress is legitimate, so one unchanged row among changed ones
+ *     is a control, not a defect. A table where NOTHING moved is the defect:
+ *     it is published as the evidence for a change it does not show.
+ *
+ * What this does NOT ask is whether the evidence is honest. A value painted
+ * onto the page before the capture, or a base read from a checkout the session
+ * altered to produce it, both yield packs that pass here — those are guarded at
+ * the Bash surface in `git-guard.cjs` and in the phase prompt. This answers the
+ * cheaper question underneath: is there any evidence at all.
+ *
+ * ui-evidence is `onFail: warn`, so a refusal flags the pack and lets the run
+ * carry on to the MR. Evidence quality should not hold a correct fix.
+ */
+export function uiEvidenceRefusal(
+  data: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!data) return null;
+  const arr = (k: string): unknown[] => (Array.isArray(data[k]) ? data[k] as unknown[] : []);
+  const shots = arr('screenshots');
+  const observations = arr('observations') as Array<{ before?: string; after?: string }>;
+  const conformance = arr('designConformance');
+
+  if (shots.length === 0 && observations.length === 0 && conformance.length === 0) {
+    return 'ui-evidence produced no screenshots, no observations and no design comparison.'
+      + ' The phase reported success and there is nothing for a reviewer to look at,'
+      + ' so the MR carries no evidence comment at all.';
+  }
+
+  const moved = observations
+    .filter((o) => String(o.before ?? '').trim() !== String(o.after ?? '').trim());
+  if (observations.length > 0 && moved.length === 0) {
+    return `ui-evidence published ${observations.length} measured value(s) and every one is`
+      + ' unchanged between the base and this branch. A table in which nothing moved is not'
+      + ' evidence of a change.';
+  }
+  return null;
 }
 
 /**
@@ -586,7 +722,14 @@ export async function runTicket(
     }
   }
 
-  const decision = decideResume(readJournal(iid));
+  // A journal from another project (journalproject.ts) is never resumed, whatever
+  // its status: it is archived after the claim below and the ticket starts fresh.
+  const existing = readJournal(iid);
+  const journalHome = existing ? journalOwner(existing) : null;
+  if (existing && journalHome?.kind === 'foreign') {
+    log.warn(`#${iid} — the run journal on disk is not this project's (${journalHome.why}); starting fresh`);
+  }
+  const decision = decideClaim(existing, journalHome);
   if (decision.kind === 'refuse') {
     log.warn(`#${iid} — ${decision.reason}`);
     return { runId: '', iid, status: 'refused', reason: decision.reason };
@@ -626,12 +769,17 @@ export async function runTicket(
 
   if (decision.kind === 'fresh' && decision.archive) {
     const moved = archiveRun(iid, decision.archive);
-    if (moved) log.info(`#${iid} had a completed run — archived to ${moved}`);
+    if (moved) {
+      log.info(`#${iid} had a ${journalHome?.kind === 'foreign' ? 'run from another project' : 'completed run'} `
+        + `— archived to ${moved}`);
+    }
   }
 
+  const project = currentProjectKey() ?? undefined;
   let j: RunJournal = resuming ? decision.journal : {
     runId,
     iid,
+    project,
     title: issue.title,
     url: issueUrl(iid),
     createdAt: Date.now(),
@@ -641,6 +789,8 @@ export async function runTicket(
 
   if (resuming) {
     j.status = 'running';
+    // An unstamped journal proven ours by its ticket url is adopted here.
+    if (!j.project && project) j.project = project;
     delete j.blockedWhy;
     delete j.blockedAt;
     writeJournal(j);
@@ -782,11 +932,19 @@ export async function runTicket(
   // Validate, do not trust. A journal survives a crash, a manual cleanup, or a
   // `git worktree prune`, so a resumed run can carry a path that no longer
   // exists — and passing a missing cwd to the SDK surfaces as the maximally
-  // confusing `spawn node ENOENT`, which looks like a broken PATH.
-  let worktree: string | undefined = j.worktree && existsSync(j.worktree) ? j.worktree : undefined;
-  if (j.worktree && !worktree) {
-    log.warn('recorded worktree is gone — re-leasing', { was: j.worktree });
+  // confusing `spawn node ENOENT`, which looks like a broken PATH. Which CLONE
+  // it was cut from does not matter — any clone of this project pushes to it —
+  // but one that is provably a checkout of another project is dropped here,
+  // and the first phase that needs a worktree leases one from WORK_REPO.
+  const recorded = worktreeToResume(j, journalHome, join(WT_ROOT, worktreeName(iid, runId)));
+  if (recorded.kind === 'block') return finish(j, 'blocked', recorded.why);
+  if (recorded.kind === 'gone') log.warn('recorded worktree is gone — re-leasing', { was: recorded.was });
+  if (recorded.kind === 'drop') {
+    log.warn(`#${iid} — ${recorded.why}; dropping it and re-leasing from WORK_REPO`, { was: recorded.was });
+    j = updateJournal(iid, { worktree: undefined }) ?? j;
+    updateRun(runId, { worktree: null });
   }
+  let worktree: string | undefined = recorded.kind === 'keep' ? recorded.worktree : undefined;
   // A RESUMED run never leases: ensureLeases() only calls leaseWorktree() when
   // `worktree` is unset, and the line above just set it from the journal. So
   // the seeding that composes `.claude` — the skills, rules and agents every
@@ -833,6 +991,7 @@ export async function runTicket(
     for (const name of phasesOwedByRound(j.mrFeedback, j.phases, window)) forced.add(name);
   }
 
+  const researchIdx = list.findIndex((p) => p.name === 'research');
   let i = 0;
   while (i < list.length) {
     const phase = list[i]!;
@@ -850,6 +1009,46 @@ export async function runTicket(
     if (phase.onDemand) {
       i += 1;
       continue;
+    }
+
+    // The Not a Bug gate — between `research` and whatever follows it.
+    //
+    // Research could not reproduce the reported bug. That verdict no longer
+    // labels the ticket by itself: stopping a real bug as Not a Bug silently
+    // drops a defect someone reported, and a reproduction that missed the
+    // reporter's data, role or environment looks exactly like a correct one.
+    // So a QA reviewer sees the evidence first. `approved` labels the ticket
+    // and stops the run; anything else is the context research missed, and
+    // research runs again with it in its prompt (see reproductionBlock).
+    //
+    // Checked before shouldSkip so a resume parked here lands on it whichever
+    // phase follows research, and latched by `approved`: a person who later
+    // overrules the label (remove it, add the entry label back) resumes into
+    // `plan` rather than being asked again.
+    if (researchIdx !== -1 && i === researchIdx + 1 && bugReproductionEnabled() && !j.notABugApproval?.approved) {
+      const decision = notABugDecision(prior.research ?? readArtifact(iid, 'research.json'));
+      if (decision.stop) {
+        const gate = await checkApprovalGate({
+          iid,
+          gate: 'notABug',
+          requestBody: notABugApprovalRequestBody(decision.repro, cfg.labels.notABug || undefined),
+          attachments: reproAttachments(iid, decision.repro.evidence),
+        });
+        j = readJournal(iid) ?? j;
+        if (gate.verdict === 'unavailable') return finish(j, 'blocked', NOT_A_BUG_UNAVAILABLE);
+        if (gate.verdict === 'pending') {
+          return finish(j, 'parked',
+            'awaiting Not a Bug confirmation — a QA reviewer comments `approved` on the ticket to '
+            + 'close it as Not a Bug, or comments what was missed to have it reproduced again');
+        }
+        if (gate.verdict === 'feedback') {
+          forced.add('research');
+          i = researchIdx;
+          continue;
+        }
+        const reason = await declareNotABug(iid, ticket.title, runId, decision.repro);
+        return finish(j, 'aborted', reason);
+      }
     }
 
     // A phase with no implementation STOPS the run — including 'code' phases.
@@ -1275,6 +1474,35 @@ export async function runTicket(
           log.warn(`testcases salvaged from partial results — ${cases.length} case(s) recorded`);
         }
       }
+
+      // The same bargain again for review, a phase whose 30-minute kill returns
+      // no verdict at all. A review that dies returns nothing, the death is
+      // infra so no lap is spent, and the conductor re-attempts the identical
+      // fan-out until MAX_INFRA_ATTEMPTS is gone and the run blocks — two of
+      // those are on this machine's ledger, neither produced a finding. Its
+      // prompt now rewrites review-partial.json as each agent lands, so what
+      // the session had already established survives it; salvagedReview()
+      // decides what that is worth.
+      //
+      // The mtime guard is the same hazard verify's salvage names above: a
+      // partial from an EARLIER lap is still on disk when the cleanup did not
+      // run, and reading it as this session's would hand back findings this lap
+      // never made. Written before this session started means it is not this
+      // session's.
+      if (r.cfg.name === 'review' && !r.out.ok && !r.out.blocked) {
+        const path = artifactPath(iid, 'review-partial.json');
+        const fresh = existsSync(path) && statSync(path).mtimeMs >= r.startedAt;
+        const partial = fresh
+          ? readArtifact<{ findings?: unknown }>(iid, 'review-partial.json')
+          : null;
+        const salvaged = salvagedReview(partial?.findings ?? [], r.out.error ?? null);
+        if (salvaged) {
+          r.out.data = salvaged;
+          r.out.ok = true;
+          writeArtifact(iid, r.cfg.artifact ?? 'findings.json', salvaged);
+          log.warn(`review salvaged from partial findings — ${salvaged.findings.length} recorded`);
+        }
+      }
     }
 
     // Reconciled strictly in phase order, whatever order they finished in:
@@ -1309,7 +1537,14 @@ export async function runTicket(
       const deliverableFail = r.out.ok && r.cfg.name === 'design'
         ? designDeliverableRefusal(iid, r.out.data as Record<string, unknown> | null)
         : null;
-      const phaseOk = r.out.ok && caseFail === null && deliverableFail === null;
+      // And again for `ui-evidence`, whose empty arrays satisfy its schema and
+      // publish as nothing. warn-on-fail, so this names a hollow pack without
+      // holding the MR behind it.
+      const evidenceFail = r.out.ok && r.cfg.name === 'ui-evidence'
+        ? uiEvidenceRefusal(r.out.data as Record<string, unknown> | null)
+        : null;
+      const phaseOk = r.out.ok && caseFail === null && deliverableFail === null
+        && evidenceFail === null;
       const accountAction = phaseOk ? undefined : r.out.accountAction;
 
       recordPhase(iid, {
@@ -1329,7 +1564,8 @@ export async function runTicket(
         // adding one means touching infraAttemptsOf, the dashboard and unblock
         // for no decision any of them make differently), so this text is the
         // only thing in the journal that tells the two apart.
-        error: accountAction ?? r.out.error ?? r.out.blocked ?? caseFail ?? deliverableFail ?? undefined,
+        error: accountAction ?? r.out.error ?? r.out.blocked
+          ?? caseFail ?? deliverableFail ?? evidenceFail ?? undefined,
       });
       j = readJournal(iid) ?? j;
 
@@ -1401,19 +1637,16 @@ export async function runTicket(
 
       prior[r.cfg.name] = r.out.data;
       // Research reproduced (or failed to reproduce) the reported bug on the
-      // unfixed base branch. Only a complete not-reproduced verdict stops the
-      // run — see src/conductor/reproduction.ts for why the bar is that high.
-      // Evaluated only on a research that RAN this pass: a resumed run skips
-      // research, which is how a person overrules Not a Bug (remove the label,
-      // add the entry label back) without the run re-stopping itself.
+      // unfixed base branch. A complete not-reproduced verdict is acted on by
+      // the Not a Bug gate at the top of the loop, which a person resolves; all
+      // that is left here is saying why an incomplete one did not arm it, and
+      // posting a complete reproduced verdict on the ticket before the fix is
+      // planned (declareReproduced checks the same bar and logs what it skips).
       if (r.cfg.name === 'research' && bugReproductionEnabled()) {
         const decision = notABugDecision(r.out.data);
         if (!decision.stop && decision.note) log.warn(`research: ${decision.note}`);
-        if (decision.stop) {
-          const reason = await declareNotABug(iid, ticket.title, runId, decision.repro);
-          claim({ kind: 'stop', status: 'aborted', reason, noRemediation: true }, r.cfg.name);
-          continue;
-        }
+        const repro = reproductionOf(r.out.data);
+        if (repro?.verdict === 'reproduced') await declareReproduced(iid, repro);
       }
       if (r.cfg.name === 'implement' && activeRound(j.mrFeedback)?.status === 'fixing') {
         const addressed = addressedFeedbackOf(r.out.data);

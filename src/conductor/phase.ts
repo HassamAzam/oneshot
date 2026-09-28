@@ -14,10 +14,10 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { appendFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  BASE_ENV, DRY_RUN, ROOT, artifactDir, envOr, modelFor, runDir,
+  BASE_ENV, DRY_RUN, ROOT, artifactDir, envOr, modelFor, projectConfig, projectSessionEnv, runDir,
   type PhaseConfig,
 } from '../lib/config.js';
-import { MEMORY } from '../lib/config.js';
+import { DEFAULT_MAX_TURNS, MEMORY } from '../lib/config.js';
 import { otelBaseEnv, otelSpawnEnv } from '../lib/otel.js';
 import { phaseEnv, type PhaseIdentity } from '../lib/ids.js';
 import { recordUsage, looksLikeUsageLimit, parkForQuota } from '../lib/quota.js';
@@ -225,7 +225,9 @@ function mcpServers(): Record<string, unknown> {
       env: {
         ...BASE_ENV,
         GITLAB_PERSONAL_ACCESS_TOKEN: token,
-        GITLAB_API_URL: envOr('ONESHOT_GITLAB_API', 'https://gitlab.arbisoft.com/api/v4'),
+        // The GitLab GITLAB_REPO_URL names, so a session's tools and the
+        // conductor's own calls can only ever reach the same instance.
+        GITLAB_API_URL: projectConfig().gitlab.apiUrl,
         USE_PIPELINE: 'true',
         USE_GITLAB_WIKI: 'false',
         USE_MILESTONE: 'false',
@@ -272,6 +274,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
 
   const env: Record<string, string> = {
     ...BASE_ENV,
+    ...projectSessionEnv(),
     ...otelBaseEnv(),
     ...otelSpawnEnv(identity),
     ...phaseEnv(identity, {
@@ -366,7 +369,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       prompt: input.prompt,
       options: {
         model,
-        maxTurns: cfg.maxTurns ?? 40,
+        maxTurns: cfg.maxTurns ?? DEFAULT_MAX_TURNS,
         cwd,
         // Coding phases get the full Claude Code harness on top of ours; the
         // rest get a plain (cheaper) system prompt.

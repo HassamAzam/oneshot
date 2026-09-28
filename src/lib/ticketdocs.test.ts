@@ -28,6 +28,23 @@ test("skips another project's upload rather than fetching it with this token", (
   assert.deepEqual(uploadLinks(md, 'description', PROJECT), []);
 });
 
+test('with no project id to compare against, an id-scoped link is skipped rather than guessed', () => {
+  const md = [
+    `[spec.docx](/uploads/${SECRET}/spec.docx)`,
+    `[flow](/-/project/42/uploads/${SECRET}/flow.pdf)`,
+    `<img src="https://gitlab.example.com/-/project/42/uploads/${SECRET}/ui.png" />`,
+  ].join('\n');
+  assert.deepEqual(
+    uploadLinks(md, 'description', { url: PROJECT.url, id: null }).map((l) => l.filename),
+    ['spec.docx'],
+  );
+});
+
+test('the project URL matches whatever its case, since a person typed it', () => {
+  const md = `![shot](https://GitLab.example.com/Acme/ERP/uploads/${SECRET}/shot.png)`;
+  assert.deepEqual(uploadLinks(md, 'description', PROJECT).map((l) => l.filename), ['shot.png']);
+});
+
 test('keeps the filename as linked, so the API path matches what GitLab stored', () => {
   const [l] = uploadLinks(`[x](/uploads/${SECRET}/Payroll%20Rules%20v2.xlsx)`, 'description', PROJECT);
   assert.equal(l!.filename, 'Payroll%20Rules%20v2.xlsx');
