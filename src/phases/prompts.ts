@@ -487,8 +487,13 @@ Load the \`bug-reproduction\` skill and follow it. In short:
   depends on one of them, you cannot run it here — record 'inconclusive', name the
   integration, and go back to the trace. Do not spend turns proving it is unreachable;
   that answer is the same on every run and is already in front of you.
+- Before driving the browser, plan: the role/flag/data the bug needs and one query that
+  finds that data, the route to the screen, and the value that means buggy vs correct.
 - Follow the ticket's steps, measure what the bug is about, screenshot into the run's
-  artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`.
+  artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`. Screenshot for EITHER
+  verdict: a 'reproduced' or 'not-reproduced' verdict is posted on the ticket with those
+  screenshots attached, and one with no \`.png\` in \`evidence\` posts nothing (a
+  'not-reproduced' one is treated as 'inconclusive'). Finish with the skill's checklist.
 
 **'not-reproduced' pauses this run for a QA reviewer**: your evidence is posted on the ticket and in
 Slack, and only if QA confirms is the ticket taken out of the loop (labelled Not a Bug when the project
@@ -880,6 +885,11 @@ Produce an implementation plan an engineer could follow without re-deriving the 
 - Reuse before writing. Search \`common/\`, the app's \`utils.py\`, and
   \`frontend/src/**/utils/\` for helpers that already do this, and name them.
 - Steps are ordered and each names the files it touches and its layer.
+- No step writes a Jest test, or any other frontend unit test. This repo's Jest toolchain has
+  rotted (Babel/enzyme/ESM drift) and CI never runs it, so such a step is unpassable by
+  construction -- \`testcases\` and \`verify\` are both already instructed to refuse it.
+  Frontend behaviour is covered by the Playwright cases \`testcases\` writes against the real
+  app; a plan step asking for one anyway spends \`implement\` on code nothing will ever run.
 - Set \`migrations\` true if any model, field, constraint or relation changes.
 - Risks are concrete: what breaks, and the mitigation.
 - Every item in research's \`unknowns\` ends in exactly one place: resolved (say how, with

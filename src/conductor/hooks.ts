@@ -151,11 +151,16 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
     ],
     PostToolUse: [
       { matcher: WRITE_TOOLS, hooks: [guard('migration-standards.cjs')], timeout: 20 },
+      { matcher: WRITE_TOOLS, hooks: [guard('script-standards.cjs')], timeout: 20 },
       // log-event stays last so a blocked write is still recorded.
       { hooks: [guard('log-event.cjs')], timeout: 10 },
     ],
     SessionStart: [
       { hooks: [guard('budget-gate.cjs')], timeout: 20 },
+      // Self-gates to `testcases` and injects that skill's traps list. An
+      // instruction to read a file is a request; a phase that has died at its
+      // cap drops reads first. Injecting costs zero turns and cannot be skipped.
+      { hooks: [guard('traps-brief.cjs')], timeout: 15 },
     ],
   };
 }
