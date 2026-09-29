@@ -10,8 +10,8 @@ import assert from 'node:assert/strict';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
-  envEntry, isPlaceholder, legacySelectors, localRemotePath, parseRepoUrl, readEnv, redactUrl, repoFromEnv, repoKey,
-  resolvePath, resolveTarget, scopedEnvName,
+  envEntry, isPlaceholder, isTargetName, legacySelectors, localRemotePath, parseRepoUrl, readEnv, redactUrl,
+  repoFromEnv, repoKey, resolvePath, resolveTarget, scopedEnvName,
 } from './repourl.cjs';
 
 const ROOT = '/opt/oneshot';
@@ -290,6 +290,16 @@ test('resolveTarget without a URL resolves nothing by default, and ignores scope
   assert.equal(t.wtRoot.path, '');
   // An explicit plain path still stands on its own.
   assert.equal(resolveTarget({ WORK_REPO: '/srv/erp' }, ROOT).workRepo.path, '/srv/erp');
+});
+
+test('isTargetName accepts the names the parser gives a project, and refuses the rest', () => {
+  for (const name of ['erp', 'erp-v2', 'my_app', 'my.app']) {
+    assert.equal(isTargetName(name), true, name);
+    assert.equal(parseRepoUrl(`git@gitlab.example.com:acme/${name}.git`).name, name);
+  }
+  for (const name of ['', 'ERP', 'erp.git', '.erp', 'erp.', 'erp?', 'acme/erp']) {
+    assert.equal(isTargetName(name), false, name);
+  }
 });
 
 // --------------------------------------------------------- legacy selectors

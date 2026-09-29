@@ -106,6 +106,28 @@ function invalid(raw, why) {
 /** A GitLab path segment: what GitLab itself allows in a group or project path. */
 const SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
 
+/** Whether `s` is a path segment parseRepoUrl() accepts: SEGMENT, and not ending in a dot. */
+function isPathSegment(s) {
+  return SEGMENT.test(s) && !s.endsWith('.');
+}
+
+/**
+ * Whether `name` is a target name resolveTarget() can derive for a GitLab
+ * project: a path segment parseRepoUrl() accepts, in lower case as the name
+ * always is, that does not end in `.git`. parseRepoUrl() strips that suffix
+ * from a clone URL before taking the name, and GitLab refuses a project path
+ * ending in it, so `erp.git` is the tail of erp's clone URL, never a project.
+ * (It strips one suffix, so `…/erp.git.git` still parses to `erp.git` — a URL
+ * no project has.)
+ *
+ * config.ts judges each phases.json `targets` entry by this rather than by a
+ * copy of it: an entry that fails it is no project's target, and would drop
+ * its phase on every project without a word.
+ */
+function isTargetName(name) {
+  return typeof name === 'string' && isPathSegment(name) && name === name.toLowerCase() && !name.endsWith('.git');
+}
+
 /**
  * Pages GitLab serves UNDER a project path without the `/-/` separator — its
  * older route style, still what some bookmarks and pasted links look like.
@@ -197,7 +219,7 @@ function parseRepoUrl(raw) {
   if (segments.length < 2) {
     throw invalid(input, 'it needs a namespace and a project, like group/project');
   }
-  const bad = segments.find((s) => !SEGMENT.test(s) || s.endsWith('.'));
+  const bad = segments.find((s) => !isPathSegment(s));
   if (bad) throw invalid(input, `'${bad}' is not a valid GitLab path segment`);
   if (TOP_ROUTES.has(segments[0].toLowerCase())) {
     throw invalid(input, `'/${segments[0]}/…' is a GitLab page, not a project — paste the project's own URL`);
@@ -694,6 +716,7 @@ module.exports = {
   defaultWtRoot,
   resolvePath,
   resolveTarget,
+  isTargetName,
   LEGACY_SELECTOR_KEYS,
   legacySelectors,
   SKIP_REPO_CHECK_VAR,
