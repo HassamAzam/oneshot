@@ -174,6 +174,11 @@ Your cases are those rows, made runnable: seed the Home item first, and start fr
   steps say what the user does that triggers it.
 - **Never guess a status code, message or limit.** If the diff and the ticket do not state it,
   it is not an `expected` result.
+- **Quote every option, button and screen name exactly** as the ticket, the diff or the approver
+  spells it, typos included ("notificaiton" if that is what the app shows). Never pluralise,
+  shorten or reword a label: Cypress selects by that text, and a paraphrase matches nothing. When
+  the change is server-only and no label is visible to you, say so in `summary` rather than
+  inventing one.
 - **`expected` is one observable oracle**: something on screen, or a saved value you can see,
   that decides pass or fail. "The page works correctly" decides nothing.
 - **No duplicates.** Two cases that would pass or fail together are one case.
