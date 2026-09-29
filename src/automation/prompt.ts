@@ -74,7 +74,7 @@ export const AUTOMATION_LIMITS: { outOfReach: readonly string[]; usuallyPartly: 
 function limitsBlock(): string {
   const bullets = (xs: readonly string[]): string => xs.map((x) => `- ${x}`).join('\n');
   return `### Automatable for Cypress
-- \`yes\`: the whole case can be driven and asserted in one browser against seeded data.
+- \`yes\`: the whole case can be driven and asserted in one browser against prepared test data.
 - \`partly\`: the UI part can be, but at least one check needs a person or a tool outside the
   browser. The \`reason\` says which check.
 - \`no\`: the check the case exists for is out of reach. The \`reason\` names the limit.
@@ -252,17 +252,20 @@ Writing rules:
 - One behaviour per case. Usually 6–20 cases, never more than 60.
 - \`scenario\` starts with "Verify that".
 - Every case is a full flow, from login to the screen where the user sees the effect:
-  - \`precondition\` seeds the data through the API so the effect is visible BEFORE the change
-    ("Via API: a teammate joined today, so a joiner update shows on Home › Team Updates"), then
-    names the role and the starting state. '' only when there truly is nothing to set up.
+  - \`precondition\` says in plain words what must already exist so the effect is visible BEFORE
+    the change ("A teammate joined today, so a joiner update shows on Home › Team Updates"), then
+    the role and the starting state. What must exist, never how to create it.
+    '' only when there truly is nothing to set up.
   - \`steps\` start with "Log in as <role>", open the screen where the effect shows and see the
-    seeded item there, go to the page the change is on, make the change, save, and go back.
-    UI actions that name the control ("Click **Save** on the Profile tab"), one per element,
-    without numbering. Never API calls in steps.
+    precondition's item there, go to the page the change is on, make the change, save, and go
+    back. UI actions that name the control ("Click **Save** on the Profile tab"), one per
+    element, without numbering.
+  - No API calls anywhere in a case: no "Via API", endpoints, scripts or seed steps in the
+    precondition or the steps. Creating test data is a separate job.
   - \`expected\` is the effect where the user sees it ("no longer shown under Home › Team
     Updates"), not only that a setting was saved. One observable result that decides pass or fail.
 - When a control's options each do something different, write one case per option, each with
-  its own seeded data and its own check; then the cases about the control itself (default,
+  its own precondition and its own check; then the cases about the control itself (default,
   options offered, several at once, cross icon removes, Save confirmation).
 - No duplicates. ${ids}
 - Never write a real password, token or key into a case: name the account ("log in as an HR

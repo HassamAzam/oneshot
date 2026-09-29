@@ -119,28 +119,28 @@ QA runs each case, and the Cypress spec built from it, from a fresh login to the
 user sees the result. A case that stops at "the setting was saved" cannot tell a build where the
 setting does nothing from one where it works. So every case has three parts:
 
-1. **`precondition` creates the data through the API** so the effect is visible **before** the
-   change is applied. Start each seeded item with `Via API:`, name who it belongs to and when it
-   is dated, then the role and the starting state. For example:
-   - `Via API: a teammate in the user's team joined today, so a joiner update shows on Home ›
-     Team Updates. The user has no blocked team updates.`
-   - `Via API: a teammate's birthday (or work anniversary) is today, so a wish card shows in
-     Home › Announcements.`
-   - `Via API: a teammate is on leave this week` / `is attending a training this week` /
-     `left the team today`.
+1. **`precondition` states, in plain words, what must already exist** so the effect is visible
+   **before** the change is applied: the data, who it belongs to and when it is dated, then the
+   role and the starting state. For example:
+   - `A teammate in the user's team joined today, so a joiner update shows on Home › Team
+     Updates. The user has no blocked team updates.`
+   - `A teammate's birthday (or work anniversary) is today, so a wish card shows in Home ›
+     Announcements.`
+   - `A teammate is on leave this week` / `is attending a training this week` / `left the team
+     today`.
 
-   The automation suite seeds these through the ERP's e2e endpoints (announcements, team updates,
-   leaves, trainings, people). Name the data, not the endpoint.
+   Say **what** must exist, never **how** to create it: no API calls, endpoints, scripts or seed
+   steps. Setting up that data is a separate job, handled outside these cases.
 2. **`steps` walk the whole flow**, the way a person does it: `Log in as <role>` · open the screen
-   where the effect will show and **see the seeded item there** (the baseline) · go to the page the
-   change is on · make the change · save · go back to the screen where the effect shows.
+   where the effect will show and **see the precondition's item there** (the baseline) · go to the
+   page the change is on · make the change · save · go back to the screen where the effect shows.
 3. **`expected` is the effect where the user sees it**, phrased the way QA writes it: "The
    teammate's joiner update is no longer shown under Home › Team Updates". Not only "the dropdown
    kept the value". When the change shows up somewhere else (Home, a report, a list), the case
    checks it there.
 
 **One case per option.** When a control's options each do something different (each blocked
-update hides a different Home item), write one case per option, each with its own seeded data and
+update hides a different Home item), write one case per option, each with its own precondition and
 its own check on the screen that option affects. Then the cases about the control itself:
 - the default (nothing selected);
 - the options it offers;
@@ -156,22 +156,24 @@ The team's own suite reads this way. From its Profile sheet:
 | On Basic Information, Edit clicked | User selects Automated birthday wish notification and taps Save | Verify that system blocks the birthday wish notification from Home > Notification section |
 | On Basic Information, Edit clicked | User clicks the cross icon | Verify that system removes the selected option from the field |
 
-Your cases are those rows, made runnable: seed the Home item first, and start from the login.
+Your cases are those rows, made runnable: say what must be on Home first, and start from the
+login.
 
 ### Writing rules
 
 - **One behaviour per case.** "Verify that the form saves and the email is sent" is two cases,
   and they get different `automatable` answers.
 - **`scenario` starts with "Verify that".**
-- **`precondition` seeds the data through the API and names the role and starting state**:
-  "Via API: an employee has a submitted leave request. Their line manager has nothing pending."
-  See "Every case is a full flow". `''` only when there truly is nothing to set up.
+- **`precondition` says what must exist, and the role and starting state, in plain words**: "An
+  employee has a submitted leave request. Their line manager has nothing pending." See "Every
+  case is a full flow". `''` only when there truly is nothing to set up.
 - **`steps` start with `Log in as <role>` and are UI actions that name the control**: "Click
-  **Save** on the Documents tab", not "save the form". One action per step. The API belongs in
-  the precondition, never in the steps ("Send a POST to …"): QA reads steps as
-  things a person does on screen. A behaviour you can only see through the API is a case only
-  when the diff itself defines the response (a status code or message in the code), and then its
-  steps say what the user does that triggers it.
+  **Save** on the Documents tab", not "save the form". One action per step.
+- **No API calls anywhere in a case**: not in the precondition ("Via API: …", "seed …", "call the
+  … endpoint") and not in the steps ("Send a POST to …"). QA reads a case as what a person does
+  and sees on screen; creating test data is a separate job. A behaviour you can only see through
+  the API is a case only when the diff itself defines it (a message in the code), and then its
+  steps say what the user does on screen that triggers it.
 - **Never guess a status code, message or limit.** If the diff and the ticket do not state it,
   it is not an `expected` result.
 - **Quote every option, button and screen name exactly** as the ticket, the diff or the approver
@@ -194,11 +196,11 @@ A good case:
 | --- | --- |
 | id | `TC-03` |
 | scenario | Verify that blocking "Team (member) joiners update" hides a teammate's joiner update from Home › Team Updates |
-| precondition | Via API: a teammate in the user's team joined today, so a joiner update shows on Home › Team Updates. The user has no blocked team updates. |
+| precondition | A teammate in the user's team joined today, so a joiner update shows on Home › Team Updates. The user has no blocked team updates. |
 | steps | Log in as the employee · Open **Home** and confirm the teammate's joiner update is shown under **Team Updates** · Open Profile › **Basic Information** · Click **Edit** · In **Blocked Team Updates**, select "Team (member) joiners update" · Click **Save** · Open **Home** |
 | expected | The teammate's joiner update is no longer shown under Home › Team Updates |
 | automatable | `yes` |
-| reason | The joiner is seeded through the API; the dropdown, Save and the Team Updates card are all in the page |
+| reason | The dropdown, Save and the Team Updates card are all in the page, and the joiner is ordinary test data |
 
 ### Choosing the module
 
@@ -211,7 +213,7 @@ the same module, which someone then has to merge by hand.
 
 ## Automatable for Cypress
 
-- `yes`: the whole case can be driven and asserted in one browser against seeded data.
+- `yes`: the whole case can be driven and asserted in one browser against prepared test data.
 - `partly`: the UI part can be, but at least one check needs a person or a tool outside the
   browser. The `reason` says which check.
 - `no`: the check the case exists for is out of reach. The `reason` names the limit.
@@ -232,8 +234,8 @@ Usually `partly`:
 Usually `yes`:
 - File upload through `selectFile`.
 - UI state backed by an API: what the page shows after the server saved it.
-- Data that has to be dated relative to today (a teammate's leave this week): the suite seeds it
-  through its API helpers before the test, so it is still `yes`. Say in `precondition` what the
+- Data that has to be dated relative to today (a teammate's leave this week): it is set up before
+  the test like any other test data, so it is still `yes`. Say in `precondition` what the
   date must be.
 
 Two users one after the other is **not** a simultaneous session: log in as the employee, submit,
@@ -290,9 +292,10 @@ Drop TC-07. Add a case for an expired session." `nextId` is `TC-13`.
 
 - [ ] Ids are unique, at least two digits, and in order (on REVISE: unchanged ids untouched, new ones from `nextId`).
 - [ ] Every scenario starts with "Verify that", and every case tests one behaviour.
-- [ ] Every case is a full flow: the precondition seeds what the check needs (`Via API: …`), the
-      steps start with `Log in as …` and see the seeded item before the change, and `expected` is
-      checked on the screen where the user sees the effect.
+- [ ] Every case is a full flow: the precondition says in plain words what must exist, the steps
+      start with `Log in as …` and see that item before the change, and `expected` is checked on
+      the screen where the user sees the effect.
+- [ ] No API calls, endpoints or seed steps anywhere in a case.
 - [ ] Options that do different things have one case each.
 - [ ] Every `reason` names the Cypress limit, or says in a few words why the case is reachable.
 - [ ] `module` is an existing module name copied exactly, or a short new Title Case name.
