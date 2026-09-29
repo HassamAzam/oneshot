@@ -91,10 +91,9 @@ test('the not-ready note lists each reason with its fix and ends with the finger
 
 // ---------------------------------------------------------------- versions
 
-test('the v1 note has the seven-column table, the CSV, both approvers and how to approve or ask for changes', () => {
+test('the cases note shares only the cases: a title line, the seven-column table, the CSV and one line for the approvers', () => {
   const body = casesBody(view());
-  assert.match(body, /^\*\*Automation test cases: v1\*\* for #101 · module \*\*Profile\*\*/);
-  assert.match(body, /Written from the merged change !501 \(`fix\/profile-docs` → `dev`\)\. 3 cases: 1 automatable, 1 partly, 1 not automatable\./);
+  assert.match(body, /^\*\*Automation test cases v1\*\* · #101 · Profile · 3 cases\n/);
   assert.ok(body.includes('| ID | Scenario | Pre-condition | Steps | Expected | Automatable | Reason |'));
   const rows = body.split('\n').filter((l) => l.startsWith('| **TC-'));
   assert.equal(rows.length, 3);
@@ -104,22 +103,19 @@ test('the v1 note has the seven-column table, the CSV, both approvers and how to
   assert.match(rows[1]!, /\| 🟡 partly \|/);
   assert.match(rows[2]!, /\| ⛔ no \|/);
   assert.match(body, /📎 \[automation-testcases-101-v1\.csv\]\(\/uploads\/abc\/automation-testcases-101-v1\.csv\)/);
-  assert.match(body, /^@anosha\.saeed @arsal\.tariq, please review v1\.$/m);
-  assert.match(body, /- \*\*Approve:\*\* comment the single word `approved`\. The cases are then written to the test-case sheet \(new tab `TestCases_Profile`\), and this ticket gets `Automation Done`\./);
-  assert.match(body, /- \*\*Request changes:\*\* comment what to change in plain words and name cases by id/);
-  assert.match(body, /Oneshot writes v2 with only those changes and posts it here\. Every other case keeps its text and id\./);
-  assert.match(body, /Only comments from @anosha\.saeed and @arsal\.tariq posted after this one count\. If the same round has both a change request and `approved`, the change request wins\./);
-  assert.doesNotMatch(body, /What changed/, 'a first version changed nothing');
+  // The @mentions are what notify the approvers that a version is up.
+  assert.match(body, /^@anosha\.saeed @arsal\.tariq — reply `approved`, or reply with the changes you want\.$/m);
   assert.equal(lastLine(body), `<!-- oneshot:automation:cases:v1:${casesHash(V1)} -->`);
-
-  const existing = casesBody(view({ moduleTabIsNew: false, csvMarkdown: null, open: [mr({ iid: 400, state: 'opened' })] }));
-  assert.match(existing, /\(tab `TestCases_Profile`\)/);
-  assert.match(existing, /📎 _The CSV could not be attached\._/);
-  assert.match(existing, /⚠️ Ignored: !400 is still open, so it is not what shipped\./);
-  assert.match(casesBody(view({ lostHistory: true })), /was lost on the oneshot side, so this list was written fresh/);
+  // Nothing else around the table.
+  for (const gone of [/Written from/, /Ignored/, /What changed/, /\*\*Approve:\*\*/, /Only comments from/, /^---$/m]) {
+    assert.doesNotMatch(body, gone);
+  }
+  const noCsvOpenMr = casesBody(view({ moduleTabIsNew: false, csvMarkdown: null, open: [mr({ iid: 400, state: 'opened' })] }));
+  assert.match(noCsvOpenMr, /📎 _The CSV could not be attached\._/);
+  assert.doesNotMatch(noCsvOpenMr, /!400/, 'an ignored open MR is not reported in the comment');
 });
 
-test('the v2 note says what changed since v1, from the computed diff and the session\'s notes', () => {
+test('a later version still shares only the cases: no change list, even with a diff and session notes', () => {
   const v2 = [
     V1[0]!,
     { ...V1[2]!, expected: 'A 403 page is shown' },
@@ -129,13 +125,9 @@ test('the v2 note says what changed since v1, from the computed diff and the ses
     v: 2, cases: v2, hash: casesHash(v2), moduleTabIsNew: false,
     diff: diffCases(V1, v2), notes: ['Changed TC-03: expects a 403 now'], feedbackAuthors: ['anosha.saeed'],
   }));
-  assert.match(body, /\*\*What changed since v1\*\* \(requested by @anosha\.saeed\)/);
-  assert.match(body, /^- Added \*\*TC-04\*\*: Verify that an expired session is sent to the login page$/m);
-  assert.match(body, /^- Changed \*\*TC-03\*\*: expected result$/m);
-  assert.match(body, /^- Removed \*\*TC-02\*\*$/m);
-  assert.match(body, /^- Note: Changed TC-03: expects a 403 now$/m);
-  assert.ok(body.indexOf('What changed') < body.indexOf('| ID |'), 'the change list comes before the table');
-  assert.match(body, /please review v2\./);
+  assert.match(body, /^\*\*Automation test cases v2\*\* · #101 · Profile · 3 cases\n/);
+  assert.doesNotMatch(body, /What changed|Added \*\*TC-04\*\*|Removed \*\*TC-02\*\*|Note: /);
+  assert.equal(body.split('\n').filter((l) => l.startsWith('| **TC-')).length, 3);
   assert.equal(lastLine(body), `<!-- oneshot:automation:cases:v2:${casesHash(v2)} -->`);
 });
 
@@ -152,8 +144,7 @@ test('the v2 note names comments and approvals that arrived while it was being w
   }));
   assert.match(body, /_Comments from @anosha\.saeed posted while v2 was being written are not in this version\. They will be applied in v3\._/);
   assert.match(body, /_@arsal\.tariq's `approved` came in while v2 was being written, so it applied to v1\. Please approve v2 if it looks right\._/);
-  // A line straight after a list would join its last bullet in GitLab's renderer.
-  assert.match(body, /- Changed \*\*TC-01\*\*: expected result\n\n_Comments from/);
+  assert.ok(body.indexOf('_Comments from') < body.indexOf('| ID |'), 'the round lines sit under the title, before the table');
 });
 
 // ------------------------------------------------------------------ the rest
@@ -263,8 +254,8 @@ test('a very long list is cut in the note and points to the CSV', () => {
   assert.ok(rows.length > 0 && rows.length < MAX_CASES, `${rows.length} rows kept`);
   const lastKept = `TC-${String(rows.length).padStart(2, '0')}`;
   assert.match(body, new RegExp(`_The table stops at \\*\\*${lastKept}\\*\\* \\(${rows.length} of 60 cases\\): GitLab cannot take a longer comment\\. The attached CSV has every case\\._`));
-  // What is never cut: the way to approve it, and the marker that stops a re-post.
-  assert.match(body, /please review v1\./);
+  // What is never cut: the line that tags the approvers, and the marker that stops a re-post.
+  assert.match(body, /reply `approved`, or reply with the changes you want\./);
   assert.equal(lastLine(body), `<!-- oneshot:automation:cases:v1:${casesHash(cases)} -->`);
 
   const noCsv = casesBody(view({ cases, hash: casesHash(cases), csvMarkdown: null }));

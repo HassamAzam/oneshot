@@ -394,8 +394,8 @@ nobody.
    ▼ ready
  one session writes v1 ──▶ comment with the table + CSV, label "Automation Test Case Review"
    │
-   ├─ a QA approver asks for changes ──▶ one session writes v2 with ONLY those changes, and the
-   │                                     comment says what changed ──▶ back to review
+   ├─ a QA approver asks for changes ──▶ one session writes v2 with ONLY those changes, posted
+   │                                     as a comment with just the cases ──▶ back to review
    ▼ a QA approver comments `approved`
  sheet (module tab + tracker row, read back) ──▶ "Automation Test Case Review" and "Loop" off,
                                                   "Automation Done" on, a done comment with both links

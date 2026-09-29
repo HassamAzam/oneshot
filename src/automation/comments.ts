@@ -92,17 +92,6 @@ const AUTOMATABLE: ReadonlySet<string> = new Set<Automatable>(['yes', 'partly', 
 const FIELDS: ReadonlyArray<keyof AutomationCase> =
   ['id', 'scenario', 'precondition', 'steps', 'expected', 'automatable', 'reason'];
 
-/** How a changed field is named in the "What changed" list, in the note's own column words. */
-const FIELD_LABEL: Record<keyof AutomationCase, string> = {
-  id: 'id',
-  scenario: 'scenario',
-  precondition: 'pre-condition',
-  steps: 'steps',
-  expected: 'expected result',
-  automatable: 'automatable',
-  reason: 'reason',
-};
-
 export interface CaseDiff {
   added: string[];
   removed: string[];
@@ -334,10 +323,6 @@ function linkUrl(s: string): string {
   return s.replace(/[()\s]/g, (ch) => encodeURIComponent(ch));
 }
 
-function mrRef(m: MrRef): string {
-  return `!${m.iid} (${codeSpan(m.source)} → ${codeSpan(m.target)})`;
-}
-
 const ICON: Record<Automatable, string> = { yes: '✅', partly: '🟡', no: '⛔' };
 
 /** A sentence from model text, without the doubled full stop the template's own `.` would add. */
@@ -399,29 +384,6 @@ function caseRow(c: AutomationCase): string {
     + `${steps || '—'} | ${tableCell(c.expected)} | ${ICON[c.automatable] ?? ''} ${c.automatable} | ${tableCell(c.reason)} |`;
 }
 
-function countLine(cases: AutomationCase[]): string {
-  const n = (a: Automatable): number => cases.filter((c) => c.automatable === a).length;
-  return `${cases.length} cases: ${n('yes')} automatable, ${n('partly')} partly, ${n('no')} not automatable.`;
-}
-
-function whatChanged(view: VersionView): string {
-  const notes = view.notes ?? [];
-  if (view.v <= 1 || (!view.diff && !notes.length)) return '';
-  const byId = new Map(view.cases.map((c) => [c.id, c]));
-  const lines: string[] = [];
-  for (const id of view.diff?.added ?? []) {
-    lines.push(`- Added **${mdText(id)}**: ${mdText(byId.get(id)?.scenario ?? '')}`);
-  }
-  for (const ch of view.diff?.changed ?? []) {
-    lines.push(`- Changed **${mdText(ch.id)}**: ${ch.fields.map((f) => FIELD_LABEL[f]).join(', ')}`);
-  }
-  for (const id of view.diff?.removed ?? []) lines.push(`- Removed **${mdText(id)}**`);
-  for (const n of notes) lines.push(`- Note: ${mdText(n)}`);
-  if (!lines.length) lines.push('- No case changed.');
-  const by = view.feedbackAuthors?.length ? ` (requested by ${view.feedbackAuthors.map(at).join(', ')})` : '';
-  return `**What changed since v${view.v - 1}**${by}\n${lines.join('\n')}`;
-}
-
 /** The lines about this round's own history. Separate paragraphs: a line straight after a list joins its last item. */
 function roundLines(view: VersionView): string[] {
   const out: string[] = [];
@@ -441,45 +403,29 @@ function roundLines(view: VersionView): string[] {
   return out;
 }
 
+/**
+ * The comment shares the test cases and nothing else: QA asked for the list, not
+ * a report around it. Which MR it came from, the open MRs ignored and the
+ * per-version change list stay in the run's journal and log. Only the
+ * round-history lines survive, and they appear only when a reviewer's comment
+ * was set aside, which a reviewer must not have to discover by rereading.
+ */
 function casesHead(view: VersionView): string {
-  const merged = view.merged.length
-    ? `Written from the merged change${view.merged.length > 1 ? 's' : ''} ${view.merged.map(mrRef).join(', ')}.`
-    : 'Written from the ticket: no merged change was recorded.';
-  const parts = [
-    `**Automation test cases: v${view.v}** for #${view.iid} · module **${mdText(view.module)}**`,
-    `${merged} ${countLine(view.cases)}`,
-  ];
-  if (view.open.length) {
-    const ids = listOf(view.open.map((m) => `!${m.iid}`));
-    parts.push(view.open.length > 1
-      ? `⚠️ Ignored: ${ids} are still open, so they are not what shipped.`
-      : `⚠️ Ignored: ${ids} is still open, so it is not what shipped.`);
-  }
-  if (view.lostHistory) {
-    parts.push('_The earlier review state for this ticket was lost on the oneshot side, so this list was written fresh._');
-  }
-  const changed = whatChanged(view);
-  if (changed) parts.push(changed);
-  parts.push(...roundLines(view));
-  return parts.join('\n\n');
+  const title = `**Automation test cases v${view.v}** · #${view.iid} · ${mdText(view.module)} · ${view.cases.length} cases`;
+  return [title, ...roundLines(view)].join('\n\n');
 }
 
+/**
+ * The CSV, one line naming who reviews, and the marker. The @mentions are what
+ * notify the approvers that a new version is up; the rest of the old how-to
+ * block went with the request to keep the comment to the cases.
+ */
 function casesTail(view: VersionView): string {
   const who = view.approvers.map(at);
-  const tab = `${view.moduleTabIsNew ? 'new tab' : 'tab'} ${codeSpan(view.moduleTab)}`;
-  const done = codeSpan(view.doneLabel ?? 'Automation Done');
-  const ask = who.length ? `${who.join(' ')}, please review v${view.v}.` : `Please review v${view.v}.`;
-  const only = who.length
-    ? `Only comments from ${listOf(who)} posted after this one count.`
-    : 'Only comments from the QA approvers in config/reviewers.json posted after this one count.';
+  const ask = `${who.length ? `${who.join(' ')} — ` : ''}reply \`approved\`, or reply with the changes you want.`;
   return `📎 ${view.csvMarkdown ?? '_The CSV could not be attached._'}
 
----
 ${ask}
-- **Approve:** comment the single word \`approved\`. The cases are then written to the test-case sheet (${tab}), and this ticket gets ${done}.
-- **Request changes:** comment what to change in plain words and name cases by id, for example "TC-03 should expect a 403", "drop TC-07", or "add a case for an expired session". Oneshot writes v${view.v + 1} with only those changes and posts it here. Every other case keeps its text and id.
-
-${only} If the same round has both a change request and \`approved\`, the change request wins.
 
 ${marker('cases', `v${view.v}:${view.hash}`)}`;
 }

@@ -275,8 +275,8 @@ find and read again.
    session sends the user to the login page".
 
 On a revision the coverage checklist is not a to-do list. Add a case only when someone asked for
-one. The conductor computes its own diff of the two versions and shows it to QA next to your
-`changes`, so an edit nobody asked for is visible.
+one. The conductor computes its own diff of the two versions and records it with your
+`changes`, so an edit nobody asked for is on record even though the comment shows only the cases.
 
 A worked example. v1 has TC-01 to TC-12, and the approver writes: "TC-03 should expect a 403.
 Drop TC-07. Add a case for an expired session." `nextId` is `TC-13`.
