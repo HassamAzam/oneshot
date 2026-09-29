@@ -704,7 +704,9 @@ sees; the switch is what this label adds. Every phase holds the work to the same
      feature — renders v1 or v2 at the SAME URL. Nothing else knows there are two versions:
      no v2 URLs, no second sidebar entry.
   4. The switch is rendered by that wrapper, so it sits in the same place in both versions,
-     says which one the user is on, and flips in place: same URL, no page reload.
+     says which one the user is on, and flips in place: same URL, no page reload. It is the
+     wrapper's, not a screen's, so it sits outside any approved design: the screens are built
+     to the design, the switch goes above them, and it is never a departure from the design.
   5. The choice is the user's own — a second account on the same browser does not inherit
      it — and it survives a reload, and a logout and login.
   6. A user who never touched the switch gets v2; the switch is the way back.
@@ -741,8 +743,12 @@ behave differently, give v2 its own.`,
   - v1's main flow after switching, expecting what \`origin/${baseBranch()}\` does today
     (\`regression\`) — the case that proves v1 was left alone;
   - the choice surviving a reload, and a logout and login (\`state\`);
-  - a user who never touched the switch landing on v2, and a second account on the same
-    browser not inheriting the first one's choice (\`boundary\`).
+  - a user who never touched the switch landing on v2 (\`boundary\`). Its first step removes the
+    stored choice, because the harness carries browser storage from one case to the next: that
+    restores the precondition, it does not reach a version.
+A second account not inheriting the choice is point 5 too, but it is not a case here: \`verify\`
+has one login, so the case would end \`blocked\`, which no gate refuses. \`review\` checks it in
+the code instead.
 The points above are part of this ticket's oracle, alongside its acceptance criteria: a switch
 case's \`expected\` comes from them, never from the diff. Steps reach a version by clicking the
 switch, the way a user does — never by writing the stored choice directly, which would leave
@@ -757,6 +763,11 @@ exactly what the label exists to prevent. So is v1 importing from \`<module>_v2/
 the feature the switch point does not wrap, a v2 URL or sidebar entry of its own, and the
 stored choice's key spelled in more than one place.
 
+Point 5's second account is yours to prove, because no browser case can: \`verify\` has one
+login. Read where the choice is read and written, and confirm each one keys it by the signed-in
+user's username, read at that moment. A username cached at module scope or once per page load is a \`major\` finding:
+ERP's logout does not reload the page, so the next person on the tab gets the last one's choice.
+
 v2's own copies of v1's COMPONENTS are what the label asked for, so they are not a duplication
 finding — tell \`util-reuse-agent\` so when you dispatch it, and do not raise them from
 \`ponytail-review\`. A copied HELPER (a util, a constant, an API call) is a finding as usual.
@@ -766,15 +777,23 @@ switch are in scope because of the label, and the description will not say so.`,
   verify: () => `Reach every version THROUGH THE SWITCH, clicking it the way a user does. Never set the stored
 choice directly — a browser storage write, a database row, a query parameter: a case that skips
 the switch has not tested it. Log out through the app's own logout, never by clearing browser
-storage, which wipes the very choice a case is measuring. v1's regression cases pass only when
-v1 behaves as it does on \`origin/${baseBranch()}\`, whatever v2 now does.`,
+storage, which wipes the very choice a case is measuring. The one write you may make is SETUP
+for the never-touched case: the harness saves the browser's storage when it logs in and loads it
+into every later case, phase and lap, so a choice an earlier case (or \`ui-evidence\`) made is
+still there. Remove that one key — not the rest of storage, which holds the login — then load
+the feature's URL, and say so in the case's steps. That restores the precondition; it does not
+reach a version. v1's regression cases pass only when v1 behaves as it does on
+\`origin/${baseBranch()}\`, whatever v2 now does.`,
 
-  'ui-evidence': () => `Your 'before' is already running: v1, reached through the switch on YOUR instance. Shoot v1 and
-then v2 of each changed screen at the same viewport, data and path, with captions that say which
-is which, plus one shot of the switch itself in each state. A base-branch 'before' from a second
-instance is optional here — take it only if the cheapness check above allows — and when you do,
-v1-through-the-switch must match it: a difference between the two is v1 having changed, and it
-goes in \`summary\` as well as in the caption.`,
+  'ui-evidence': () => `Your 'before' is already running: v1, reached through the switch on YOUR instance. That is the
+one exception to the rule above that a 'before' comes from a second instance: v1 IS the base
+branch's behaviour, kept runnable on purpose. Shoot v1 and then v2 of each changed screen at the
+same viewport, data and path, with captions that say which is which, plus one shot of the switch
+itself in each state. A base-branch 'before' from a second instance is optional here — take it
+only if the cheapness check above allows — and when you do, compare the page BELOW the switch:
+the switch is new in both versions, so its absence from the base-branch shot is expected and is
+not a difference. Any other difference between the two is v1 having changed, and it goes in
+\`summary\` as well as in the caption.`,
 
   mr: () => `The description says this ships as a beta: where v1 and v2 live, the switch point and the
 routes it wraps, where the choice is kept and that it does not follow a user to another browser,
@@ -1829,7 +1848,9 @@ pack is what verify's shots do not show:
     $ONESHOT_HOME/scripts/app.cjs ensure --ref ${baseBranch()}\`, shoot the 'before' at the
     \`baseUrl\` it prints, and the 'after' on \`$ONESHOT_PORT\`. Caption the omission only if
     that instance will not come up cheaply; never pass an unchanged region of this branch off as
-    a before.
+    a before.${betaRequested(ctx, 'ui-evidence') ? `
+    This ticket is a beta, the one exception: its block below makes v1, reached through the
+    switch on this instance, the 'before'.` : ''}
   - the states a passing test never reaches: empty, loading, error, and the permission-denied
     view if the change touches a gated screen.
   - one shot per high-blast case that PASSED${highPassed.length ? ` (${highPassed.map((x) => x.id).join(', ')})` : ''}, so the pack shows the feature

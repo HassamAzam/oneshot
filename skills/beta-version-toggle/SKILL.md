@@ -125,6 +125,9 @@ component={requireAuthentication(requireLogsVersion(ProjectLogsListing, ProjectL
 
 - **Rendered by the switch point**, above whichever page it renders — so it sits in
   the same place in both versions, and v1 needs no edit to carry it.
+- **Outside any approved design.** A ticket that also carries `Design` gets mockups
+  without it: build the screens to them and put the switch above them. It is never a
+  departure from the design.
 - An MUI `Switch` in a `FormControlLabel`, labelled from `DISPLAY_STRINGS` so it says
   which version the user is on; checked means v2. Competencies' `LABELS.LEGACY_VIEW` /
   `LABELS.CURRENT_VIEW` ("Legacy View" / "Current View", `displayText.js`) is the house
@@ -187,17 +190,21 @@ it costs a model, a migration and an endpoint.
   `summary`, with why.
 - **testcases** — the criteria in v2; the switch both ways at the same URL; v1's main
   flow as a `regression` case against the base branch; the choice across a reload and
-  a logout/login; a fresh user on v2; a second account on the same browser not
-  inheriting the choice. Every step reaches a version by clicking the switch.
+  a logout/login; a fresh user on v2, whose first step removes the stored choice (the
+  harness carries storage between cases). Every other step reaches a version by
+  clicking the switch. No second-account case: verify has one login, so `review`
+  checks that in the code.
 - **review** — reads every v1 file in `git diff --stat origin/<base>...HEAD`; anything
   but a backward-compatible extension is a `major`, and so is v1 importing v2, an
-  unwrapped route, a v2 URL or sidebar entry, or the storage key spelled twice. v2's
+  unwrapped route, a v2 URL or sidebar entry, the storage key spelled twice, or a
+  username cached instead of read when the choice is read or written (§5). v2's
   copies of v1's components are the requirement, not a duplication finding.
 - **verify** — clicks the switch, never writes the stored choice; logs out through the
-  app, never by clearing storage.
+  app, never by clearing storage. The one exception is setup: before the fresh-user
+  case it removes the stored choice's key, and only that key.
 - **ui-evidence** — v1 through the switch and v2 of each changed screen, same viewport
-  and data, and the switch in both states. v1-through-the-switch should match the
-  base branch; a difference is v1 having changed.
+  and data, and the switch in both states. Below the switch, v1 should match the base
+  branch; the switch itself is new, and any other difference is v1 having changed.
 - **mr** — the description says where v1 and v2 live, which routes the switch wraps,
   where the choice is kept and that it is per browser, the default, the v1 files v2
   extended, and how to retire v1 (§8).
@@ -235,6 +242,7 @@ Write this into the MR, because the person who does it will not have read the ti
   deploy to change.
 - **Do not give v2 its own URLs or sidebar entry.**
 - **Do not write the stored choice from a test, a script or a verify session** — reach
-  each version through the switch, or the switch is untested.
+  each version through the switch, or the switch is untested. Removing it before the
+  fresh-user case is setup, not a way to a version.
 - **Do not write a Jest test for the switch.** Jest is rotted here and CI does not run
   it; the Playwright cases `testcases` writes are the coverage.

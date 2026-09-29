@@ -377,7 +377,16 @@ test('testcases writes a v1 regression case and reaches each version by the swit
   // The phase's own rule is that only the criteria and the ticket are an oracle;
   // the switch appears in neither, so without this its cases have no source.
   assert.match(p, /part of this ticket's oracle, alongside its acceptance criteria/);
-  assert.match(p, /a second account on the same browser not inheriting the first one's choice/);
+});
+
+test('the never-touched case starts by removing the stored choice, and no case needs a second login', () => {
+  // The harness reloads the storage it saved at login into every later case, so an
+  // earlier case's choice would land this one on v1; and verify has exactly one
+  // login, so a second-account case could only end blocked, which no gate refuses.
+  const p = flat('testcases');
+  assert.match(p, /a user who never touched the switch landing on v2 \(`boundary`\)\. Its first step removes the stored choice/);
+  assert.match(p, /it is not a case here: `verify` has one login/);
+  assert.doesNotMatch(p, /a second account on the same browser not inheriting/);
 });
 
 test('verify reaches each version through the switch, never by writing the stored choice', () => {
@@ -388,8 +397,43 @@ test('verify reaches each version through the switch, never by writing the store
   assert.match(p, /Log out through the app's own logout, never by clearing browser storage/);
 });
 
+test('verify may remove the stored choice only to set up the never-touched case', () => {
+  const p = flat('verify');
+  assert.match(p, /Never set the stored choice directly/);
+  assert.match(p, /The one write you may make is SETUP for the never-touched case/);
+  assert.match(p, /Remove that one key — not the rest of storage, which holds the login/);
+});
+
+test('review proves in code that the choice is per user, since no browser case can', () => {
+  const p = flat('review');
+  assert.match(p, /Point 5's second account is yours to prove, because no browser case can/);
+  assert.match(p, /A username cached at module scope or once per page load is a `major` finding/);
+});
+
 test('ui-evidence takes its before from v1 on its own instance and checks it against the base', () => {
   const p = flat('ui-evidence');
   assert.match(p, /v1, reached through the switch on YOUR instance/);
-  assert.match(p, /a difference between the two is v1 having changed/);
+  assert.match(p, /Any other difference between the two is v1 having changed/);
+});
+
+test('ui-evidence compares v1 with the base branch below the switch, which the base never has', () => {
+  // The switch renders above v1 too, so a whole-page match could never hold and
+  // every beta MR taking a base shot would claim that v1 had changed.
+  const p = flat('ui-evidence');
+  assert.match(p, /compare the page BELOW the switch/);
+  assert.match(p, /its absence from the base-branch shot is expected and is not a difference/);
+});
+
+test('the rule that a before comes from a second instance names the beta exception, on a beta only', () => {
+  assert.match(flat('ui-evidence'), /This ticket is a beta, the one exception: its block below makes v1/);
+  assert.doesNotMatch(flat('ui-evidence', ctx(ticket({ labels: ['Loop'] }))), /This ticket is a beta/);
+});
+
+test('the switch sits outside an approved design, so Design and Beta together ask for one thing', () => {
+  // design is never told about the beta, so its mockups carry no switch; without
+  // this, implement is told both to build exactly to them and to add the switch.
+  for (const phase of ['implement', 'ui-evidence']) {
+    assert.match(flat(phase), /it sits outside any approved design/, phase);
+    assert.match(flat(phase), /it is never a departure from the design/, phase);
+  }
 });
