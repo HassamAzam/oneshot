@@ -350,7 +350,8 @@ back out of it, so a Slack that is down costs a notification and never a verdict
 `Design` decides what a change looks like. `Beta` decides how it ships. Put it on a ticket
 alongside `Loop` and the change is built as a **new version of the feature (v2) beside the one
 users have today (v1)**, not as an edit to it, with a switch that lets the end user go back to v1
-and forward again.
+and forward again. On a ticket carrying both, the approved design covers the screens and the
+switch sits above them, outside it — so it is never counted as a departure from the design.
 
 **The layout is Project Logs v2's; the switch is new.** Project Logs v2 is a sibling
 `project_logs_v2/` directory beside `project_logs/`, one route wrapper (`LogsVersionRoute.js`) that
@@ -367,10 +368,10 @@ work — and each of those phases is handed the same contract and its own part i
 |---|---|
 | `plan` | names v1's directory, the `<module>_v2/` files, the routes the switch wraps, any v1 file v2 must extend, and where the choice is kept; the switch gets its own steps |
 | `implement` | builds v2 beside v1, then the switch point and the switch as their own commit; extends a v1 file only backward-compatibly, and names each one |
-| `testcases` | the criteria in v2, the switch both ways, v1's main flow as a regression case, the choice across a reload and a re-login, the default, a second account not inheriting it |
-| `review` | reads every v1 file the diff touches — anything but a backward-compatible extension is a `major` finding, and so is v1 importing v2 |
-| `verify` | reaches each version by clicking the switch, never by writing the stored choice, and logs out through the app |
-| `ui-evidence` | v1 (through the switch) and v2 of each changed screen, and the switch in both states |
+| `testcases` | the criteria in v2, the switch both ways, v1's main flow as a regression case, the choice across a reload and a re-login, and the default |
+| `review` | reads every v1 file the diff touches — anything but a backward-compatible extension is a `major` finding, and so is v1 importing v2 — and checks in the code that the choice is keyed by the signed-in user, since `verify` has one login and cannot try a second account |
+| `verify` | reaches each version by clicking the switch, never by writing the stored choice, and logs out through the app; it removes the stored choice only as setup for the default case |
+| `ui-evidence` | v1 (through the switch) and v2 of each changed screen, and the switch in both states; against a base-branch shot, only the page below the switch is compared |
 | `mr` | says where v1 and v2 live, where the choice is kept, and what retiring v1 later takes |
 
 **The label decides both halves.** `src/phases/prompts.ts` renders the Beta block only when the
