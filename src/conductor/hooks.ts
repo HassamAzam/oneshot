@@ -158,6 +158,7 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
     PreToolUse: [
       { hooks: [guard('pause-check.cjs')], timeout: 15 },
       { matcher: WRITE_TOOLS, hooks: [guard('write-scope.cjs')], timeout: 15 },
+      { matcher: WRITE_TOOLS, hooks: [guard('frontend-test-guard.cjs')], timeout: 15 },
       { matcher: BASH, hooks: [guard('git-guard.cjs')], timeout: 20 },
       { matcher: MR_TOOLS, hooks: [guard('mr-gate.cjs')], timeout: 15 },
       { matcher: READ_OR_BASH, hooks: [guard('secret-guard.cjs')], timeout: 15 },

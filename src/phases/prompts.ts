@@ -789,7 +789,9 @@ Work out what this ticket actually requires, and trace the code that implements 
   still a requirement — put it in \`acceptanceCriteria\` and name the document it came from.
   Try each document linked outside GitLab with WebFetch; most sit behind a company login, and
   one that returns a sign-in page or nothing goes in \`unknowns\` by URL. Never guess what an
-  unopened document says.
+  unopened document says. Chat permalinks are the one class not worth the call: a Slack
+  archive URL answers 403 to every unauthenticated fetch and this session is given no Slack
+  tool, so it can never be read from here. Record it in \`unknowns\` by URL and move on.
 - Trace the real execution path and cite \`file:line\` for each step. Do not describe the
   architecture in general terms — follow THIS ticket's path.
 - While you are in those files, record what ALREADY EXISTS that this change could build on,
