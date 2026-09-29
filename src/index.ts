@@ -44,7 +44,7 @@ import {
   deregister, heartbeat, liveConductorIds, liveConductors, peersEverSeen, register,
 } from './lib/fleet.js';
 import { renewPromotion } from './lib/promotion.js';
-import { getIssue, projectUrl } from './lib/gitlab.js';
+import { checkReadAccess, getIssue, projectUrl } from './lib/gitlab.js';
 import { alert } from './lib/slack.js';
 import { checkIdentity, describeIdentity } from './lib/identity.js';
 import { log } from './lib/log.js';
@@ -266,10 +266,6 @@ async function banner(): Promise<void> {
 }
 
 /**
- * Refuse to start on a misconfiguration that would only surface as a confusing
- * failure three phases into a real ticket.
- */
-/**
  * Make sure something is shipping this desk's runs to the board.
  *
  * The conductor and the collector are separate processes by design — the
@@ -304,7 +300,11 @@ function ensureCollector(): void {
   }
 }
 
-function preflight(): boolean {
+/**
+ * Refuse to start on a misconfiguration that would only surface as a confusing
+ * failure three phases into a real ticket.
+ */
+async function preflight(): Promise<boolean> {
   let fatal = false;
 
   const auth = auditAuth();
@@ -336,6 +336,23 @@ function preflight(): boolean {
   if (!envOr('GITLAB_TOKEN')) {
     log.error('GITLAB_TOKEN is not set. cp .env.example .env and fill it in.');
     fatal = true;
+  }
+
+  const readAccess = await checkReadAccess(repo);
+  if (readAccess.rejected) {
+    log.error(`GITLAB_READ_TOKEN cannot read ${readAccess.project} — ${readAccess.reason}.`);
+    log.error('  Reads prefer that token, so every board read is refused. Replace it, or unset');
+    log.error('  GITLAB_READ_TOKEN so reads fall back to this desk\'s own credential.');
+    fatal = true;
+  } else if (!readAccess.ok) {
+    log.error(`GITLAB_READ_TOKEN cannot see ${readAccess.project} — ${readAccess.reason}.`);
+    log.error('  Reads prefer that token, so the board comes back empty and this desk claims');
+    log.error('  nothing, while the banner above reports a project and an identity resolved');
+    log.error('  from GITLAB_TOKEN instead. Either give it access to the project, or unset');
+    log.error('  GITLAB_READ_TOKEN so reads fall back to this desk\'s own credential.');
+    fatal = true;
+  } else if (readAccess.reason) {
+    log.warn(`GITLAB_READ_TOKEN access ${readAccess.project ? `to ${readAccess.project} ` : ''}${readAccess.reason}`);
   }
 
   if (!WORK_REPO || !existsSync(WORK_REPO)) {
@@ -596,7 +613,7 @@ async function main(): Promise<void> {
   if (ensureClaudeDir(ROOT).length) log.ok('.claude    composed in the conductor repo');
 
   await banner();
-  if (!preflight()) process.exit(1);
+  if (!(await preflight())) process.exit(1);
   ensureCollector();
   // Before the first ticket is even looked at: one warm app for this loop, in its own
   // worktree. It is the shared babel cache under the seed repo's node_modules that
