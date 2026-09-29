@@ -1,103 +1,72 @@
 # Why a real bug fails to reproduce
 
-Six reasons a defect that genuinely exists comes back `not-reproduced`, from the
-QA team's own history. Walk this list **before** recording that verdict — it is
-the one that can close a real ticket.
-
-Most are false negatives, not near misses: the bug was there, the run looked
-straight at it, and the conditions were wrong. The last one runs in **both**
-directions — it also manufactures a discrepancy that is not a defect at all.
+**One principle: you ran it under different conditions than the reporter, and the
+difference is the bug.** Below are the five conditions that differ most often,
+from the QA team's own history. Walk them before recording `not-reproduced` —
+that is the verdict that closes a real ticket.
 
 ---
 
-### 1. You are a superuser and the bug is about permissions
+### 1. The account
 
-**The most common cause by a distance.** The test accounts carry superuser
-access, so anything gated on a role, a permission or a group behaves *correctly*
-for you and wrongly for the person who reported it. Nothing is visibly broken,
-because nothing is denied to you.
+Test accounts are superusers, so anything gated on a role, permission or group
+behaves correctly for you and wrongly for the reporter. **The most common cause
+by a distance.** A permission ticket also has two halves — the right person can
+act, the wrong person is stopped — and reproducing one proves half of it.
 
-A permission ticket also has two sides, and one of them is easy to skip: that the
-right person **can** act, and that the wrong person **is stopped**. Reproducing
-only the first proves half of it.
+**Do:** confirm the account matches the ticket's role and is not a superuser. No
+non-superuser account available is `inconclusive` / `blocker: access`.
 
-**Do:** before `not-reproduced` on anything touching visibility, access, or an
-action being allowed — confirm the account's role matches the one the ticket
-names, and that it is not a superuser. No non-superuser account available is
-`inconclusive` with `blocker: access`, never `not-reproduced`.
+### 2. The record
 
-### 2. The record is not the record the bug needs
+The screen loaded and nothing looked wrong — on a row that lacks the property the
+defect depends on. A different row of the same table is not the same test.
 
-The steps ran, the screen loaded, nothing looked wrong — on a record that does
-not have the property the defect depends on. A different row of the same table is
-not the same test.
+**Do:** name the record's shape in the plan, find one with a targeted query, say
+which you used. None here is `blocker: data`.
 
-**Do:** name the record's required shape in the plan, find one with a targeted
-query, and say which record you used. If none exists here, that is
-`blocker: data`.
+### 3. The content
 
-### 3. Long content means one long WORD, not a long sentence
+"Long content" usually means one long *word* — a URL, an unbroken identifier.
+Prose wraps and looks fine; a single token cannot, and that is what overflows the
+cell or clips the row.
 
-A layout bug that needs "long content" usually needs a single unbroken token — a
-URL, a long email address, an identifier with no spaces. Ordinary long prose
-wraps and looks fine; one long word cannot wrap, and that is what overflows the
-cell, pushes the column, or clips the row.
+**Do:** paste a real URL, not lorem ipsum.
 
-**Do:** reproduce with a real unbroken string, not lorem ipsum. Paste a URL.
+### 4. The order
 
-### 4. The bug is in the edit path, not the create path
+Fill the form and submit: works. Fill it, **edit a field, then submit**: fails.
+The defect is in the transition — stale values, a dirty-form flag, validation
+that only runs on first render.
 
-Fill the form, submit, it works. Fill it, **edit a field, then submit** — and it
-fails. The defect lives in the transition, not the initial state: stale values,
-a dirty-form flag, validation that only runs on first render.
+**Do:** run both orders before concluding anything.
 
-**Do:** where a ticket involves a form, run both orders before concluding
-anything. Submitting directly once is not a reproduction of a bug reported on a
-form that was changed.
+### 5. The precision — the one that cuts both ways
 
-### 5. Money is rounded on screen and exact underneath — the only one that cuts both ways
+Costing and report screens show whole dollars or two decimal places; the backend
+calculates at full precision. One fact, two opposite errors:
 
-On costing and report screens amounts show as whole dollars, or as floats rounded
-to two decimal places. The backend calculates at full precision, to however many
-places the arithmetic produces. That creates two opposite mistakes:
+- **False `reproduced`:** a screen value compared against an API or DB value
+  differs *by design*. That discrepancy is there on a correct build.
+- **False `not-reproduced`:** the drift only accumulates at scale. Under a narrow
+  date filter it is sub-cent; across a wide one it reaches $2–3.
 
-- **A discrepancy you "reproduce" by comparing a screen value against an API or
-  DB value is not the bug.** Those two numbers differ by design. Reproducing a
-  reported "wrong total" that way is a false `reproduced` — it will be there on a
-  perfectly correct build.
-- **A genuine rounding bug only appears at scale.** Over a short date range the
-  drift is under a cent and invisible; over a long one it accumulates, and a
-  report pulled across a wide filter comes out $2–3 apart. Run it over a narrow
-  range and a real defect records as `not-reproduced`.
-
-**Do:** compare like with like — screen against screen, or raw against raw, and
-say in `observed` which you used. Where the ticket reports a discrepancy over a
-period, use **that** period, not a convenient short one. A difference of a few
-dollars across a wide date filter is the shape this bug has; treating it as noise
-loses it, and treating rounded-vs-exact as the bug invents one.
-
-### 6. The conditions were not the ticket's conditions
-
-The environment, browser, viewport, period or account you used differed from the
-one reported, and the difference is the bug. Already in the skill's rules, and it
-is what the five above are each a specific instance of.
-
-**Do:** state the conditions you ran in `reason`, so a reader can see which one
-differed from the report.
+**Do:** compare like with like — screen against screen or raw against raw — and
+say which in `observed`. Use the period the ticket reports, not a shorter one.
 
 ---
 
 ## How these get caught
 
-Not by re-reading the code — by asking, of a `not-reproduced`: **whose account,
-which record, what content, which order, over what range, rounded or raw?** Every
-entry above is a different answer to one of those, and each was found the same
-way: someone re-ran it under the reporter's conditions and the bug appeared
-immediately.
+Ask of any `not-reproduced`: **whose account, which record, what content, which
+order, over what range, rounded or raw?** Each entry is one answer.
 
-## Adding to this file
+## Adding and retiring
 
-An entry earns a place when a reproduction said `not-reproduced` (or
-`reproduced` for the wrong defect) and a person later showed otherwise. Write
-the class, not the ticket — "long content means one long word" fires on a screen
-nobody has seen yet; "ticket #123's link was too long" does not.
+An entry earns its place by **changing a verdict**. Write the class, not the
+incident — "long content means one long word" fires on a screen nobody has seen
+yet; "the link on that payroll ticket was too long" does not.
+
+Retire one the same way. If no reproduction has cited an entry and no `blocker`
+in the run telemetry matches its cause, it is not firing. An entry nobody has
+used is furniture, not knowledge.
