@@ -2,6 +2,7 @@ import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mrOpenNote, promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
+import { gateSubjectDigest } from '../lib/artifacts.js';
 import { ROOT, phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -121,6 +122,68 @@ test('implement drops a plan-gated skill the plan rules out', () => {
   })));
   assert.ok(!got.includes('django-migration-standards'));
   assert.ok(!got.includes('script-writing-standards'));
+});
+
+// ------------------------------------------- ui-evidence only claims a real approval
+
+const DESIGN = {
+  applicable: true,
+  screens: [{ id: 's1', name: 'Completed list', screenshot: 's1.png' }],
+};
+
+function uiEvidencePrompt(gate: Record<string, unknown>, design: unknown): string {
+  return promptFor(cfg('ui-evidence'), {
+    ticket: ticket(), runId: 'r-test', lap: 0,
+    journal: { designApproval: gate },
+    prior: { design },
+  } as unknown as PromptCtx);
+}
+
+test('ui-evidence pairs against the design when the approval covers it', () => {
+  const gate = {
+    requestTs: 'x', approved: true, feedback: [],
+    approvedDigest: gateSubjectDigest(DESIGN),
+  };
+  assert.match(uiEvidencePrompt(gate, DESIGN), /is this what I approved/);
+});
+
+test('ui-evidence stops claiming approval once the design was rewritten', () => {
+  // The caption is a factual claim to the reviewer -- "a human approved these
+  // screens before the code was written". Against a design rewritten after the
+  // sign-off that is false, and saying nothing is better than captioning the
+  // wrong screens as approved.
+  const gate = {
+    requestTs: 'x', approved: true, feedback: [],
+    approvedDigest: gateSubjectDigest({ ...DESIGN, screens: [] }),
+  };
+  assert.ok(!uiEvidencePrompt(gate, DESIGN).includes('is this what I approved'));
+});
+
+test('an approval predating digests still pairs, so upgrades do not regress', () => {
+  const gate = { requestTs: 'x', approved: true, feedback: [] };
+  assert.match(uiEvidencePrompt(gate, DESIGN), /is this what I approved/);
+});
+
+test('plan does not tell itself a stale design was approved', () => {
+  const gate = {
+    requestTs: 'x', approved: true, feedback: [],
+    approvedDigest: gateSubjectDigest({ ...DESIGN, screens: [] }),
+  };
+  const planDesign = {
+    applicable: true,
+    screens: [{ id: 's1', name: 'Completed list', purpose: 'p', mockupHtml: 's1.html', screenshot: 's1.png' }],
+  };
+  const stale = promptFor(cfg('plan'), {
+    ...ctx(ticket()), journal: { designApproval: gate }, prior: { design: planDesign },
+  } as unknown as PromptCtx);
+  assert.ok(!stale.includes('A human approved these screens'));
+  assert.match(stale, /No approval covers this version/);
+
+  const covering = { ...gate, approvedDigest: gateSubjectDigest(planDesign) };
+  const fresh = promptFor(cfg('plan'), {
+    ...ctx(ticket()), journal: { designApproval: covering }, prior: { design: planDesign },
+  } as unknown as PromptCtx);
+  assert.match(fresh, /A human approved these screens/);
 });
 
 // ------------------------------------------- plan does not order frontend unit tests

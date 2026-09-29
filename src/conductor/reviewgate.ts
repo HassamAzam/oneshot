@@ -66,7 +66,8 @@
  */
 import { DRY_RUN, phases, projectConfig, reviewersConfig } from '../lib/config.js';
 import {
-  readArtifact, readJournal, updateJournal, writeArtifact,
+  approvedDigestFor, gateSubjectDigest, readArtifact, readJournal, requestCovers, updateJournal,
+  writeArtifact,
   type ReviewGateState, type RunJournal,
 } from '../lib/artifacts.js';
 import {
@@ -322,6 +323,27 @@ function persist(iid: number, gate: Gate, state: ReviewGateState): RunJournal | 
   return updateJournal(iid, { [GATE_STATE[gate]]: state });
 }
 
+/**
+ * Clear a gate's sign-off so the next check posts a FRESH request.
+ *
+ * Re-arming by flipping `approved` alone is not enough and fails in the worst
+ * possible direction: the gate keys off `requestNoteId`, so it would poll the
+ * PREVIOUS request note, find the `approved` reply still sitting on it, and
+ * approve the rewritten artifact against a sign-off given for the old one --
+ * stamping a fresh digest on it and making the drift undetectable from then on.
+ * The note id has to go with the verdict.
+ *
+ * Feedback history is kept: the reviewer's earlier rounds still apply to the
+ * artifact being redrawn, and dropping them would send the next round in blind.
+ */
+export function rearmGate(iid: number, gate: Gate): RunJournal | null {
+  const j = readJournal(iid);
+  const prior = j ? stateOf(j, gate) : blankState();
+  return persist(iid, gate, {
+    requestTs: null, requestNoteId: null, approved: false, feedback: prior.feedback,
+  });
+}
+
 export interface CheckGateOpts {
   iid: number;
   gate: Gate;
@@ -332,6 +354,17 @@ export interface CheckGateOpts {
    * here.
    */
   requestBody: string;
+  /**
+   * The artifact this gate is asking a human to sign off on.
+   *
+   * Digested when the request posts and compared on every check after it: a
+   * request whose artifact is rewritten while it stands is re-asked, and an
+   * approval is stamped with the digest the request showed, never with what
+   * the artifact holds on the tick the reply is read. That is what lets a later
+   * rewrite be told apart from the version that was actually approved. Omit it
+   * and the gate behaves exactly as before.
+   */
+  subject?: unknown;
   /**
    * Invoked once, exactly on the transition into 'approved' — the caller's
    * chance to leave the ticket its audit record (`addIssueNote`) now that the
@@ -405,7 +438,7 @@ async function uploadAll(iid: number, attachments: GateAttachment[]): Promise<st
  * the dry run forever waiting for something it can never ask for.
  */
 export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult> {
-  const { iid, gate, requestBody, onApproved, onFeedback } = opts;
+  const { iid, gate, requestBody, subject, onApproved, onFeedback } = opts;
 
   if (DRY_RUN) {
     log.warn(`[dry-run] would pause at the '${gate}' review gate — auto-approving`, { iid });
@@ -428,6 +461,15 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
 
   let state = stateOf(journal, gate);
 
+  // The artifact was rewritten while this request stood. A reply on it is a
+  // verdict on what it showed, so re-ask about what is there now; feedback
+  // history carries over, as it does in rearmGate().
+  if (!requestCovers(state, subject)) {
+    log.warn(`${gate} artifact changed since its request on #${iid} — re-asking`, { iid, note: state.requestNoteId });
+    state = { ...state, requestNoteId: null, requestedDigest: undefined };
+    persist(iid, gate, state);
+  }
+
   // requestNoteId, never requestTs: a journal written before the gates moved
   // to GitLab carries a Slack ts here, and treating that as a note id would
   // compare every note against a number no note will ever exceed. Absent
@@ -443,7 +485,11 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
       log.warn(`${gate} approval request could not be posted to the ticket — will retry next tick`, { iid });
       return { verdict: 'pending' };
     }
-    state = { ...state, requestNoteId: posted.data.id };
+    state = {
+      ...state,
+      requestNoteId: posted.data.id,
+      ...(subject === undefined ? {} : { requestedDigest: gateSubjectDigest(subject) }),
+    };
     persist(iid, gate, state);
     await setBoardLabel(iid, gate, true);
     // Broadcast: the dev or QA who has to act on this is not the person
@@ -510,6 +556,7 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
       ...state,
       approved: true,
       feedback: feedback ? [...state.feedback, feedback] : state.feedback,
+      ...(subject === undefined ? {} : { approvedDigest: approvedDigestFor(state, subject) }),
     };
     persist(iid, gate, state);
     await setBoardLabel(iid, gate, false);
