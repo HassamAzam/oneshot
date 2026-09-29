@@ -91,11 +91,16 @@ function isProjectAgent(name: string): boolean {
  * toast"` redacts the prose the page exists to show, and an operator who cannot
  * trust the text stops reading the page rather than tightening the regex.
  */
-const SECRET_RULES: Array<[RegExp, string]> = [
+const SECRET_RULES: Array<[RegExp, string | ((match: string, ...groups: string[]) => string)]> = [
   [/((?:authorization|private-token|x-api-key|x-gitlab-token)\\?["']?\s*[:=]\s*\\?["']?)[^"'\n,;}]{6,}/gi,
     '$1[redacted: credential header]'],
   [/(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1[redacted: bearer token]'],
-  [/(Basic\s+)[A-Za-z0-9+/=]{8,}/g, '$1[redacted: basic credentials]'],
+  // Only what actually decodes to `user:password`. The shape alone ("Basic" and
+  // eight base64 letters) is also the shape of ordinary English: "Basic
+  // Information" is a Profile tab, and every test step that opened it was
+  // posted as "Basic [redacted: basic credentials]".
+  [/(Basic\s+)([A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9+/=])/g,
+    (match, lead, token) => (isBasicCredential(token) ? `${lead}[redacted: basic credentials]` : match)],
   [/xox[baprs]-[A-Za-z0-9-]{8,}/g, '[redacted: slack token]'],
   [/glpat-[A-Za-z0-9_-]{8,}/g, '[redacted: gitlab token]'],
   [/sk-ant-[A-Za-z0-9_-]{8,}/g, '[redacted: anthropic api key]'],
@@ -105,6 +110,12 @@ const SECRET_RULES: Array<[RegExp, string]> = [
   [/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?token|client[_-]?secret|password|passwd)(\\?["']?\s*[:=]\s*\\?["']?)(?!\[redacted)[^"'\s,;}\n]{4,}/gi,
     '$1$2[redacted: $1]'],
 ];
+
+/** True when a `Basic` token decodes to printable `user:password` text, which is what HTTP Basic carries. */
+function isBasicCredential(token: string): boolean {
+  const decoded = Buffer.from(token, 'base64').toString('latin1');
+  return /^[\x20-\x7e]+$/.test(decoded) && decoded.includes(':');
+}
 
 /**
  * Shortest credential worth hiding. Below this a "secret" is a word first, and
@@ -146,7 +157,9 @@ export function redact(value: string): string {
   // that is already a marker, and the ordering note above explains why that is
   // worse than leaving it alone.
   for (const secret of knownSecrets()) out = out.split(secret).join('[redacted: credential]');
-  for (const [pattern, replacement] of SECRET_RULES) out = out.replace(pattern, replacement);
+  for (const [pattern, replacement] of SECRET_RULES) {
+    out = typeof replacement === 'string' ? out.replace(pattern, replacement) : out.replace(pattern, replacement);
+  }
   return out;
 }
 
