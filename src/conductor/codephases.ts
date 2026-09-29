@@ -30,12 +30,13 @@ import {
   artifactsDirFor, readArtifact, readJournal, updateJournal, writeArtifact, type RunJournal,
 } from '../lib/artifacts.js';
 import { logEvent, updateRun } from '../lib/db.js';
+import { writeMemory } from '../lib/memory.js';
 import { log } from '../lib/log.js';
 import { alert, thread } from '../lib/slack.js';
 import { releasePort } from '../lib/worktrees.js';
 import {
   acceptMergeRequest, addIssueNote, addMergeRequestNote, compareRefs, createMergeRequest,
-  failedJobs, findMergeRequests, getBranch, getMergeRequest, issueNotes, mergeRefusal,
+  failedJobs, findMergeRequests, getBranch, getIssue, getMergeRequest, issueNotes, mergeRefusal,
   mergeRequestUrl, mrDiscussions, projectSettings, rebaseMergeRequest, swapLabel, updateMergeRequest,
   type MergeRequest, type ProjectSettings,
 } from '../lib/gitlab.js';
@@ -1212,6 +1213,18 @@ async function recordSuccess(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<voi
       mrIid: rec.mrIid ?? null,
       mergedSha: journal.mergedSha ?? rec.mergedSha ?? null,
     }, { runId: ctx.runId });
+  });
+
+  // What the next run's recall reads. Labels are the one field no artifact
+  // keeps; a card without them still matches on files and module.
+  await step('memory', async () => {
+    const issue = await getIssue(ctx.iid);
+    const line = writeMemory(ctx.iid, {
+      labels: issue.ok ? issue.data?.labels : undefined,
+      mergedSha: journal.mergedSha ?? rec.mergedSha,
+      mrUrl: rec.mrUrl,
+    });
+    if (!line) throw new Error('no journal or merged sha to record');
   });
 }
 
