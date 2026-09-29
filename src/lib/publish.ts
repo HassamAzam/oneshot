@@ -31,6 +31,8 @@ import {
 } from './gitlab.js';
 import { log } from './log.js';
 import { mdText, tableCell } from './gitlabmd.js';
+import { fileChangesSection, renderFileChanges } from './planfiles.js';
+import { flowBlock, flowSection, renderFlowMermaid } from './planflow.js';
 
 /** GitLab rejects very large attachments; skip them with a note rather than failing. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -72,6 +74,9 @@ interface PlanArtifact {
   outOfScope?: string[];
   acceptanceCoverage?: Array<{ criterion: string; coveredBy: string; status: string; note: string }>;
   feedbackResponse?: Array<{ point: string; response: string; where: string; note: string }>;
+  /** Unvalidated here: planfiles.ts and planflow.ts check them field by field, and old plans lack both. */
+  fileChanges?: unknown;
+  flow?: unknown;
   summary?: string;
 }
 
@@ -94,11 +99,16 @@ export function renderPlanMd(iid: number, title: string, plan: PlanArtifact): st
     .map((c) => `| ${tableCell(c.criterion)} | ${c.status} | ${
       tableCell(c.coveredBy) || '—'} | ${tableCell(c.note)} |`)
     .join('\n');
+  // Same order as the approval comment: the picture before the prose, and the
+  // file tables directly above the steps they summarise.
+  const flow = flowSection(plan.flow);
+  const files = fileChangesSection(plan);
   return `# Implementation plan — #${iid} ${title}
 
-${answered ? `## Reviewer feedback, point by point\n| Point | Response | Where | Note |\n|---|---|---|---|\n${answered}\n\n` : ''}## Approach
+${answered ? `## Reviewer feedback, point by point\n| Point | Response | Where | Note |\n|---|---|---|---|\n${answered}\n\n` : ''}${
+  flow ? `## Flow — the runtime path this plan touches\n${flow}\n\n` : ''}## Approach
 ${plan.approach ?? '(not recorded)'}
-${questions ? `\n## Open questions\n${questions}\n` : ''}
+${questions ? `\n## Open questions\n${questions}\n` : ''}${files ? `\n## What changes\n${files}\n` : ''}
 ## Steps
 | # | Layer | Change | Files |
 |---|---|---|---|
@@ -260,22 +270,50 @@ function screenshotsFrom(iid: number, results: CaseResult[], limit: number): Att
   return out;
 }
 
+/**
+ * The plan note: the start of the approach, then the diagram and the file
+ * tables, then a pointer to the attachment.
+ *
+ * The picture and the tables are INLINE rather than only in the attachment
+ * because GitLab draws Mermaid only in a comment body — an uploaded .md opens
+ * as raw text — and on a ticket the Review gate never arms, this note is the
+ * only plan anyone sees. The renderers' warnings come back with the body so the
+ * caller can log them once per published plan, not once per rendering of it.
+ */
+export function planNoteBody(data: Record<string, unknown>): { body: string; warnings: string[] } {
+  const flow = renderFlowMermaid(data.flow);
+  const files = renderFileChanges(data);
+  const diagram = flowBlock(flow);
+  const body = `**Plan** — how Oneshot intends to implement this.\n\n> ${
+    mdText(String(data.approach ?? '').slice(0, 400))}\n\n` +
+    (diagram ? `**Flow** — the runtime path this plan touches\n\n${diagram}\n\n` : '') +
+    (files.markdown ? `**What changes** — ${files.markdown}\n\n` : '') +
+    `${(data.steps as unknown[] ?? []).length} step(s)${data.migrations ? ' · includes a migration' : ''}. ` +
+    'Full plan attached; implementation follows it unless a step proves wrong.';
+  return { body, warnings: [...(flow?.warnings ?? []), ...files.warnings] };
+}
+
 const SPECS: Spec[] = [
   {
     key: 'plan',
     artifact: 'plan.json',
     target: 'ticket',
-    build: (data, ctx) => ({
-      body: `**Plan** — how Oneshot intends to implement this.\n\n> ${
-        mdText((data.approach as string ?? '').slice(0, 400))}\n\n` +
-        `${(data.steps as unknown[] ?? []).length} step(s)${data.migrations ? ' · includes a migration' : ''}. ` +
-        'Full plan attached; implementation follows it unless a step proves wrong.',
-      attachments: [{
-        name: `plan-${ctx.iid}.md`,
-        content: renderPlanMd(ctx.iid, ctx.journal.title, data as PlanArtifact),
-        mime: 'text/markdown',
-      }],
-    }),
+    build: (data, ctx) => {
+      const note = planNoteBody(data);
+      if (note.warnings.length) {
+        log.warn('publish: plan overview drew around bad or oversized entries', {
+          iid: ctx.iid, warnings: note.warnings.slice(0, 8),
+        });
+      }
+      return {
+        body: note.body,
+        attachments: [{
+          name: `plan-${ctx.iid}.md`,
+          content: renderPlanMd(ctx.iid, ctx.journal.title, data as PlanArtifact),
+          mime: 'text/markdown',
+        }],
+      };
+    },
   },
   {
     key: 'testcases',
