@@ -59,4 +59,7 @@ Read and follow the **`django-migration-standards`** skill for all migration rul
 
 ## Management Commands & Scheduling
 
-Read and follow the **`django-management-commands`** skill whenever writing a management command or implementing recurring/scheduled work (reminders, weekly/monthly jobs). Recurring work is a management command registered on the server crontab by DevOps — **not** a `django_celery_beat` `PeriodicTask`/`CrontabSchedule` row created in code or a migration; there is no precedent for that in this repo.
+Two skills, two questions:
+
+- **`django-management-commands`** — writing a command under `apps/<app>/management/commands/`. `BaseCommand` shape, thin `handle()`, idempotency, testing, and a post-task validation checklist.
+- **`django-scheduled-jobs`** — making something run on a recurring schedule. Recurring cadence is a management command on a DevOps-managed server crontab, **not** a `django_celery_beat` `PeriodicTask`/`CrontabSchedule` row created in code or a migration; there is no precedent for that here. Read it before proposing any scheduling mechanism.

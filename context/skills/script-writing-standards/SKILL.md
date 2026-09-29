@@ -89,7 +89,7 @@ That's it. No bootstrap, no main-guard, no CLI parsing. The trailing `_do_the_wo
 
 ### When the "script" really does need to be a CLI tool
 
-Rare. If a request is genuinely for a CLI utility (cron job, CI helper, something that doesn't run inside a Django shell), it should be a **Django management command** under `apps/<app>/management/commands/<name>.py`, not a `scripts/` file. Management commands have their own conventions and `BaseCommand` boilerplate that's standard across Django. They are NOT the subject of this skill — read **`django-management-commands`** instead, which also covers how such a command gets scheduled (crontab via DevOps, not a `PeriodicTask` row).
+Rare. If a request is genuinely for a CLI utility (cron job, CI helper, something that doesn't run inside a Django shell), it should be a **Django management command** under `apps/<app>/management/commands/<name>.py`, not a `scripts/` file. Management commands have their own conventions and `BaseCommand` boilerplate that's standard across Django. They are NOT the subject of this skill — read **`django-management-commands`** instead, and **`django-scheduled-jobs`** if the thing needs to run on a schedule (crontab via DevOps, not a `PeriodicTask` row).
 
 If you're unsure whether a request is "script" or "management command", ask the user before writing.
 
