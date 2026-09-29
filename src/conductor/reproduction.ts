@@ -44,6 +44,8 @@ export interface Reproduction {
   observed: string;
   evidence: string[];
   reason: string;
+  /** What stopped an inconclusive run; 'none' on every other verdict. */
+  blocker: 'none' | 'env' | 'data' | 'access' | 'surface' | 'steps' | 'flake';
 }
 
 export type ReproductionDecision =
@@ -75,6 +77,11 @@ export function reproductionOf(research: Record<string, unknown> | null | undefi
     observed: strOf(r.observed),
     evidence: listOf(r.evidence),
     reason: strOf(r.reason),
+    // Defaulted the way `verdict` is: an older artifact predating this field, or
+    // a session that omitted it, reads as 'none' rather than throwing. 'none' is
+    // also the honest answer for the three verdicts that were not blocked.
+    blocker: (['none', 'env', 'data', 'access', 'surface', 'steps', 'flake'] as const)
+      .find((b) => b === r.blocker) ?? 'none',
   };
 }
 
