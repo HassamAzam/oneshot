@@ -682,8 +682,9 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const [portFile, token] = process.argv.slice(1);
-const { trigger: T, deployed: D } =
-  require(path.join(process.env.ONESHOT_HOME, "config", "project.json")).automation.labels;
+const project = require(path.join(process.env.ONESHOT_HOME, "config", "project.json"));
+const { trigger: T, deployed: D } = project.automation.labels;
+const L = project.labels.entry;   // the Loop: the master switch, required beside the trigger
 const add = (name, at) => ({ action: "add", created_at: at, label: { name } });
 const mr = (iid, state, source, target) => ({
   iid, project_id: 7, state, source_branch: source, target_branch: target,
@@ -691,12 +692,20 @@ const mr = (iid, state, source, target) => ({
   title: "fixture " + iid, web_url: "http://127.0.0.1/mr/" + iid,
 });
 const tickets = {
-  1: { issue: { iid: 1, project_id: 7, state: "closed", labels: [T], updated_at: "2026-01-03T00:00:00Z" },
+  1: { issue: { iid: 1, project_id: 7, state: "closed", labels: [L, T], updated_at: "2026-01-03T00:00:00Z" },
        events: [add(T, "2026-01-03T00:00:00Z")],
        mrs: [mr(11, "merged", "fix/x", "dev"), mr(12, "merged", "stage", "dev")] },
-  2: { issue: { iid: 2, project_id: 7, state: "opened", labels: [T, D], updated_at: "2026-01-05T00:00:00Z" },
+  2: { issue: { iid: 2, project_id: 7, state: "opened", labels: [L, T, D], updated_at: "2026-01-05T00:00:00Z" },
        events: [add(T, "2026-01-03T00:00:00Z"), add(D, "2026-01-04T00:00:00Z")],
        mrs: [mr(21, "opened", "fix/y", "dev")] },
+  // Ticket 1 without the Loop: ready by both rules, switched off.
+  5: { issue: { iid: 5, project_id: 7, state: "closed", labels: [T], updated_at: "2026-01-03T00:00:00Z" },
+       events: [add(T, "2026-01-03T00:00:00Z")],
+       mrs: [mr(51, "merged", "fix/z", "dev")] },
+  // Ticket 2 without the Loop: every reason at once.
+  6: { issue: { iid: 6, project_id: 7, state: "opened", labels: [T, D], updated_at: "2026-01-05T00:00:00Z" },
+       events: [add(T, "2026-01-03T00:00:00Z"), add(D, "2026-01-04T00:00:00Z")],
+       mrs: [mr(61, "opened", "fix/w", "dev")] },
 };
 const server = http.createServer((req, res) => {
   const send = (status, body, headers) => {
@@ -750,6 +759,13 @@ ar_shape() {
     if [ -n "$bad" ]; then red "  FAIL  $label:$bad"; FAIL=$((FAIL+1)); fi
 }
 
+# ar_lacks <label> <stdout> <text ...> — none of <text> may appear. Counts only a failure.
+ar_lacks() {
+    local label="$1" out="$2" bad="" unwanted; shift 2
+    for unwanted in "$@"; do printf '%s' "$out" | grep -qF -- "$unwanted" && bad="$bad unexpected:$unwanted"; done
+    if [ -n "$bad" ]; then red "  FAIL  $label:$bad"; FAIL=$((FAIL+1)); fi
+}
+
 # The fixture's address and the token stay set for the section; each case names
 # its phase and ticket in front of the helper, which exports them to the hook.
 export ONESHOT_AUTOMATION_API="http://127.0.0.1:${AR_PORT:-9}/api/v4"
@@ -777,11 +793,25 @@ if [ -n "$AR_PORT" ]; then
     ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=3 expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
     ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=3 run automation-ready.cjs "$AR_PAYLOAD")" \
         '"verdict":"unknown"' '"errorKind":"server"'
+
+    # The Loop is the master switch: without it nothing else can make a ticket ready.
+    L="closed ticket with a merged fix MR, but no Loop"
+    ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=5 expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+    AR_OUT="$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=5 run automation-ready.cjs "$AR_PAYLOAD")"
+    ar_shape "$L" "$AR_OUT" '"verdict":"not-ready"' '"code":"loop-missing"' 'is not on the ticket.' '"iid":51'
+    ar_lacks "$L" "$AR_OUT" '"code":"rfa-missing"' '"code":"rfd-order"' '"code":"mr-not-merged"'
+
+    L="no Loop, and both rules failing too: loop-missing first, beside the rest"
+    ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=6 expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+    ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=6 run automation-ready.cjs "$AR_PAYLOAD")" \
+        '"reasons":[{"code":"loop-missing"' '"code":"rfd-order"' '"code":"mr-not-merged"' '!61 is still open'
 else
     red "  FAIL  the fixture GitLab did not start, so the cases that need it cannot run"; FAIL=$((FAIL+1))
     skip "closed ticket with a merged fix MR" "no fixture"
     skip "open ticket, deployed after the trigger, MR still open" "no fixture"
     skip "GitLab answering 500 fails closed" "no fixture"
+    skip "closed ticket with a merged fix MR, but no Loop" "no fixture"
+    skip "no Loop, and both rules failing too: loop-missing first, beside the rest" "no fixture"
 fi
 
 # Port 9 is on fetch's blocked-port list: refused before any packet leaves.

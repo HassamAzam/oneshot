@@ -4,7 +4,13 @@
  * UserPromptSubmit: refuse to start an automation-testcases session on a
  * ticket that is not ready for automation test cases.
  *
- * A ticket is READY only when both rules hold:
+ * A ticket is READY only when the Loop's entry label is on it and both rules
+ * hold:
+ *   0. the entry label (`Loop`) is on it. It is the master switch: neither
+ *      scan picks up a ticket without it, and `Loop` + the trigger is what
+ *      makes a ticket this mode's rather than the Loop pipeline's. Its absence,
+ *      like the trigger's, withdraws the request rather than leaving something
+ *      to fix, so the runner stops silently on it (src/automation/readiness.ts);
  *   A. the trigger label is on it, and either `Ready For Deployment` was ADDED
  *      before the latest trigger add, or the ticket is closed;
  *   B. at least one merge request GitLab links to it is in the same project,
@@ -144,6 +150,20 @@ function decideReadiness(f) {
   const issueLabels = Array.isArray(issue.labels) ? issue.labels : [];
   const reasons = [];
   const warnings = [];
+
+  // ---- The master switch. Checked by the hook itself rather than trusted to
+  // the scan: a label taken off between the scan and this check, or during the
+  // session (this is also its UserPromptSubmit guard), reaches here without
+  // one. The rules below are still judged, so the verdict names every fact at
+  // once.
+  if (!issueLabels.includes(labels.loop)) {
+    reasons.push({
+      code: 'loop-missing',
+      text: `\`${labels.loop}\` is not on the ticket.`,
+      fix: `Add \`${labels.loop}\` if this ticket should get automation test cases: the automation mode acts only on tickets that carry it beside \`${labels.trigger}\`.`,
+      detail: 'absent',
+    });
+  }
 
   // ---- Rule A. Both branches need the trigger label ON the ticket: a closed
   // ticket the label was taken off has withdrawn the request, not finished it.
@@ -371,6 +391,8 @@ function settings() {
   const auto = cfg && cfg.automation;
   const labels = auto && auto.labels;
   if (!labels || !labels.trigger || !labels.deployed) return missing('config/project.json automation.labels');
+  const loop = cfg.labels && cfg.labels.entry;
+  if (!loop) return missing('config/project.json labels.entry');
   if (!auto.releaseBranchPattern) return missing('config/project.json automation.releaseBranchPattern');
   const protectedBranches = cfg.branches && Array.isArray(cfg.branches.protected) ? cfg.branches.protected : null;
   if (!protectedBranches) return missing('config/project.json branches.protected');
@@ -387,7 +409,7 @@ function settings() {
     token: env.ONESHOT_AUTOMATION_TOKEN,
     base: `${env.ONESHOT_AUTOMATION_API.replace(/\/+$/, '')}/projects/` +
       `${encodeURIComponent(env.ONESHOT_AUTOMATION_PROJECT)}/issues/${iid}`,
-    labels: { trigger: labels.trigger, deployed: labels.deployed },
+    labels: { trigger: labels.trigger, deployed: labels.deployed, loop },
     protectedBranches,
     releaseBranch,
   };

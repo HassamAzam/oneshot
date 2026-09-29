@@ -9,7 +9,7 @@
  * is wrong" and "that issue does not exist" demand completely different
  * responses, and a caller that blurs them retries forever against a dead link.
  */
-import { envOr, projectConfig, DRY_RUN } from './config.js';
+import { automationTriggerLabel, envOr, projectConfig, DRY_RUN } from './config.js';
 import { resolveToken, setupHint } from './token.js';
 import { log } from './log.js';
 import type { MrDiscussion } from '../mrfeedback/types.js';
@@ -139,29 +139,43 @@ export function getIssue(iid: number): Promise<GitlabResult<Issue>> {
   return call<Issue>('GET', `/projects/${projectId()}/issues/${iid}`);
 }
 
-/** Open issues carrying the entry label, oldest-updated first (rough FIFO). */
+/**
+ * Open issues carrying the entry label, oldest-updated first (rough FIFO), one
+ * page of 50 — minus, server-side, those carrying the Ready For Automation
+ * trigger (automationTriggerLabel). Those are the automation mode's, and they
+ * keep `Loop` for as long as they wait on readiness or on QA, so read here they
+ * would sort to the front of the only page this reads and could push every
+ * ticket the Loop can work off it. The watcher still skips one if it slips
+ * through (automationOwns). With no usable automation block there is nothing
+ * to exclude and the read is what it always was.
+ */
 export async function issuesWithEntryLabel(): Promise<GitlabResult<Issue[]>> {
   const label = encodeURIComponent(projectConfig().labels.entry);
+  const trigger = automationTriggerLabel();
+  const not = trigger ? `&not%5Blabels%5D=${encodeURIComponent(trigger)}` : '';
   return call<Issue[]>(
     'GET',
-    `/projects/${projectId()}/issues?state=opened&labels=${label}&per_page=50&order_by=updated_at&sort=asc`,
+    `/projects/${projectId()}/issues?state=opened&labels=${label}${not}&per_page=50&order_by=updated_at&sort=asc`,
   );
 }
 
 /**
- * Issues carrying `label` (exact name), newest-updated first, one page of 100.
+ * Issues carrying `label` (exact name) — or, given several, carrying ALL of
+ * them — newest-updated first, one page of 100.
  *
  * Unlike issuesWithEntryLabel this takes the label and the state as arguments:
  * the Ready For Automation mode reads CLOSED tickets too (a ticket is often
  * closed by the time QA asks for automation cases), and excludes its own done
  * label server-side with `not[labels]` so finished tickets never fill the page.
- * `state` defaults to 'all'.
+ * `state` defaults to 'all'. GitLab's `labels=` is an AND over a comma list, so
+ * each name is encoded on its own and the commas are left as separators.
  */
 export async function issuesWithLabel(
-  label: string,
+  label: string | readonly string[],
   opts: { state?: 'opened' | 'closed' | 'all'; notLabel?: string } = {},
 ): Promise<GitlabResult<Issue[]>> {
-  const params = [`labels=${encodeURIComponent(label)}`, `state=${opts.state ?? 'all'}`];
+  const all = typeof label === 'string' ? [label] : label;
+  const params = [`labels=${all.map((l) => encodeURIComponent(l)).join(',')}`, `state=${opts.state ?? 'all'}`];
   if (opts.notLabel) params.push(`not%5Blabels%5D=${encodeURIComponent(opts.notLabel)}`);
   params.push('per_page=100', 'order_by=updated_at', 'sort=desc');
   return call<Issue[]>('GET', `/projects/${projectId()}/issues?${params.join('&')}`);

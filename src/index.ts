@@ -32,7 +32,8 @@ import { join } from 'node:path';
 import {
   CONTEXT_REPO, DRY_RUN, FOLLOW_TICK_MS, GITLAB_USERNAME, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT,
   PROJECT_TARGET, TICK_MS, WORK_REPO, WT_ROOT,
-  auditAuth, automationConfig, automationEnabled, envOr, pathSources, phases, portPool, projectConfig,
+  auditAuth, automationConfig, automationEnabled, automationTriggerLabel, envOr, pathSources, phases, portPool,
+  projectConfig,
   repoIdentity, seedFrom, slackConfig,
 } from './lib/config.js';
 import {
@@ -45,7 +46,7 @@ import { probe, netState } from './lib/reachability.js';
 import { windowUsage, dayUsage, quotaParked } from './lib/quota.js';
 import { budgetConfig } from './lib/config.js';
 import { describe, scan } from './conductor/watcher.js';
-import { runTicket, type RunOutcome } from './conductor/runner.js';
+import { refusalIsFinal, runTicket, type RunOutcome } from './conductor/runner.js';
 import { automationPreflight, automationTick, outcomeLine, runAutomationOnce } from './automation/runner.js';
 import {
   deregister, heartbeat, liveConductorIds, liveConductors, peersEverSeen, register,
@@ -234,7 +235,9 @@ let followExitCode = 0;
  *   conductor already understands the status. Not terminal.
  * - `refused` — this pass lost a race for ownership (another conductor holds
  *   the run, or a block's cooldown has not elapsed). Not a failure of the
- *   ticket itself. Not terminal.
+ *   ticket itself. Not terminal — unless `refusalIsFinal()` says only a person
+ *   can clear it (assigned to someone else, or carrying the automation mode's
+ *   trigger label): then terminal, exit 1.
  */
 function handleFollowOutcome(outcome: RunOutcome): void {
   // A shutdown signal already sets `stopping`, which ends the loop regardless
@@ -259,7 +262,7 @@ function handleFollowOutcome(outcome: RunOutcome): void {
       say.warn(`#${outcome.iid} aborted — ${outcome.reason ?? 'no reason given'} — ${wait}`);
       break;
     case 'refused':
-      if (outcome.reason?.includes('assigned to') || outcome.reason?.includes('GITLAB_USERNAME')) {
+      if (refusalIsFinal(outcome)) {
         say.error(`#${outcome.iid} refused — ${outcome.reason} — not retrying`);
         followSettled = true;
         followExitCode = 1;
@@ -301,10 +304,16 @@ async function banner(): Promise<void> {
   } else if (automationEnabled()) {
     try {
       const a = automationConfig();
-      log.info(`automation on — "${a.labels.trigger}" tickets → sheet ${a.sheet.spreadsheetId}`);
+      log.info(`automation on — "${cfg.labels.entry}" + "${a.labels.trigger}" tickets → sheet ${a.sheet.spreadsheetId}`);
     } catch {
       log.info('automation on — but config/project.json has no usable automation block (preflight says why)');
     }
+  }
+  if (cfg.automation !== undefined && automationTriggerLabel() === null) {
+    // Said on every desk, the mode on or off: the Loop's routing changes with it.
+    let why = 'config/project.json has no usable `automation` block';
+    try { automationConfig(); } catch (err) { why = (err as Error).message; }
+    log.warn(`routing    ${why} — so the Loop routes no ticket to the automation mode and works them all as before`);
   }
   if (DRY_RUN) log.warn('DRY_RUN is on — every write will be refused, in its own state-dry home');
 }

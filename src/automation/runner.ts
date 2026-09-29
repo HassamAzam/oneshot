@@ -2,17 +2,26 @@
  * The Ready For Automation mode: scan, state machine, and the one session.
  *
  * A second, independent mode in the same conductor process. It polls for
- * tickets carrying the trigger label (any assignee, open or closed, not yet
- * done), proves each one ready with hooks/automation-ready.cjs, has ONE
- * session write the automation test cases, posts them for a QA approver, revises
- * them on request, and on a bare `approved` writes them to the Google Sheet and
- * flips the labels — all in conductor code except the writing itself.
+ * tickets carrying the Loop's entry label AND the trigger label (any assignee,
+ * open or closed, not yet done), proves each one ready with
+ * hooks/automation-ready.cjs, has ONE session write the automation test cases,
+ * posts them for a QA approver, revises them on request, and on a bare
+ * `approved` writes them to the Google Sheet and flips the labels — all in
+ * conductor code except the writing itself.
+ *
+ * The entry label is the master switch for both modes: `Loop` + the trigger is
+ * this mode's ticket, `Loop` alone is the Loop pipeline's (which skips the
+ * other kind, src/conductor/watcher.ts automationOwns), and no `Loop` is
+ * nobody's. The scan, the readiness hook and a fresh read before each write
+ * that follows a session (switchedOff) all require it. The finishing label
+ * edit takes `Loop` off with the review label — one label in, one label out —
+ * and nothing else here writes the Loop's labels.
  *
  * What it never touches, by construction (R8): the Loop's state/runs, its
- * claim table and `runs` rows, the port pool, the `running` map and the Loop's
- * labels. Its state is STATE/automation/<iid> (journal.ts), its session gets
- * that directory as `stateDir`, and its only database rows are `events`
- * (kind automation_*, run id `a-…`) and the quota rows runPhase records.
+ * claim table and `runs` rows, the port pool and the `running` map. Its state
+ * is STATE/automation/<iid> (journal.ts), its session gets that directory as
+ * `stateDir`, and its only database rows are `events` (kind automation_*, run
+ * id `a-…`) and the quota rows runPhase records.
  *
  * The shape of every function here follows from three rules:
  *
@@ -40,7 +49,7 @@ import {
 import { currentProjectKey } from '../lib/journalproject.js';
 import {
   addIssueNote, editIssueLabels, getIssue, issueNotes, issueUrl, issuesWithLabel, readToken, uploadFile,
-  type Issue, type IssueNote,
+  type GitlabResult, type Issue, type IssueNote,
 } from '../lib/gitlab.js';
 import { logEvent } from '../lib/db.js';
 import { log } from '../lib/log.js';
@@ -64,7 +73,7 @@ import {
 } from './journal.js';
 import { fetchAutomationTicket, fetchMergedChanges } from './context.js';
 import { automationPrompt, automationSystemPrompt, type AutomationPromptInput } from './prompt.js';
-import { AUTOMATION_PHASE, readinessFromHookOutput, triggerWithdrawn, type MrRef, type Readiness } from './readiness.js';
+import { AUTOMATION_PHASE, readinessFromHookOutput, withdrawnLabels, type MrRef, type Readiness } from './readiness.js';
 import { moduleDisplayName, moduleTabTitle, normaliseModule } from './sheetlayout.js';
 import {
   getSpreadsheet, listModuleTabs, loadServiceAccount, writeApprovedCases, type SheetsFail, type SheetsResult,
@@ -313,15 +322,21 @@ export function stuckReleased(
 
 // ------------------------------------------------------------------ the scan
 
+/** The Loop's entry label: the master switch this mode requires beside its trigger. */
+function loopLabel(): string {
+  return projectConfig().labels.entry;
+}
+
 /**
- * Tickets to advance: the trigger label present, the done label absent.
- * Assignee and open/closed state are deliberately NOT filtered (R1): QA asks
- * for automation cases on whoever's ticket it is, and often after it closed.
- * The done label is excluded server-side too; checking again here costs
- * nothing and keeps a label added between the two reads from being worked on.
+ * Tickets to advance: the Loop's entry label and the trigger label present,
+ * the done label absent. Assignee and open/closed state are deliberately NOT
+ * filtered (R1): QA asks for automation cases on whoever's ticket it is, and
+ * often after it closed. Both labels and the done label are filtered
+ * server-side too; checking again here costs nothing and keeps a label changed
+ * between the two reads from deciding the wrong way.
  */
 export function scanFilter(
-  issues: Issue[], o: { trigger: string; done: string },
+  issues: Issue[], o: { trigger: string; loop: string; done: string },
 ): { candidates: Issue[]; skipped: Array<{ iid: number; why: string }> } {
   const candidates: Issue[] = [];
   const skipped: Array<{ iid: number; why: string }> = [];
@@ -331,10 +346,35 @@ export function scanFilter(
     seen.add(i.iid);
     const labels = i.labels ?? [];
     if (!labels.includes(o.trigger)) skipped.push({ iid: i.iid, why: `no "${o.trigger}" label` });
+    else if (!labels.includes(o.loop)) skipped.push({ iid: i.iid, why: `no "${o.loop}" label` });
     else if (labels.includes(o.done)) skipped.push({ iid: i.iid, why: `already "${o.done}"` });
     else candidates.push(i);
   }
   return { candidates, skipped };
+}
+
+/**
+ * The scan's one read and its filter. GitLab's `labels=` is an AND, so asking
+ * for the trigger and the entry label together returns only the tickets the
+ * master switch is on: a `Ready For Automation` ticket nobody put `Loop` on is
+ * never read, never checked and never commented on.
+ */
+export async function automationScan(
+  cfg: AutomationConfig, loop: string,
+): Promise<GitlabResult<ReturnType<typeof scanFilter>>> {
+  const res = await issuesWithLabel([cfg.labels.trigger, loop], { state: 'all', notLabel: cfg.labels.done });
+  if (!res.ok || !res.data) return { ...res, data: null };
+  return { ...res, data: scanFilter(res.data, { trigger: cfg.labels.trigger, loop, done: cfg.labels.done }) };
+}
+
+/**
+ * The atomic label edit that finishes a ticket: the review label and the
+ * Loop's entry label out, the done label in. `Loop` goes too because it is
+ * the master switch — left on, a finished ticket would read as work still
+ * asked for — and the done note names exactly this edit.
+ */
+export function doneLabelEdit(cfg: AutomationConfig, loop: string): { add: string[]; remove: string[] } {
+  return { remove: [cfg.labels.review, loop], add: [cfg.labels.done] };
 }
 
 // ------------------------------------------------------------------ sessions
@@ -411,6 +451,8 @@ interface Ctx {
   issue: Issue;
   opts: AutomationOpts;
   cfg: AutomationConfig;
+  /** The Loop's entry label, which this mode requires beside the trigger. */
+  loop: string;
   approvers: string[];
   j: AutomationJournal | null;
 }
@@ -545,10 +587,39 @@ async function enterNotReady(ctx: Ctx, j: AutomationJournal, r: Readiness): Prom
   return `not ready (${fp}: ${codes}) — ${post.adopted ? 'already commented' : 'commented'}`;
 }
 
+/** The silent stop for a withdrawn switch label: a log line and the outcome, nothing on the ticket. */
+function withdrawnStop(iid: number, missing: string[]): string {
+  const names = missing.map((l) => `"${l}"`).join(' and ');
+  const verb = missing.length > 1 ? 'are' : 'is';
+  log.info(`${tag(iid)} ${names} ${verb} not on the ticket — stopping, journal kept`);
+  return `${names} ${verb} not on the ticket — stopped`;
+}
+
+/**
+ * Both switch labels, read fresh, just before a write that can come long after
+ * the scan read them: an authoring session runs for up to half an hour, and
+ * the version note, the review label, the no-change note and the stuck note
+ * follow it in the same pass, on the scan's copy of the labels. A `Loop` or
+ * trigger a person took off meanwhile stops them the way the readiness gate
+ * stops everything else — silently, journal kept, so the write happens when
+ * the label is back. null when both are on; otherwise what the step says. A
+ * failed read is a hold: nothing is written without seeing the switch on.
+ * Never asked before the done note, whose ticket the finishing edit has
+ * already taken `Loop` off.
+ */
+async function switchedOff(ctx: Ctx): Promise<string | null> {
+  const res = await getIssue(ctx.iid);
+  if (!res.ok || !res.data) return `hold — cannot re-read the ticket's labels (${res.kind})`;
+  const labels = res.data.labels ?? [];
+  const missing = [ctx.loop, ctx.cfg.labels.trigger].filter((l) => !labels.includes(l));
+  return missing.length ? withdrawnStop(ctx.iid, missing) : null;
+}
+
 /**
  * Act on a readiness verdict. `ready` records it and lets the caller carry on;
  * anything else has already been handled here (the not-ready note, a log line
- * for a hold, a silent stop for a withdrawn trigger) and the caller stops.
+ * for a hold, a silent stop for a withdrawn `Loop` or trigger) and the caller
+ * stops.
  */
 async function gateOnReadiness(
   ctx: Ctx, j: AutomationJournal, r: Readiness, where: string,
@@ -570,11 +641,12 @@ async function gateOnReadiness(
     }
     return { ready: false, did: `hold — ${why}` };
   }
-  if (triggerWithdrawn(r)) {
-    // Removing the label withdraws the request; it is not something to "fix",
-    // so nothing is posted and the journal stays as it is for when it returns.
-    log.info(`${tag(iid)} "${cfg.labels.trigger}" is no longer on the ticket — stopping, journal kept`);
-    return { ready: false, did: `"${cfg.labels.trigger}" was removed — stopped` };
+  const withdrawn = withdrawnLabels(r, { loop: ctx.loop, trigger: cfg.labels.trigger });
+  if (withdrawn.length) {
+    // A missing switch label (Loop or the trigger) withdraws the request; it is
+    // not something to "fix", so nothing is posted and the journal stays as it
+    // is for when the label returns.
+    return { ready: false, did: withdrawnStop(iid, withdrawn) };
   }
   if (r.verdict === 'not-ready') return { ready: false, did: await enterNotReady(ctx, j, r) };
 
@@ -717,10 +789,17 @@ async function noChange(ctx: Ctx, latest: VersionRecord, sessionNotes: string[])
   const pf = j.pendingFeedback;
   const authors = unique((pf?.notes ?? []).map((n) => n.author).filter(Boolean));
   const maxId = Math.max(0, ...(pf?.notes ?? []).map((n) => n.id));
-  const post = await postOnce(ctx.iid, 'nochange', String(maxId), noChangeBody({
-    v: latest.v, authors, notes: sessionNotes, nearApproval: false, maxNoteId: maxId,
-  }));
-  if (!post.ok) log.warn(`${tag(ctx.iid)} the no-change note could not be posted: ${post.error}`);
+  // Best effort, like a failed post: with the switch off the note is dropped,
+  // not owed, and the round is consumed all the same.
+  const off = await switchedOff(ctx);
+  if (off) {
+    log.warn(`${tag(ctx.iid)} the no-change note was not posted: ${off}`);
+  } else {
+    const post = await postOnce(ctx.iid, 'nochange', String(maxId), noChangeBody({
+      v: latest.v, authors, notes: sessionNotes, nearApproval: false, maxNoteId: maxId,
+    }));
+    if (!post.ok) log.warn(`${tag(ctx.iid)} the no-change note could not be posted: ${post.error}`);
+  }
   delete j.pendingFeedback;
   j.state = 'in-review';
   j.attempts = 0;
@@ -731,6 +810,7 @@ async function noChange(ctx: Ctx, latest: VersionRecord, sessionNotes: string[])
   writeAutoJournal(j);
   logEvent('automation_feedback', { iid: ctx.iid, v: latest.v, outcome: 'no-change', authors },
     { runId: j.runId, phase: AUTOMATION_PHASE });
+  if (off) return stop(`no change to v${latest.v} — ${off}`);
   log.info(`${tag(ctx.iid)} revision of v${latest.v} changed nothing — said so, still waiting on QA`);
   return stop(`no change to v${latest.v} — said so on the ticket`);
 }
@@ -937,6 +1017,8 @@ async function stepPost(ctx: Ctx, v: number): Promise<StepResult> {
     log.error(`${tag(iid)} cases-v${v}.json is missing — archive state/automation/${iid} to start this ticket over`);
     return stop(`hold — the saved v${v} list is missing`);
   }
+  const off = await switchedOff(ctx);
+  if (off) return stop(off);
   const notes = await issueNotes(iid);
   if (!notes.ok || !notes.data) return stop(`hold — cannot read the ticket's notes (${notes.kind})`);
 
@@ -996,6 +1078,8 @@ async function stepLabelReview(ctx: Ctx, v: number): Promise<StepResult> {
   const j = ctx.j!;
   const rec = j.versions.find((x) => x.v === v);
   if (!rec) return stop(`hold — v${v} is not in the journal`);
+  const off = await switchedOff(ctx);
+  if (off) return stop(off);
   const res = await editIssueLabels(ctx.iid, { add: [ctx.cfg.labels.review] });
   if (!res.ok) {
     log.warn(`${tag(ctx.iid)} could not add "${ctx.cfg.labels.review}" (${res.kind}) — retrying next tick`);
@@ -1171,7 +1255,7 @@ async function stepSheet(ctx: Ctx): Promise<StepResult> {
       + `'${res.data.trackerTab}' row ${res.data.trackerRow}${res.data.dryRun ? ' (dry run)' : ''}`);
   }
 
-  const lab = await editIssueLabels(iid, { remove: [cfg.labels.review], add: [cfg.labels.done] });
+  const lab = await editIssueLabels(iid, doneLabelEdit(cfg, ctx.loop));
   if (!lab.ok) {
     log.warn(`${tag(iid)} the sheet is written, but the labels could not be changed (${lab.kind}) — retrying next tick`);
     return stop('hold — the labels could not be changed');
@@ -1189,8 +1273,9 @@ async function stepDoneNote(ctx: Ctx): Promise<StepResult> {
   const s = j.sheet;
   if (!ap || !s) return stop('hold — the done note needs the approval and the sheet result');
   const count = j.versions.find((x) => x.v === ap.version)?.count ?? 0;
+  const edit = doneLabelEdit(cfg, ctx.loop);
   const post = await postOnce(iid, 'done', undefined, doneBody({
-    v: ap.version, count, approvedBy: ap.by, reviewLabel: cfg.labels.review, doneLabel: cfg.labels.done,
+    v: ap.version, count, approvedBy: ap.by, removed: edit.remove, added: edit.add,
     sheet: {
       moduleTab: s.moduleTab, blockRange: s.blockRange, blockLink: s.blockLink, trackerTab: s.trackerTab,
       trackerRow: s.trackerRow, trackerLink: s.trackerLink, automationStatus: s.automationStatus,
@@ -1231,6 +1316,8 @@ async function stepStuckPoll(ctx: Ctx): Promise<StepResult> {
     return go;
   }
   if (st.notePostedAt === null) {
+    const off = await switchedOff(ctx);
+    if (off) return stop(`stuck — ${off}`);
     const post = await postOnce(iid, 'failed', st.fp, stuckBody(st.reason, st.fp, ctx.approvers));
     if (!post.ok) {
       log.warn(`${tag(iid)} stuck — the note could not be posted (${post.error}); retrying next tick`);
@@ -1304,7 +1391,7 @@ export async function advanceTicket(issue: Issue, opts: AutomationOpts): Promise
     return { iid, state: 'skipped', did: errText(err) };
   }
   const project = currentProjectKey();
-  const ctx: Ctx = { iid, issue, opts, cfg, approvers: reviewersConfig().qa, j: readAutoJournal(iid) };
+  const ctx: Ctx = { iid, issue, opts, cfg, loop: loopLabel(), approvers: reviewersConfig().qa, j: readAutoJournal(iid) };
   if (ctx.j && ctx.j.project !== project) {
     const to = archiveAutoJournal(iid, ctx.j.runId);
     log.warn(`${tag(iid)} its journal was written for ${ctx.j.project ?? 'no project'}, not ${project ?? 'this one'} — `
@@ -1358,12 +1445,13 @@ export async function automationTick(opts: AutomationOpts): Promise<void> {
     log.warn(`auto       ${errText(err)}`);
     return;
   }
-  const res = await issuesWithLabel(cfg.labels.trigger, { state: 'all', notLabel: cfg.labels.done });
+  const loop = loopLabel();
+  const res = await automationScan(cfg, loop);
   if (!res.ok || !res.data) {
-    log.warn(`auto       could not scan for "${cfg.labels.trigger}" tickets`, { kind: res.kind, status: res.status });
+    log.warn(`auto       could not scan for "${loop}" + "${cfg.labels.trigger}" tickets`, { kind: res.kind, status: res.status });
     return;
   }
-  const { candidates } = scanFilter(res.data, { trigger: cfg.labels.trigger, done: cfg.labels.done });
+  const { candidates } = res.data;
   const seen = new Set(candidates.map((i) => i.iid));
   for (const j of listAutoJournals()) {
     if (seen.has(j.iid) || j.state !== 'approved' || !j.labelsDone || j.donePostedAt != null) continue;
@@ -1388,8 +1476,9 @@ export async function automationTick(opts: AutomationOpts): Promise<void> {
 
 /**
  * `--automation <iid>`: the same advance, under the same lock, for one ticket.
- * A ticket without the trigger label is left alone like the scan leaves it —
- * unless it owes its done note, which nextStep puts first.
+ * A ticket without the trigger label or the Loop's entry label is left alone
+ * like the scan leaves it — unless it owes its done note, which nextStep puts
+ * first (the finishing edit has already taken `Loop` off by then).
  */
 export async function runAutomationOnce(iid: number, opts: AutomationOpts): Promise<AutomationOutcome> {
   let cfg: AutomationConfig;
@@ -1402,8 +1491,11 @@ export async function runAutomationOnce(iid: number, opts: AutomationOpts): Prom
   if (!res.ok || !res.data) return { iid, state: 'skipped', did: `cannot read #${iid} from GitLab (${res.kind} ${res.status})` };
   const j = readAutoJournal(iid);
   const owesDoneNote = j?.state === 'approved' && j.labelsDone === true && j.donePostedAt == null;
-  if (!res.data.labels.includes(cfg.labels.trigger) && !owesDoneNote) {
-    return { iid, state: j?.state ?? 'skipped', did: `"${cfg.labels.trigger}" is not on #${iid} — nothing to do` };
+  const labels = res.data.labels;
+  const missing = [cfg.labels.trigger, loopLabel()].filter((l) => !labels.includes(l));
+  if (missing.length && !owesDoneNote) {
+    const names = missing.map((l) => `"${l}"`).join(' and ');
+    return { iid, state: j?.state ?? 'skipped', did: `${names} ${missing.length > 1 ? 'are' : 'is'} not on #${iid} — nothing to do` };
   }
   return advanceLocked(res.data, opts);
 }

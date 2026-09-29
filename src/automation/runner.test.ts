@@ -3,7 +3,11 @@
  * the pure half of runner.ts. Nothing here reaches GitLab, the sheet or a
  * session: the I/O steps are thin over these decisions, and these are the
  * decisions that would silently post twice, approve the wrong version, or pay
- * for a session nobody needed if they drifted.
+ * for a session nobody needed if they drifted. The few that read GitLab (the
+ * scan and the tick around it, `--automation`'s label check, the finishing
+ * label edit) run against a stubbed fetch and stop before anything is locked,
+ * journaled or spent. advance.test.ts drives advanceTicket itself, readiness
+ * hook and all, against a fixture GitLab.
  *
  * Every iid, note id and MR number is invented.
  */
@@ -13,15 +17,23 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Issue, IssueNote } from '../lib/gitlab.js';
+import { DRY_RUN, automationConfig, projectConfig } from '../lib/config.js';
+import { editIssueLabels, type Issue, type IssueNote } from '../lib/gitlab.js';
 import { CANCELLED_BY_CONDUCTOR, NO_STRUCTURED_OUTPUT, type PhaseOutput } from '../conductor/phase.js';
 import type { AutomationJournal, VersionRecord } from './journal.js';
 import {
-  AUTOMATION_DENY, blockedBeforeModel, hookCallbackFailed, isNearApproval, nextStep, outcomeLine, reviewVerdict,
-  scanFilter, sessionCharge, stuckReleased,
+  AUTOMATION_DENY, automationScan, automationTick, blockedBeforeModel, doneLabelEdit, hookCallbackFailed, isNearApproval,
+  nextStep, outcomeLine, reviewVerdict, runAutomationOnce, scanFilter, sessionCharge, stuckReleased,
 } from './runner.js';
+import { automationDir, readAutoJournal } from './journal.js';
+
+// Set rather than inherited, so this machine's .env and desk token cannot change the answer.
+process.env.GITLAB_READ_TOKEN = 'test-read-token';
+process.env.ONESHOT_GITLAB_TOKEN = 'test-write-token';
 
 const TRIGGER = 'Ready For Automation';
+const LOOP = 'Loop';
+const REVIEW = 'Automation Test Case Review';
 const DONE = 'Automation Done';
 const PROJECT = 'gitlab.example.com/acme/erp';
 const RECHECK = 30 * 60_000;
@@ -30,7 +42,7 @@ const APPROVERS = ['anosha.saeed', 'arsal.tariq'];
 
 function issue(over: Partial<Issue> = {}): Issue {
   return {
-    iid: 101, title: 'Profile preferences', description: '', labels: [TRIGGER], assignees: [],
+    iid: 101, title: 'Profile preferences', description: '', labels: [LOOP, TRIGGER], assignees: [],
     state: 'closed', web_url: 'https://gitlab.example.com/acme/erp/-/issues/101', updated_at: '2026-09-28T10:00:00Z',
     ...over,
   };
@@ -71,17 +83,125 @@ function out(over: Partial<PhaseOutput> = {}): PhaseOutput {
 
 // ---------------------------------------------------------------- scan
 
-test('the scan keeps open and closed tickets from any assignee and drops Automation Done', () => {
+test('the scan keeps open and closed tickets from any assignee, needs Loop beside the trigger, and drops Automation Done', () => {
   const { candidates, skipped } = scanFilter([
     issue({ iid: 101, state: 'closed', assignees: [{ username: 'someone.else' }] }),
     issue({ iid: 102, state: 'opened', assignees: [] }),
-    issue({ iid: 103, labels: [TRIGGER, DONE] }),
-    issue({ iid: 104, labels: ['Loop'] }),
+    issue({ iid: 103, labels: [LOOP, TRIGGER, DONE] }),
+    issue({ iid: 104, labels: [LOOP] }),
+    issue({ iid: 105, labels: [TRIGGER] }),
     issue({ iid: 101 }),
-  ], { trigger: TRIGGER, done: DONE });
+  ], { trigger: TRIGGER, loop: LOOP, done: DONE });
   assert.deepEqual(candidates.map((i) => i.iid), [101, 102]);
-  assert.deepEqual(skipped.map((s) => s.iid), [103, 104]);
-  assert.match(skipped[0]!.why, /Automation Done/);
+  assert.deepEqual(skipped, [
+    { iid: 103, why: `already "${DONE}"` },
+    { iid: 104, why: `no "${TRIGGER}" label` },
+    { iid: 105, why: `no "${LOOP}" label` },
+  ]);
+});
+
+// ---------------------------------------------------------------- GitLab, stubbed
+
+const API = 'https://gitlab.example.com/api/v4/projects/acme%2Ferp';
+const calls: Array<{ method: string; url: string; body: unknown }> = [];
+
+/** Every request is recorded; `answer` decides the reply, undefined meaning a 404. Restored after each test. */
+function stubFetch(answer: (url: string, method: string) => unknown): () => void {
+  const real = globalThis.fetch;
+  calls.length = 0;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    calls.push({ method, url: String(input), body: typeof init?.body === 'string' ? JSON.parse(init.body) : null });
+    const body = answer(String(input), method);
+    return body === undefined
+      ? new Response('{"message":"404 Not Found"}', { status: 404 })
+      : new Response(JSON.stringify(body), { status: 200 });
+  }) as typeof fetch;
+  return () => { globalThis.fetch = real; };
+}
+
+test('the config this mode ships with: Loop is the entry label it requires', () => {
+  assert.equal(projectConfig().labels.entry, LOOP);
+  assert.deepEqual(automationConfig().labels, { trigger: TRIGGER, deployed: 'Ready For Deployment', review: REVIEW, done: DONE });
+});
+
+test('the scan asks GitLab for tickets carrying BOTH Loop and the trigger, in every state, minus Automation Done', async () => {
+  const restore = stubFetch(() => [
+    issue({ iid: 101 }),
+    issue({ iid: 102, labels: [TRIGGER] }),               // GitLab should not send it; if it does, it is still dropped
+    issue({ iid: 103, labels: [LOOP, TRIGGER, DONE] }),
+  ]);
+  try {
+    const res = await automationScan(automationConfig(), LOOP);
+    assert.deepEqual(calls.map((c) => [c.method, c.url]), [[
+      'GET',
+      `${API}/issues?labels=Ready%20For%20Automation,Loop&state=all&not%5Blabels%5D=Automation%20Done`
+        + '&per_page=100&order_by=updated_at&sort=desc',
+    ]]);
+    assert.equal(res.ok, true);
+    assert.deepEqual(res.data?.candidates.map((i) => i.iid), [101]);
+    assert.deepEqual(res.data?.skipped.map((x) => x.why), [`no "${LOOP}" label`, `already "${DONE}"`]);
+  } finally {
+    restore();
+  }
+});
+
+test('the tick scans for Loop AND the trigger, and advances nothing GitLab returns without Loop', async () => {
+  const SCAN = `${API}/issues?labels=Ready%20For%20Automation,Loop&state=all&not%5Blabels%5D=Automation%20Done`
+    + '&per_page=100&order_by=updated_at&sort=desc';
+  // Only the scan answers. Anything else — a done-note sweep over some other
+  // journal on this desk — is a 404, so nothing can be advanced by accident.
+  const restore = stubFetch((url) => (url === SCAN ? [issue({ iid: 990301, labels: [TRIGGER] })] : undefined));
+  try {
+    await automationTick({ conductor: 'test', signal: new AbortController().signal });
+    assert.deepEqual([calls[0]?.method, calls[0]?.url], ['GET', SCAN]);
+    assert.deepEqual(calls.filter((c) => c.method !== 'GET'), [], 'nothing was written');
+    assert.equal(calls.some((c) => c.url.includes('/issues/990301')), false, 'the ticket without Loop was never read');
+    assert.equal(readAutoJournal(990301), null, 'nor journaled');
+  } finally {
+    restore();
+    rmSync(automationDir(990301), { recursive: true, force: true });  // only there if this failed
+  }
+});
+
+test('--automation on a ticket without Loop says there is nothing to do, and reads nothing else', async () => {
+  const signal = new AbortController().signal;
+  const iid = 990302;                            // invented, so no journal of this desk's can answer instead
+  const cases: Array<[string[], string]> = [
+    [[TRIGGER, 'Ready For Deployment'], `"${LOOP}" is not on #${iid} — nothing to do`],
+    [[LOOP], `"${TRIGGER}" is not on #${iid} — nothing to do`],
+    [[], `"${TRIGGER}" and "${LOOP}" are not on #${iid} — nothing to do`],
+  ];
+  for (const [labels, did] of cases) {
+    const restore = stubFetch(() => issue({ iid, labels }));
+    try {
+      const o = await runAutomationOnce(iid, { conductor: 'test', signal });
+      assert.deepEqual(o, { iid, state: 'skipped', did });
+      assert.deepEqual(calls.map((c) => [c.method, c.url]), [['GET', `${API}/issues/${iid}`]], labels.join('+'));
+    } finally {
+      restore();
+      rmSync(automationDir(iid), { recursive: true, force: true });  // only there if this failed
+    }
+  }
+});
+
+test('finishing takes Automation Test Case Review AND Loop off and puts Automation Done on, in one edit', async () => {
+  const edit = doneLabelEdit(automationConfig(), LOOP);
+  assert.deepEqual(edit, { remove: [REVIEW, LOOP], add: [DONE] });
+  const restore = stubFetch(() => ({ iid: 101, labels: [TRIGGER, DONE] }));
+  try {
+    assert.equal((await editIssueLabels(101, edit)).ok, true);
+    if (DRY_RUN) {
+      assert.deepEqual(calls, []);                  // a dry run never writes
+      return;
+    }
+    assert.deepEqual(calls, [{
+      method: 'PUT', url: `${API}/issues/101`,
+      body: { add_labels: DONE, remove_labels: `${REVIEW},${LOOP}` },
+    }]);
+  } finally {
+    restore();
+  }
 });
 
 // ---------------------------------------------------------------- nextStep

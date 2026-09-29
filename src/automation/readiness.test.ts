@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import {
-  AUTOMATION_PHASE, readinessFromHookOutput, triggerWithdrawn,
+  AUTOMATION_PHASE, readinessFromHookOutput, withdrawnLabels,
   type Readiness, type ReadinessReason,
 } from './readiness.js';
 
@@ -35,7 +35,7 @@ interface Facts {
   issue: { iid: number; state: string; labels: string[]; project_id: number; updated_at?: string };
   events: LabelEvent[];
   mrs: LinkedMr[];
-  labels: { trigger: string; deployed: string };
+  labels: { trigger: string; deployed: string; loop: string };
   protectedBranches: string[];
   releaseBranch: RegExp;
   now?: string;
@@ -57,11 +57,14 @@ const hook = createRequire(import.meta.url)('../../hooks/automation-ready.cjs') 
 // The labels and branch policy the hook reads at run time, so these tests
 // judge against the configuration that ships rather than a copy of it.
 const project = JSON.parse(readFileSync(new URL('../../config/project.json', import.meta.url), 'utf8')) as {
+  labels: { entry: string };
   automation: { labels: { trigger: string; deployed: string }; releaseBranchPattern: string };
   branches: { protected: string[] };
 };
 const T = project.automation.labels.trigger;
 const D = project.automation.labels.deployed;
+/** The Loop's entry label: the master switch every ticket this mode works must carry. */
+const L = project.labels.entry;
 const PROJECT = 7;
 
 const add = (name: string, at: string): LabelEvent => ({ action: 'add', created_at: at, label: { name } });
@@ -78,13 +81,13 @@ function facts(over: FactsOver = {}): Facts {
   return {
     events: [],
     mrs: [],
-    labels: { trigger: T, deployed: D },
+    labels: { trigger: T, deployed: D, loop: L },
     protectedBranches: project.branches.protected,
     releaseBranch: new RegExp(project.automation.releaseBranchPattern, 'i'),
     now: '2026-09-28T12:00:00.000Z',
     ...over,
     issue: {
-      iid: 101, state: 'opened', labels: [T, D], project_id: PROJECT, updated_at: '2026-09-28T11:00:00+05:00',
+      iid: 101, state: 'opened', labels: [L, T, D], project_id: PROJECT, updated_at: '2026-09-28T11:00:00+05:00',
       ...over.issue,
     },
   };
@@ -102,7 +105,7 @@ const FIX = mr(501, 'merged', 'fix/profile-docs');
 
 test('a closed ticket with the trigger, one merged fix MR, an abandoned open MR and five promotion MRs is ready', () => {
   const r = decide({
-    issue: { state: 'closed', labels: [T, D] },
+    issue: { state: 'closed', labels: [L, T, D] },
     events: [add(D, '2026-09-17T20:42:40+05:00'), add(T, '2026-09-28T16:11:43+05:00')],
     mrs: [
       FIX,
@@ -180,7 +183,7 @@ test('re-adding the trigger after deployment is what makes an open ticket ready'
 
 test('a closed ticket without the trigger label is not ready', () => {
   const r = decide({
-    issue: { state: 'closed', labels: [D] },
+    issue: { state: 'closed', labels: [L, D] },
     events: [add(D, '2026-09-20T09:00:00+05:00'), add(T, '2026-09-20T10:00:00+05:00'), remove(T, '2026-09-21T10:00:00+05:00')],
     mrs: [FIX],
   });
@@ -192,7 +195,7 @@ test('a closed ticket without the trigger label is not ready', () => {
 
 test('a ticket that never had the trigger label is told it is not there, not that it was taken off', () => {
   // No trigger event on record at all: "no longer" and "back" would both be false.
-  const r = decide({ issue: { state: 'closed', labels: [D] }, events: [add(D, '2026-09-20T09:00:00+05:00')], mrs: [FIX] });
+  const r = decide({ issue: { state: 'closed', labels: [L, D] }, events: [add(D, '2026-09-20T09:00:00+05:00')], mrs: [FIX] });
   const why = reason(r, 'rfa-missing');
   assert.equal(why.text, `\`${T}\` is not on the ticket.`);
   assert.equal(why.fix, `Add \`${T}\` if this ticket should get automation test cases.`);
@@ -268,7 +271,7 @@ test('an unmerged MR is described by its state', () => {
 });
 
 test('both rules failing reports both, rule A first', () => {
-  const r = decide({ issue: { labels: [T] }, events: [add(T, '2026-09-20T10:00:00+05:00')], mrs: [] });
+  const r = decide({ issue: { labels: [L, T] }, events: [add(T, '2026-09-20T10:00:00+05:00')], mrs: [] });
   assert.deepEqual(codes(r), ['rfd-order', 'mr-not-merged']);
   assert.equal(reason(r, 'rfd-order').detail, 'absent');
   assert.equal(r.state, 'opened');
@@ -371,10 +374,52 @@ test('readinessFromHookOutput round-trips a ready payload', () => {
   assert.match(other.error ?? '', /answered for #101, not #102/);
 });
 
-test('triggerWithdrawn is true only when rfa-missing is among the reasons', () => {
-  assert.equal(triggerWithdrawn(decide({ issue: { labels: [] }, mrs: [] })), true);
-  assert.equal(triggerWithdrawn(decide({ mrs: [] })), false);
-  assert.equal(triggerWithdrawn(decide({ issue: { state: 'closed' }, mrs: [FIX] })), false);
+test('withdrawnLabels names the missing switch labels, Loop first, and nothing when only the rules fail', () => {
+  const names = { loop: L, trigger: T };
+  assert.deepEqual(withdrawnLabels(decide({ issue: { labels: [] }, mrs: [] }), names), [L, T]);
+  assert.deepEqual(withdrawnLabels(decide({ issue: { labels: [T, D] }, mrs: [] }), names), [L]);
+  assert.deepEqual(withdrawnLabels(decide({ issue: { labels: [L, D] }, mrs: [] }), names), [T]);
+  assert.deepEqual(withdrawnLabels(decide({ mrs: [] }), names), []);
+  assert.deepEqual(withdrawnLabels(decide({ issue: { state: 'closed' }, mrs: [FIX] }), names), []);
+});
+
+// ---------------------------------------------------------------- the master switch
+
+test('a ticket that is otherwise ready but has no Loop is not ready, for that one reason', () => {
+  const r = decide({
+    issue: { state: 'closed', labels: [T, D] },
+    events: [add(D, '2026-09-17T20:42:40+05:00'), add(T, '2026-09-28T16:11:43+05:00')],
+    mrs: [FIX],
+  });
+  assert.equal(r.verdict, 'not-ready');
+  assert.deepEqual(codes(r), ['loop-missing']);
+  const why = reason(r, 'loop-missing');
+  assert.equal(why.detail, 'absent');
+  assert.equal(why.text, `\`${L}\` is not on the ticket.`);
+  assert.match(why.fix, new RegExp(`^Add \`${L}\``));
+  // Everything else was still judged: the merged fix is named, as for a ready ticket.
+  assert.deepEqual(r.merged.map((m) => m.iid), [501]);
+  assert.match(r.fingerprint ?? '', /^[0-9a-f]{12}$/);
+});
+
+test('loop-missing comes first beside the other reasons, and is part of the fingerprint', () => {
+  const facts = { events: [add(T, '2026-09-20T10:00:00+05:00')], mrs: [] };
+  const without = decide({ ...facts, issue: { labels: [T] } });
+  assert.deepEqual(codes(without), ['loop-missing', 'rfd-order', 'mr-not-merged']);
+  const withLoop = decide({ ...facts, issue: { labels: [L, T] } });
+  assert.deepEqual(codes(withLoop), ['rfd-order', 'mr-not-merged']);
+  assert.notEqual(without.fingerprint, withLoop.fingerprint);
+
+  const neither = decide({ issue: { state: 'closed', labels: [D] }, mrs: [] });
+  assert.deepEqual(codes(neither), ['loop-missing', 'rfa-missing', 'mr-not-merged']);
+});
+
+test('the in-session guard blocks a ticket without Loop, and says why', () => {
+  const r = decide({ issue: { state: 'closed', labels: [T, D] }, mrs: [FIX] });
+  const out = hook.renderOutput(r);
+  assert.equal(out.decision, 'block');
+  assert.equal('hookSpecificOutput' in out, false);
+  assert.equal(out.reason, `Not ready for automation test cases: \`${L}\` is not on the ticket.`);
 });
 
 test('the hook and the conductor agree on the phase name', () => {

@@ -13,7 +13,7 @@
  * run is skipped, and a ticket whose run died mid-phase is picked up from its
  * journal rather than restarted.
  */
-import { gitlabUsername, projectConfig } from '../lib/config.js';
+import { automationTriggerLabel, gitlabUsername, projectConfig } from '../lib/config.js';
 import { foreignOwner } from '../lib/claims.js';
 import { isClaimed, latestRunStatus, logEvent, seeTicket } from '../lib/db.js';
 import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
@@ -33,8 +33,6 @@ export interface WatchResult {
  * looks identical to a queue with nothing to do.
  */
 export async function scan(): Promise<WatchResult> {
-  const cfg = projectConfig();
-
   if (!isReachable()) {
     return { candidates: [], skipped: [], held: `network ${netState()}` };
   }
@@ -57,10 +55,21 @@ export async function scan(): Promise<WatchResult> {
     return { candidates: [], skipped: [], held: `gitlab ${res.kind}` };
   }
 
+  return triage(res.data);
+}
+
+/**
+ * The scan's verdict on each ticket it read: claimable, skipped with a reason,
+ * or dropped silently (a teammate's). Split from scan() only so a test can
+ * hand it tickets without the network and quota gates in front; scan() is
+ * those gates, one read, and this.
+ */
+export async function triage(issues: Issue[]): Promise<WatchResult> {
+  const cfg = projectConfig();
   const candidates: Issue[] = [];
   const skipped: Array<{ iid: number; why: string }> = [];
 
-  for (const issue of res.data) {
+  for (const issue of issues) {
     seeTicket(issue.iid, issue.title, issue.labels);
 
     if (issue.labels.includes(cfg.labels.exit)) {
@@ -89,6 +98,11 @@ export async function scan(): Promise<WatchResult> {
         continue;
       }
     }
+    const owned = automationOwns(issue.labels);
+    if (owned) {
+      skipped.push({ iid: issue.iid, why: owned });
+      continue;
+    }
     if (isClaimed(issue.iid)) {
       skipped.push({ iid: issue.iid, why: 'run already in flight' });
       continue;
@@ -109,6 +123,28 @@ export async function scan(): Promise<WatchResult> {
   }
 
   return { candidates: orderCandidates(candidates, latestRunStatus), skipped };
+}
+
+/**
+ * Why the Loop leaves a ticket to the Ready For Automation mode, or null when
+ * it is the Loop's.
+ *
+ * The entry label is the master switch for both: beside the trigger label it
+ * makes the ticket the automation job's (src/automation), alone it makes it
+ * the Loop's. A ticket is never worked by both — the Loop would plan, build and
+ * merge a change on a ticket QA only asked to have test cases written for. So
+ * this holds whether or not the automation mode is on at this desk. With no
+ * usable automation block there is no trigger to route on, and the Loop is as
+ * it was. issuesWithEntryLabel already leaves these tickets out of the page it
+ * reads; scan() asks again for one that slips through, and runTicket() asks
+ * because `--ticket` reaches it without a scan.
+ */
+export function automationOwns(
+  labels: readonly string[], trigger: string | null = automationTriggerLabel(),
+): string | null {
+  return trigger !== null && labels.includes(trigger)
+    ? `carries "${trigger}" — the automation mode owns it`
+    : null;
 }
 
 /**

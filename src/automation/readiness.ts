@@ -25,7 +25,7 @@ export interface MrRef {
   url: string;
 }
 
-export type ReasonCode = 'rfa-missing' | 'rfd-order' | 'mr-not-merged';
+export type ReasonCode = 'loop-missing' | 'rfa-missing' | 'rfd-order' | 'mr-not-merged';
 
 export interface ReadinessReason {
   code: ReasonCode;
@@ -49,7 +49,7 @@ export interface Readiness {
   state: 'opened' | 'closed' | null;
   /** The latest trigger-label ADD event, or null when there is none on record. */
   triggerAddedAt: string | null;
-  /** [] when ready or unknown. Rule A's reason (if any) comes before rule B's. */
+  /** [] when ready or unknown. The entry label's reason (if any) comes first, then rule A's, then rule B's. */
   reasons: ReadinessReason[];
   /** E.g. '!400 is still open — it is not what shipped, and is ignored'. */
   warnings: string[];
@@ -137,7 +137,19 @@ export function readinessFromHookOutput(out: Record<string, unknown>, iid: numbe
   }
 }
 
-/** True when any reason is `rfa-missing`: the runner stops silently instead of posting a note. */
-export function triggerWithdrawn(r: Readiness): boolean {
-  return r.reasons.some((x) => x.code === 'rfa-missing');
+/**
+ * The switch labels this verdict says are missing, by name, in reason order:
+ * the Loop's entry label (`loop-missing`) and the trigger (`rfa-missing`).
+ * Non-empty means the request was WITHDRAWN, not left unmet — a person took a
+ * label off, or never put `Loop` on — so there is nothing to "fix" on the
+ * ticket: the runner stops silently instead of posting a note, and keeps the
+ * journal for when the label comes back.
+ */
+export function withdrawnLabels(r: Readiness, names: { loop: string; trigger: string }): string[] {
+  const out: string[] = [];
+  for (const x of r.reasons) {
+    if (x.code === 'loop-missing') out.push(names.loop);
+    else if (x.code === 'rfa-missing') out.push(names.trigger);
+  }
+  return out;
 }

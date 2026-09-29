@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  codePhaseStatus, decideClaim, mergePollWait, nextIndex, salvagedReview, testcaseGateRoute,
-  uiEvidenceRefusal,
+  codePhaseStatus, decideClaim, mergePollWait, nextIndex, refusalIsFinal, runTicket, salvagedReview,
+  testcaseGateRoute, uiEvidenceRefusal,
 } from './runner.js';
 import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
-import type { RunJournal } from '../lib/artifacts.js';
+import { readJournal, type RunJournal } from '../lib/artifacts.js';
+import { isClaimed } from '../lib/db.js';
+import type { Issue } from '../lib/gitlab.js';
 import type { JournalOwner } from '../lib/journalproject.js';
 
 function phase(name: string, n: number, group?: string): PhaseConfig {
@@ -286,4 +288,50 @@ test('a partial whose findings is not an array salvages nothing instead of throw
   }
   // Non-object entries inside an array are dropped, not dereferenced.
   assert.equal(salvagedReview([null, 'x', finding('F-01', 'blocker')], null)?.findings.length, 1);
+});
+
+// ------------------------------------------------ the automation mode's tickets
+
+test('runTicket refuses a Loop ticket carrying Ready For Automation before it claims, posts or spends anything', async () => {
+  const iid = 101;
+  const ticket = (over: Partial<Issue>): Issue => ({
+    iid, title: 'Profile preferences', description: null, labels: ['Loop', 'Ready For Automation'], assignees: [],
+    state: 'opened', web_url: `https://gitlab.example.com/acme/erp/-/issues/${iid}`, updated_at: '2026-09-28T10:00:00Z',
+    ...over,
+  });
+  const why = 'carries "Ready For Automation" — the automation mode owns it';
+  assert.equal(readJournal(iid), null, 'precondition: no run on disk for the fixture ticket');
+
+  const real = globalThis.fetch;
+  const was = process.env.ONESHOT_AUTOMATION;
+  const fetched: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    fetched.push(String(input));
+    throw new Error('offline');
+  }) as typeof fetch;
+  // The mode being off on this desk changes nothing: the Loop still leaves it alone.
+  delete process.env.ONESHOT_AUTOMATION;
+  try {
+    for (const t of [ticket({}), ticket({ state: 'closed', assignees: [{ username: 'someone.else' }] })]) {
+      const out = await runTicket(t, { conductor: 'test-conductor' });
+      assert.deepEqual(out, { runId: '', iid, status: 'refused', reason: why, final: true });
+      assert.equal(refusalIsFinal(out), true, '--follow stops on it instead of re-checking forever');
+    }
+    assert.deepEqual(fetched, [], 'nothing was read from or written to GitLab');
+    assert.equal(readJournal(iid), null, 'no run journal was started');
+    assert.equal(isClaimed(iid), false, 'no claim row was taken');
+  } finally {
+    globalThis.fetch = real;
+    if (was !== undefined) process.env.ONESHOT_AUTOMATION = was;
+  }
+});
+
+test('--follow stops on a refusal only a person can clear, and keeps checking one that clears by waiting', () => {
+  const refused = (reason: string, final?: true) => ({ runId: '', iid: 101, status: 'refused' as const, reason, ...(final ? { final } : {}) });
+  assert.equal(refusalIsFinal(refused('carries "Ready For Automation" — the automation mode owns it', true)), true);
+  assert.equal(refusalIsFinal(refused('assigned to someone.else')), true);
+  assert.equal(refusalIsFinal(refused('another conductor holds run r-1')), false);
+  assert.equal(refusalIsFinal(refused('blocked 3 minutes ago — cooling down')), false);
+  assert.equal(refusalIsFinal({ runId: 'r-1', iid: 101, status: 'blocked', reason: 'assigned to x', final: true }), false,
+    'only a refusal is judged here; blocked has its own branch');
 });

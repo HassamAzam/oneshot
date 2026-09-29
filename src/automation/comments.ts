@@ -575,9 +575,13 @@ Oneshot keeps retrying by itself; labels stay as they are until the write succee
 ${marker('sheet-failed', o.kind)}`;
 }
 
-/** §5.5. The last note: where the cases went, and the label swap that closed the loop. */
+/**
+ * §5.5. The last note: where the cases went, and the label edit that closed the
+ * loop — `removed`/`added` are the edit runner.ts made (doneLabelEdit), so the
+ * note names exactly what changed on the board.
+ */
 export function doneBody(o: {
-  v: number; count: number; approvedBy: string; reviewLabel: string; doneLabel: string;
+  v: number; count: number; approvedBy: string; removed: string[]; added: string[];
   sheet: { moduleTab: string; blockRange: string; blockLink: string; trackerTab: string; trackerRow: number; trackerLink: string; automationStatus: string };
 }): string {
   const s = o.sheet;
@@ -589,7 +593,7 @@ v${o.v} (${o.count} cases) was ${by} and written to the test-case sheet:
 - Cases: [${linkText(s.moduleTab)}, ${linkText(s.blockRange)}](${linkUrl(s.blockLink)})
 - Tracker: [${linkText(s.trackerTab)}, row ${s.trackerRow}](${linkUrl(s.trackerLink)}). Test Case Status is **Done**, Automation Status is **${mdText(s.automationStatus)}**.
 
-Labels: removed ${codeSpan(o.reviewLabel)}, added ${codeSpan(o.doneLabel)}.
+Labels: removed ${listOf(o.removed.map(codeSpan))}, added ${listOf(o.added.map(codeSpan))}.
 
 ${marker('done')}`;
 }

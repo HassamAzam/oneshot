@@ -160,7 +160,8 @@ test('the v2 note names comments and approvals that arrived while it was being w
 
 test('the done note links the block and the tracker row and names the labels', () => {
   const body = doneBody({
-    v: 2, count: 12, approvedBy: 'anosha.saeed', reviewLabel: 'Automation Test Case Review', doneLabel: 'Automation Done',
+    v: 2, count: 12, approvedBy: 'anosha.saeed',
+    removed: ['Automation Test Case Review', 'Loop'], added: ['Automation Done'],
     sheet: {
       moduleTab: 'Team Reviews [Latest]', blockRange: 'A730:H743',
       blockLink: 'https://docs.google.com/spreadsheets/d/sheet-id/edit#gid=77&range=A730:H743',
@@ -174,7 +175,7 @@ test('the done note links the block and the tracker row and names the labels', (
   assert.ok(body.includes('- Cases: [Team Reviews \\[Latest\\], A730:H743](https://docs.google.com/spreadsheets/d/sheet-id/edit#gid=77&range=A730:H743)'));
   assert.ok(body.includes('- Tracker: [TestCases year 2026, row 14](https://docs.google.com/spreadsheets/d/sheet-id/edit#gid=0&range=A14:E14).'));
   assert.match(body, /Test Case Status is \*\*Done\*\*, Automation Status is \*\*Not started\*\*\./);
-  assert.match(body, /Labels: removed `Automation Test Case Review`, added `Automation Done`\./);
+  assert.match(body, /Labels: removed `Automation Test Case Review` and `Loop`, added `Automation Done`\./);
   assert.equal(lastLine(body), '<!-- oneshot:automation:done -->');
 });
 

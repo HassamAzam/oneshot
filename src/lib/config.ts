@@ -165,8 +165,9 @@ export interface ProjectConfig {
   promotions: Array<{ from: string; to: string; auto: boolean }>;
   /**
    * The Ready For Automation mode (src/automation). Optional: absent, the mode
-   * cannot be switched on, and nothing else reads it. Read through
-   * `automationConfig()`, which checks it, never directly.
+   * cannot be switched on. Read through `automationConfig()`, which checks it,
+   * never directly. The Loop reads only its trigger label, through
+   * `automationTriggerLabel()`, to leave those tickets to the mode.
    */
   automation?: AutomationConfig;
   concurrency: number;
@@ -483,13 +484,14 @@ export function reviewersConfig(): ReviewersConfig {
  * nothing, a bad regex makes the hook fail closed on every ticket, and a
  * non-numeric cadence makes a not-ready ticket re-check every tick. Saying which
  * field is wrong at boot is cheaper than any of those. Not cached, so a test or
- * a preflight always sees the file as it is.
+ * a preflight always sees the file as it is. `cfg` is for tests; everything
+ * else reads config/project.json.
  */
-export function automationConfig(): AutomationConfig {
+export function automationConfig(cfg: Pick<ProjectConfig, 'automation'> = projectConfig()): AutomationConfig {
   const bad = (what: string): never => {
     throw new Error(`config/project.json has no usable \`automation\` block: ${what}`);
   };
-  const a = projectConfig().automation as unknown;
+  const a = cfg.automation as unknown;
   if (!a || typeof a !== 'object') bad('it is missing');
   const raw = a as Record<string, unknown>;
   const str = (v: unknown, name: string): string => (typeof v === 'string' && v.trim() !== '' ? v : bad(`${name} must be a non-empty string`));
@@ -523,6 +525,26 @@ export function automationConfig(): AutomationConfig {
     },
     recheckMinutes: recheckMinutes as number,
   };
+}
+
+/**
+ * The Ready For Automation trigger label, for the LOOP's routing: a ticket
+ * carrying it beside the entry label belongs to the automation mode, and the
+ * Loop pipeline never works it (src/conductor/watcher.ts, automationOwns).
+ *
+ * The routing holds on every desk, the mode switched on here or not. Null when
+ * the block is not usable — whenever automationConfig() would throw (missing,
+ * or any field wrong, the sheet's included): the mode cannot run anywhere
+ * then, so there is no trigger to route on and the Loop behaves as it did
+ * before the mode existed, rather than leaving the ticket to nobody. Never
+ * throws: the Loop's scan and runTicket call it.
+ */
+export function automationTriggerLabel(cfg?: Pick<ProjectConfig, 'automation'>): string | null {
+  try {
+    return automationConfig(cfg ?? projectConfig()).labels.trigger;
+  } catch {
+    return null;
+  }
 }
 
 /**
