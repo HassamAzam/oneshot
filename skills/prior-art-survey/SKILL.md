@@ -155,6 +155,14 @@ not a duplicate of the helper that wraps it. A field name appears in every
 historical migration that ever touched it, and not one of them tells you what
 the code does today.
 
+**One carve-out, and it is the useful one.** A vendored file your own code
+EXTENDS, OVERRIDES or SUBCLASSES is a mirror, and citing it is correct: it is
+where the behaviour you are about to add already exists, and reading it is how
+you learn what your override has to fill in. Tag it `mirror:` like any other,
+and say in the role that it is vendored so nobody plans an edit to it. What the
+exclusion above is really refusing is the sweep that trawls dependencies you
+never touch — not the base class you inherit from.
+
 ## Turn economy — the survey is a slice of the phase, not its subject
 
 This runs inside the trace and shares its budget. The trace is the deliverable;

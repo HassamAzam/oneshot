@@ -76,7 +76,10 @@ predicate inside a larger function — has no name to search and is cited as
 **What is not prior art.** Do not read, and do not record: migration history,
 vendored dependencies and lockfiles, build output and bundles, fixtures and
 factories. Test helpers are not prior art for production code, nor the reverse.
-A framework function is not a duplicate of the helper that wraps it.
+A framework function is not a duplicate of the helper that wraps it. The one
+carve-out: a vendored file your own code extends, overrides or subclasses IS a
+mirror — confirm it and copy its shape, but no step ever edits it, so say so on
+the line.
 
 ## Place a new unit where its mirror lives
 
