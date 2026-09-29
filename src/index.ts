@@ -30,7 +30,7 @@ import {
   auditAuth, envOr, pathSources, phases, portPool, projectConfig, repoIdentity, seedFrom, slackConfig,
 } from './lib/config.js';
 import {
-  checkoutFindings, identityFindings, relaxRepoChecks, repoCheckOverrideNotice, wtRootFinding, type Finding,
+  checkoutFindings, findCheckout, identityFindings, relaxRepoChecks, repoCheckOverrideNotice, wtRootFinding, type Finding,
 } from './lib/repocheck.js';
 import { foreignJournalFinding } from './lib/journalproject.js';
 import { activeRunsFleet, logEvent, reconcileForeignRuns } from './lib/db.js';
@@ -357,7 +357,25 @@ async function preflight(): Promise<boolean> {
 
   if (!WORK_REPO || !existsSync(WORK_REPO)) {
     log.error(`WORK_REPO does not exist: ${WORK_REPO || '(no path — GITLAB_REPO_URL is what derives one)'}`);
-    if (repo && WORK_REPO) log.error(`  git clone ${repo.sshUrl} ${WORK_REPO}`);
+    if (repo && WORK_REPO) {
+      // A path set in .env did not come from a missing clone, so cloning INTO
+      // it is advice for the wrong problem — worse when the value is a
+      // documented example pasted as-is. Name the line, and any checkout of
+      // this project the machine already has.
+      const sources = pathSources();
+      const key = sources.WORK_REPO.key || 'WORK_REPO';
+      const found = findCheckout(repo.url, repo.name);
+      if (found) {
+        log.error(`  your ${repo.project} checkout looks like it is at: ${found}`);
+        log.error(`  set it in .env:  ${key}=${found}`);
+        if (seedFrom() === WORK_REPO) {
+          log.error(`  and ${sources.ONESHOT_SEED_FROM.key || 'ONESHOT_SEED_FROM'}, which names the same missing path`);
+        }
+      } else {
+        if (sources.WORK_REPO.source !== 'default') log.error(`  ${key} in .env sets this path. Point it at your checkout, or clone:`);
+        log.error(`  git clone ${repo.sshUrl} ${WORK_REPO}`);
+      }
+    }
     fatal = true;
   } else if (repo) {
     // The stale-clone guard: a WORK_REPO or ONESHOT_SEED_FROM line left over

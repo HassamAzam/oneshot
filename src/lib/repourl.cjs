@@ -43,9 +43,18 @@ const EXAMPLE_URL = 'https://gitlab.example.com/group/project';
  * Treated as unset, not as a value. Otherwise `SLACK_BOT_TOKEN=xoxb-REPLACE_ME`
  * satisfies every "is it configured" check and the failure only surfaces later
  * as an opaque `invalid_auth` from the API.
+ *
+ * A `<marker>` may contain `/` and `_` (`<your/path/to>/erp`), and a stand-in
+ * PATH counts too: `~/their/path/erp`, pasted verbatim from setup instructions,
+ * expanded to a real-looking directory nobody created and was reported as a
+ * missing checkout with advice to clone into it. Only the slash-separated
+ * spellings count — `my-path` or `some_path` is a folder somebody can own, and
+ * ignoring a correct setting is worse than the bug.
  */
 function isPlaceholder(v) {
-  return /REPLACE_ME|<[a-z-]+>|CHANGE_?ME|your-.*-here/i.test(String(v));
+  const s = String(v);
+  return /REPLACE_ME|<[a-z_/-]+>|CHANGE_?ME|your-.*-here/i.test(s)
+    || /(^|\/)(their|your|my|some)\/path(\/|$)|(^|\/)path\/to(\/|$)/i.test(s);
 }
 
 /**

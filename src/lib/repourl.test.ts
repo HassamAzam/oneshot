@@ -151,6 +151,22 @@ test('any other env value carrying a template word counts as unset', () => {
   assert.equal(isPlaceholder('/srv/erp'), false);
 });
 
+test('a stand-in path pasted from setup instructions counts as unset, not as a location', () => {
+  for (const v of [
+    '~/their/path/erp', '~/your/path/erp', '~/my/path/erp', '/path/to/erp', '~/path/to/the/repo',
+    '~/some/path/erp', '<your/path/to>/erp', '<your_path>/erp',
+  ]) assert.equal(isPlaceholder(v), true, v);
+  assert.equal(readEnv({ ONESHOT_ERP_WORK_REPO: '~/their/path/erp' }, 'ONESHOT_ERP_WORK_REPO'), '');
+});
+
+test('real checkout layouts are honoured, including folders that merely contain the word path', () => {
+  for (const v of [
+    '~/Documents/erp', '~/erp', '~/Desktop/workstream-repo/erp', '~/code/erp', '~/work/arbisoft/erp',
+    '/Users/someone/repos/erp', '~/Documents/pathfinder/erp', '~/projects/mypath/erp',
+    '~/my-path/erp', '~/some_path/erp', '~/your-path/erp', '~/their_path/erp', '~/path-to/erp',
+  ]) assert.equal(isPlaceholder(v), false, v);
+});
+
 test('anything that is not a project URL is refused with the reason and an example', () => {
   const cases: Array<[string, RegExp]> = [
     ['https://gitlab.example.com', /needs a namespace and a project/],
