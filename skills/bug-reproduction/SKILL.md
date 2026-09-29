@@ -138,6 +138,12 @@ never got the app up is `env` even if you then also found the data missing.
 
 Rules that keep `not-reproduced` honest:
 
+- **Read [`refs/why-it-did-not-reproduce.md`](refs/why-it-did-not-reproduce.md)
+  before you record it.** Five ways a real bug comes back `not-reproduced`, from
+  QA's own history — the first being that the test accounts are superusers, so a
+  permission bug behaves correctly for you and wrongly for whoever reported it.
+  Each entry is one answer to: whose account, which record, what content, which
+  order?
 - **Different environment is not "not a bug".** The ticket may come from
   stage/production data, another browser, a narrow viewport or a specific user. If
   the conditions the ticket names are not the ones you ran, that is `inconclusive`.
@@ -169,6 +175,8 @@ means fix the record, or change the verdict to `inconclusive`.
       `reason` if a later phase needs it.
 - [ ] For `not-reproduced`: you observed the correct value you planned for, on
       the ticket's own conditions.
+- [ ] For `not-reproduced`: `refs/why-it-did-not-reproduce.md` walked, and the
+      account you used is not a superuser where the ticket is about permissions.
 
 ## Output
 
