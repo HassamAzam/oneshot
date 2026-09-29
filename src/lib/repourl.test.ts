@@ -10,8 +10,8 @@ import assert from 'node:assert/strict';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
-  envEntry, isPlaceholder, legacySelectors, localRemotePath, parseRepoUrl, readEnv, redactUrl, repoFromEnv, repoKey,
-  resolvePath, resolveTarget, scopedEnvName,
+  envEntry, isPlaceholder, isTargetName, legacySelectors, localRemotePath, parseRepoUrl, readEnv, redactUrl,
+  repoFromEnv, repoKey, resolvePath, resolveTarget, scopedEnvName,
 } from './repourl.cjs';
 
 const ROOT = '/opt/oneshot';
@@ -149,6 +149,22 @@ test('any other env value carrying a template word counts as unset', () => {
   }
   assert.equal(readEnv({ ONESHOT_TEST_LOGIN: 'someone@arbisoft.com:changeme' }, 'ONESHOT_TEST_LOGIN'), '');
   assert.equal(isPlaceholder('/srv/erp'), false);
+});
+
+test('a stand-in path pasted from setup instructions counts as unset, not as a location', () => {
+  for (const v of [
+    '~/their/path/erp', '~/your/path/erp', '~/my/path/erp', '/path/to/erp', '~/path/to/the/repo',
+    '~/some/path/erp', '<your/path/to>/erp', '<your_path>/erp',
+  ]) assert.equal(isPlaceholder(v), true, v);
+  assert.equal(readEnv({ ONESHOT_ERP_WORK_REPO: '~/their/path/erp' }, 'ONESHOT_ERP_WORK_REPO'), '');
+});
+
+test('real checkout layouts are honoured, including folders that merely contain the word path', () => {
+  for (const v of [
+    '~/Documents/erp', '~/erp', '~/Desktop/workstream-repo/erp', '~/code/erp', '~/work/arbisoft/erp',
+    '/Users/someone/repos/erp', '~/Documents/pathfinder/erp', '~/projects/mypath/erp',
+    '~/my-path/erp', '~/some_path/erp', '~/your-path/erp', '~/their_path/erp', '~/path-to/erp',
+  ]) assert.equal(isPlaceholder(v), false, v);
 });
 
 test('anything that is not a project URL is refused with the reason and an example', () => {
@@ -290,6 +306,16 @@ test('resolveTarget without a URL resolves nothing by default, and ignores scope
   assert.equal(t.wtRoot.path, '');
   // An explicit plain path still stands on its own.
   assert.equal(resolveTarget({ WORK_REPO: '/srv/erp' }, ROOT).workRepo.path, '/srv/erp');
+});
+
+test('isTargetName accepts the names the parser gives a project, and refuses the rest', () => {
+  for (const name of ['erp', 'erp-v2', 'my_app', 'my.app']) {
+    assert.equal(isTargetName(name), true, name);
+    assert.equal(parseRepoUrl(`git@gitlab.example.com:acme/${name}.git`).name, name);
+  }
+  for (const name of ['', 'ERP', 'erp.git', '.erp', 'erp.', 'erp?', 'acme/erp']) {
+    assert.equal(isTargetName(name), false, name);
+  }
 });
 
 // --------------------------------------------------------- legacy selectors

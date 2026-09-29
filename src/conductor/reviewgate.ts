@@ -29,7 +29,7 @@
  * ticket answers.
  *
  * That reverses the previous version, which asked and read in Slack. The
- * reason is authorisation, not preference: approval is now restricted to two
+ * reason is authorisation, not preference: approval is now restricted to
  * named groups (config/reviewers.json), and the only identity a reply carries
  * in Slack is a Slack user id, which cannot be matched against the GitLab
  * usernames the people asking for this gate actually gave. Reading the verdict
@@ -38,11 +38,11 @@
  * than advisory. It also collapses two systems into one: the request, every
  * feedback round and the audit record now all live on the ticket, in order.
  *
- * WHO may approve is per-gate, not global: `plan` is a dev sign-off and
- * `testcases` is a QA sign-off (GATE_ROLE below). A comment from outside the
- * relevant group is not an approval AND is not gating feedback — it is logged
- * and ignored, so ordinary ticket chatter cannot knock a run into a revision
- * cycle.
+ * WHO may approve is per-gate, not global: `plan` is a dev sign-off,
+ * `testcases` a QA sign-off and `design` a design sign-off (GATE_ROLE below).
+ * A comment from outside the relevant group is not an approval AND is not
+ * gating feedback — it is logged and ignored, so ordinary ticket chatter
+ * cannot knock a run into a revision cycle.
  *
  * This file is deliberately NOT a polling loop. A check is one quick GitLab
  * read, and when nothing has happened yet it says so and the CALLER parks the
@@ -200,12 +200,16 @@ function isApprovedReply(text: string): boolean {
  * them is the difference between "a human looked" and "the right human
  * looked": one list for both would let a reviewer sign off on the half of the
  * pipeline they were not asked to own.
+ *
+ * `design` has its own group for the same reason. Agreeing the UI before it
+ * is built is the product owner's call as well as the developers', and the
+ * product owner does not own the plan — so `dev` could not simply grow.
  */
-export type ReviewRole = 'dev' | 'qa';
+export type ReviewRole = 'dev' | 'qa' | 'design';
 // `notABug` is QA's: whether a reported defect really does not happen is a
 // testing judgement, and the people who own the case list are the ones who
 // know which data, role or environment the reproduction may have missed.
-const GATE_ROLE: Record<Gate, ReviewRole> = { plan: 'dev', testcases: 'qa', design: 'dev', notABug: 'qa' };
+const GATE_ROLE: Record<Gate, ReviewRole> = { plan: 'dev', testcases: 'qa', design: 'design', notABug: 'qa' };
 
 /**
  * Does the DESIGN gate apply to this run?
