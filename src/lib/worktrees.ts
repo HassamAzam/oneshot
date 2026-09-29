@@ -526,6 +526,49 @@ export function runForkPoint(branch: string, cwd = WORK_REPO): string {
   );
 }
 
+/**
+ * Commits that reference this ticket and are NOT in the replay's base — the
+ * answer key, if the phase goes looking for it.
+ *
+ * `replayWorktree` uses `git worktree add`, which shares the object store and
+ * every ref of the work repo. So a detached checkout at a pre-fix base is a
+ * blind WORKING TREE inside a repository that still holds the merged fix:
+ * `git log --all`, `git show <sha>` and `git log --grep=#<iid>` all reach it.
+ *
+ * `runForkPoint` fails closed for a landed branch and tells the caller to pass
+ * `--base <sha>`. That escape hatch fixes the checkout and does nothing about
+ * reachability, which is how a measured replay stopped being blind without
+ * anyone noticing. This does not prevent that — it makes the run declare it,
+ * so the artifact carries its own caveat instead of somebody's memory.
+ *
+ * Empty is the common and good case: a ticket whose fix never landed has no
+ * answer key in the repo to find.
+ */
+export function answerKeyCommits(iid: number, base: string, cwd = WORK_REPO): string[] {
+  let candidates: string[];
+  try {
+    // `([^0-9]|$)` rather than `\b`: git's ERE has no word-boundary escape, and
+    // a bare `#18` would otherwise match #189 and report every low-numbered
+    // ticket as contaminated until the warning stopped meaning anything.
+    candidates = git(['log', '--all', '--format=%H %s', `--grep=#${iid}([^0-9]|$)`, '-E'], cwd)
+      .split('\n').map((l) => l.trim()).filter(Boolean);
+  } catch {
+    // A repo with no matching commits, or no refs at all, is not an error here.
+    return [];
+  }
+  return candidates.filter((line) => {
+    const sha = line.split(' ')[0];
+    if (!sha) return false;
+    try {
+      // In the base already: it is history the phase is entitled to read.
+      git(['merge-base', '--is-ancestor', sha, base], cwd);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+}
+
 /** Counterpart to replayWorktree. No branch to preserve, and no port to release. */
 export function removeReplayWorktree(worktree: string): void {
   if (!existsSync(worktree)) return;

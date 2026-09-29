@@ -134,7 +134,7 @@ const { transcriptPath } = await import('../src/lib/artifacts.js');
 const { fetchTicket } = await import('../src/conductor/runner.js');
 const { runPhase } = await import('../src/conductor/phase.js');
 const { promptFor, systemPromptFor } = await import('../src/phases/prompts.js');
-const { replayWorktree, removeReplayWorktree, runForkPoint } = await import('../src/lib/worktrees.js');
+const { answerKeyCommits, replayWorktree, removeReplayWorktree, runForkPoint } = await import('../src/lib/worktrees.js');
 type RunJournal = import('../src/lib/artifacts.js').RunJournal;
 type Ticket = import('../src/phases/types.js').Ticket;
 
@@ -191,6 +191,20 @@ console.log(`oneshot   ${oneshotSha}   skills ${args.skillsRoot}`);
 console.log(`worktree  ${worktree}`);
 console.log(`output    ${outDir}`);
 
+// A worktree shares the work repo's objects, so a pre-fix base is a blind
+// working tree in a repo that may still hold the fix. Say so rather than let
+// the number be read as blind later. --base is exactly the path that gets here
+// with a landed branch, because runForkPoint refuses and names it as the way out.
+const answerKey = answerKeyCommits(args.iid, base);
+if (answerKey.length) {
+  console.log('');
+  console.log(`NOT BLIND  ${answerKey.length} commit(s) reference #${args.iid} and are not in the base;`);
+  console.log('           a phase that greps the history can read the fix it is meant to plan.');
+  for (const c of answerKey) console.log(`           ${c}`);
+  console.log('           recorded as answerKeyCommits in meta.json — see issue #155.');
+  console.log('');
+}
+
 const freshJournal: RunJournal = {
   runId, iid: args.iid, title: ticket.title, url: journal.url, createdAt: Date.now(),
   status: 'running', phases: [],
@@ -202,7 +216,11 @@ if (args.from === 'plan') prior.research = readJson(args.research ?? join(args.s
 
 const meta: Record<string, unknown> = {
   iid: args.iid, label: args.label, from: args.from, oneshot: oneshotSha, base,
-  skillsRoot: args.skillsRoot, sourceRun: journal.runId, research: args.research ?? null, phases: {},
+  skillsRoot: args.skillsRoot, sourceRun: journal.runId, research: args.research ?? null,
+  // Empty means the run WAS blind: no commit naming this ticket is reachable
+  // outside the base. Non-empty means the plan could have read the answer, so
+  // the artifact says so on its face.
+  answerKeyCommits: answerKey, phases: {},
 };
 
 let exitCode = 0;
