@@ -76,6 +76,14 @@ is not only appearance — it is what stopped anyone looking.
 
 ### 7. Setup states its conditions, and records the decisions the plan left open
 
+- **Prove the state is reachable before writing cases that assume it.** It can be
+  unreachable two ways: conditions that exclude one another, or a view that filters
+  it out — cancelling a leave sets `is_active = False`, and the listing queries
+  `active_objects`, so a cancelled row never renders there at all. Cases resting on
+  an unreachable state come back BLOCKED rather than failing, and a list of blocked
+  cases reads as coverage. Make reachability the first case, and say plainly that
+  the rest must not be recorded as passes if it fails. Where the state exists only
+  in a defensive branch, assert the helper directly instead.
 - Derive the period and the record from the listing, or seed them. A hard-coded
   month plus an exact count rots the first time anything changes that state.
 - Put a known pre-existing failure's workaround in the pre-condition rather than
@@ -83,8 +91,6 @@ is not only appearance — it is what stopped anyone looking.
 - Where a plan step has a branch ("delete the key unless another consumer exists"),
   the case records which branch happened. Hard-coding one arm fails the build where
   the other was correct.
-- Check the code can produce the state. Two conditions that exclude each other mean
-  no setup reaches that row; assert the helper directly instead.
 - When the diff adds a helper, assert it directly for each state it returns. That
   check is repeatable, needs no seeded data, and cannot pass where the helper is
   absent.
