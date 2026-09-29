@@ -27,11 +27,18 @@ which you used. None here is `blocker: data`.
 
 ### 3. The content
 
-"Long content" usually means one long *word* — a URL, an unbroken identifier.
-Prose wraps and looks fine; a single token cannot, and that is what overflows the
-cell or clips the row.
+Two shapes, and they fail for different reasons:
 
-**Do:** paste a real URL, not lorem ipsum.
+- **More characters than the display was built for.** A field accepts 1200
+  characters where the view box was sized for 1000. It looks correct while
+  typing — the defect appears only **after saving**, when the stored value is
+  rendered back and the overflow has nowhere to go and no scrollbar.
+- **One word wider than the field.** A link or an unbroken identifier has no
+  break opportunity, so it cannot wrap and overlaps out of its container. Prose
+  of the same total length wraps and looks fine.
+
+**Do:** for the first, exceed the limit, **save, and re-open** — typing it is not
+reproducing it. For the second, paste a real URL, not lorem ipsum.
 
 ### 4. The order
 
