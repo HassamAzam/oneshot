@@ -251,10 +251,19 @@ Cover, with at least one case each:
 Writing rules:
 - One behaviour per case. Usually 6–20 cases, never more than 60.
 - \`scenario\` starts with "Verify that".
-- \`precondition\` names the data, the role and the page. '' only when there truly is none.
-- \`steps\` are UI actions that name the control ("Click **Save** on the Profile tab"), one per
-  element, without numbering.
-- \`expected\` is one observable result that decides pass or fail.
+- Every case is a full flow, from login to the screen where the user sees the effect:
+  - \`precondition\` seeds the data through the API so the effect is visible BEFORE the change
+    ("Via API: a teammate joined today, so a joiner update shows on Home › Team Updates"), then
+    names the role and the starting state. '' only when there truly is nothing to set up.
+  - \`steps\` start with "Log in as <role>", open the screen where the effect shows and see the
+    seeded item there, go to the page the change is on, make the change, save, and go back.
+    UI actions that name the control ("Click **Save** on the Profile tab"), one per element,
+    without numbering. Never API calls in steps.
+  - \`expected\` is the effect where the user sees it ("no longer shown under Home › Team
+    Updates"), not only that a setting was saved. One observable result that decides pass or fail.
+- When a control's options each do something different, write one case per option, each with
+  its own seeded data and its own check; then the cases about the control itself (default,
+  options offered, several at once, cross icon removes, Save confirmation).
 - No duplicates. ${ids}
 - Never write a real password, token or key into a case: name the account ("log in as an HR
   admin"). Anything that looks like a credential is blanked before the list is posted.

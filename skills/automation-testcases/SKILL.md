@@ -5,10 +5,10 @@ description: Write, or revise on an approver's request, the automation-ready tes
 
 # Automation Test Cases
 
-A ticket is labelled `Ready For Automation`: its change is merged, and QA wants test cases the
-automation team can build Cypress tests from. You write that list. The conductor posts it on the
-ticket as a table and a CSV, a QA approver reads every line, and either comments `approved` or
-asks for changes. Approved lists go into the team's test-case sheet.
+A ticket is labelled `Loop` and `Ready For Automation`: its change is merged, and QA wants test
+cases the automation team can build Cypress tests from. You write that list. The conductor posts
+it on the ticket as a table and a CSV, a QA approver reads every line, and either comments
+`approved` or asks for changes. Approved lists go into the team's test-case sheet.
 
 So the reader is a QA engineer deciding what the Cypress suite takes on. Write for them: plain
 words, one behaviour per case, and an honest answer to "can Cypress do this?" on every row.
@@ -107,23 +107,68 @@ The list must have at least one case for each of these that applies:
   pages in one tab, so they are usually `yes`.
 
 When two controls share one server routine (two dropdowns saved by the same helper), write the
-full set of cases for one of them, and for the other only the cases whose data differs (its own
-options, its own first save). Repeating every case for both doubles the list without testing
-anything new.
+save-and-persist cases (reload, clear, keep-remove-add) once, not once per control. The per-option
+cases below are different: each option has its own effect, so each gets its own case.
 
 Usually 6 to 20 cases. Never more than 60. If the change is small, the list is small; do not pad
 it to look thorough.
+
+### Every case is a full flow
+
+QA runs each case, and the Cypress spec built from it, from a fresh login to the screen where the
+user sees the result. A case that stops at "the setting was saved" cannot tell a build where the
+setting does nothing from one where it works. So every case has three parts:
+
+1. **`precondition` creates the data through the API** so the effect is visible **before** the
+   change is applied. Start each seeded item with `Via API:`, name who it belongs to and when it
+   is dated, then the role and the starting state. For example:
+   - `Via API: a teammate in the user's team joined today, so a joiner update shows on Home ›
+     Team Updates. The user has no blocked team updates.`
+   - `Via API: a teammate's birthday (or work anniversary) is today, so a wish card shows in
+     Home › Announcements.`
+   - `Via API: a teammate is on leave this week` / `is attending a training this week` /
+     `left the team today`.
+
+   The automation suite seeds these through the ERP's e2e endpoints (announcements, team updates,
+   leaves, trainings, people). Name the data, not the endpoint.
+2. **`steps` walk the whole flow**, the way a person does it: `Log in as <role>` · open the screen
+   where the effect will show and **see the seeded item there** (the baseline) · go to the page the
+   change is on · make the change · save · go back to the screen where the effect shows.
+3. **`expected` is the effect where the user sees it**, phrased the way QA writes it: "The
+   teammate's joiner update is no longer shown under Home › Team Updates". Not only "the dropdown
+   kept the value". When the change shows up somewhere else (Home, a report, a list), the case
+   checks it there.
+
+**One case per option.** When a control's options each do something different (each blocked
+update hides a different Home item), write one case per option, each with its own seeded data and
+its own check on the screen that option affects. Then the cases about the control itself:
+- the default (nothing selected);
+- the options it offers;
+- choosing several at once, each effect checked;
+- removing a choice with its cross icon;
+- the confirmation message after Save.
+
+The team's own suite reads this way. From its Profile sheet:
+
+| Pre Condition | Action | Description |
+| --- | --- | --- |
+| On Basic Information, Edit clicked | User selects Team (member) joiners update and taps Save | Verify that system blocks the joiners update from Home > Team section |
+| On Basic Information, Edit clicked | User selects Automated birthday wish notification and taps Save | Verify that system blocks the birthday wish notification from Home > Notification section |
+| On Basic Information, Edit clicked | User clicks the cross icon | Verify that system removes the selected option from the field |
+
+Your cases are those rows, made runnable: seed the Home item first, and start from the login.
 
 ### Writing rules
 
 - **One behaviour per case.** "Verify that the form saves and the email is sent" is two cases,
   and they get different `automatable` answers.
 - **`scenario` starts with "Verify that".**
-- **`precondition` names the data, the role and the page**: "An employee with a submitted leave
-  request; logged in as their line manager; on Leaves > Approvals." `''` only when there truly is
-  nothing to set up.
-- **`steps` are UI actions that name the control**: "Click **Save** on the Documents tab", not
-  "save the form". One action per step. Not API calls ("Send a POST to …"): QA reads these as
+- **`precondition` seeds the data through the API and names the role and starting state**:
+  "Via API: an employee has a submitted leave request. Their line manager has nothing pending."
+  See "Every case is a full flow". `''` only when there truly is nothing to set up.
+- **`steps` start with `Log in as <role>` and are UI actions that name the control**: "Click
+  **Save** on the Documents tab", not "save the form". One action per step. The API belongs in
+  the precondition, never in the steps ("Send a POST to …"): QA reads steps as
   things a person does on screen. A behaviour you can only see through the API is a case only
   when the diff itself defines the response (a status code or message in the code), and then its
   steps say what the user does that triggers it.
@@ -142,13 +187,13 @@ A good case:
 
 | Field | Value |
 | --- | --- |
-| id | `TC-04` |
-| scenario | Verify that a document over 5 MB is rejected on the Profile Documents tab |
-| precondition | Logged in as an employee; a 6 MB PDF on disk; on Profile > Documents |
-| steps | Click **Upload document** · Choose the 6 MB PDF · Click **Save** |
-| expected | "File must be 5 MB or smaller" appears under the upload field, and no new row is added to the documents table |
+| id | `TC-03` |
+| scenario | Verify that blocking "Team (member) joiners update" hides a teammate's joiner update from Home › Team Updates |
+| precondition | Via API: a teammate in the user's team joined today, so a joiner update shows on Home › Team Updates. The user has no blocked team updates. |
+| steps | Log in as the employee · Open **Home** and confirm the teammate's joiner update is shown under **Team Updates** · Open Profile › **Basic Information** · Click **Edit** · In **Blocked Team Updates**, select "Team (member) joiners update" · Click **Save** · Open **Home** |
+| expected | The teammate's joiner update is no longer shown under Home › Team Updates |
 | automatable | `yes` |
-| reason | Upload through `selectFile`, and the message and the table are both in the page |
+| reason | The joiner is seeded through the API; the dropdown, Save and the Team Updates card are all in the page |
 
 ### Choosing the module
 
@@ -240,6 +285,10 @@ Drop TC-07. Add a case for an expired session." `nextId` is `TC-13`.
 
 - [ ] Ids are unique, at least two digits, and in order (on REVISE: unchanged ids untouched, new ones from `nextId`).
 - [ ] Every scenario starts with "Verify that", and every case tests one behaviour.
+- [ ] Every case is a full flow: the precondition seeds what the check needs (`Via API: …`), the
+      steps start with `Log in as …` and see the seeded item before the change, and `expected` is
+      checked on the screen where the user sees the effect.
+- [ ] Options that do different things have one case each.
 - [ ] Every `reason` names the Cypress limit, or says in a few words why the case is reachable.
 - [ ] `module` is an existing module name copied exactly, or a short new Title Case name.
 - [ ] `sources` lists the MRs and files your cases come from.
