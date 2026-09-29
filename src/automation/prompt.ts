@@ -287,6 +287,9 @@ Writing rules:
 - Every case must be able to fail on the unfixed build: it goes through the changed behaviour
   (for a save bug, it clicks Save); a case that only views data its precondition set up is
   dropped. The bug's own reproduction is written for every control the ticket names.
+- Cases of the same kind share the same precondition wording, each with its own date in the
+  screen's window. Cover keeping an existing choice while adding another in one Save. Check a
+  control's content only after it has finished loading.
 - Expected states a control's whole content ("shows only A and B", "exactly these six"). One
   action per step, and say how ("click the cross icon on each selected option"); put waits in
   the step ("Open **Home** and wait for **Team Updates** to finish loading"). Paths use "›".

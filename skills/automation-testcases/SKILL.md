@@ -149,6 +149,13 @@ setting does nothing from one where it works. So every case has three parts:
      as, who has never blocked anything". The suite runs every day on shared accounts, so an
      account another case uses is no longer in its default state.
 
+   **Cases of the same kind share the same precondition wording**, with only the item changed: if
+   the joiner case says "the employee and the teammate are active members of the same team" and
+   gives a date, the leaver, on-leave and training cases say the same, each with its own date in
+   the window the screen shows for it (a teammate who left today, a leave between today and seven
+   days from now, a training that has not started yet). One case worded differently from its
+   siblings is the one QA sends back.
+
    For example: `A teammate joined today, and the employee and the teammate are active members of
    the same team, so a joiner update shows on Home › Team Updates. Nothing is blocked in Blocked
    Team Updates. The employee has already ticked both consent checkboxes on Profile › Basic
@@ -173,8 +180,9 @@ setting does nothing from one where it works. So every case has three parts:
    teammate's joiner update is no longer shown under Home › Team Updates". Not only "the dropdown
    kept the value". When the change shows up somewhere else (Home, a report, a list), the case
    checks it there.
-   - **Check "is not shown" only after that section has finished loading.** While a card shows its
-     loading placeholder, "not shown" is true on any build.
+   - **Check "is not shown" only after that section has finished loading**, and a control's
+     content ("no longer lists", "shows only") only after the control has finished loading. While
+     a card or a dropdown shows its loading state, "not shown" is true on any build.
    - **When an option has no visible effect** (it only stops an email or a background job), do not
      invent a screen for it. Its case checks that the control keeps the saved selection once the
      page has re-read it.
@@ -193,7 +201,8 @@ the save-and-persist cases instead of getting one each. Then the cases about the
   yet**: a selected option disappears from the open list, so the list case fails on a correct
   build for an account that has something chosen. Quote labels trimmed everywhere; mention a
   trailing space only in this case's comparison;
-- saving several at once, and removing some while adding others, each checked after a re-read;
+- saving several at once; **keeping an existing choice while adding another in one Save**;
+  removing one of two; clearing all. Each checked after a re-read;
 - for a fix that turns something back on (a removed choice re-selected, a record reactivated),
   also the other side: a choice removed in an **earlier** Save stays off when a **different**
   choice is saved now. A fix that switches on too much passes every "it comes back" case;
