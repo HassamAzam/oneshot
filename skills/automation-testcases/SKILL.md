@@ -108,7 +108,9 @@ The list must have at least one case for each of these that applies:
   controls in one Save, that one Save is the case.
 
 **Not in the list:** the Django admin, database rows or flags (duplicate rows, `is_active`), and
-anything else only a developer can see. Emails and other background effects are not part of
+anything else only a developer can see. Nor a case whose precondition the product cannot reach
+through its own screens: a state only a database edit could create (two rows where the model has
+a unique rule, say) cannot be set up for the suite, so the case can never run. Emails and other background effects are not part of
 automation either. The suite drives the product's own screens as an employee uses them.
 
 When two controls share one server routine (two dropdowns saved by the same helper), write the
