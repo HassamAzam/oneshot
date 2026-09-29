@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  designApprovalRequestBody, designApprovedRecordBody, designAttachments,
+  approverLine, designApprovalRequestBody, designApprovedRecordBody, designAttachments,
   designDeliverableRefusal, designGateApplies,
 } from './reviewgate.js';
 import { artifactDir, phases } from '../lib/config.js';
@@ -59,7 +59,12 @@ test('the request renders screens, decisions, new patterns and open questions', 
   assert.match(body, /\*\*Decisions worth your attention\*\*/);
   assert.match(body, /\*\*New — needs approval\*\*/);
   assert.match(body, /Can a lead approve their own\? — _recommended: No_/);
-  assert.match(body, /Only DEV may sign this off/);
+  assert.match(body, /Only DESIGN may sign this off/);
+});
+
+test('the product owner may sign off a design, and not a plan', () => {
+  assert.match(approverLine('design'), /`@muhammad\.nouman`/);
+  assert.doesNotMatch(approverLine('plan'), /muhammad\.nouman/);
 });
 
 test('a flow change says the mockups are its states, and a single screen says so', () => {

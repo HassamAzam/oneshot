@@ -428,7 +428,7 @@ export function slackConfig(): SlackConfig {
 }
 
 /**
- * The two sign-off groups, by GitLab username (config/reviewers.json).
+ * The sign-off groups, by GitLab username (config/reviewers.json).
  *
  * Not merged into `slackConfig().allowlist`, which it replaces as the review
  * gates' authorisation source: that list holds SLACK user ids, and the gates
@@ -445,6 +445,12 @@ export function slackConfig(): SlackConfig {
 export interface ReviewersConfig {
   dev: string[];
   qa: string[];
+  /**
+   * The design gate's group. Deliberately neither `dev` nor derived from it:
+   * it holds a product owner who signs off designs but not plans, and a list
+   * inherited from `dev` would change whenever the plan approvers do.
+   */
+  design: string[];
   /**
    * The work-email domain a GitLab username is completed with to find that
    * person's SLACK id (`<username>@<emailDomain>` → `users.lookupByEmail` →
@@ -487,6 +493,7 @@ export function reviewersConfig(): ReviewersConfig {
     _reviewers = {
       dev: Array.isArray(c.dev) ? c.dev : [],
       qa: Array.isArray(c.qa) ? c.qa : [],
+      design: Array.isArray(c.design) ? c.design : [],
       emailDomain: envOr('ONESHOT_REVIEWER_EMAIL_DOMAIN', typeof c.emailDomain === 'string' ? c.emailDomain : ''),
       slackIds: (c.slackIds && typeof c.slackIds === 'object') ? c.slackIds : {},
     };

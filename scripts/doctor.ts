@@ -338,8 +338,8 @@ async function main(): Promise<void> {
     // for real rather than checking that config looks plausible: an
     // unresolvable reviewer fails silently — the ask posts unaddressed and
     // they never learn they are being waited on.
-    const { dev, qa, emailDomain, slackIds } = reviewersConfig();
-    const names = [...new Set([...dev, ...qa])];
+    const { dev, qa, design, emailDomain, slackIds } = reviewersConfig();
+    const names = [...new Set([...dev, ...qa, ...design])];
     if (names.length) {
       // A pinned id is trusted at runtime without a lookup, so this is the
       // only place it is ever checked. Verify it against the live workspace
