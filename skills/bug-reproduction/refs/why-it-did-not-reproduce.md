@@ -1,11 +1,12 @@
 # Why a real bug fails to reproduce
 
-Five reasons a defect that genuinely exists comes back `not-reproduced`, from the
+Six reasons a defect that genuinely exists comes back `not-reproduced`, from the
 QA team's own history. Walk this list **before** recording that verdict — it is
 the one that can close a real ticket.
 
-Each is a false negative, not a near miss: the bug was there, the run looked
-straight at it, and the conditions were wrong.
+Most are false negatives, not near misses: the bug was there, the run looked
+straight at it, and the conditions were wrong. The last one runs in **both**
+directions — it also manufactures a discrepancy that is not a defect at all.
 
 ---
 
@@ -54,11 +55,32 @@ a dirty-form flag, validation that only runs on first render.
 anything. Submitting directly once is not a reproduction of a bug reported on a
 form that was changed.
 
-### 5. The conditions were not the ticket's conditions
+### 5. Money is rounded on screen and exact underneath — the only one that cuts both ways
+
+On costing and report screens amounts show as whole dollars, or as floats rounded
+to two decimal places. The backend calculates at full precision, to however many
+places the arithmetic produces. That creates two opposite mistakes:
+
+- **A discrepancy you "reproduce" by comparing a screen value against an API or
+  DB value is not the bug.** Those two numbers differ by design. Reproducing a
+  reported "wrong total" that way is a false `reproduced` — it will be there on a
+  perfectly correct build.
+- **A genuine rounding bug only appears at scale.** Over a short date range the
+  drift is under a cent and invisible; over a long one it accumulates, and a
+  report pulled across a wide filter comes out $2–3 apart. Run it over a narrow
+  range and a real defect records as `not-reproduced`.
+
+**Do:** compare like with like — screen against screen, or raw against raw, and
+say in `observed` which you used. Where the ticket reports a discrepancy over a
+period, use **that** period, not a convenient short one. A difference of a few
+dollars across a wide date filter is the shape this bug has; treating it as noise
+loses it, and treating rounded-vs-exact as the bug invents one.
+
+### 6. The conditions were not the ticket's conditions
 
 The environment, browser, viewport, period or account you used differed from the
 one reported, and the difference is the bug. Already in the skill's rules, and it
-is what the four above are each a specific instance of.
+is what the five above are each a specific instance of.
 
 **Do:** state the conditions you ran in `reason`, so a reader can see which one
 differed from the report.
@@ -68,9 +90,10 @@ differed from the report.
 ## How these get caught
 
 Not by re-reading the code — by asking, of a `not-reproduced`: **whose account,
-which record, what content, which order?** Every entry above is a different
-answer to one of those four questions, and each was found the same way: someone
-re-ran it under the reporter's conditions and the bug appeared immediately.
+which record, what content, which order, over what range, rounded or raw?** Every
+entry above is a different answer to one of those, and each was found the same
+way: someone re-ran it under the reporter's conditions and the bug appeared
+immediately.
 
 ## Adding to this file
 
