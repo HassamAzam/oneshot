@@ -367,6 +367,7 @@ export function hookPlan(env: Record<string, string>): Record<string, HookEntry[
     PreToolUse: [
       { script: 'pause-check.cjs', timeout: 15 },
       { matcher: WRITE_TOOLS, script: 'write-scope.cjs', timeout: 15 },
+      { matcher: WRITE_TOOLS, script: 'frontend-test-guard.cjs', timeout: 15 },
       { matcher: BASH, script: 'git-guard.cjs', timeout: 20 },
       { matcher: MR_TOOLS, script: 'mr-gate.cjs', timeout: 15 },
       { matcher: READ_OR_BASH, script: 'secret-guard.cjs', timeout: 15 },

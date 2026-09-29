@@ -450,6 +450,21 @@ export async function editIssueLabels(
   return call<Issue>('PUT', `/projects/${projectId()}/issues/${iid}`, body, true);
 }
 
+export interface Label { name: string }
+
+/**
+ * Every label defined on the project.
+ *
+ * Oneshot never creates a label, and every label check it performs is by NAME
+ * against whatever the ticket carries — so a name that is misspelled, renamed
+ * on the board, or never created simply never matches. Nothing raises: a swap
+ * writes a label the board does not show, and a `labelSkills` pair silently
+ * stops routing. This is the one call that can turn that into a sentence.
+ */
+export function listLabels(): Promise<GitlabResult<Label[]>> {
+  return call<Label[]>('GET', `/projects/${projectId()}/labels?per_page=100`);
+}
+
 export interface Branch { name: string; protected: boolean; commit: { id: string } }
 
 export function getBranch(name: string): Promise<GitlabResult<Branch>> {

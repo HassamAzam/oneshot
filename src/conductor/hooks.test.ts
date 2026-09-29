@@ -38,6 +38,7 @@ const LOOP_PLAN = {
   PreToolUse: [
     { script: 'pause-check.cjs', timeout: 15 },
     { matcher: '^(Write|Edit|NotebookEdit)$', script: 'write-scope.cjs', timeout: 15 },
+    { matcher: '^(Write|Edit|NotebookEdit)$', script: 'frontend-test-guard.cjs', timeout: 15 },
     { matcher: '^Bash$', script: 'git-guard.cjs', timeout: 20 },
     { matcher: '^mcp__gitlab__(create|update)_merge_request$', script: 'mr-gate.cjs', timeout: 15 },
     { matcher: '^(Read|NotebookRead|Grep|Bash)$', script: 'secret-guard.cjs', timeout: 15 },

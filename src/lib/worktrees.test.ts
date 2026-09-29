@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readlinkSync } from 'node:fs';
-import { detachTrackedClaude, seedWorktree } from './worktrees.js';
+import { detachTrackedClaude, runForkPoint, seedWorktree } from './worktrees.js';
 import { SKILLS_ROOT } from './config.js';
 
 const git = (args: string[], cwd: string): string =>
@@ -139,6 +139,54 @@ test('a checkout that does not commit .claude is left alone', () => {
     detachTrackedClaude(dir);
 
     assert.ok(existsSync(join(dir, '.claude', 'skills', 'ours.md')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A repo with `dev`, a branch cut from it, and a settable origin/dev. */
+function repoWithBranch(): { dir: string; base: string; tip: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'oneshot-fp-'));
+  git(['init', '-q', '-b', 'dev'], dir);
+  git(['config', 'user.email', 'test@example.com'], dir);
+  git(['config', 'user.name', 'Test'], dir);
+  writeFileSync(join(dir, 'a.txt'), 'base\n');
+  git(['add', '-A'], dir);
+  git(['commit', '-qm', 'base'], dir);
+  const base = git(['rev-parse', 'HEAD'], dir);
+  git(['checkout', '-q', '-b', 'oneshot/ticket-1-x'], dir);
+  writeFileSync(join(dir, 'a.txt'), 'the fix\n');
+  git(['commit', '-qam', 'the fix the plan is scored on finding'], dir);
+  const tip = git(['rev-parse', 'HEAD'], dir);
+  git(['update-ref', 'refs/remotes/origin/dev', base], dir);
+  return { dir, base, tip };
+}
+
+test('runForkPoint returns where the branch left the base, not its tip', () => {
+  const { dir, base, tip } = repoWithBranch();
+  try {
+    const got = runForkPoint('oneshot/ticket-1-x', dir);
+    assert.equal(got, base);
+    assert.notEqual(got, tip);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runForkPoint refuses a branch the base already contains, rather than returning its tip', () => {
+  // Once the run's MR lands, merge-base(branch, base) IS the branch tip, so the
+  // replay would build its worktree on top of the implementation it is meant to
+  // be re-planning from scratch. Wrong silently is the one outcome a
+  // measurement rig cannot have.
+  const { dir, tip } = repoWithBranch();
+  try {
+    git(['update-ref', 'refs/remotes/origin/dev', tip], dir);
+
+    assert.throws(
+      () => runForkPoint('oneshot/ticket-1-x', dir),
+      /contained in/,
+      'a landed branch must not silently yield its own tip',
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
