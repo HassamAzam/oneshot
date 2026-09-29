@@ -96,22 +96,33 @@ The list must have at least one case for each of these that applies:
 - the happy path;
 - validation and negative input (required fields, wrong formats, a value the rule rejects);
 - boundaries (the limit itself and one past it, empty, maximum length, a date at the edge);
-- roles and permissions: who can do it, and who must not be able to;
-- persistence: the result is still there after a reload and after logging in again;
+- roles and permissions, when the change is about who can do something. Not a second-user case
+  "to prove isolation" when the screen only ever reads the logged-in user's own settings;
+- persistence: the result is still there once the page re-reads the saved data (a reload).
+  Logging out and in again reads it the same way, so it is not a case of its own;
 - neighbours the diff touched: a screen or report that shares the changed code (regression);
 - for a bug ticket, the original reproduction steps as a case, now expecting the fixed result.
   Put in its `precondition` whatever state made the old bug appear (for example "the option was
   blocked earlier, then removed and saved"). The reporter's steps often skip it, and a case run
-  on fresh data then passes on the broken build too;
-- Django admin pages the diff changed (a new column, filter or hidden field). They are ordinary
-  pages in one tab, so they are usually `yes`.
+  on fresh data then passes on the broken build too. When the reproduction changes several
+  controls in one Save, that one Save is the case.
+
+**Not in the list:** the Django admin, database rows or flags (duplicate rows, `is_active`), and
+anything else only a developer can see. Emails and other background effects are not part of
+automation either. The suite drives the product's own screens as an employee uses them.
 
 When two controls share one server routine (two dropdowns saved by the same helper), write the
-save-and-persist cases (reload, clear, keep-remove-add) once, not once per control. The per-option
-cases below are different: each option has its own effect, so each gets its own case.
+save-and-persist cases (reload, clear, keep-remove-add) once, not once per control. Two kinds of
+case are still written for **every** control the ticket names: the bug's own reproduction (for
+example blocked, removed, then blocked again), and each option with a visible effect.
+
+**Every case must be able to fail on the unfixed build.** It goes through the changed behaviour
+(for a save bug, it clicks Save). A case that only reloads or views data its precondition already
+set up passes on the broken build too: drop it.
 
 Usually 6 to 20 cases. Never more than 60. If the change is small, the list is small; do not pad
-it to look thorough.
+it to look thorough. A lean list where every case catches something the others do not is what
+QA approves.
 
 ### Every case is a full flow
 
@@ -120,40 +131,82 @@ user sees the result. A case that stops at "the setting was saved" cannot tell a
 setting does nothing from one where it works. So every case has three parts:
 
 1. **`precondition` states, in plain words, what must already exist** so the effect is visible
-   **before** the change is applied: the data, who it belongs to and when it is dated, then the
-   role and the starting state. For example:
-   - `A teammate in the user's team joined today, so a joiner update shows on Home › Team
-     Updates. The user has no blocked team updates.`
-   - `A teammate's birthday (or work anniversary) is today, so a wish card shows in Home ›
-     Announcements.`
-   - `A teammate is on leave this week` / `is attending a training this week` / `left the team
-     today`.
+   **before** the change is applied. It must pin down **everything the expected result depends
+   on**, so the case gives one answer on a correct build:
+   - **the data and the relationship the screen actually uses**, as the screen defines it: "the
+     employee and the teammate are active members of the same team", not an assumed role such as
+     "the employee leads the team";
+   - **dates inside the window the screen shows**: "on leave on a day between today and seven days
+     from now", "registered for a training that has not started yet", never "this week";
+   - **the whole starting selection**: when `expected` says a control "shows only X", the
+     precondition says what else is (or is not) selected: "Nothing else is blocked", "The employee
+     blocks only A and B";
+   - **what enables the controls the steps use**, and only those: "The employee has already
+     ticked both consent checkboxes on Profile › Basic Information, so Save is enabled" belongs in
+     a case that clicks Save, and nowhere else. Do not claim it enables anything the code does not
+     gate on it;
+   - **a fresh account when the case is about a default**: "An employee that no other case logs in
+     as, who has never blocked anything". The suite runs every day on shared accounts, so an
+     account another case uses is no longer in its default state.
+
+   For example: `A teammate joined today, and the employee and the teammate are active members of
+   the same team, so a joiner update shows on Home › Team Updates. Nothing is blocked in Blocked
+   Team Updates. The employee has already ticked both consent checkboxes on Profile › Basic
+   Information, so Save is enabled.`
 
    Say **what** must exist, never **how** to create it: no API calls, endpoints, scripts or seed
    steps. Setting up that data is a separate job, handled outside these cases.
 2. **`steps` walk the whole flow**, the way a person does it: `Log in as <role>` · open the screen
    where the effect will show and **see the precondition's item there** (the baseline) · go to the
    page the change is on · make the change · save · go back to the screen where the effect shows.
+   - **After Save, make the page re-read what was stored before checking**: reload it, or open
+     another page from the menu and come back without reloading the browser. The save reply echoes
+     back what was sent, so a check made on the same page right after Save passes on a build that
+     stored nothing.
+   - **Every step ends in something `expected` checks.** A reload with nothing checked after it is
+     a dangling step: either check something after it or leave it out.
+   - **One action per step, and say how**: "Click the cross icon on each selected option", not
+     "Remove both options"; "Reload the page" as its own step, not folded into "Open … and reload".
+   - **Put the wait in the step**: "Open **Home** and wait for **Team Updates** to finish loading",
+     so the automation waits before it checks.
 3. **`expected` is the effect where the user sees it**, phrased the way QA writes it: "The
    teammate's joiner update is no longer shown under Home › Team Updates". Not only "the dropdown
    kept the value". When the change shows up somewhere else (Home, a report, a list), the case
    checks it there.
+   - **Check "is not shown" only after that section has finished loading.** While a card shows its
+     loading placeholder, "not shown" is true on any build.
+   - **When an option has no visible effect** (it only stops an email or a background job), do not
+     invent a screen for it. Its case checks that the control keeps the saved selection once the
+     page has re-read it.
+   - **Quote the app's exact message** when it has one ("Profile updated successfully").
+   - **State a control's whole content**: "shows only A and B", "shows exactly these six", never
+     "shows A and B" (which a build that also kept C passes). When a case checks at two moments,
+     name both ("after returning from Home, and again after the reload").
 
-**One case per option.** When a control's options each do something different (each blocked
-update hides a different Home item), write one case per option, each with its own precondition and
-its own check on the screen that option affects. Then the cases about the control itself:
-- the default (nothing selected);
-- the options it offers;
-- choosing several at once, each effect checked;
+**One case per option with a visible effect.** When a control's options each change something on
+screen (each blocked update hides a different Home item), write one case per option, each with its
+own precondition and its own check where that option shows. Options with no visible effect share
+the save-and-persist cases instead of getting one each. Then the cases about the control itself:
+- the default (nothing selected), on a fresh account;
+- the options it offers: **all** of them, named exactly, compared with leading and trailing spaces
+  ignored (a label in the app can end with a space). Its precondition says **nothing is selected
+  yet**: a selected option disappears from the open list, so the list case fails on a correct
+  build for an account that has something chosen. Quote labels trimmed everywhere; mention a
+  trailing space only in this case's comparison;
+- saving several at once, and removing some while adding others, each checked after a re-read;
+- for a fix that turns something back on (a removed choice re-selected, a record reactivated),
+  also the other side: a choice removed in an **earlier** Save stays off when a **different**
+  choice is saved now. A fix that switches on too much passes every "it comes back" case;
 - removing a choice with its cross icon;
-- the confirmation message after Save.
+- the confirmation message after Save: add it to the `expected` of a case that already clicks
+  Save, rather than writing the same steps twice.
 
 The team's own suite reads this way. From its Profile sheet:
 
 | Pre Condition | Action | Description |
 | --- | --- | --- |
 | On Basic Information, Edit clicked | User selects Team (member) joiners update and taps Save | Verify that system blocks the joiners update from Home > Team section |
-| On Basic Information, Edit clicked | User selects Automated birthday wish notification and taps Save | Verify that system blocks the birthday wish notification from Home > Notification section |
+| On Basic Information, Edit clicked | User clicks on Blocked Team Updates | Verify that system shows the below options to user: … |
 | On Basic Information, Edit clicked | User clicks the cross icon | Verify that system removes the selected option from the field |
 
 Your cases are those rows, made runnable: say what must be on Home first, and start from the
@@ -183,24 +236,48 @@ login.
   inventing one.
 - **`expected` is one observable oracle**: something on screen, or a saved value you can see,
   that decides pass or fail. "The page works correctly" decides nothing.
-- **No duplicates.** Two cases that would pass or fail together are one case.
+- **No duplicates.** Two cases that would pass or fail together are one case. Before returning,
+  walk the list and:
+  - **merge** cases with the same precondition, selection and expected result that differ only in
+    how the page re-reads the data (do both re-reads in one case);
+  - **drop** a case another case already covers: saving two options is covered by the case that
+    saves all of them; a Save-message case that repeats another case's first steps belongs in
+    that case's `expected`; a log-out-and-in case repeats the reload case; two cases that start
+    from the same selection and each remove one option are one case (fold a second way of
+    removing, such as the cross icon, into its steps).
 - **Ids `TC-01`, `TC-02`, … in list order**, at least two digits.
 - **No real credentials.** Name the account ("log in as an HR admin"), never a password or a
   token. Anything that looks like a credential is blanked before the list is posted, which would
   leave a step that reads "enter password: [redacted]".
-- **Nothing invented.** A behaviour that is in neither the diff nor the ticket is not a case.
+- **Nothing invented.** A behaviour that is in neither the diff nor the ticket is not a case, and
+  a condition nobody stated is not a precondition (write "a teammate is on leave on a day between
+  today and seven days from now", not "on approved leave", unless the ticket or code says so).
+  State each fact once.
+- **Write paths with `›`**, as QA does: Profile › **Basic Information**, Home › **Team Updates**.
 
 A good case:
 
 | Field | Value |
 | --- | --- |
 | id | `TC-03` |
-| scenario | Verify that blocking "Team (member) joiners update" hides a teammate's joiner update from Home › Team Updates |
-| precondition | A teammate in the user's team joined today, so a joiner update shows on Home › Team Updates. The user has no blocked team updates. |
-| steps | Log in as the employee · Open **Home** and confirm the teammate's joiner update is shown under **Team Updates** · Open Profile › **Basic Information** · Click **Edit** · In **Blocked Team Updates**, select "Team (member) joiners update" · Click **Save** · Open **Home** |
-| expected | The teammate's joiner update is no longer shown under Home › Team Updates |
+| scenario | Verify that blocking "Team (member) joiner update" hides a teammate's joiner update from Home › Team Updates |
+| precondition | A teammate joined today, and the employee and the teammate are active members of the same team, so a joiner update shows on Home › Team Updates. Nothing is blocked in Blocked Team Updates. The employee has already ticked both consent checkboxes on Profile › Basic Information, so Save is enabled. |
+| steps | Log in as the employee · Open **Home** and wait for **Team Updates** to finish loading, then confirm the teammate's joiner update is shown · Open Profile › **Basic Information** · Click **Edit** · In **Blocked Team Updates**, select "Team (member) joiner update" · Click **Save** · Open **Home** |
+| expected | The message "Profile updated successfully" is shown after Save and, once Home › **Team Updates** has finished loading, the teammate's joiner update is no longer shown |
 | automatable | `yes` |
-| reason | The dropdown, Save and the Team Updates card are all in the page, and the joiner is ordinary test data |
+| reason | The dropdown, Save, the message and the Team Updates card are all in the page, and the joiner is ordinary test data |
+
+And one for an option with no visible effect, checked on the control itself after a re-read:
+
+| Field | Value |
+| --- | --- |
+| id | `TC-02` |
+| scenario | Verify that a notification blocked, removed and then blocked again is still selected when the page re-reads the saved data |
+| precondition | The employee blocked "Automated birthday wish notification" earlier, then removed it and saved. Nothing else is blocked in Blocked Notifications. The employee has already ticked both consent checkboxes on Profile › Basic Information, so Save is enabled. |
+| steps | Log in as the employee · Open Profile › **Basic Information** · Click **Edit** · In **Blocked Notifications**, select "Automated birthday wish notification" · Click **Save** · Open **Home** from the menu · Open Profile › **Basic Information** again without reloading the browser · Reload the page |
+| expected | Both times, once **Blocked Notifications** has finished loading, it shows only "Automated birthday wish notification" |
+| automatable | `yes` |
+| reason | The dropdown, Save, the menu and the reload are all in one tab |
 
 ### Choosing the module
 
@@ -296,7 +373,14 @@ Drop TC-07. Add a case for an expired session." `nextId` is `TC-13`.
       start with `Log in as …` and see that item before the change, and `expected` is checked on
       the screen where the user sees the effect.
 - [ ] No API calls, endpoints or seed steps anywhere in a case.
-- [ ] Options that do different things have one case each.
+- [ ] Options with a visible effect have one case each; options without one are covered by the
+      save-and-persist cases, and no case invents a screen for them.
+- [ ] Every precondition pins down what `expected` depends on: the whole starting selection, the
+      relationship the screen uses, dates inside its window, the consents that enable Save, and a
+      fresh account for a default.
+- [ ] Every check after Save happens after the page re-read the data, every "not shown" after the
+      section finished loading, and no step is left without a check.
+- [ ] No Django admin, database or email cases; no case another case already covers.
 - [ ] Every `reason` names the Cypress limit, or says in a few words why the case is reachable.
 - [ ] `module` is an existing module name copied exactly, or a short new Title Case name.
 - [ ] `sources` lists the MRs and files your cases come from.
