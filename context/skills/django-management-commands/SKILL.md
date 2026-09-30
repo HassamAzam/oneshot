@@ -23,12 +23,21 @@ Start from `templates/command.py`. Three things in that template are repo conven
 
 ## `add_arguments` vs. date-based auto-detection
 
-Two patterns coexist. Of the 108 commands in `apps/*/management/commands/`, 78 take no arguments at all and 30 declare `add_arguments`.
+**ERP stores no schedule.** No model holds a cron expression, cadence, or reminder calendar — for crontab-driven work the schedule exists only in a crontab line on a server, outside this repo and outside version control. That single fact decides this section.
 
-- **Date-based auto-detection** (the majority — `notify_person_project_logs.py:69,74`): the command reads `date.today()` itself and branches on weekday or month-end. No arguments. Simple, but every branch lives in one command and a bug in the date logic hits all of them at once.
-- **`add_arguments`** — used in this repo for exactly three jobs: a **date or window** to operate over (`--month`, `--for-date`, `--year`, `--start`/`--end`, `--before`/`--after`), the **entity to scope to** (`--person`, `--team`, `--teams`), and a **safety toggle** (`--dry-run`, `--confirm-large`). Reach for it when a human or a backfill has to re-run the command over a period the clock would not pick on its own — that is what makes the logic re-runnable and testable without waiting for the calendar.
+Because the schedule is not in the repo, **"am I due right now?" must be answered in the repo.** The majority pattern does exactly that: `notify_person_project_logs.py:74` compares `date.today().weekday()` against `FRIDAY_WEEK_DAY_CONSTANT` from `common/constants.py`. The intent is a named constant a reviewer can check and a test can assert. 78 of the 108 commands take no arguments at all and work this way.
 
-**No command here selects among N variants of the same logic by flag** — there are zero uses of `choices=` across all 108. If a ticket seems to want that shape (three reminder slots, say), treat it as a new pattern rather than the house style: weigh one flag per caller against N branches in a date-sniffing `handle()` on the merits, and do not expect a precedent to cite.
+The failure mode of the alternative is the whole point. A flag like `--reminder 2` that says *which slot of the schedule this invocation is* moves the meaning of "2" into the crontab line. Nothing in ERP then records that three slots exist, which days they fall on, or that slot 2 is Friday's. The repo cannot express it, no test can assert it, and if ops registers it on the wrong day nothing here contradicts them. You have split one concept across two systems and left the authoritative half unversioned.
+
+So: **do not encode schedule semantics in a flag.** `add_arguments` is for inputs ERP genuinely owns, which in this repo means exactly three things:
+
+- a **date or window** to operate over — `--month`, `--for-date`, `--year`, `--start`/`--end`, `--before`/`--after`
+- the **entity to scope to** — `--person`, `--team`, `--teams`
+- a **safety toggle** — `--dry-run`, `--confirm-large`
+
+All three are parameters a human or a backfill supplies to re-run the command over something the clock would not pick on its own. None of them tells the command when it is due.
+
+Zero of the 108 commands use `choices=`, and none selects among variants of the same logic by flag. If a ticket seems to call for that, the shape is usually a sign the schedule is leaking into the arguments — put the cadence in a constant and branch on the date instead. If you still need it, say so explicitly in the MR rather than letting it imply precedent.
 
 ## Idempotency
 

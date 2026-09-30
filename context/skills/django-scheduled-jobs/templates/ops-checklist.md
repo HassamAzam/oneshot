@@ -42,5 +42,6 @@ Notes:
 
 - State the **environments explicitly**. "All environments" is ambiguous when a reminder should not fire from dev.
 - Give the cadence in words next to the cron expression. Nobody should have to parse `3,5,0` to review the MR.
-- **One checklist item per crontab line.** If one command is invoked several times with different flags, each invocation is its own line and ops needs all of them — a partially-registered set fails silently for the slots nobody added. Note that no command in this repo currently works that way (zero use `choices=`), so if yours does, say so explicitly rather than letting the shape imply precedent.
+- **One checklist item per crontab line.** Most commands need exactly one.
+- **A command should not need several lines that differ only by a flag.** That shape means the schedule's meaning is in the crontab rather than the repo — ERP stores no schedule, so nothing here can record what `--slot 2` is due to do, and a partially-registered set fails silently for whichever invocations ops missed. Put the cadence in a named constant and branch on the date instead; see `django-management-commands` § `add_arguments`.
 - Run the invocation verbatim before pasting it. A typo here is a no-op on the server that nobody discovers until someone asks why a reminder never arrived.

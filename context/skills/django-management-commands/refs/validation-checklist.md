@@ -21,8 +21,9 @@ If an item does not apply, say why rather than skipping it silently.
 
 ## Arguments
 
-- [ ] Choice between `add_arguments` and date-based auto-detection is deliberate — 78 of 108 commands take no arguments and read `date.today()` themselves; see the SKILL for what the 30 use flags for
-- [ ] If a flag selects between variants of the same logic, that is a new pattern here (zero commands use `choices=`) — say so in the MR rather than implying precedent
+- [ ] **No flag encodes schedule semantics.** ERP stores no schedule, so "am I due?" must be answerable from the repo — a named constant checked against `date.today()`, not a `--reminder N` whose meaning lives only in an unversioned crontab line
+- [ ] Every flag is a date/window, an entity scope, or a safety toggle — the three things ERP actually owns as inputs
+- [ ] Cadence is a named constant (`common/constants.py`-style), not a literal buried in a branch
 - [ ] Every argument declares `type=`, plus `required=` where there is no safe default
 - [ ] No argument silently defaulting to a value that changes who gets notified
 
