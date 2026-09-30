@@ -26,18 +26,21 @@ Paste into the MR description under `## Checklist`, and post the same content as
 
 ## Worked example
 
+`example_weekly_reminder` and `old_weekly_nudge` below are illustrative names — no such commands exist. Substitute your own.
+
 ```markdown
 ## Checklist
 - [ ] Tested locally
 - [ ] **Ops action required**: register on the server crontab —
-      `0 9 * * 3,5,0 <path>/manage.py notify_project_logs_weekly_reminder --reminder <N>`
+      `0 9 * * 3,5,0 <path>/manage.py example_weekly_reminder`
       (Wed/Fri/Sun 09:00, dev + stage + prod)
 - [ ] **Ops action required**: remove/disable the legacy crontab entry for `old_weekly_nudge` —
-      superseded by `notify_project_logs_weekly_reminder`
+      superseded by `example_weekly_reminder`
 ```
 
 Notes:
 
 - State the **environments explicitly**. "All environments" is ambiguous when a reminder should not fire from dev.
-- One checklist item per crontab line. Three reminder slots passing `--reminder 1|2|3` are three lines, and ops needs all three.
 - Give the cadence in words next to the cron expression. Nobody should have to parse `3,5,0` to review the MR.
+- **One checklist item per crontab line.** If one command is invoked several times with different flags, each invocation is its own line and ops needs all of them — a partially-registered set fails silently for the slots nobody added. Note that no command in this repo currently works that way (zero use `choices=`), so if yours does, say so explicitly rather than letting the shape imply precedent.
+- Run the invocation verbatim before pasting it. A typo here is a no-op on the server that nobody discovers until someone asks why a reminder never arrived.

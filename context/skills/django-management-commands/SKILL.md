@@ -50,4 +50,6 @@ If the work is more than a quick query — sending mail, heavy computation — h
 
 ## Before you call it done
 
-Load `refs/validation-checklist.md` and walk it against what you wrote. It is the mechanical form of everything above — the rules in this file are the explanation, that file is the check.
+Load `refs/validation-checklist.md` and walk it against what you wrote. This file is the explanation; that file is the check.
+
+Budget for its **Evidence** section before you declare done. Everything else on that list can be satisfied by a command that has never once executed — the evidence items cannot, and they are where the real failures live: a command whose `--help` is broken, a guard that does not actually make the second run a no-op, a test that was written but never collected, an exception handler nobody has seen fire.

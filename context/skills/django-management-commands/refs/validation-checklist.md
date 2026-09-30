@@ -2,7 +2,12 @@
 
 Run this after writing or changing a file under `apps/<app>/management/commands/`. Authoritative specs: `django-management-commands/SKILL.md`, `django-scheduled-jobs/SKILL.md`, and `.claude/rules/backend-python.md`. This file is a check, not a rulebook — read the spec when a line needs depth.
 
-Each item is written so it can be answered by looking at the diff. If an item does not apply, say why rather than skipping it silently.
+Two kinds of item here, and the difference matters:
+
+- **Static checks** are answerable by reading the diff.
+- **Evidence checks** are answerable only by running something and recording what happened. A tick with no recorded outcome is not a pass — write the number, the output line, or the row count next to it.
+
+If an item does not apply, say why rather than skipping it silently.
 
 ## Structure
 
@@ -16,15 +21,17 @@ Each item is written so it can be answered by looking at the diff. If an item do
 
 ## Arguments
 
-- [ ] Choice between `add_arguments` and date-based auto-detection is deliberate, per the SKILL's rule (N distinct invocations → `add_arguments`)
-- [ ] Every argument declares `type=`, and `choices=` / `required=` where the domain is closed
+- [ ] Choice between `add_arguments` and date-based auto-detection is deliberate — 78 of 108 commands take no arguments and read `date.today()` themselves; see the SKILL for what the 30 use flags for
+- [ ] If a flag selects between variants of the same logic, that is a new pattern here (zero commands use `choices=`) — say so in the MR rather than implying precedent
+- [ ] Every argument declares `type=`, plus `required=` where there is no safe default
 - [ ] No argument silently defaulting to a value that changes who gets notified
 
 ## Idempotency
 
-- [ ] A second run over the same data is a no-op — there is an explicit guard (`is_completed=False`, `get_or_create`, `update_or_create`, or an equivalent filter)
+- [ ] There is an explicit guard (`is_completed=False`, `get_or_create`, `update_or_create`, or an equivalent filter)
 - [ ] The guard is in the query, not merely implied by the schedule
 - [ ] Nothing double-sends if the process dies partway and is re-run
+- [ ] **Demonstrated, not asserted** — see Evidence below
 
 ## Celery
 
@@ -41,13 +48,23 @@ Each item is written so it can be answered by looking at the diff. If an item do
 ## Tests
 
 - [ ] Test file is named `apps/<app>/tests/<command_name>_test.py`
-- [ ] **Its test class is imported in `apps/<app>/tests/__init__.py`** — the import is what collects the test; the runner keeps Django's default `test*.py` pattern, so the filename alone runs nothing. Name the class you added and the line you added it on; a correct suffix is not evidence of collection
-- [ ] The test was observed to actually run (it appears in the runner's output), not merely written
+- [ ] **Its test class is imported in `apps/<app>/tests/__init__.py`** — the import is what collects the test; the runner keeps Django's default `test*.py` pattern, so the filename alone runs nothing. Name the class and the line you added it on; a correct suffix is not evidence of collection
 - [ ] The extracted `utils.py` function is tested directly, not only through `call_command`
 - [ ] `.delay()` is mocked and asserted on by argument
 - [ ] Empty queryset covered (nobody to notify)
 - [ ] Idempotency guard covered (second run is a no-op)
 - [ ] Each `add_arguments` branch covered separately
+
+## Evidence — run it, do not just read it
+
+Everything above can be satisfied by a command that has never executed. These cannot. Record the actual output beside each one.
+
+- [ ] **`python manage.py <command> --help` exits 0.** Catches a broken `add_arguments` before ops discovers it on a server. Record the flags it printed.
+- [ ] **Ran once against local data.** Record what changed — rows touched, recipients, or "nothing, queryset was empty". If nothing changed and you expected something to, the command is not working.
+- [ ] **Ran a second time immediately.** Record that nothing changed. This is the only thing that actually establishes idempotency; the guard in the query is just the mechanism.
+- [ ] **Ran the test and saw it execute.** Paste the runner line naming your test class. This is the sole defence against the `__init__.py` collection trap — a written test that was never collected looks identical to a passing one.
+- [ ] **Exercised the failure path at least once** (bad input, or temporarily raise inside the util) and confirmed the `logger.exception(...)` line appeared, under the logger name you chose. `send_competency_deadline_reminder.py` has no handler at all and nobody noticed for as long as it has been live — an unverified handler is the same thing with extra steps.
+- [ ] **If scheduled:** the exact `manage.py` invocation written in the ops checklist item was run verbatim and succeeded. A typo in that line is a silent no-op on the server.
 
 ## Scheduling handoff
 
@@ -59,5 +76,5 @@ Each item is written so it can be answered by looking at the diff. If an item do
 
 ## Lint
 
-- [ ] `flake8` and `pylint` clean on every changed `.py` file
+- [ ] `flake8` and `pylint` clean on every changed `.py` file — record the exit status, not the intention
 - [ ] No inline `#` comments added (per `.claude/rules/backend-python.md` — docstrings instead)
