@@ -1027,6 +1027,7 @@ export async function runTicket(
     const refused = refusedTicket(ticket.labels);
     if (refused) {
       log.warn('refused ticket', { iid, reason: refused });
+      logEvent('zone_refused', { iid }, { runId: j.runId });
       return finish(j, 'blocked', refused);
     }
 
@@ -1176,6 +1177,8 @@ export async function runTicket(
         phase.name === 'review' ? prior.implement ?? null : null), loadZoneMap());
       if (zone.unreadable || zone.violations.length) {
         log.warn('zone guard stopped the run', { iid, violations: zone.violations, unreadable: zone.unreadable });
+        logEvent('zone_guard_stop', { iid, files: zone.violations.length, unreadable: zone.unreadable,
+          zones: [...new Set(zone.violations.map((v) => v.zone))] }, { runId: j.runId });
         return finish(j, 'blocked', zoneBlockReason(zone));
       }
     }

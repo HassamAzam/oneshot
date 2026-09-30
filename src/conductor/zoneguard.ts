@@ -52,8 +52,7 @@ export function zoneOf(map: ZoneMap, file: string): ZoneHit {
 export function refusedTicket(labels: string[]): string | null {
   const label = projectConfig().zones?.testsLabel;
   if (!label || !labels.includes(label)) return null;
-  return `this is a "${label}" ticket — those tests pin current behaviour before an agent changes it, so a `
-    + 'person writes them, never Oneshot. Remove Loop; the change ticket is released once these tests merge';
+  return `"${label}" tickets are written by a person, never Oneshot — remove Loop; the change is released when these merge`;
 }
 
 /** Whether this ticket was routed by zone, and so is held to its zone. */
@@ -99,14 +98,9 @@ export function zoneVerdict(labels: string[], files: string[], map: ZoneMap | nu
 
 /** The stop reason posted on the ticket: which files, which zone, and what a person can do. */
 export function zoneBlockReason(verdict: ZoneVerdict): string {
-  if (verdict.unreadable) {
-    return 'the delivery zone map could not be read from the work repo, so this AI-routed ticket cannot be '
-      + 'checked against it — fetch origin, or remove the AI label to run it under the review gates';
-  }
+  if (verdict.unreadable) return 'zone map unreadable — fetch origin, or remove AI to run under the review gates';
   const shown = verdict.violations.slice(0, 8)
-    .map((v) => `${v.file} (${v.zone}${v.areas.length ? `: ${v.areas.join(', ')}` : ', unmapped'})`).join('; ');
-  const more = verdict.violations.length > 8 ? `; and ${verdict.violations.length - 8} more` : '';
-  return `this run would change files outside the zone it was routed for — ${shown}${more}. `
-    + 'A person decides: re-plan within the zone, move the work to the team, or update .claude/zones.json '
-    + 'through a reviewed MR';
+    .map((v) => `${v.file} (${v.zone}${v.areas.length ? `: ${v.areas.join(', ')}` : ''})`).join('; ');
+  const more = verdict.violations.length > 8 ? ` +${verdict.violations.length - 8} more` : '';
+  return `outside its zone: ${shown}${more}. Re-plan inside the zone, hand it to the team, or change .claude/zones.json by MR`;
 }

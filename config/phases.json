@@ -88,7 +88,7 @@
         "Backend": "django-backend-standards",
         "Frontend": "react-frontend-standards"
       },
-      "_why_layer_skills": "Backend / Frontend are decided at grooming by Jev (TypeSafe) from the ticket text, evaluated on 44 tickets with known outcomes (93% / 91% against the merged diffs). The plan settles the approach, so it gets that layer's standards before any file list exists; from the plan on, the plan's own forecast decides, and the labels only ever add (see implement's agent block in src/phases/prompts.ts).",
+      "_why_layer_skills": "Backend/Frontend are set at grooming by Jev (backend 93%, frontend 88%, 0 wrong skips on 42 tickets). Plan gets that layer's standards; from the plan on, its forecast decides and labels only add.",
       "_why_skills": "`skills` is this phase's method, loaded for every ticket. `labelSkills` is the domain knowledge a particular ticket calls for, keyed by the label triage puts on it \u2014 reuse and approach are decided here, so an accessibility ticket needs that standard at plan time and not first at implement. One line adds the next pair; nothing in code changes.",
       "artifact": "plan.json"
     },

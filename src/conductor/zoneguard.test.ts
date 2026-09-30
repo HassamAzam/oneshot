@@ -61,7 +61,7 @@ test('red is never allowed, whatever the labels', () => {
 test('an unreadable map stops an AI ticket', () => {
   const v = zoneVerdict(['AI', 'Loop'], ['apps/training/views.py'], null);
   assert.equal(v.unreadable, true);
-  assert.match(zoneBlockReason(v), /could not be read/);
+  assert.match(zoneBlockReason(v), /unreadable/);
 });
 
 test('files are reported once each, with zone and area', () => {
@@ -69,11 +69,11 @@ test('files are reported once each, with zone and area', () => {
   assert.equal(v.violations.length, 2);
   const reason = zoneBlockReason(v);
   assert.match(reason, /apps\/payroll\/a\.py \(red: payroll\)/);
-  assert.match(reason, /README\.md \(yellow, unmapped\)/);
+  assert.match(reason, /README\.md \(yellow\)/);
 });
 
 test('a characterization-test ticket is always refused, whatever else it carries', () => {
-  assert.match(refusedTicket(['Characterization Tests', 'Loop', 'AI']) ?? '', /person writes them/);
+  assert.match(refusedTicket(['Characterization Tests', 'Loop', 'AI']) ?? '', /written by a person/);
   assert.match(refusedTicket(['Characterization Tests', 'Loop']) ?? '', /never Oneshot/);
 });
 
