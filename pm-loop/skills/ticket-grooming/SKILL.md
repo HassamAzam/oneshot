@@ -15,19 +15,16 @@ description: Groom Plane tickets into GitLab issues on arbisoft/erp — single, 
 
 Run as `python3 ~/.claude/scripts/groom.py …` (allow-listed).
 
-## Flow — 4 calls per ticket
+## Flow — 3 calls per ticket
 
 1. `groom.py resolve WORKSTREAMRE-230` — `eligible: false` → report `skip_reason`, stop.
    Note `route` and `layers` (Jev's backend / frontend / migration call).
 2. `groom.py context "kw1" "kw2" "kw3"` — pick 2–5 lines for Previous Context.
    An `(open)` line asking for the same outcome → stop: "possible duplicate of #N".
-3. **Dry run, then ask.** Run `create` with `--dry-run`, and show the user each label from
-   `label_reasons` (label — why). **Never put a label on a ticket without their yes.** Labels
-   separate streams on this board (e.g. `Opensource`, `Plane team`).
-4. `groom.py create` with the approved list, body in the same call:
+3. `groom.py create`, body in the same call:
    ```bash
    python3 ~/.claude/scripts/groom.py create --id WORKSTREAMRE-230 --title "<title>" \
-     --from-issues <context iids> --confirm-labels "<approved list from confirm_with>" <<'GROOM_BODY'
+     --from-issues <context iids> <<'GROOM_BODY'
    ## Previous Context
    - [#<iid> — <title>](<url>) (closed <YYYY-MM-DD>)
 
@@ -40,8 +37,11 @@ Run as `python3 ~/.claude/scripts/groom.py …` (allow-listed).
    GROOM_BODY
    ```
    On route `ai` / `ai-tests`, add the sections in `templates/ai-sections.md` after Current State.
-   `--kind` / `--size` only when `create` asks for them. If the user drops or changes a label,
-   stop and tell them: labels come from the triage marker and Plane, so the fix belongs there.
+   `--kind` / `--size` only when `create` asks for them. `--dry-run` writes nothing.
+
+**Labels apply automatically, with two exceptions.** `create` stops with "check with the user
+first" for a label not yet on GitLab, or one flagged in `ask_first` (`Opensource`, `Plane team`:
+they move work between streams). Ask about just that label, then rerun with `--confirm-labels "<label>"`.
 
 `create` adds Attachments, References, Requested By, Plane Ticket, Routing and the backend AC itself.
 
@@ -55,7 +55,7 @@ Run as `python3 ~/.claude/scripts/groom.py …` (allow-listed).
 | `documents.failed`, `unlabelled` | Report each |
 | `sheet: FAILED`, `plane.backlink: FAILED` | Report with the rerun command; the issue exists |
 
-**Batch:** one `resolve` for all IDs, one call for all `context` searches, dry-run every ticket and ask once for all label lists, then one `create` per ticket.
+**Batch:** one `resolve` for all IDs, one call for all `context` searches, then one `create` per ticket.
 **One-shot** (no Plane ticket): `create --title … --kind … --size …`, always the human route.
 
 ## Before you finish
@@ -63,6 +63,6 @@ Run as `python3 ~/.claude/scripts/groom.py …` (allow-listed).
 - [ ] Every sentence in each body traces to the ticket, a comment or an attached document
 - [ ] Guesses are written as `unknown`, not filled in
 - [ ] Context was checked for an open duplicate
-- [ ] The user approved every ticket's labels before `create`
+- [ ] Any new or `ask_first` label was confirmed with the user, never passed on your own
 - [ ] Every skipped ticket, error, fallback, failed or private document and unlabelled item is reported
 - [ ] One row per ticket: `| Plane | Title | Route | Zone | GitLab | Sheet | Documents |`

@@ -23,7 +23,9 @@ LABELS = {
     "flow": {"ai": "AI", "loop": "Loop", "review": "Review", "design": "Design", "accessibility": "Accessibility",
              "characterization_tests": "Characterization Tests", "needs_human": "Needs Human"},
     "area": {"training": "Training", "teams": "Team Management", "payroll": "Payroll"},
-    "swimlane": {"Finance": "Finance", "Pod": "POD"},
+    "swimlane": {"Finance": "Finance", "Pod": "POD", "Opensource": "Opensource"},
+    "stream": {"opensource": "Opensource", "plane_team": "Plane team"},
+    "ask_first": ["Opensource", "Plane team"],
     "retired": {"names": ["Minor"]},
     "creatable": {"Zone: Green": {}, "Zone: Yellow": {}, "Zone: Red": {}, "Characterization Tests": {},
                   "XLarge (40+ hrs)": {}},
@@ -35,6 +37,8 @@ def _labels(monkeypatch, tmp_path):
     Path(tmp_path, "labels.json").write_text(json.dumps(LABELS))
     monkeypatch.setenv("PM_LOOP_MAP_DIR", str(tmp_path))
     gl.map_file.cache_clear()
+    live = {v for g in LABELS.values() if isinstance(g, dict) for v in g.values() if isinstance(v, str)}
+    monkeypatch.setattr(gl, "_live_labels", lambda: live | set(LABELS["creatable"]))
     yield
     gl.map_file.cache_clear()
 
@@ -145,8 +149,8 @@ def test_frontend_work_must_name_a_dark_theme_screen(monkeypatch):
 
 def test_unlabelled_areas_and_swimlanes_are_reported(monkeypatch):
     out = _dry_create(monkeypatch, _ticket(route="human", zone="red", areas=("payroll", "core"),
-                                           swimlanes=("Opensource", "Accessibility")), GOOD)
-    assert out["unlabelled"] == ["area core", "swimlane Opensource"]
+                                           swimlanes=("Accounts", "Accessibility")), GOOD)
+    assert out["unlabelled"] == ["area core", "swimlane Accounts"]
 
 
 def test_code_adds_plane_ticket_requested_by_and_routing(monkeypatch):
@@ -504,14 +508,34 @@ def test_unreadable_comments_fail_closed(monkeypatch):
     assert not t["eligible"] and "comments unreadable" in t["skip_reason"]
 
 
-def test_missing_labels_are_created_only_when_creatable(monkeypatch):
+def test_new_labels_need_a_yes_before_they_are_created(monkeypatch):
     posted = []
     monkeypatch.setattr(gl, "_live_labels", lambda: {"Bug"})
     monkeypatch.setattr(gl, "call", lambda m, path, payload=None: posted.append((m, path, payload["name"])))
-    gl.check_labels(["Bug", "Zone: Green"])
+    with pytest.raises(gl.GroomError, match="check with the user first: \\['Zone: Green'\\]"):
+        gl.check_labels(["Bug", "Zone: Green"])
+    gl.check_labels(["Bug", "Zone: Green"], frozenset({"Zone: Green"}))
     assert posted == [("POST", "labels", "Zone: Green")]
-    with pytest.raises(gl.GroomError, match="not creatable"):
-        gl.check_labels(["Bug", "Small (0-8 hrs)"])
+
+
+def test_ask_first_labels_need_a_yes_even_though_they_exist(monkeypatch):
+    monkeypatch.setattr(gl, "_live_labels", lambda: {"Bug", "Opensource"})
+    with pytest.raises(gl.GroomError, match="Opensource"):
+        gl.check_labels(["Bug", "Opensource"])
+    gl.check_labels(["Bug", "Opensource"], frozenset({"Opensource"}))
+
+
+def test_ordinary_existing_labels_need_no_confirmation(monkeypatch):
+    monkeypatch.setattr(gl, "_live_labels", lambda: {"Bug", "Frontend", "Zone: Green"})
+    gl.check_labels(["Bug", "Frontend", "Zone: Green"])
+
+
+def test_ensure_labels_creates_only_confirmed_new_labels(monkeypatch):
+    posted = []
+    monkeypatch.setattr(gl, "_live_labels", lambda: set())
+    monkeypatch.setattr(gl, "call", lambda m, path, payload=None: posted.append(payload["name"]))
+    out = gl.ensure_labels(frozenset({"Zone: Green"}))
+    assert posted == ["Zone: Green"] and "Zone: Red" in out["awaiting_confirmation"]
 
 
 def test_existing_issue_matches_the_exact_ticket_line_only(monkeypatch):
@@ -544,17 +568,10 @@ def test_live_create_backlinks_plane_and_adds_a_sheet_row_per_issue(monkeypatch,
     assert [r["url"] for r in calls["rows"]] == ["u20", "u19"] and out["issue"]["iid"] == 20
 
 
-def test_real_create_needs_the_user_approved_labels(monkeypatch):
-    with pytest.raises(gl.GroomError, match="need the user's approval"):
-        _dry_create(monkeypatch, _ticket(), GOOD, dry_run=False)
-    with pytest.raises(gl.GroomError, match="need the user's approval"):
-        _dry_create(monkeypatch, _ticket(), GOOD, dry_run=False, confirm_labels="Bug,AI,Loop")
-
-
-def test_dry_run_explains_every_label_and_gives_the_confirm_flag(monkeypatch):
-    out = _dry_create(monkeypatch, _ticket(route="human", zone="red", areas=("payroll",), swimlanes=("Finance",)),
-                      GOOD, layers=("backend",))
+def test_dry_run_explains_labels_and_flags_only_ask_first(monkeypatch):
+    out = _dry_create(monkeypatch, _ticket(route="human", zone="red", areas=("payroll",),
+                                           swimlanes=("Finance", "Opensource")), GOOD, layers=("backend",))
     reasons = out["label_reasons"]
     assert set(reasons) == set(out["labels"]) and "requested" not in reasons.values()
-    assert reasons["Finance"] == "Plane swimlane Finance" and reasons["Zone: Red"].startswith("zone red")
-    assert out["confirm_with"] == "--confirm-labels " + json.dumps(",".join(out["labels"]))
+    assert reasons["Opensource"] == "Plane swimlane Opensource" and reasons["Zone: Red"].startswith("zone red")
+    assert out["needs_user_yes"] == ["Opensource"]

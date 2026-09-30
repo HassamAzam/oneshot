@@ -11,7 +11,7 @@
   groom.py attach --issue 8812 FILE [FILE …]     add files to an existing issue's ## Attachments
   groom.py mr 10400                              MR summary JSON
   groom.py sweep [--dry-run] [--notify]          release yellow changes whose tests a person merged
-  groom.py ensure-labels
+  groom.py ensure-labels [--confirm-labels "New Label"]
 
 `create` re-checks eligibility right before writing, takes route/zone/kind/size
 from the triage marker, asks Jev which layers the ticket needs (jev_layers.py), attaches the original documents, adds the Plane
@@ -140,15 +140,12 @@ def create(args: argparse.Namespace) -> dict:
     if args.dry_run:
         return {"dry_run": True, "route": spec["route"], "labels": labels, "layers": jev,
                 "label_reasons": label_reasons(spec, every_label, jev),
-                "confirm_with": "--confirm-labels " + json.dumps(",".join(every_label)),
+                "needs_user_yes": gl.needs_yes(every_label),
                 "tests_labels": tests_labels,
                 "documents": docs, "unlabelled": unlabelled, "body": body}
-    approved = [l.strip() for l in (args.confirm_labels or "").split(",") if l.strip()]
-    if sorted(approved) != sorted(every_label):
-        raise gl.GroomError("labels need the user's approval first: run --dry-run, show label_reasons, and pass "
-                            f"the approved list with --confirm-labels. Composed: {every_label}; approved: {approved}")
+    approved = frozenset(l.strip() for l in (args.confirm_labels or "").split(",") if l.strip())
     assignee = mr["author_id"] if mr else (gl.user_id(args.assignee) if args.assignee else None)
-    made = gl.create_issues(spec, args.title, body, scope, assignee, ticket["id"] if ticket else None)
+    made = gl.create_issues(spec, args.title, body, scope, assignee, ticket["id"] if ticket else None, approved)
     log_jev_decision(made["issue"]["iid"], ticket["id"] if ticket else None,
                      ticket["name"] if ticket else args.title, source_text, jev, spec["route"], body)
     out = {"id": ticket["id"] if ticket else None, "route": spec["route"], "zone": spec.get("zone"),
@@ -270,7 +267,7 @@ def main() -> int:
     c.add_argument("--size", choices=SIZES, help="only when the triage marker has none")
     c.add_argument("--assignee", help="GitLab username (human route / one-shot)")
     c.add_argument("--dry-run", action="store_true")
-    c.add_argument("--confirm-labels", help="the exact label list the user approved (comma-separated, from --dry-run)")
+    c.add_argument("--confirm-labels", help="labels the user said yes to: new ones, or ask_first (Opensource, Plane team)")
     a = sub.add_parser("attach")
     a.add_argument("--issue", type=int, required=True)
     a.add_argument("files", nargs="+")
@@ -278,7 +275,8 @@ def main() -> int:
     sweeper = sub.add_parser("sweep")
     sweeper.add_argument("--dry-run", action="store_true")
     sweeper.add_argument("--notify", action="store_true", help="post new releases/holds to Slack (cron)")
-    sub.add_parser("ensure-labels")
+    sub.add_parser("ensure-labels").add_argument("--confirm-labels", default="",
+                                                 help="new labels the user agreed to create")
     args = parser.parse_args()
     try:
         if args.command == "resolve":
@@ -307,7 +305,7 @@ def main() -> int:
             if args.notify:
                 notify_sweep(out, args.dry_run)
         else:
-            out = gl.ensure_labels()
+            out = gl.ensure_labels(frozenset(l.strip() for l in args.confirm_labels.split(",") if l.strip()))
     except (gl.GroomError, ValueError, pm_http.NetworkError, pm_http.HTTPStatusError) as exc:
         print(json.dumps({"error": str(exc)}))
         return 1

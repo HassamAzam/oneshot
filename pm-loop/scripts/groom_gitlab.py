@@ -120,11 +120,21 @@ def _live_labels() -> set[str]:
         page += 1
 
 
-def check_labels(names: list[str]) -> None:
-    """Raise unless every name is allow-listed; create allow-listed creatable ones that are missing."""
+def needs_yes(names: list[str], approved: frozenset = frozenset()) -> list[str]:
+    """Labels the user must confirm: any not yet on GitLab (would be created), and the ask_first list."""
+    ask_first, live = set(label_map().get("ask_first", [])), _live_labels()
+    return [n for n in dict.fromkeys(names) if (n not in live or n in ask_first) and n not in approved]
+
+
+def check_labels(names: list[str], approved: frozenset = frozenset()) -> None:
+    """Raise unless every name is allow-listed and any new or ask_first label was confirmed; create confirmed new ones."""
     outside = [n for n in names if n not in allowed_names()]
     if outside:
         raise GroomError(f"labels not in .claude/labels.json: {outside}")
+    pending = needs_yes(names, approved)
+    if pending:
+        raise GroomError(f"check with the user first: {pending} (new, or flagged in ask_first) — "
+                         f"rerun with --confirm-labels once they agree")
     live, creatable = _live_labels(), label_map()["creatable"]
     blocked = [n for n in names if n not in live and n not in creatable]
     if blocked:
@@ -133,13 +143,14 @@ def check_labels(names: list[str]) -> None:
         call("POST", "labels", {"name": name, **creatable[name]})
 
 
-def ensure_labels() -> dict:
-    """Create every creatable label that is missing; report allow-listed names GitLab lacks."""
+def ensure_labels(approved: frozenset = frozenset()) -> dict:
+    """Create the creatable labels the user confirmed; list the rest that are still missing."""
     live = _live_labels()
-    created = [n for n in label_map()["creatable"] if n not in live]
+    missing = [n for n in label_map()["creatable"] if n not in live]
+    created = [n for n in missing if n in approved]
     for name in created:
         call("POST", "labels", {"name": name, **label_map()["creatable"][name]})
-    return {"created": created,
+    return {"created": created, "awaiting_confirmation": [n for n in missing if n not in approved],
             "missing": sorted(n for n in allowed_names() - set(label_map()["creatable"]) if n not in live)}
 
 
@@ -211,11 +222,11 @@ CHANGE_ISSUE_PLACEHOLDER
 
 
 def create_issues(spec: dict, title: str, body: str, tests_scope: str, assignee: int | None,
-                  ticket_id: str | None = None) -> dict:
+                  ticket_id: str | None = None, approved: frozenset = frozenset()) -> dict:
     """Create the issue(s) for one route. Labels are checked before anything is written."""
     change_labels = compose_labels(spec)
     tests_labels = compose_labels(spec, for_tests_issue=True) if spec["route"] == "ai-tests" else []
-    check_labels(change_labels + tests_labels)
+    check_labels(change_labels + tests_labels, approved)
     milestone = active_milestone()
     out = {"milestone": milestone, "tests_issue": None}
     if tests_labels:
