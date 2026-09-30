@@ -10,8 +10,13 @@
  *
  * Idempotent: the index is rewritten with this ticket's line replaced, so a
  * resumed merge or a second backfill never leaves two lines for one iid.
+ * The rewrite is a read-modify-write of a file merge and backfill share, so it
+ * runs under `index.lock`, and every file lands by rename so a killed process
+ * never leaves a truncated index or card.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { MEMORY } from './config.js';
 import { readArtifact, readJournal } from './artifacts.js';
@@ -42,7 +47,38 @@ function moduleName(module: string): string {
 function verdictOf(verify: Obj | null | undefined): IndexLine['verdict'] {
   const results = arr<Obj>(verify?.results);
   if (!results.length) return 'unverified';
-  return results.some((r) => r.result === 'fail') ? 'fail' : 'pass';
+  if (results.some((r) => r.result === 'fail')) return 'fail';
+  // A blocked or skipped case verified nothing.
+  return results.every((r) => r.result === 'pass') ? 'pass' : 'unverified';
+}
+
+/** Write beside the target, then rename over it: readers see old or new, never half. */
+function publish(file: string, body: string): void {
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, body);
+  renameSync(tmp, file);
+}
+
+/** A lock older than this is from a process that died holding it. */
+const LOCK_STALE_MS = 30_000;
+
+/** Hold an O_EXCL lockfile across `fn`. Sync, like its callers' write. */
+function withLock<T>(lock: string, fn: () => T): T {
+  const deadline = Date.now() + LOCK_STALE_MS * 2;
+  for (;;) {
+    try {
+      closeSync(openSync(lock, 'wx'));
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) { rmSync(lock, { force: true }); continue; }
+      } catch { continue; /* released between open and stat */ }
+      if (Date.now() > deadline) throw new Error(`memory: ${lock} held too long`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  try { return fn(); } finally { rmSync(lock, { force: true }); }
 }
 
 function bullets(lines: string[], empty = '(none)'): string {
@@ -135,15 +171,17 @@ export function writeMemory(
   const cards = join(MEMORY, 'tickets');
   mkdirSync(cards, { recursive: true });
   const card = join(cards, `${iid}.md`);
-  if (!(opts.keepCard && existsSync(card))) writeFileSync(card, renderCard(iid, title, a));
-
   const index = join(MEMORY, 'index.jsonl');
-  const lines = existsSync(index) ? readFileSync(index, 'utf8').split('\n').filter((l) => l.trim()) : [];
-  const isMine = (l: string): boolean => {
-    try { return Number(JSON.parse(l).iid) === iid; } catch { return false; }
-  };
-  const existing = lines.find(isMine);
-  if (opts.keepCard && existing) return JSON.parse(existing) as IndexLine;
-  writeFileSync(index, [...lines.filter((l) => !isMine(l)), JSON.stringify(line)].join('\n') + '\n');
-  return line;
+  return withLock(join(MEMORY, 'index.lock'), () => {
+    if (!(opts.keepCard && existsSync(card))) publish(card, renderCard(iid, title, a));
+
+    const lines = existsSync(index) ? readFileSync(index, 'utf8').split('\n').filter((l) => l.trim()) : [];
+    const isMine = (l: string): boolean => {
+      try { return Number(JSON.parse(l).iid) === iid; } catch { return false; }
+    };
+    const existing = lines.find(isMine);
+    if (opts.keepCard && existing) return JSON.parse(existing) as IndexLine;
+    publish(index, [...lines.filter((l) => !isMine(l)), JSON.stringify(line)].join('\n') + '\n');
+    return line;
+  });
 }

@@ -99,8 +99,14 @@ function memoryRecords(): Map<number, string> {
   return text;
 }
 
-/** A repo-relative or absolute file path: at least one slash and an extension. */
-const PATH_RE = /(?:[\w.-]+\/)+[\w.-]+\.\w+/g;
+/**
+ * A file path: directory-qualified with any extension, or a bare root-level
+ * name (README.md, ThemedApp.js) with a source extension — a bare `x.y` alone
+ * would catch "e.g" and version numbers.
+ */
+const PATH_RE = /(?:[\w.-]+\/)+[\w.-]+\.\w+|\b[\w-]+(?:\.[\w-]+)*\.(?:py|jsx?|tsx?|mjs|cjs|json|md|html|s?css|ya?ml|sql|sh|vue)\b/g;
+
+const paths = (text: string): string[] => (text.match(PATH_RE) ?? []).map((p) => p.replace(/^\.\//, ''));
 
 /** docs/rubrics/recall.md, check for check. Judges the answer only — see outOfMemory. */
 const gradeRecall: Grader = (out, ticket, gold) => {
@@ -112,8 +118,12 @@ const gradeRecall: Grader = (out, ticket, gold) => {
   // is the phase's own code research (or an invention), and it is pasted into
   // research, plan, implement and review all the same.
   const citedText = cited.map((i) => memoryRecords().get(i) ?? '').join('\n');
-  const named = [brief, ...prior.flatMap((p) => p.gotchas ?? [])].join('\n').match(PATH_RE) ?? [];
-  const ungrounded = [...new Set(named)].filter((p) => !citedText.includes(p));
+  // Whole paths, not substrings: components/Button.tsx is not src/components/Button.tsx.
+  // A bare name is grounded by a cited file of that name in any directory.
+  const citedPaths = new Set(paths(citedText));
+  const citedNames = new Set([...citedPaths].map((p) => p.split('/').pop()!));
+  const named = paths([brief, ...prior.flatMap((p) => p.gotchas ?? [])].join('\n'));
+  const ungrounded = [...new Set(named)].filter((p) => !citedPaths.has(p) && !(!p.includes('/') && citedNames.has(p)));
   const checks: Check[] = [
     { name: 'no-self', pass: !cited.includes(ticket.iid) },
     {
@@ -288,16 +298,23 @@ async function loadTicket(iid: number, refetch: boolean): Promise<Ticket> {
     return offline;
   }
   const notes = await allIssueNotes(iid);
+  // Never cache a ticket without its comments: the cache outlives the outage.
+  if (!notes.ok || !notes.data) {
+    const offline = ticketFromTranscript(iid);
+    if (!offline) throw new Error(`#${iid}: could not read the ticket's comments from GitLab (${notes.error ?? 'no data'}) nor its recall transcript`);
+    console.log(`#${iid}: GitLab comments unreachable — using the prompt the live run saw`);
+    mkdirSync(TICKETS, { recursive: true });
+    writeFileSync(cached, JSON.stringify(offline, null, 2));
+    return offline;
+  }
   const ticket: Ticket = {
     iid: res.data.iid,
     title: res.data.title,
     description: res.data.description,
     labels: res.data.labels,
-    notes: notes.ok && notes.data
-      ? notes.data
-        .filter((n) => !n.system && n.body && !isMachineNote(n.body) && !n.body.startsWith('Oneshot '))
-        .map((n) => n.body)
-      : [],
+    notes: notes.data
+      .filter((n) => !n.system && n.body && !isMachineNote(n.body) && !n.body.startsWith('Oneshot '))
+      .map((n) => n.body),
   };
   mkdirSync(TICKETS, { recursive: true });
   writeFileSync(cached, JSON.stringify(ticket, null, 2));
@@ -341,6 +358,10 @@ async function main(): Promise<void> {
   }
   const nAt = argv.indexOf('--n');
   const n = nAt >= 0 ? Number(argv[nAt + 1]) : 3;
+  if (!Number.isInteger(n) || n < 1) {
+    console.error('--n needs a positive integer');
+    process.exit(2);
+  }
   if (argv.includes('--refresh')) {
     console.error('--refresh is split: --refresh-memory re-snapshots memory, --refetch re-reads the tickets.');
     process.exit(2);
