@@ -18,15 +18,17 @@ Additive to `django-backend-standards` and `.claude/rules/backend-python.md` —
 Start from `templates/command.py`. Three things in that template are repo conventions rather than Django defaults, and each exists for a reason:
 
 - **`handle()` is a thin CLI entrypoint.** Real logic lives in `utils.py` or on model methods — the same separation of concerns views follow. This is what makes the logic unit-testable directly, without going through `call_command`.
-- **`handle()` wraps its call in `try/except Exception` and logs via `logger.exception(...)`.** A command invoked from an external crontab has nobody watching stdout, so an unhandled exception must land in the logs instead of silently killing the process. Every existing reminder command does this (`notify_person_project_logs.py`, `send_competency_deadline_reminder.py`).
+- **`handle()` wraps its call in `try/except Exception` and logs via `logger.exception(...)`.** A command invoked from an external crontab has nobody watching stdout, so an unhandled exception must land in the logs instead of silently killing the process. `notify_person_project_logs.py:90-91` is the pattern to copy. Treat this as a rule to follow rather than a majority to imitate: only 48 of the 108 command files contain any `except` at all, and `send_competency_deadline_reminder.py` — a live reminder — has none, which is precisely why a failure in it is invisible.
 - **Logging obeys `.claude/rules/backend-python.md` § "Logging — Which Logger and Which Level".** That table is authoritative — which logger name, which level, and the trap that `getLogger(__name__)` silently drops INFO and WARNING in prod. Read it rather than reconstructing the rule from memory; a command that needs a durable INFO line needs a second, explicitly-named logger, and the table says which.
 
 ## `add_arguments` vs. date-based auto-detection
 
-Two valid patterns coexist here. Pick on what actually varies:
+Two patterns coexist. Of the 108 commands in `apps/*/management/commands/`, 78 take no arguments at all and 30 declare `add_arguments`.
 
-- **Date-based auto-detection** (majority — `notify_person_project_logs.py`): the command reads `date.today()` itself and branches on weekday or month-end. No arguments. Simple, but every branch lives in one command and a bug in the date logic hits all of them at once.
-- **`add_arguments`** (`send_competency_feedback_form.py`, `generate_quarterly_checklists.py`): the caller picks the variant by passing a flag, e.g. `--reminder 2`. Prefer this when a ticket describes **N distinct invocations of the same underlying logic** — one command with one flag per caller, rather than N branches baked into a date-sniffing `handle()`.
+- **Date-based auto-detection** (the majority — `notify_person_project_logs.py:69,74`): the command reads `date.today()` itself and branches on weekday or month-end. No arguments. Simple, but every branch lives in one command and a bug in the date logic hits all of them at once.
+- **`add_arguments`** — used in this repo for exactly three jobs: a **date or window** to operate over (`--month`, `--for-date`, `--year`, `--start`/`--end`, `--before`/`--after`), the **entity to scope to** (`--person`, `--team`, `--teams`), and a **safety toggle** (`--dry-run`, `--confirm-large`). Reach for it when a human or a backfill has to re-run the command over a period the clock would not pick on its own — that is what makes the logic re-runnable and testable without waiting for the calendar.
+
+**No command here selects among N variants of the same logic by flag** — there are zero uses of `choices=` across all 108. If a ticket seems to want that shape (three reminder slots, say), treat it as a new pattern rather than the house style: weigh one flag per caller against N branches in a date-sniffing `handle()` on the merits, and do not expect a precedent to cite.
 
 ## Idempotency
 
@@ -38,7 +40,8 @@ If the work is more than a quick query — sending mail, heavy computation — h
 
 ## Testing
 
-- **File must be `apps/<app>/tests/<command_name>_test.py`.** Test discovery here ignores a bare `<command_name>.py`, so a test file named without the suffix is never collected and never runs. `apps/project_logs/tests/notify_person_project_logs.py` is a real example of a test file silently doing nothing.
+- **Name it `apps/<app>/tests/<command_name>_test.py`, then import its test class in `apps/<app>/tests/__init__.py`.** The import is what collects the test; the filename alone does nothing. `common.tests.GlobalTestRunner` extends `DiscoverRunner` and overrides `__init__`, `get_resultclass`, `setup_databases` and `build_suite` — but never `pattern` — so Django's default `test*.py` stands and `*_test.py` matches none of it. All 505 `*_test.py` files under `apps/*/tests/` run purely because an `__init__.py` imports them.
+- **Skipping that import fails silently.** `apps/advisory/tests/checklist_test.py` is on `dev`, is imported nowhere, and has therefore never run once. Correct suffix, zero execution, no error.
 - Call the extracted `utils.py` function directly, or `call_command("<name>", ...)` when you need to exercise `add_arguments` parsing.
 - Mock `.delay()` and assert on its arguments rather than on delivered mail.
 - Cover the empty queryset (nobody to notify), the idempotency guard (second run is a no-op), and each `add_arguments` branch separately.

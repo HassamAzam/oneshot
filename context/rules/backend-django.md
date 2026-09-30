@@ -60,4 +60,4 @@
 ## Management Commands & Scheduling
 
 - For command structure (`BaseCommand` shape, thin `handle()`, idempotency, testing), read the **`django-management-commands`** skill — it is the authoritative source.
-- For how recurring work actually gets scheduled, read the **`django-scheduled-jobs`** skill. Recurring cadence is a crontab entry registered by DevOps, never a `PeriodicTask`/`CrontabSchedule` row created in app code or a migration; that skill carries the rule, the one exception, and the mandatory ops handoff.
+- For how recurring work actually gets scheduled, read the **`django-scheduled-jobs`** skill. Never seed a `PeriodicTask`/`CrontabSchedule` row in a data migration — no migration in this repo does. Fixed-cadence work that runs at the same time for everyone is a crontab entry registered by DevOps; app code *does* legitimately create per-entity schedules at runtime, and that skill has the three cases and the mandatory ops handoff.

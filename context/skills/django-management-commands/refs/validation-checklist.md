@@ -40,7 +40,9 @@ Each item is written so it can be answered by looking at the diff. If an item do
 
 ## Tests
 
-- [ ] Test file is `apps/<app>/tests/<command_name>_test.py` — **the `_test.py` suffix is mandatory or the file is never collected**
+- [ ] Test file is named `apps/<app>/tests/<command_name>_test.py`
+- [ ] **Its test class is imported in `apps/<app>/tests/__init__.py`** — the import is what collects the test; the runner keeps Django's default `test*.py` pattern, so the filename alone runs nothing. Name the class you added and the line you added it on; a correct suffix is not evidence of collection
+- [ ] The test was observed to actually run (it appears in the runner's output), not merely written
 - [ ] The extracted `utils.py` function is tested directly, not only through `call_command`
 - [ ] `.delay()` is mocked and asserted on by argument
 - [ ] Empty queryset covered (nobody to notify)
@@ -49,7 +51,9 @@ Each item is written so it can be answered by looking at the diff. If an item do
 
 ## Scheduling handoff
 
-- [ ] If this command needs to run on a schedule, `django-scheduled-jobs` was read and its deploy checklist applied — a schedule is never created in app code or a migration
+- [ ] If this command needs to run on a schedule, `django-scheduled-jobs` was read and the shape identified as case 1, 2 or 3 — state which
+- [ ] No `PeriodicTask`/`CrontabSchedule` row is seeded in a data migration (absolute)
+- [ ] If a row is created from app code, it is per-entity (case 2 or 3) and the reason it cannot be a crontab line is stated
 - [ ] The MR description carries the "Ops action required" item with the exact `manage.py` invocation and target servers
 - [ ] A matching comment exists on the ticket, so the ops step stays visible after the MR closes
 

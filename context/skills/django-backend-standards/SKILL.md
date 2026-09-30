@@ -62,4 +62,4 @@ Read and follow the **`django-migration-standards`** skill for all migration rul
 Two skills, two questions:
 
 - **`django-management-commands`** — writing a command under `apps/<app>/management/commands/`. `BaseCommand` shape, thin `handle()`, idempotency, testing, and a post-task validation checklist.
-- **`django-scheduled-jobs`** — making something run on a recurring schedule. Recurring cadence is a management command on a DevOps-managed server crontab, **not** a `django_celery_beat` `PeriodicTask`/`CrontabSchedule` row created in code or a migration; there is no precedent for that here. Read it before proposing any scheduling mechanism.
+- **`django-scheduled-jobs`** — making something run on a schedule. Never seed a `PeriodicTask`/`CrontabSchedule` row in a data migration. Beyond that the answer depends on which of three shapes you have — fixed cadence for everyone, one-off per entity, or repeating per entity — and only the first is a DevOps crontab entry. Read that skill before proposing any scheduling mechanism; do not infer the rule from this line.
