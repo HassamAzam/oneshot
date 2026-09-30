@@ -133,6 +133,18 @@ function labelSkills(cfg: PhaseConfig, ticket: Ticket): string[] {
   return pairs.filter(([label]) => carried.has(label.toLowerCase())).map(([, skill]) => skill);
 }
 
+/**
+ * The layers grooming labelled this ticket with (Backend / Frontend, decided by
+ * Jev from the ticket text). They only ever ADD an agent to the plan's
+ * forecast: the forecast reads the files the plan intends to touch, the label
+ * reads what the ticket asks for, and either one alone is a reason to dispatch
+ * that layer's agent. Case-insensitive, like labelSkills.
+ */
+export function labelledLayers(ticket: Pick<Ticket, 'labels'>): { backend: boolean; frontend: boolean } {
+  const carried = new Set(ticket.labels.map((l) => l.toLowerCase()));
+  return { backend: carried.has('backend'), frontend: carried.has('frontend') };
+}
+
 interface PlanForecast {
   migration: boolean; script: boolean; backend: boolean; frontend: boolean;
 }
@@ -1108,12 +1120,14 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
     // edit a backend ticket picks up. So the unplanned layer keeps its agent
     // and simply stops being advertised.
     const planned = ctx.prior.plan ? planForecast(ctx) : null;
-    const wanted = planned && (planned.backend || planned.frontend)
-      ? [planned.backend ? '`backend-agent`' : '', planned.frontend ? '`frontend-agent`' : '']
-        .filter(Boolean)
+    const labelled = labelledLayers(ctx.ticket);
+    const backend = Boolean(planned?.backend) || labelled.backend;
+    const frontend = Boolean(planned?.frontend) || labelled.frontend;
+    const wanted = backend || frontend
+      ? [backend ? '`backend-agent`' : '', frontend ? '`frontend-agent`' : ''].filter(Boolean)
       : ['`backend-agent`', '`frontend-agent`'];
     const unplanned = wanted.length === 1
-      ? ` The plan forecasts no ${planned?.backend ? 'frontend' : 'backend'} work, so the other
+      ? ` Neither the plan nor the ticket's layer labels call for ${backend ? 'frontend' : 'backend'} work, so the other
 agent is not listed — but the forecast is not a rule. If the change turns out to need that layer,
 dispatch its agent for it rather than writing that layer yourself.`
       : '';

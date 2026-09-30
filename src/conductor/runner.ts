@@ -102,6 +102,7 @@ import {
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
+import { loadZoneMap, refusedTicket, zoneBlockReason, zoneGuardApplies, zoneVerdict } from './zoneguard.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { Ticket, TestCase } from '../phases/types.js';
 import {
@@ -1021,6 +1022,14 @@ export async function runTicket(
       return finish(j, 'aborted', 'the conductor asked this run to stop');
     }
 
+    // A characterization-test ticket is a person's work (src/conductor/zoneguard.ts):
+    // stopped before any phase, code or session, can touch it.
+    const refused = refusedTicket(ticket.labels);
+    if (refused) {
+      log.warn('refused ticket', { iid, reason: refused });
+      return finish(j, 'blocked', refused);
+    }
+
     // On-demand phases are stepped over before anything else looks at them:
     // they are invoked by name when something needs them, so an unimplemented
     // one must not stop the run the way a scheduled one does, and a resume must
@@ -1154,6 +1163,21 @@ export async function runTicket(
       }
       // 'approved' (or 'design' somehow absent from the list) — fall through
       // into 'plan' below, which now reads design.json as its specification.
+    }
+
+    // The delivery-zone guard (src/conductor/zoneguard.ts): once the plan has
+    // declared its files, and again before review, when implement has reported
+    // the files it really changed. Checked ahead of the plan gate so nobody is
+    // asked to approve a plan that is about to be stopped.
+    const zoneCheckpoint = (phase.name === 'implement' && phaseSucceeded(iid, 'plan'))
+      || (phase.name === 'review' && phaseSucceeded(iid, 'implement'));
+    if (zoneCheckpoint && zoneGuardApplies(ticket.labels)) {
+      const zone = zoneVerdict(ticket.labels, declaredFiles(prior.plan ?? null,
+        phase.name === 'review' ? prior.implement ?? null : null), loadZoneMap());
+      if (zone.unreadable || zone.violations.length) {
+        log.warn('zone guard stopped the run', { iid, violations: zone.violations, unreadable: zone.unreadable });
+        return finish(j, 'blocked', zoneBlockReason(zone));
+      }
     }
 
     // The Review label's plan-approval gate — opt-in, additive, and checked

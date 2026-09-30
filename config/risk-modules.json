@@ -1,5 +1,5 @@
 {
-  "_comment": "ONE list of the ERP modules too consequential to ship unwatched, shared by Oneshot and the Plane triage router (triage-cron reads this file via ONESHOT_HOME). Oneshot uses `paths`: a plan or diff touching one arms the review gates (highScrutinyPaths is derived from this file in src/lib/config.ts). Triage uses `keywords`: a Plane ticket whose text names one is routed to the human erp board, never the AI board. Add a module here and both sides pick it up.",
+  "_comment": "The ERP modules too consequential to ship unwatched. Oneshot uses `paths`: a plan or diff touching one arms the review gates (highScrutinyPaths is derived from this file in src/lib/config.ts). The Plane triage router no longer reads this file: it routes by the ERP repo's own zone map (.claude/zones.json), which also drives the zone guard for AI-labelled tickets (src/conductor/zoneguard.ts). `keywords` are kept for reference only.",
   "modules": [
     { "name": "payroll", "paths": ["apps/payroll/"],
       "keywords": ["payroll", "payslip", "salary", "compensation", "increment", "bonus", "encashment", "settlement", "tax", "provident fund", "eobi"] },

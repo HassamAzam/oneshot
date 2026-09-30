@@ -38,6 +38,8 @@
     "No QA",
     "Design"
   ],
+  "_comment_zones": "The ERP delivery-zone map (.claude/zones.json, drawn and merged by a person). A ticket carrying guardLabel (AI — set by Plane grooming when triage routed it by zone) is stopped with the blocked label when its plan or diff touches a file outside green, or outside green+yellow when it also carries yellowLabel (grooming adds that only after the ticket's characterization tests merged). Red is never allowed. Read from the work repo's origin/<base>, so a branch cannot widen its own zone. A ticket labelled Loop by hand, without AI, keeps the review-gate behaviour. A ticket carrying testsLabel is always stopped: characterization tests pin behaviour BEFORE an agent changes it, so they are written by a person, never by the agent that will then be judged against them. Remove this block to switch the guard off.",
+  "zones": { "file": ".claude/zones.json", "guardLabel": "AI", "yellowLabel": "Zone: Yellow", "testsLabel": "Characterization Tests" },
   "_comment_branches": "base is what ticket branches are cut from and what their MRs target. Do not infer it from the project's GitLab default branch, which need not be 'dev'. Everything in protected is refused by the git guard whatever the server would allow \u2014 which is why 'main' is listed even on a project that does not have it, or where it reports can_push=true for our token. doctor WARNs about a listed branch the project does not have, and FAILs one that exists but is not protected on GitLab: on a project with an unprotected 'main', protect it there or remove it from this list.",
   "branches": {
     "base": "dev",
