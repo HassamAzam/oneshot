@@ -269,7 +269,6 @@ def test_sweep_releases_a_person_written_tests_only_mr(monkeypatch):
     ({"mr_branch": "oneshot/ticket-19-pin"}, "agent branch"),
     ({"mr_files": ("apps/teams/tests/test_a.py", "apps/teams/views.py")}, "non-test files: apps/teams/views.py"),
     ({"tests_state": "opened"}, "still open"),
-    ({"marker": False}, "no tests-first marker"),
 ])
 def test_sweep_holds_and_reports(monkeypatch, kw, why):
     writes = _fake_gitlab(monkeypatch, **kw)
@@ -575,3 +574,31 @@ def test_dry_run_explains_labels_and_flags_only_ask_first(monkeypatch):
     assert set(reasons) == set(out["labels"]) and "requested" not in reasons.values()
     assert reasons["Opensource"] == "Plane swimlane Opensource" and reasons["Zone: Red"].startswith("zone red")
     assert out["needs_user_yes"] == ["Opensource"]
+
+
+def test_sweep_promotes_an_ai_label_a_person_added(monkeypatch):
+    """No tests-first marker = a person decided: add Loop so Oneshot picks it up."""
+    writes = _fake_gitlab(monkeypatch, marker=False)
+    actions = gl.sweep(dry_run=False)
+    assert [a["why"] for a in actions] == ["AI added by a person"] and writes == [("issues/20", {"add_labels": "Loop"})]
+
+
+@pytest.mark.parametrize("labels, promoted", [(["AI"], True), (["AI", "Zone: Red"], False), (["AI", "Needs Human"], False),
+                                              (["AI", "Merged"], False), (["AI", "Characterization Tests"], False)])
+def test_person_ai_promotion_rules(monkeypatch, labels, promoted):
+    writes = []
+    issue = {"iid": 30, "labels": labels, "description": "body"}
+    monkeypatch.setattr(gl, "call", lambda m, path, payload=None: writes.append(path) if m == "PUT" else [issue])
+    out = gl.promote_person_ai(dry_run=False)
+    assert bool(writes) is promoted
+    if "Zone: Red" in labels:
+        assert "zone is red" in out[0]["why"]
+
+
+def test_one_shot_gets_areas_and_zone_from_the_map(monkeypatch, tmp_path):
+    Path(tmp_path, "zones.json").write_text(json.dumps({"severity": ["green", "yellow", "red"], "default_zone": "yellow",
+        "areas": [{"name": "training", "zone": "green", "keywords": ["training"]},
+                  {"name": "project_logs", "zone": "red", "keywords": ["project log"]}]}))
+    out = groom.light_triage("Approve Logs filter", "On Project Logs approve page", ["training", "made_up"])
+    assert out == {"areas": ["training", "project_logs"], "zone": "red", "unknown_areas": ["made_up"]}
+    assert groom.light_triage("Rename a button", "", [])["zone"] == "yellow"

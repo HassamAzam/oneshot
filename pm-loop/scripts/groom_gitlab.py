@@ -312,6 +312,35 @@ def tests_mr_problem(mr: dict) -> str | None:
     return None
 
 
+STOP_LABELS = ("Needs Human", "Merged", "merged", "Not a Bug", "Characterization Tests")
+
+
+def promote_person_ai(dry_run: bool) -> list[dict]:
+    """A person decided a ticket is Oneshot's by adding AI: add Loop so Oneshot picks it up.
+
+    Skipped: yellow changes still waiting for their tests (the tests-first flow releases those), tickets
+    Oneshot already stopped or finished, and the tests issues themselves. Red is held and reported, because
+    Oneshot's zone guard would stop it at the plan anyway.
+    """
+    flow, zone = label_map()["flow"], label_map()["zone"]
+    query = urllib.parse.urlencode({"state": "opened", "labels": flow["ai"], "not[labels]": flow["loop"], "per_page": 100})
+    actions = []
+    for issue in call("GET", f"issues?{query}"):
+        labels = set(issue.get("labels") or [])
+        if labels & set(STOP_LABELS) or TESTS_FIRST_RE.search(issue.get("description") or ""):
+            continue
+        entry = {"issue": issue["iid"], "why": "AI added by a person"}
+        if zone["red"] in labels:
+            actions.append({**entry, "action": "none",
+                            "why": "AI added by a person, but the zone is red — Oneshot's zone guard would stop it; "
+                                   "keep it with people or change .claude/zones.json by MR"})
+            continue
+        if not dry_run:
+            call("PUT", f"issues/{issue['iid']}", {"add_labels": flow["loop"]})
+        actions.append({**entry, "action": "would add Loop" if dry_run else "added Loop"})
+    return actions
+
+
 def sweep(dry_run: bool) -> list[dict]:
     """Add Loop to each waiting yellow change whose tests issue was closed by a person's tests-only MR.
 
@@ -325,7 +354,6 @@ def sweep(dry_run: bool) -> list[dict]:
         entry = {"issue": issue["iid"]}
         match = TESTS_FIRST_RE.search(issue.get("description") or "")
         if not match:
-            actions.append({**entry, "action": "none", "why": "no tests-first marker — a person decides"})
             continue
         tests_iid = entry["tests_issue"] = int(match.group(1))
         if call("GET", f"issues/{tests_iid}")["state"] != "closed":
@@ -344,4 +372,4 @@ def sweep(dry_run: bool) -> list[dict]:
         if not dry_run:
             call("PUT", f"issues/{issue['iid']}", {"add_labels": flow["loop"]})
         actions.append({**entry, "action": "would add Loop" if dry_run else "added Loop", "tests_mr": good[0]["iid"]})
-    return actions
+    return actions + promote_person_ai(dry_run)

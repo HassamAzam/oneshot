@@ -56,7 +56,9 @@ they move work between streams). Ask about just that label, then rerun with `--c
 | `sheet: FAILED`, `plane.backlink: FAILED` | Report with the rerun command; the issue exists |
 
 **Batch:** one `resolve` for all IDs, one call for all `context` searches, then one `create` per ticket.
-**One-shot** (no Plane ticket): `create --title … --kind … --size …`, always the human route.
+**One-shot** (no Plane ticket): `create --title … --kind … --size … --areas <zones.json names>` — name
+the areas as triage would (backend and frontend); code adds keyword hits and sets the zone. It goes to
+people; whether Oneshot takes it is a person's call: adding `AI` on GitLab hands it over (the sweep adds `Loop`).
 
 ## Before you finish
 

@@ -61,7 +61,22 @@ def _acceptance(body: str) -> list[str]:
     return [l for l in (match.group(1).splitlines() if match else []) if l.strip().startswith("- [")]
 
 
-def _spec(args: argparse.Namespace, ticket: dict | None, layers: list[str]) -> dict:
+def light_triage(title: str, text: str, proposed: list[str]) -> dict:
+    """Areas and zone for a ticket triage never saw (one-shot, MR): proposed areas plus keyword hits,
+    most severe zone wins, no area = the map's default. The same rules triage applies; the route stays human."""
+    zones = gl.map_file("zones.json")
+    by_name = {a["name"]: a for a in zones["areas"]}
+    haystack = f"{title} {text}".lower()
+    areas = [a for a in dict.fromkeys(proposed) if a in by_name]
+    for area in zones["areas"]:
+        if area["name"] not in areas and any(re.search(r"\b" + re.escape(k.lower()), haystack) for k in area["keywords"]):
+            areas.append(area["name"])
+    order = zones["severity"]
+    zone = max((by_name[a]["zone"] for a in areas), key=order.index) if areas else zones["default_zone"]
+    return {"areas": areas, "zone": zone, "unknown_areas": [a for a in proposed if a not in by_name]}
+
+
+def _spec(args: argparse.Namespace, ticket: dict | None, layers: list[str], light: dict | None = None) -> dict:
     """Route, zone and labels inputs: from the triage marker when there is one, else from flags."""
     triage = (ticket or {}).get("triage") or {}
     route = ticket["route"] if ticket else "human"
@@ -72,8 +87,8 @@ def _spec(args: argparse.Namespace, ticket: dict | None, layers: list[str]) -> d
         return (triage.get(key) or flag) if ai_route else (flag or triage.get(key))
 
     spec = {"route": route, "kind": pick("kind", args.kind), "size": pick("size", args.size),
-            "zone": triage.get("zone"),
-            "areas": triage.get("areas") or [], "design": bool(triage.get("design")),
+            "zone": triage.get("zone") or (light or {}).get("zone"),
+            "areas": triage.get("areas") or (light or {}).get("areas") or [], "design": bool(triage.get("design")),
             "urgent": (ticket or {}).get("priority") in URGENT_PRIORITIES,
             "swimlanes": (ticket or {}).get("swimlanes") or [],
             "extra": [LAYER_LABELS[l] for l in layers if l in LAYER_LABELS],
@@ -108,7 +123,8 @@ def _finish_body(body: str, spec: dict, ticket: dict | None, docs: dict, jev: di
         body = gl.add_section(body, "Plane Ticket", [ticket["id"]])
     zone = f" · zone {spec['zone']} ({', '.join(spec['areas']) or 'no area'})" if spec.get("zone") else ""
     why = f" — {'; '.join(spec['reasons'])}" if spec["reasons"] else ""
-    note = f" [{ticket['route_note']}]" if ticket and ticket.get("route_note") else ""
+    note = (f" [{ticket['route_note']}]" if ticket and ticket.get("route_note")
+            else "" if ticket else " [no triage: a person decides — add AI on GitLab to hand it to Oneshot]")
     probs = ", ".join(f"{k} {v:.2f}" for k, v in jev["probabilities"].items()) or "none"
     layer_line = f"Layers: {', '.join(layers)} — {jev['source']} ({probs})" + (f" — {jev['note']}" if jev["note"] else "")
     return gl.add_section(body, "Routing", [f"{spec['route']}{zone}{why} (size {spec['size']}, {spec['kind']}){note}",
@@ -128,7 +144,8 @@ def create(args: argparse.Namespace) -> dict:
     body = sys.stdin.read()
     source_text = ticket["description"] if ticket else (mr["description"] if mr else body)
     jev = jev_layers.decide(args.title if not ticket else ticket["name"], source_text)
-    spec = _spec(args, ticket, jev["layers"])
+    light = None if ticket else light_triage(args.title, body, [a.strip() for a in args.areas.split(",") if a.strip()])
+    spec = _spec(args, ticket, jev["layers"], light)
     body, _, scope = body.partition(TESTS_SCOPE_MARK)
     docs = collect_documents.collect(ticket["uuid"] if ticket else None, args.from_issues, dry_run=args.dry_run)
     requested_by = ticket["requested_by"] if ticket else mr["author_name"] if mr else SELF_NAME
@@ -136,7 +153,7 @@ def create(args: argparse.Namespace) -> dict:
     labels = gl.compose_labels(spec)
     tests_labels = gl.compose_labels(spec, for_tests_issue=True) if spec["route"] == "ai-tests" else []
     every_label = list(dict.fromkeys(labels + tests_labels))
-    unlabelled = gl.unlabelled(spec)
+    unlabelled = gl.unlabelled(spec) + [f"unknown area {a}" for a in (light or {}).get("unknown_areas", [])]
     if args.dry_run:
         return {"dry_run": True, "route": spec["route"], "labels": labels, "layers": jev,
                 "label_reasons": label_reasons(spec, every_label, jev),
@@ -210,7 +227,8 @@ def notify_sweep(actions: list[dict], dry_run: bool) -> list[str]:
         if seen.get(key) == state:
             continue
         if a["action"] in ("added Loop", "would add Loop"):
-            lines.append(f"#{a['issue']}: tests !{a['tests_mr']} merged — {a['action']} (Oneshot starts)")
+            cause = f"tests !{a['tests_mr']} merged" if a.get("tests_mr") else a.get("why", "")
+            lines.append(f"#{a['issue']}: {cause} — {a['action']} (Oneshot starts)")
         elif a["action"] == "failed":
             lines.append(f"sweep FAILED (posted once until the error changes): {a['why']}")
         else:
@@ -263,6 +281,7 @@ def main() -> int:
     source.add_argument("--mr", type=int, help="MR iid, for MR-to-ticket")
     c.add_argument("--title", required=True)
     c.add_argument("--from-issues", type=_csv_ints, default=[], help="erp iids used as Previous Context")
+    c.add_argument("--areas", default="", help="one-shot / MR only: zones.json area names, as triage would propose them")
     c.add_argument("--kind", choices=KINDS, help="only when the triage marker has none")
     c.add_argument("--size", choices=SIZES, help="only when the triage marker has none")
     c.add_argument("--assignee", help="GitLab username (human route / one-shot)")

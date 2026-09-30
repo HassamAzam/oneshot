@@ -17,4 +17,4 @@ Real incidents. Each line: the situation → what to do.
 - WORKSTREAMRE-230 links a private Google Sheet the Drive connector can't open → leave the ⚠️ link `create` wrote and report it; never paste a summary of a file you couldn't read.
 
 **Untriaged ticket**
-- WORKSTREAMRE-357 had no triage marker → it goes to people with `[no triage route]`, even if it looks automatable. To reach Oneshot, it must go through triage.
+- WORKSTREAMRE-357 had no triage marker → it goes to people with `[no triage route]`, even if it looks automatable. Never add `AI` yourself: a person decides, and adding `AI` on GitLab is how they hand it to Oneshot.
