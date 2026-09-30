@@ -1678,6 +1678,19 @@ export async function runTicket(
         const decision = notABugDecision(r.out.data);
         if (!decision.stop && decision.note) log.warn(`research: ${decision.note}`);
         const repro = reproductionOf(r.out.data);
+        // The verdict has to reach the database or it is unmeasurable: it lives
+        // in research.json on disk, so "how often does reproduction stop, and on
+        // what" is a question nobody can ask. `blocker` is the whole point of the
+        // row — skills/bug-reproduction/refs/why-it-did-not-reproduce.md retires
+        // an entry that no blocker ever matches, and that rule needs something to
+        // count.
+        if (repro) {
+          logEvent('reproduction', {
+            iid, kind: repro.kind, verdict: repro.verdict, blocker: repro.blocker,
+            steps: repro.steps.length,
+            shots: repro.evidence.filter((e) => e.endsWith('.png')).length,
+          }, { runId, phase: 'research' });
+        }
         if (repro?.verdict === 'reproduced') await declareReproduced(iid, repro);
       }
       if (r.cfg.name === 'implement' && activeRound(j.mrFeedback)?.status === 'fixing') {
