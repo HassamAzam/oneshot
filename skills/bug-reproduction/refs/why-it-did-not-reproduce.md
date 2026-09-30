@@ -17,6 +17,15 @@ act, the wrong person is stopped — and reproducing one proves half of it.
 **Do:** confirm the account matches the ticket's role and is not a superuser. No
 non-superuser account available is `inconclusive` / `blocker: access`.
 
+**Say this plainly, because it is a change of posture, not a tweak:** this
+pipeline has exactly one test account (`ONESHOT_TEST_LOGIN`) and it is a
+superuser. Until a limited one exists — an optional `ONESHOT_TEST_LOGIN_LIMITED`
+would do it — **every permission ticket records `inconclusive` / `access`** and
+none of them reproduce. That is the safe direction: a permission bug confirmed
+from a superuser session is confirmed against the one account that cannot show
+it. But it means the fix here is an account, not a rule, and the `blocker` counts
+are what will say how much that class costs.
+
 ### 2. The record
 
 The screen loaded and nothing looked wrong — on a row that lacks the property the

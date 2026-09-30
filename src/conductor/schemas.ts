@@ -12,6 +12,7 @@
  * the next phase reads a field that will not be there next time.
  */
 import { ADDRESSED_FEEDBACK_PROP, MR_FEEDBACK_PROPS } from '../mrfeedback/schema.js';
+import { BLOCKERS } from './reproduction.js';
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -166,7 +167,7 @@ export const RESEARCH_SCHEMA = phaseSchema({
       reason: str('Why this verdict. For inconclusive or not-applicable, what stopped you.'),
       blocker: {
         type: 'string',
-        enum: ['none', 'env', 'data', 'access', 'surface', 'steps', 'flake'],
+        enum: [...BLOCKERS],
         description:
           'WHAT stopped you, when the verdict is inconclusive. `none` for every other verdict. ' +
           'env: the app, the login or the harness (a named E_ code belongs in reason). ' +
