@@ -81,12 +81,14 @@
       "onFail": "abort",
       "skills": [
         "planning-methodology",
-        "util-reuse-methodology"
+        "util-reuse-methodology",
+        "django-scheduled-jobs"
       ],
       "labelSkills": {
         "Accessibility": "frontend-accessibility"
       },
       "_why_skills": "`skills` is this phase's method, loaded for every ticket. `labelSkills` is the domain knowledge a particular ticket calls for, keyed by the label triage puts on it \u2014 reuse and approach are decided here, so an accessibility ticket needs that standard at plan time and not first at implement. One line adds the next pair; nothing in code changes.",
+      "_why_django_scheduled_jobs": "The only domain skill declared at plan, here because the mechanism it governs is chosen at plan time and is expensive to revisit later. ERP #8344 is the case: the plan proposed seeding `PeriodicTask`/`CrontabSchedule` rows in a data migration for a recurring reminder, citing `apps/costing/utils.py` as precedent \u2014 which is a per-entity one-off task, a different shape. Nothing the phase read said otherwise, so the wrong mechanism entered the plan and every later phase inherited it as a settled question. Scheduling is the rare case `implement` cannot recover: by then the migration is written, and `review` checks the diff against the plan rather than the plan against the repo. Deliberately NOT in `labelSkills`, which would be the tidier home \u2014 that needs triage to already know it is a scheduling ticket, and not knowing is the entire failure. 6KB against plan's existing 9KB, affordable only because the skill was split out of `django-management-commands`; the command-writing half stays at implement, reached through `django-backend-standards`.",
       "artifact": "plan.json"
     },
     {

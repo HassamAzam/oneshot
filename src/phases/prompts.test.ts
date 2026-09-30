@@ -107,6 +107,35 @@ test('the recall prompt still stands alone if the skill does not resolve', () =>
   assert.match(p, /then module, then label, then\s+title-token overlap/);
 });
 
+// ------------------------------------------ plan knows how scheduling is done
+
+test('plan is told how recurring work gets scheduled, for every ticket', () => {
+  // ERP #8344: the plan proposed seeding PeriodicTask rows in a data migration
+  // for a recurring reminder. The mechanism is chosen here and implement cannot
+  // walk it back — by then the migration exists and review checks the diff
+  // against the plan, not the plan against the repo. Unlabelled on purpose: a
+  // labelSkills entry needs triage to already know it is a scheduling ticket,
+  // and not knowing is the failure this closes.
+  const got = names(systemPromptFor(cfg('plan'), ctx(ticket())));
+  assert.ok(got.includes('django-scheduled-jobs'), 'plan must declare the scheduling skill');
+});
+
+test('plan gets the scheduling skill eagerly, not lazily', () => {
+  // Only implement uses the lazy SKILL_LINE. A lazily-offered skill is one the
+  // session may skip after reading the plan — but here the skill is what tells
+  // it the plan may be wrong, so it has to be read before the plan is written.
+  const p = systemPromptFor(cfg('plan'), ctx(ticket()));
+  assert.match(p, /Invoke these with the Skill tool BEFORE you start/);
+  assert.doesNotMatch(p, /Read the plan first/, 'plan must not get implement\'s lazy wording');
+});
+
+test('the scheduling skill plan declares actually ships in the snapshot', () => {
+  // plan runs at cwd 'worktree', so it resolves skills from the .claude that
+  // ensureClaudeDir composes there — context/skills first. A name in config with
+  // no directory behind it fails silently and the phase just runs without it.
+  assert.ok(existsSync(join(ROOT, 'context', 'skills', 'django-scheduled-jobs', 'SKILL.md')));
+});
+
 // --------------------------------------------- implement's gating is unchanged
 
 test('implement keeps a plan-gated skill when there is no plan to gate on', () => {
