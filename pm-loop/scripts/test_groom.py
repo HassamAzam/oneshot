@@ -398,3 +398,146 @@ def test_fallback_at_grooming_scores_as_load_everything(monkeypatch):
     row = hb.build_row({"iid": 1, "title": "t", "description": "d", "source": "fallback"},
                        {"layers": {"backend": True, "frontend": False, "migration": False}, "mrs": [2], "files": []}, [])
     assert row["jev_groom"] == {"backend": 1.0, "frontend": 1.0, "migration": 1.0} and row["groom_fallback"]
+
+
+def test_grooming_outcomes_are_grouped_by_skill_version(monkeypatch):
+    monkeypatch.setattr(hb, "logged_decisions", lambda: {
+        1: {"iid": 1, "route": "ai", "skill": "v1", "at": "2026-10-01T00:00:00", "unknown_lines": 2},
+        2: {"iid": 2, "route": "ai-tests", "skill": "v1", "at": "2026-10-02T00:00:00", "unknown_lines": 0},
+        3: {"iid": 3, "route": "human", "skill": "v1", "at": "2026-10-02T00:00:00"},
+        4: {"iid": 4, "route": "ai", "skill": "v2", "at": "2026-10-05T00:00:00", "unknown_lines": 1}})
+    states = {1: (["AI", "Merged"], "closed"), 2: (["AI", "Needs Human"], "opened"), 4: (["AI", "Loop"], "opened")}
+    monkeypatch.setattr(hb.gl, "call", lambda m, path, payload=None: {
+        "labels": states[int(path.split("/")[1])][0], "state": states[int(path.split("/")[1])][1]})
+    rows = hb.grooming_outcomes()
+    assert [r["skill"] for r in rows] == ["v1", "v2"]
+    assert rows[0]["n"] == 2 and rows[0]["merged"] == 1 and rows[0]["needs human"] == 1 and rows[0]["unknowns"] == 2
+    assert rows[1]["in flight"] == 1
+    assert "| v1 | 2026-10-01 | 2 | 1 (50%) | 1 (50%) |" in hb.render_outcomes(rows)
+
+
+# ── eligibility, duplicates, label creation, write path (mutation-test gaps) ──
+
+def _plane(monkeypatch, *, state=plane.INCOMING, comments=(), description="<p>Something is broken</p>",
+           attachments=(), links=()):
+    def get(path):
+        if path.startswith("work-items/"):
+            return {"id": "u1", "name": "Ticket", "description_html": description, "priority": "high",
+                    "labels": [], "state": state, "created_by": "m1"}
+        if path.endswith("/comments/"):
+            return {"results": list(comments)}
+        if path.endswith("/issue-attachments/"):
+            return list(attachments)
+        if path.endswith("/links/"):
+            return {"results": list(links)}
+        raise AssertionError(path)
+    monkeypatch.setattr(plane, "_get", get)
+    monkeypatch.setattr(plane, "full_name", lambda _id: "A Person")
+    monkeypatch.setattr(plane, "label_names", lambda ids: [])
+
+
+BACKLINK = {"created_at": "2026-09-01T10:00:00+05:00",
+            "comment_html": '<p>GitLab issue created: <a href="https://gitlab.arbisoft.com/arbisoft/erp/-/issues/12">#12</a></p>'}
+
+
+def _marker(route, zone="green", at="2026-09-02T10:00:00+05:00"):
+    return {"created_at": at, "comment_html":
+            f'<!-- workstream-triage v2 outcome=groom route={route} size=S kind=bug design=0 zone={zone} areas=training why="x" -->'}
+
+
+def test_incoming_ticket_with_text_is_eligible(monkeypatch):
+    _plane(monkeypatch)
+    t = plane.resolve("9")
+    assert t["eligible"] and t["skip_reason"] is None and t["route"] == "human"
+
+
+def test_backlink_blocks_regrooming(monkeypatch):
+    _plane(monkeypatch, comments=[BACKLINK])
+    t = plane.resolve("9")
+    assert not t["eligible"] and t["skip_reason"] == "already groomed: GitLab #12"
+
+
+def test_a_pasted_gitlab_link_is_not_a_backlink(monkeypatch):
+    pasted = {"created_at": "2026-09-01T10:00:00+05:00",
+              "comment_html": "<p>see https://gitlab.arbisoft.com/arbisoft/erp/-/issues/12</p>"}
+    _plane(monkeypatch, comments=[pasted])
+    assert plane.resolve("9")["eligible"]
+
+
+def test_empty_ticket_is_refused_but_attachments_or_links_are_material(monkeypatch):
+    _plane(monkeypatch, description="")
+    assert "nothing to groom" in plane.resolve("9")["skip_reason"]
+    _plane(monkeypatch, description="", attachments=[{"id": "a"}])
+    assert plane.resolve("9")["eligible"]
+    _plane(monkeypatch, description="", links=[{"url": "https://x"}])
+    assert plane.resolve("9")["eligible"]
+
+
+def test_state_rules(monkeypatch):
+    _plane(monkeypatch, state="other-state")
+    assert "not in Incoming" in plane.resolve("9")["skip_reason"]
+    _plane(monkeypatch, state=plane.REQ_SCOPING)
+    assert "not in Incoming" in plane.resolve("9")["skip_reason"]
+    _plane(monkeypatch, state=plane.REQ_SCOPING, comments=[_marker("ai")])
+    t = plane.resolve("9")
+    assert t["eligible"] and t["route"] == "ai" and t["triage"]["zone"] == "green"
+    _plane(monkeypatch, state=plane.REQ_SCOPING, comments=[_marker("pm")])
+    assert "not in Incoming" in plane.resolve("9")["skip_reason"]
+
+
+def test_latest_marker_wins(monkeypatch):
+    _plane(monkeypatch, comments=[_marker("ai", at="2026-09-02T10:00:00+05:00"),
+                                  _marker("human", at="2026-09-03T10:00:00+05:00")])
+    assert plane.resolve("9")["route"] == "human"
+
+
+def test_unreadable_comments_fail_closed(monkeypatch):
+    _plane(monkeypatch)
+    real = plane._get
+    def flaky(path):
+        if path.endswith("/comments/"):
+            raise plane.pm_http.NetworkError("down")
+        return real(path)
+    monkeypatch.setattr(plane, "_get", flaky)
+    t = plane.resolve("9")
+    assert not t["eligible"] and "comments unreadable" in t["skip_reason"]
+
+
+def test_missing_labels_are_created_only_when_creatable(monkeypatch):
+    posted = []
+    monkeypatch.setattr(gl, "_live_labels", lambda: {"Bug"})
+    monkeypatch.setattr(gl, "call", lambda m, path, payload=None: posted.append((m, path, payload["name"])))
+    gl.check_labels(["Bug", "Zone: Green"])
+    assert posted == [("POST", "labels", "Zone: Green")]
+    with pytest.raises(gl.GroomError, match="not creatable"):
+        gl.check_labels(["Bug", "Small (0-8 hrs)"])
+
+
+def test_existing_issue_matches_the_exact_ticket_line_only(monkeypatch):
+    issues = [{"iid": 5, "description": "## Plane Ticket\nWORKSTREAMRE-230\n"},
+              {"iid": 6, "description": "## Plane Ticket\nWORKSTREAMRE-2301\n"}]
+    monkeypatch.setattr(gl, "call", lambda m, path, payload=None: issues)
+    assert gl.existing_issue("WORKSTREAMRE-230") == 5
+    monkeypatch.setattr(gl, "call", lambda m, path, payload=None: issues[1:])
+    assert gl.existing_issue("WORKSTREAMRE-230") is None
+
+
+@pytest.mark.parametrize("kind, size", [("bug", None), (None, "S")])
+def test_either_missing_kind_or_size_is_refused(monkeypatch, kind, size):
+    with pytest.raises(gl.GroomError, match="pass --kind and --size"):
+        _dry_create(monkeypatch, _ticket(route="human", zone=None, kind=kind, size=size), GOOD)
+
+
+def test_live_create_backlinks_plane_and_adds_a_sheet_row_per_issue(monkeypatch, tmp_path):
+    calls = {}
+    monkeypatch.setattr(groom, "JEV_DECISIONS", tmp_path / "d.jsonl")
+    monkeypatch.setattr(gl, "compose_labels", lambda spec, for_tests_issue=False: ["x"])
+    monkeypatch.setattr(gl, "create_issues", lambda *a, **k: {
+        "milestone": {"title": "Sprint 65"}, "issue": {"iid": 20, "url": "u20"},
+        "tests_issue": {"iid": 19, "url": "u19"}})
+    monkeypatch.setattr(plane, "post_groom", lambda *a: calls.setdefault("plane", a) and {"backlink": "ok"})
+    monkeypatch.setattr(gl, "link_mr", lambda *a: calls.setdefault("mr", a))
+    monkeypatch.setattr(groom.sprint_plan_append, "append_rows", lambda m, rows: calls.setdefault("rows", rows) and {"appended": len(rows)})
+    out = _dry_create(monkeypatch, _ticket(route="ai-tests", zone="yellow"), GOOD, dry_run=False)
+    assert calls["plane"][1:3] == ("u20", 20) and "mr" not in calls
+    assert [r["url"] for r in calls["rows"]] == ["u20", "u19"] and out["issue"]["iid"] == 20

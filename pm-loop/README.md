@@ -14,7 +14,10 @@ Tracking ticket: arbisoft/erp#8777.
 
 | Path | What |
 |---|---|
-| `skills/ticket-grooming/SKILL.md` | Grooming skill. The model writes title and body; `groom.py` owns every rule |
+| `skills/ticket-grooming/SKILL.md` | Grooming skill (always loaded). The model writes title and body; `groom.py` owns every rule |
+| `skills/ticket-grooming/templates/ai-sections.md` | Extra body sections for AI routes, loaded only then |
+| `skills/ticket-grooming/hard-cases.md` | Real incidents and what to do, read only for ambiguous tickets |
+| `skills/mr-to-ticket/SKILL.md` | Separate skill: create the missing issue for an MR |
 | `skills/ticket-triage/SKILL.md` | Triage skill (its code lives in the erp repo, `scripts/triage/`, MR !11017) |
 | `scripts/groom.py` | Grooming CLI: `resolve`, `context`, `create`, `attach`, `mr`, `sweep`, `ensure-labels` |
 | `scripts/groom_gitlab.py` | Labels (allow-list), issues, the yellow tests-first flow, MRs, sweep |
@@ -23,10 +26,11 @@ Tracking ticket: arbisoft/erp#8777.
 | `scripts/search_gitlab_context.py` | Previous-context search |
 | `scripts/sprint_plan_append.py` | Sprint sheet, one atomic append per batch |
 | `scripts/jev_layers.py` | Jev (TypeSafe) decides backend / frontend / migration from title + description |
-| `scripts/jev_heartbeat.py` | Re-scores Jev every 50 finished tickets; history table in `~/Documents/ai/jev-findings/heartbeat/` |
+| `scripts/jev_heartbeat.py` | Every 50 finished tickets: re-scores Jev, ablates each fact, and tabulates Oneshot outcomes per grooming-skill version. Output in `~/Documents/ai/jev-findings/heartbeat/HEARTBEAT.md` |
 | `scripts/pm_http.py`, `scripts/pm_secrets.py` | HTTP with timeouts and retries; credentials |
 | `scripts/*_cron.sh` | Cron entry points: triage 11:00 and 17:00, sync + sweep hourly, heartbeat 10:30 |
-| `scripts/test_groom.py` | `python3 -m pytest pm-loop/scripts -q` |
+| `scripts/test_groom.py` | `python3 -m pytest pm-loop/scripts -q` (78 tests) |
+| `scripts/mutation_check.py` | Mutation check for the rules (works on a copy) |
 
 The zone map, label allow-list and Jev facts are **not** here. They live in the erp repo
 (`.claude/zones.json`, `.claude/labels.json`, `.claude/erp-facts.json`) and are read from
@@ -58,6 +62,13 @@ The zone map, label allow-list and Jev facts are **not** here. They live in the 
   attachments or names), to decide its layers. The heartbeat re-sends past tickets' text when scoring.
 - **GitLab (arbisoft/erp):** documents collected for a ticket are uploaded there. Direct-file links
   are fetched only over https from gitlab/projects.arbisoft.com and Google hosts.
+
+## How we know it helps
+
+- **Jev:** accuracy per batch of 50 against merged diffs, vs the keyword baseline; wrong skips must stay 0.
+- **Facts:** each is re-scored with itself removed. A fact that changes nothing is dropped.
+- **Grooming skill:** Oneshot outcomes (merged / Needs Human / Not a Bug) and `unknown` lines per skill version, so a skill edit is judged by what Oneshot then did.
+- **Code rules:** `python3 scripts/mutation_check.py` mutates the rule-bearing functions on a temporary copy. A rule whose mutation no test catches gets a test or gets deleted. Last run: 177 mutants, 89% killed (up from 72% after closing the gaps); the 19 survivors are tuning values, fallbacks and formatting.
 
 ## Rules that live in code (don't re-add them to the skills)
 

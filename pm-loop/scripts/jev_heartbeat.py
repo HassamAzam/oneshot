@@ -207,7 +207,24 @@ def batch_record(number: int, rows: list[dict], facts: list[str], skip: dict, no
             "by_origin": {o: score([r for r in rows if r["origin"] == o], skip)
                           for o in sorted({r["origin"] for r in rows})},
             "rows": [{k: r[k] for k in ("iid", "origin", "truth", "mrs", "files", "jev_now", "jev_candidate",
-                                        "jev_groom")} for r in rows]}
+                                        "jev_groom")} for r in rows],
+            "ablation": ablation(rows, facts, skip) if facts else []}
+
+
+def ablation(rows: list[dict], facts: list[str], skip: dict) -> list[dict]:
+    """Re-score with each fact removed (mutation testing for facts): a fact that changes nothing can go."""
+    full = score(rows, skip)
+    out = []
+    for i, fact in enumerate(facts):
+        without = facts[:i] + facts[i + 1:]
+        probs = [jev_layers.ask(r["title"], r["description"], without)[0] for r in rows]
+        s = score([{**r, "jev_now": p} for r, p in zip(rows, probs)], skip)
+        delta = {l: round((s[l]["jev_now_acc"] - full[l]["jev_now_acc"]) * 100) for l in LAYERS}
+        wrong = {l: len(s[l]["wrong_skips"]) - len(full[l]["wrong_skips"]) for l in LAYERS}
+        verdict = "keep" if any(delta.values()) or any(wrong.values()) else "no effect — candidate to drop"
+        out.append({"fact": fact[:80], "accuracy_delta_without": delta, "extra_wrong_skips_without": wrong,
+                    "verdict": verdict})
+    return out
 
 
 # ── history ──────────────────────────────────────────────────────
@@ -311,9 +328,56 @@ def render(history: dict, status: str) -> str:
                 notes.append(f"  - {origin} subset (n={count}): pinned "
                              + "/".join(_pct(s[l]["jev_now_acc"]) for l in LAYERS)
                              + ", keyword " + "/".join(_pct(s[l]["keyword_acc"]) for l in LAYERS))
+    last = history["batches"][-1]
+    if last.get("ablation"):
+        notes.append(f"- Fact ablation, batch {last['batch']} (accuracy points and extra wrong skips B/F/M without each fact):")
+        for a in last["ablation"]:
+            d, w = a["accuracy_delta_without"], a["extra_wrong_skips_without"]
+            notes.append(f"  - {a['verdict']}: \"{a['fact']}…\" — "
+                         f"{'/'.join(f'{d[l]:+d}' for l in LAYERS)} pts, {'/'.join(f'{w[l]:+d}' for l in LAYERS)} wrong skips")
     notes.append("- Batches take the oldest finished tickets first; quick-to-merge tickets finish first, so early "
                  "batches lean towards smaller work.")
     return "\n".join(lines + ["", *notes, ""])
+
+
+OUTCOME_LABELS = (("Merged", "merged"), ("Not a Bug", "not a bug"), ("Needs Human", "needs human"))
+
+
+def grooming_outcomes() -> list[dict]:
+    """Per skill version: what Oneshot did with the AI tickets grooming produced (P11: does the skill help?)."""
+    by_version: dict[str, dict] = {}
+    for record in logged_decisions().values():
+        if record.get("route") not in ("ai", "ai-tests"):
+            continue
+        try:
+            issue = gl.call("GET", f"issues/{record['iid']}")
+        except gl.GroomError:
+            continue
+        labels = set(issue.get("labels") or [])
+        outcome = next((name for label, name in OUTCOME_LABELS if label in labels),
+                       "closed other" if issue["state"] == "closed" else "in flight")
+        v = by_version.setdefault(record.get("skill") or "unknown", {"n": 0, "unknowns": 0, "since": record["at"][:10]})
+        v["n"] += 1
+        v[outcome] = v.get(outcome, 0) + 1
+        v["unknowns"] += record.get("unknown_lines", 0)
+        v["since"] = min(v["since"], record["at"][:10])
+    return [{"skill": k, **v} for k, v in sorted(by_version.items(), key=lambda kv: kv[1]["since"])]
+
+
+def render_outcomes(rows: list[dict]) -> str:
+    if not rows:
+        return "## Grooming outcomes by skill version\n\n_No AI-routed tickets groomed with logging yet._\n"
+    lines = ["## Grooming outcomes by skill version", "",
+             "What Oneshot did with AI-routed tickets, per version of the grooming skill (hash of SKILL.md). "
+             "Compare versions once each has ~20 finished tickets.", "",
+             "| Skill | Since | n | Merged | Needs Human | Not a Bug | Closed other | In flight | Avg `unknown` lines |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        done = r["n"] - r.get("in flight", 0)
+        pct = lambda k: f"{r.get(k, 0)} ({r.get(k, 0) / done:.0%})" if done else str(r.get(k, 0))  # noqa: E731
+        lines.append(f"| {r['skill']} | {r['since']} | {r['n']} | {pct('merged')} | {pct('needs human')} | "
+                     f"{pct('not a bug')} | {pct('closed other')} | {r.get('in flight', 0)} | {r['unknowns'] / r['n']:.1f} |")
+    return "\n".join(lines) + "\n"
 
 
 def post(text: str) -> None:
@@ -349,7 +413,7 @@ def run() -> str:
               f"{unfinished} groomed tickets not merged yet; {len(history['excluded_iids'])} excluded "
               f"(bundled MRs only); {len(errors)} Plane scan errors — checked {date.today().isoformat()}")
     table = render(history, status)
-    TABLE.write_text(table)
+    TABLE.write_text(table + "\n" + render_outcomes(grooming_outcomes()))
     if made or errors:
         head = f"Jev heartbeat: batch {', '.join(map(str, made))} scored." if made else "Jev heartbeat:"
         post(head + "\n" + "\n".join(l for l in table.splitlines() if l.startswith("|"))

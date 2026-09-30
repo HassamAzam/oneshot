@@ -25,6 +25,7 @@ characterization-test issue's "Pin this behaviour" section (ai-tests route).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -141,7 +142,7 @@ def create(args: argparse.Namespace) -> dict:
     assignee = mr["author_id"] if mr else (gl.user_id(args.assignee) if args.assignee else None)
     made = gl.create_issues(spec, args.title, body, scope, assignee, ticket["id"] if ticket else None)
     log_jev_decision(made["issue"]["iid"], ticket["id"] if ticket else None,
-                     ticket["name"] if ticket else args.title, source_text, jev)
+                     ticket["name"] if ticket else args.title, source_text, jev, spec["route"], body)
     out = {"id": ticket["id"] if ticket else None, "route": spec["route"], "zone": spec.get("zone"),
            "issue": made["issue"], "tests_issue": made["tests_issue"], "milestone": made["milestone"]["title"],
            "unlabelled": unlabelled, "layers": jev,
@@ -166,15 +167,27 @@ def create(args: argparse.Namespace) -> dict:
 
 SWEEP_SEEN = Path.home() / ".cache" / "pm-loop" / "sweep_seen.json"
 JEV_DECISIONS = Path.home() / "Documents" / "ai" / "jev-findings" / "heartbeat" / "decisions.jsonl"
+SKILL_FILE = Path.home() / ".claude" / "skills" / "ticket-grooming" / "SKILL.md"
+UNKNOWN_RE = re.compile(r"\bunknown\b", re.I)
 
 
-def log_jev_decision(issue_iid: int, ticket_id: str | None, title: str, text: str, jev: dict) -> None:
+def skill_version() -> str:
+    """Short hash of the grooming skill text, so outcomes can be compared per skill version."""
+    try:
+        return hashlib.sha256(SKILL_FILE.read_bytes()).hexdigest()[:10]
+    except OSError:
+        return "unknown"
+
+
+def log_jev_decision(issue_iid: int, ticket_id: str | None, title: str, text: str, jev: dict,
+                     route: str = "human", body: str = "") -> None:
     """What Jev decided at grooming time, so the heartbeat scores the decision that actually drove Oneshot."""
     JEV_DECISIONS.parent.mkdir(parents=True, exist_ok=True)
     record = {"iid": issue_iid, "ticket": ticket_id, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
               "model": jev_layers.MODEL, "title": title, "description": text[:jev_layers.DESCRIPTION_CHARS],
               "source": jev["source"], "layers": jev["layers"], "probabilities": jev["probabilities"],
-              "facts": jev.get("facts")}
+              "facts": jev.get("facts"), "route": route, "skill": skill_version(),
+              "unknown_lines": sum(1 for line in body.splitlines() if UNKNOWN_RE.search(line))}
     with JEV_DECISIONS.open("a") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 SLACK_POST = Path(__file__).resolve().parent / "slack_post.py"
