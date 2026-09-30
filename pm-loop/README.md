@@ -29,7 +29,7 @@ Tracking ticket: arbisoft/erp#8777.
 | `scripts/jev_heartbeat.py` | Every 50 finished tickets: re-scores Jev, ablates each fact, and tabulates Oneshot outcomes per grooming-skill version. Output in `~/Documents/ai/jev-findings/heartbeat/HEARTBEAT.md` |
 | `scripts/pm_http.py`, `scripts/pm_secrets.py` | HTTP with timeouts and retries; credentials |
 | `scripts/*_cron.sh` | Cron entry points: triage 11:00 and 17:00, sync + sweep hourly, heartbeat 10:30 |
-| `scripts/test_groom.py` | `python3 -m pytest pm-loop/scripts -q` (78 tests) |
+| `scripts/test_groom.py` | `python3 -m pytest pm-loop/scripts -q` (80 tests) |
 | `scripts/mutation_check.py` | Mutation check for the rules (works on a copy) |
 
 The zone map, label allow-list and Jev facts are **not** here. They live in the erp repo
@@ -71,6 +71,8 @@ The zone map, label allow-list and Jev facts are **not** here. They live in the 
 - **Code rules:** `python3 scripts/mutation_check.py` mutates the rule-bearing functions on a temporary copy. A rule whose mutation no test catches gets a test or gets deleted. Last run: 177 mutants, 89% killed (up from 72% after closing the gaps); the 19 survivors are tuning values, fallbacks and formatting.
 
 ## Rules that live in code (don't re-add them to the skills)
+
+- **Labels need the user's yes:** a real `create` refuses unless `--confirm-labels` matches the composed list; `--dry-run` shows each label and why. Labels separate streams on this board (`Opensource`, `Plane team`).
 
 - **Labels:** only from the allow-list; the GitLab API would otherwise create any typo.
 - **Duplicate protection:** eligibility needs a readable Plane back-link check, plus a GitLab search for the ticket ID.

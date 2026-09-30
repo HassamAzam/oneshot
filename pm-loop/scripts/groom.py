@@ -134,11 +134,19 @@ def create(args: argparse.Namespace) -> dict:
     requested_by = ticket["requested_by"] if ticket else mr["author_name"] if mr else SELF_NAME
     body = _finish_body(body, spec, ticket, docs, jev, requested_by)
     labels = gl.compose_labels(spec)
+    tests_labels = gl.compose_labels(spec, for_tests_issue=True) if spec["route"] == "ai-tests" else []
+    every_label = list(dict.fromkeys(labels + tests_labels))
     unlabelled = gl.unlabelled(spec)
     if args.dry_run:
         return {"dry_run": True, "route": spec["route"], "labels": labels, "layers": jev,
-                "tests_labels": gl.compose_labels(spec, for_tests_issue=True) if spec["route"] == "ai-tests" else [],
+                "label_reasons": label_reasons(spec, every_label, jev),
+                "confirm_with": "--confirm-labels " + json.dumps(",".join(every_label)),
+                "tests_labels": tests_labels,
                 "documents": docs, "unlabelled": unlabelled, "body": body}
+    approved = [l.strip() for l in (args.confirm_labels or "").split(",") if l.strip()]
+    if sorted(approved) != sorted(every_label):
+        raise gl.GroomError("labels need the user's approval first: run --dry-run, show label_reasons, and pass "
+                            f"the approved list with --confirm-labels. Composed: {every_label}; approved: {approved}")
     assignee = mr["author_id"] if mr else (gl.user_id(args.assignee) if args.assignee else None)
     made = gl.create_issues(spec, args.title, body, scope, assignee, ticket["id"] if ticket else None)
     log_jev_decision(made["issue"]["iid"], ticket["id"] if ticket else None,
@@ -219,6 +227,30 @@ def notify_sweep(actions: list[dict], dry_run: bool) -> list[str]:
     return lines
 
 
+def label_reasons(spec: dict, labels: list[str], layers: dict) -> dict:
+    """Why each label is on the issue, so the user can approve them knowingly."""
+    m, why = gl.label_map(), {}
+    sources = [(m["kind"].get(spec.get("kind")), f"kind {spec.get('kind')} (triage marker or --kind)"),
+               (m["size"].get(spec.get("size")), f"size {spec.get('size')} (triage marker or --size)"),
+               (m["zone"].get(spec.get("zone")), f"zone {spec.get('zone')} from the zone map"),
+               (m["priority"]["urgent"] if spec.get("urgent") else None, "Plane priority high/urgent"),
+               (m["flow"]["design"] if spec.get("design") else None, "triage design flag"),
+               (m["flow"]["accessibility"] if "Accessibility" in spec.get("swimlanes", []) else None,
+                "Plane swimlane Accessibility")]
+    sources += [(m["area"].get(a), f"area {a} (triage)") for a in spec.get("areas", [])]
+    sources += [(m["swimlane"].get(s), f"Plane swimlane {s}") for s in spec.get("swimlanes", [])]
+    probs = layers.get("probabilities", {})
+    sources += [(m["layer"][l], f"Jev layer {l}" + (f" (p={probs[l]:.2f})" if l in probs else " (Jev fallback)"))
+                for l in ("backend", "frontend") if l in layers.get("layers", [])]
+    sources += [(m["flow"]["ai"], f"route {spec['route']}"), (m["flow"]["loop"], "route ai: Oneshot starts"),
+                (m["flow"]["review"], "route ai-tests: human gates"),
+                (m["flow"]["characterization_tests"], "tests issue for a yellow route")]
+    for label, reason in sources:
+        if label and label in labels and label not in why:
+            why[label] = reason
+    return {label: why.get(label, "requested") for label in labels}
+
+
 def _csv_ints(value: str) -> list[int]:
     return [int(v) for v in value.split(",") if v.strip()]
 
@@ -238,6 +270,7 @@ def main() -> int:
     c.add_argument("--size", choices=SIZES, help="only when the triage marker has none")
     c.add_argument("--assignee", help="GitLab username (human route / one-shot)")
     c.add_argument("--dry-run", action="store_true")
+    c.add_argument("--confirm-labels", help="the exact label list the user approved (comma-separated, from --dry-run)")
     a = sub.add_parser("attach")
     a.add_argument("--issue", type=int, required=True)
     a.add_argument("files", nargs="+")

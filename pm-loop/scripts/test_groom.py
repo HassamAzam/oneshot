@@ -47,7 +47,8 @@ def _ticket(route="ai", zone="green", areas=("training",), kind="bug", size="S",
 
 
 def _args(**kw):
-    base = dict(id="9", mr=None, title="T", from_issues=[], kind=None, size=None, assignee=None, dry_run=True)
+    base = dict(id="9", mr=None, title="T", from_issues=[], kind=None, size=None, assignee=None, dry_run=True,
+                confirm_labels=None)
     return argparse.Namespace(**{**base, **kw})
 
 
@@ -538,6 +539,22 @@ def test_live_create_backlinks_plane_and_adds_a_sheet_row_per_issue(monkeypatch,
     monkeypatch.setattr(plane, "post_groom", lambda *a: calls.setdefault("plane", a) and {"backlink": "ok"})
     monkeypatch.setattr(gl, "link_mr", lambda *a: calls.setdefault("mr", a))
     monkeypatch.setattr(groom.sprint_plan_append, "append_rows", lambda m, rows: calls.setdefault("rows", rows) and {"appended": len(rows)})
-    out = _dry_create(monkeypatch, _ticket(route="ai-tests", zone="yellow"), GOOD, dry_run=False)
+    out = _dry_create(monkeypatch, _ticket(route="ai-tests", zone="yellow"), GOOD, dry_run=False, confirm_labels="x")
     assert calls["plane"][1:3] == ("u20", 20) and "mr" not in calls
     assert [r["url"] for r in calls["rows"]] == ["u20", "u19"] and out["issue"]["iid"] == 20
+
+
+def test_real_create_needs_the_user_approved_labels(monkeypatch):
+    with pytest.raises(gl.GroomError, match="need the user's approval"):
+        _dry_create(monkeypatch, _ticket(), GOOD, dry_run=False)
+    with pytest.raises(gl.GroomError, match="need the user's approval"):
+        _dry_create(monkeypatch, _ticket(), GOOD, dry_run=False, confirm_labels="Bug,AI,Loop")
+
+
+def test_dry_run_explains_every_label_and_gives_the_confirm_flag(monkeypatch):
+    out = _dry_create(monkeypatch, _ticket(route="human", zone="red", areas=("payroll",), swimlanes=("Finance",)),
+                      GOOD, layers=("backend",))
+    reasons = out["label_reasons"]
+    assert set(reasons) == set(out["labels"]) and "requested" not in reasons.values()
+    assert reasons["Finance"] == "Plane swimlane Finance" and reasons["Zone: Red"].startswith("zone red")
+    assert out["confirm_with"] == "--confirm-labels " + json.dumps(",".join(out["labels"]))
