@@ -728,6 +728,71 @@ expect_block "Write that adds an inline style" \
 
 rm -f "$FE"/components/demo/*.bak
 
+# ---------------------------------------------------------------- artifact-guard
+#
+# RUN=<the run directory the test env already scopes writes to>. The deny cases
+# are a handoff and the journal; the allow cases are the three *-partial.json
+# backstops a prompt actually asks for, and anything one level deeper — a
+# session's own scratch is none of this guard's business.
+echo
+echo "artifact-guard"
+RUN="$ROOT/state/runs/0"
+edit_json_payload() {
+    printf '{"tool_name":"Edit","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$1"
+}
+
+expect_deny  "Write another phase's findings.json" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/findings.json")"
+expect_deny  "Write verify.json (the merge gate reads it)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/verify.json")"
+expect_deny  "Write run.json (the journal, holds human approvals)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/run.json")"
+expect_deny  "Edit findings.json"      artifact-guard.cjs "$(edit_json_payload "$RUN/findings.json")"
+expect_deny  "Write merge.json (name defaulted from the phase, not declared)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/merge.json")"
+expect_deny  "Write ANOTHER run's artifact" \
+                                       artifact-guard.cjs "$(write_payload "$ROOT/state/runs/999/findings.json")"
+
+expect_allow "Write review-partial.json (the sanctioned backstop)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/review-partial.json")"
+expect_allow "Write verify-partial.json" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/verify-partial.json")"
+expect_allow "Write testcases-partial.json" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/testcases-partial.json")"
+expect_allow "Write artifacts/verify.json (a subdirectory, not a handoff)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/artifacts/verify.json")"
+expect_allow "Write scratch/plan.json" artifact-guard.cjs "$(write_payload "$RUN/scratch/plan.json")"
+expect_allow "Write a worktree file"   artifact-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/apps/x/views.py")"
+
+# The Bash surface. write-scope.cjs never sees these, which is the whole reason
+# this guard watches both.
+expect_deny  "redirect over verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "echo '{}' > $RUN/verify.json")"
+expect_deny  "append to the journal"   artifact-guard.cjs "$(bash_payload "echo x >> $RUN/run.json")"
+expect_deny  "python json.dump into findings.json" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import json;json.dump({}, open('$RUN/findings.json','w'))\"")"
+expect_deny  "node writeFileSync into verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "node -e \"require('fs').writeFileSync('$RUN/verify.json','{}')\"")"
+expect_deny  "cp over findings.json"   artifact-guard.cjs "$(bash_payload "cp /tmp/x.json $RUN/findings.json")"
+expect_deny  "sed -i on verify.json"   artifact-guard.cjs "$(bash_payload "sed -i '' 's/fail/pass/' $RUN/verify.json")"
+expect_deny  "tee into findings.json"  artifact-guard.cjs "$(bash_payload "echo '{}' | tee $RUN/findings.json")"
+expect_deny  "rm the journal"          artifact-guard.cjs "$(bash_payload "rm $RUN/run.json")"
+expect_deny  "redirect after a legal command" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && echo '{}' > $RUN/verify.json")"
+expect_deny  "relative path from the conductor cwd" \
+                                       artifact-guard.cjs "$(bash_payload "echo '{}' > state/runs/0/findings.json")"
+
+expect_allow "cat findings.json (reads are never refused)" \
+                                       artifact-guard.cjs "$(bash_payload "cat $RUN/findings.json")"
+expect_allow "python json.load of testcases.json" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import json;d=json.load(open('$RUN/testcases.json'))\"")"
+expect_allow "jq over verify.json"     artifact-guard.cjs "$(bash_payload "jq '.results' $RUN/verify.json")"
+expect_allow "redirect into a partial" artifact-guard.cjs "$(bash_payload "echo '{}' > $RUN/verify-partial.json")"
+expect_allow "grep -r for a finding id" \
+                                       artifact-guard.cjs "$(bash_payload "grep -rn F-1 $RUN/findings.json")"
+expect_allow "an ordinary build command" \
+                                       artifact-guard.cjs "$(bash_payload 'npm test -- --watchAll=false')"
+
 rm -rf "$ONESHOT_WORKTREE"
 
 echo

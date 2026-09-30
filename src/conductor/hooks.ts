@@ -140,6 +140,12 @@ function runGuard(script: string, input: unknown, env: Record<string, string>): 
 /** Tool-name matchers, mirroring hooks/hooks.settings.json. */
 const WRITE_TOOLS = '^(Write|Edit|NotebookEdit)$';
 const BASH = '^Bash$';
+/**
+ * artifact-guard's subject is a set of filenames, not a tool, so it has to see
+ * both surfaces: write-scope covers the write tools and nothing covers Bash,
+ * which is exactly how a handoff would get rewritten.
+ */
+const WRITE_TOOLS_OR_BASH = '^(Write|Edit|NotebookEdit|Bash)$';
 const MR_TOOLS = '^mcp__gitlab__(create|update)_merge_request$';
 const READ_OR_BASH = '^(Read|NotebookRead|Grep|Bash)$';
 
@@ -158,6 +164,7 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
     PreToolUse: [
       { hooks: [guard('pause-check.cjs')], timeout: 15 },
       { matcher: WRITE_TOOLS, hooks: [guard('write-scope.cjs')], timeout: 15 },
+      { matcher: WRITE_TOOLS_OR_BASH, hooks: [guard('artifact-guard.cjs')], timeout: 15 },
       { matcher: WRITE_TOOLS, hooks: [guard('frontend-test-guard.cjs')], timeout: 15 },
       { matcher: BASH, hooks: [guard('git-guard.cjs')], timeout: 20 },
       { matcher: MR_TOOLS, hooks: [guard('mr-gate.cjs')], timeout: 15 },
