@@ -28,12 +28,12 @@ Cover every category:
 
 ## Walk the traps list before you present
 
-**Read `refs/traps.md` and walk it against your draft before the GATE.** Every entry there is a revision request QA has already had to make on a real ticket — a case that failed on a correct build, passed on an unchanged one, or was never written at all. It is the difference between a list that is approved in one round and one that costs three.
+**Read `refs/traps.md` and walk it against your draft before the GATE.** It holds numbered **principles**, each generalising revision requests QA has already had to make on real tickets — cases that failed on a correct build, passed on an unchanged one, or were never written at all. Walk the principles, not the examples: the bullets under each one are illustrations of it, and the principle is what has to fire on a screen they never mention. It is the difference between a list that is approved in one round and one that costs three.
 
 Two checks to run over the finished draft:
 
-- **Would this case still pass if the diff were reverted?** If yes it proves nothing about the change. Keep it if it guards a regression, but label it a smoke check and give it a positive control (traps B).
-- **Does this change REMOVE something that was hiding a state** — a blur, a disabled look, a muted colour, a collapsed row? Then write the cases for what it was hiding, not just for its absence (traps C). This class is the most-missed one on record.
+- **Would this case still pass if the diff were reverted?** If yes it proves nothing about the change. Keep it if it guards a regression, but label it a smoke check and give it a positive control (principle 5).
+- **Does this change REMOVE something that was hiding a state** — a blur, a disabled look, a muted colour, a collapsed row? Then write the cases for what it was hiding, not just for its absence (principle 6). This class is the most-missed one on record.
 
 Note in your output which traps you applied and which you considered and ruled out, so the reviewer can see the list was walked rather than skimmed.
 
@@ -175,7 +175,12 @@ Show: count before → after; the ids added and what each one came from (intent 
 Walk `refs/traps.md` over the revised list too — a revision round is exactly where a trap resurfaces, because the cases you just rewrote are the ones nobody has checked yet.
 
 **8. Name the trap this round taught you.**
-If the feedback names something `refs/traps.md` does not already cover, end your output with a `candidateTraps` block: the trap stated generally enough to fire on a different ticket, how it bites a case, what to assert instead, and this ticket as its source. Do not edit `refs/traps.md` yourself — it is shared by every run and a human curates it. Proposing the entry is the whole job.
+If the feedback names something `refs/traps.md` does not already cover, end your output with a `candidateTraps` block. **Say which of the two it is, because they are curated differently:**
+
+- **A new instance under principle N** — the principle already covers it and this is a shape of it nobody had written down. Name the principle, give the bullet, and say what in this ticket the existing bullets did not reach. This is the common case.
+- **A new principle** — no existing principle covers it. Say which ones you checked and why each missed, then state the principle as a rule about authoring a case. If stating it needs a sentence about how the code should be built or how the repo should be configured, it belongs to another phase and is not a candidate here.
+
+Either way: stated generally enough to fire on a different ticket, how it bites a case, what to assert instead, and the source as a full URL — ticket numbers are not unique across projects. Do not edit `refs/traps.md` yourself; it is shared by every run and a human curates it. Proposing the candidate is the whole job.
 
 > **The approve-and-add round is the only append-only path left.** When a reviewer signs off AND names a case in the same comment, the gate appends that case mechanically rather than cycling this phase: only bullet lines (`- Verify that …`) and lines opening with a test verb are read, every other line is dropped, and each appended case is tagged `boundary` / `medium` with `Matches the QA-reported edge case: …` as its Expected unless the line carries its own `expects:` clause. Every other reply cycles this phase, where you rewrite the list yourself under rules 1–6.
 

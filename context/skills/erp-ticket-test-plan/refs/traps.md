@@ -4,9 +4,10 @@ A case that can fail for a reason the diff did not cause is worse than no case: 
 burns a cycle, sends `implement` after work it cannot do, and blocks the gate on
 something no diff can fix.
 
-Seven principles. Each one is a rule about **authoring a case** — if applying it
-needs a sentence about how the code should be built or how the repo should be
-configured, it belongs to another phase.
+Each principle below is a rule about **authoring a case** — if applying it needs a
+sentence about how the code should be built or how the repo should be configured,
+it belongs to another phase. Principles are numbered for citation, and the list is
+open: a new one appends rather than renumbering.
 
 ---
 
@@ -16,8 +17,10 @@ A lint or test-suite run is a build step, not a case. If the runner is broken th
 case fails correctly and tells you nothing about the diff.
 
 - If a case's only assertion is "run X, expect a clean exit", it is not a case.
-- Where a known-broken runner is unavoidable, state its true scale so a tester
-  does not read a wall of failures as new breakage.
+- A runner appears only as a secondary step inside a case that asserts product
+  behaviour. Where that runner is known-broken, state its true scale in the
+  pre-condition, so a tester does not read a wall of pre-existing failures as new
+  breakage.
 
 ### 2. Assert on what you actually query, not on what the screen shows
 
@@ -25,7 +28,10 @@ The DOM and the rendered page routinely disagree.
 
 - Text capitalised by a display rule is stored in title case: the DOM holds
   `Processed`, the screen shows `PROCESSED`. Compare case-insensitively, or assert
-  the stored wording and the rule separately.
+  the stored wording and the rule separately. The same applies to trimmed
+  whitespace, truncation with an ellipsis, and number/date formatting — anything
+  the display does to a stored value is a second thing to assert, not part of the
+  first.
 - `keepMounted` modals and drawers sit in the DOM at all times. `querySelectorAll`
   counts them; axe and a screen reader ignore them. Scope the query to the content
   container and name the known always-mounted nodes as expected.
@@ -67,8 +73,11 @@ label it, and give it a positive control.
 The most-missed class. A blur, a disabled look, a muted colour or a collapsed row
 is not only appearance — it is what stopped anyone looking.
 
-- Test the action the barrier was discouraging. Processed rows were always
-  selectable; the blur was the only thing deterring a second increment email.
+- Test the action the barrier was discouraging — **performed both individually and
+  through any select-all path** — and assert what the system does on the repeat.
+  Processed rows were always selectable; the blur was the only thing deterring a
+  second increment email, and select-all is where the second one goes out without
+  anyone choosing it.
 - Ask whether one entity can appear twice. A sort on a per-row timestamp with
   `.distinct()` cannot collapse two rows differing in it.
 - Find the surviving half. When a change reverses part of an older requirement,
@@ -79,11 +88,14 @@ is not only appearance — it is what stopped anyone looking.
 - **Prove the state is reachable before writing cases that assume it.** It can be
   unreachable two ways: conditions that exclude one another, or a view that filters
   it out — cancelling a leave sets `is_active = False`, and the listing queries
-  `active_objects`, so a cancelled row never renders there at all. Cases resting on
-  an unreachable state come back BLOCKED rather than failing, and a list of blocked
-  cases reads as coverage. Make reachability the first case, and say plainly that
-  the rest must not be recorded as passes if it fails. Where the state exists only
-  in a defensive branch, assert the helper directly instead.
+  `active_objects`, so a cancelled row never renders there at all. Fourteen cases
+  each beginning "find a cancelled row" then come back `blocked`, and **`blocked` is
+  the one status nothing refuses.** It is not a pass, but the merge gate reads
+  failures, so a list where every case is blocked reaches merge having proved
+  nothing. So write reachability as an ordinary case with a real assertion — *a
+  cancelled leave appears in this listing* — because when the state is unreachable
+  that case **fails**, and a failure is what stops the gate. Where the state exists
+  only in a defensive branch, assert the helper directly instead.
 - Derive the period and the record from the listing, or seed them. A hard-coded
   month plus an exact count rots the first time anything changes that state.
 - Put a known pre-existing failure's workaround in the pre-condition rather than
@@ -97,16 +109,24 @@ is not only appearance — it is what stopped anyone looking.
 
 ---
 
-## Retiring an entry
+## Retiring a principle or a bullet
 
-Mutate the code a principle covers and re-run a case written from it. If the
-verdict does not move, the case caught nothing and the entry is not earning its
-place — delete it. An entry that has never changed a case is noise.
+Mutate the code it covers and re-run a case written from it. If the verdict does
+not move, the case caught nothing and it is not earning its place — delete it. A
+bullet goes on its own; a principle goes only when every bullet under it has.
+Anything that has never changed a case is noise.
 
-## Source
+## Sources
 
-Principles 1–7 were distilled from four QA revision rounds on
-[workstreamai#259](https://gitlab.arbisoft.com/arbisoft/workstreamai/-/work_items/259)
-(*Remove blur on processed increment rows in review listing*). Ticket numbers are
-not unique across projects — `erp#259` is an unrelated ticket — so cite new sources
-by full URL.
+Ticket numbers are not unique across projects — `erp#259` is an unrelated ticket to
+the one below — so every source is cited by full URL, and a new one must be too.
+
+- **Most of the file**, principles 1–6 and the rest of 7: four QA revision rounds on
+  [workstreamai#259](https://gitlab.arbisoft.com/arbisoft/workstreamai/-/work_items/259)
+  (*Remove blur on processed increment rows in review listing*).
+- **Principle 7's reachability bullet**:
+  [erp#8775](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8775), where a run
+  wrote fourteen cases resting on a state the listing filters out.
+- **Principle 2's `keepMounted` bullet**: not a QA round at all — testing the
+  `local-browser-verify` helpers against a live app (`f9c7901`), where a MUI `Popper`
+  with `keepMounted` kept its geometry after being dismissed.
