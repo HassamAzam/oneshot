@@ -45,6 +45,7 @@ import { ensureClaudeDir } from './lib/claudedir.js';
 import { probe, netState } from './lib/reachability.js';
 import { windowUsage, dayUsage, quotaParked } from './lib/quota.js';
 import { budgetConfig } from './lib/config.js';
+import { iidFlag } from './lib/cliargs.js';
 import { describe, scan } from './conductor/watcher.js';
 import { refusalIsFinal, runTicket, type RunOutcome } from './conductor/runner.js';
 import { automationPreflight, automationTick, outcomeLine, runAutomationOnce } from './automation/runner.js';
@@ -189,13 +190,16 @@ if (followArg && ticketArg === null) {
   process.exit(1);
 }
 
-/** `--automation <iid>` — one pass of the Ready For Automation state machine for one ticket, then exit. Works without ONESHOT_AUTOMATION: it is an operator's explicit act. */
-const automationArg = (() => {
-  const i = process.argv.indexOf('--automation');
-  if (i === -1) return null;
-  const n = Number(process.argv[i + 1]);
-  return Number.isInteger(n) && n > 0 ? n : null;
-})();
+/**
+ * `--automation <iid>` — one pass of the Ready For Automation state machine for one ticket, then exit. Works without ONESHOT_AUTOMATION: it is an operator's explicit act.
+ * A malformed value is refused rather than read as no flag (iidFlag says why).
+ */
+const automationFlag = iidFlag(process.argv, '--automation');
+const automationArg = automationFlag.iid;
+if (automationFlag.given && automationArg === null) {
+  log.error('--automation needs a positive ticket iid, e.g. --automation 8420 (no leading #, no =)');
+  process.exit(1);
+}
 if (automationArg !== null && (ticketArg !== null || followArg)) {
   log.error('--automation <iid> runs on its own: it cannot be combined with --ticket or --follow');
   process.exit(1);
