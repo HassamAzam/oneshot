@@ -458,10 +458,15 @@ function freeSlots(): { slots: number; mine: number; fleet: number; pool: number
 }
 
 /**
- * How often an awaited --ticket run beats on its own. Well inside
- * CONDUCTOR_TTL_MS, matching the drain's cadence below.
+ * How often a conductor beats on its own while it awaits something outside
+ * tick(), which is otherwise the only place heartbeat() and renewPromotion()
+ * run: an awaited --ticket run, and the shutdown drain. It must stay well
+ * inside both limits the beat holds off — CONDUCTOR_TTL_MS, past which the
+ * fleet reads the owner as dead and resumes its run, and the promotion
+ * LEASE_TTL_MS, past which a waiting peer may break the lease. Both are 5 min.
+ * It also sets how often the drain logs its "still finishing" line.
  */
-const TICKET_HEARTBEAT_MS = 15_000;
+const OUT_OF_TICK_BEAT_MS = 15_000;
 
 async function tick(): Promise<void> {
   // The fleet's liveness and the promotion lease's renewal ride the same clock
@@ -508,7 +513,7 @@ async function tick(): Promise<void> {
     const beat = setInterval(() => {
       heartbeat();
       renewPromotion(me);
-    }, TICKET_HEARTBEAT_MS);
+    }, OUT_OF_TICK_BEAT_MS);
     beat.unref();
     let runOutcome: Awaited<ReturnType<typeof runTicket>>;
     try {
@@ -589,7 +594,7 @@ async function drain(): Promise<void> {
     heartbeat();
     renewPromotion(me);
     say.info(`still finishing ${running.size} run(s): ${names()}`);
-  }, 15_000);
+  }, OUT_OF_TICK_BEAT_MS);
   progress.unref();
 
   await Promise.allSettled([...running.values()]);
