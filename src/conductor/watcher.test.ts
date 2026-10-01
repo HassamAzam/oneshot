@@ -69,6 +69,13 @@ test('the Loop skips a ticket carrying Ready For Automation beside Loop, and say
     `carries "${TRIGGER}" — the automation mode owns it`);
 });
 
+test('the trigger without Loop keeps the pipeline off, and the reason names both ways out instead of an owner', () => {
+  assert.equal(automationOwns([TRIGGER]),
+    `carries "${TRIGGER}", which keeps the pipeline off it — add "Loop" for automation test cases, `
+    + `or remove "${TRIGGER}" to run the pipeline`);
+  assert.equal(automationOwns(['Bug', TRIGGER, 'Ready For Deployment'])?.includes('the automation mode owns it'), false);
+});
+
 test('a plain Loop ticket is still the Loop\'s, whatever else it carries', () => {
   assert.equal(automationOwns(['Loop']), null);
   assert.equal(automationOwns(['Loop', 'Bug', 'Ready For Deployment', 'Automation Done']), null);

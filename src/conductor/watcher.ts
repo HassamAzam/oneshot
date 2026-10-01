@@ -138,13 +138,23 @@ export async function triage(issues: Issue[]): Promise<WatchResult> {
  * it was. issuesWithEntryLabel already leaves these tickets out of the page it
  * reads; scan() asks again for one that slips through, and runTicket() asks
  * because `--ticket` reaches it without a scan.
+ *
+ * The trigger alone keeps the Loop off too, but then nobody owns the ticket:
+ * the automation mode acts only on the entry label AND the trigger. QA puts
+ * the trigger on tickets in its own workflow, so `--ticket` meets this case,
+ * and "the automation mode owns it" sent the operator to wait on a mode that
+ * would never pick the ticket up. The reason then names both ways out.
  */
 export function automationOwns(
-  labels: readonly string[], trigger: string | null = automationTriggerLabel(),
+  labels: readonly string[],
+  trigger: string | null = automationTriggerLabel(),
+  entry: string = projectConfig().labels.entry,
 ): string | null {
-  return trigger !== null && labels.includes(trigger)
+  if (trigger === null || !labels.includes(trigger)) return null;
+  return labels.includes(entry)
     ? `carries "${trigger}" — the automation mode owns it`
-    : null;
+    : `carries "${trigger}", which keeps the pipeline off it — add "${entry}" for automation test cases, `
+      + `or remove "${trigger}" to run the pipeline`;
 }
 
 /**

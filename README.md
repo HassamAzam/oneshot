@@ -12,7 +12,8 @@ pipeline below. `Loop` **and** `Ready For Automation` send the ticket to the
 [Ready For Automation mode](#ready-for-automation-mode) instead, and the pipeline never works a
 ticket carrying `Ready For Automation`: its scan leaves it out and `--ticket` refuses it.
 `npm start -- --ticket <iid>` on a ticket without `Loop` is an operator's explicit override, as
-before.
+before — except on a ticket carrying `Ready For Automation`, which it refuses with or without
+`Loop`.
 
 **The pipeline ends at the merge.** Nothing is deployed, nothing is QA'd on a running build,
 and no demo is recorded — deploying is a person's job, and the ticket says so when it hands
@@ -385,6 +386,13 @@ long they wait on readiness or on QA they never crowd its one page of 50. The on
 cannot run anywhere then, so there is no trigger to route on and the pipeline treats
 `Ready For Automation` tickets as it did before this mode existed, rather than leaving them to
 nobody.
+
+QA uses `Ready For Automation` in its own workflow, so the label can be on a ticket nobody meant
+for this mode. To have the pipeline fix such a ticket (a reopened bug still carrying it, say),
+remove `Ready For Automation` first; with `Loop` beside it, the ticket goes to test-case writing
+instead, and it reads as ready if an earlier fix merged. A Loop run that was parked or in flight
+when the label went on is no longer scanned either: its run and claim note stay as they were
+until someone removes the label or releases the run by hand.
 
 ```
  "Loop" + "Ready For Automation" (open or closed, any assignee, not "Automation Done")

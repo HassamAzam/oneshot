@@ -317,6 +317,14 @@ test('runTicket refuses a Loop ticket carrying Ready For Automation before it cl
       assert.deepEqual(out, { runId: '', iid, status: 'refused', reason: why, final: true });
       assert.equal(refusalIsFinal(out), true, '--follow stops on it instead of re-checking forever');
     }
+    // Without Loop the automation mode will never take it either, so the
+    // reason must not send the operator to wait on that mode.
+    const orphan = await runTicket(ticket({ labels: ['Ready For Automation'] }), { conductor: 'test-conductor' });
+    assert.deepEqual(orphan, {
+      runId: '', iid, status: 'refused', final: true,
+      reason: 'carries "Ready For Automation", which keeps the pipeline off it — add "Loop" for automation test cases, '
+        + 'or remove "Ready For Automation" to run the pipeline',
+    });
     assert.deepEqual(fetched, [], 'nothing was read from or written to GitLab');
     assert.equal(readJournal(iid), null, 'no run journal was started');
     assert.equal(isClaimed(iid), false, 'no claim row was taken');
