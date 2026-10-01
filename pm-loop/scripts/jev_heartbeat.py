@@ -340,7 +340,26 @@ def render(history: dict, status: str) -> str:
     return "\n".join(lines + ["", *notes, ""])
 
 
-OUTCOME_LABELS = (("Merged", "merged"), ("Not a Bug", "not a bug"), ("Needs Human", "needs human"))
+OUTCOME_LABELS = (("Merged", "merged"), ("Not a Bug", "stopped"), ("Needs Human", "needs human"))
+LOOP = "Loop"
+
+
+def outcome_of(iid: int, issue: dict) -> str:
+    """Where Oneshot left one groomed ticket.
+
+    "stopped" is Not a Bug or a person dropping the ticket. It is read from Loop's removal, not
+    only from a 'Not a Bug' label: erp sets no labels.notABug, so on erp that label never appears
+    and every Not a Bug stop used to be counted as in flight.
+    """
+    labels = set(issue.get("labels") or [])
+    labelled = next((name for label, name in OUTCOME_LABELS if label in labels), None)
+    if labelled:
+        return labelled
+    if issue["state"] == "closed":
+        return "closed other"
+    if LOOP not in labels and gl.loop_was_removed(iid, LOOP):
+        return "stopped"
+    return "in flight"
 
 
 def grooming_outcomes() -> list[dict]:
@@ -350,12 +369,9 @@ def grooming_outcomes() -> list[dict]:
         if record.get("route") not in ("ai", "ai-tests"):
             continue
         try:
-            issue = gl.call("GET", f"issues/{record['iid']}")
+            outcome = outcome_of(record["iid"], gl.call("GET", f"issues/{record['iid']}"))
         except gl.GroomError:
             continue
-        labels = set(issue.get("labels") or [])
-        outcome = next((name for label, name in OUTCOME_LABELS if label in labels),
-                       "closed other" if issue["state"] == "closed" else "in flight")
         v = by_version.setdefault(record.get("skill") or "unknown", {"n": 0, "unknowns": 0, "since": record["at"][:10]})
         v["n"] += 1
         v[outcome] = v.get(outcome, 0) + 1
@@ -370,13 +386,14 @@ def render_outcomes(rows: list[dict]) -> str:
     lines = ["## Grooming outcomes by skill version", "",
              "What Oneshot did with AI-routed tickets, per version of the grooming skill (hash of SKILL.md). "
              "Compare versions once each has ~20 finished tickets.", "",
-             "| Skill | Since | n | Merged | Needs Human | Not a Bug | Closed other | In flight | Avg `unknown` lines |",
+             "| Skill | Since | n | Merged | Needs Human | Stopped (Not a Bug / dropped) | Closed other | In flight "
+             "| Avg `unknown` lines |",
              "|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         done = r["n"] - r.get("in flight", 0)
         pct = lambda k: f"{r.get(k, 0)} ({r.get(k, 0) / done:.0%})" if done else str(r.get(k, 0))  # noqa: E731
         lines.append(f"| {r['skill']} | {r['since']} | {r['n']} | {pct('merged')} | {pct('needs human')} | "
-                     f"{pct('not a bug')} | {pct('closed other')} | {r.get('in flight', 0)} | {r['unknowns'] / r['n']:.1f} |")
+                     f"{pct('stopped')} | {pct('closed other')} | {r.get('in flight', 0)} | {r['unknowns'] / r['n']:.1f} |")
     return "\n".join(lines) + "\n"
 
 

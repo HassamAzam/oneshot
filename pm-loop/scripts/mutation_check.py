@@ -9,7 +9,8 @@ import ast, json, subprocess, sys
 from pathlib import Path
 
 TARGETS = {
-    "groom_gitlab.py": ["compose_labels", "check_labels", "existing_issue", "tests_mr_problem", "sweep", "add_section", "unlabelled"],
+    "groom_gitlab.py": ["compose_labels", "check_labels", "existing_issue", "tests_mr_problem", "sweep", "promote_person_ai",
+                        "loop_was_removed", "add_section", "unlabelled"],
     "groom.py": ["_spec", "_finish_body", "create", "notify_sweep"],
     "resolve_plane_ticket.py": ["effective_route", "normalise_id", "resolve"],
     "jev_layers.py": ["decide"],

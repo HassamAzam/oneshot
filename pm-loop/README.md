@@ -67,12 +67,12 @@ The zone map, label allow-list and Jev facts are **not** here. They live in the 
 
 - **Jev:** accuracy per batch of 50 against merged diffs, vs the keyword baseline; wrong skips must stay 0.
 - **Facts:** each is re-scored with itself removed. A fact that changes nothing is dropped.
-- **Grooming skill:** Oneshot outcomes (merged / Needs Human / Not a Bug) and `unknown` lines per skill version, so a skill edit is judged by what Oneshot then did.
+- **Grooming skill:** Oneshot outcomes (merged / Needs Human / stopped) and `unknown` lines per skill version, so a skill edit is judged by what Oneshot then did. Stopped means Not a Bug or a person's drop, read from `Loop`'s removal: erp sets no Not a Bug label.
 - **Code rules:** `python3 scripts/mutation_check.py` mutates the rule-bearing functions on a temporary copy. A rule whose mutation no test catches gets a test or gets deleted. Last run: 177 mutants, 89% killed (up from 72% after closing the gaps); the 19 survivors are tuning values, fallbacks and formatting.
 
 ## Rules that live in code (don't re-add them to the skills)
 
-- **Route is a person's call when triage never saw the ticket:** one-shot and MR tickets get areas and a zone the way triage computes them, but always go to people. A person adding `AI` on GitLab hands the ticket to Oneshot: the hourly sweep adds `Loop` (red is held and reported, since the zone guard would stop it).
+- **Route is a person's call when triage never saw the ticket:** one-shot and MR tickets get areas and a zone the way triage computes them, but always go to people. A person adding `AI` on GitLab hands the ticket to Oneshot: the hourly sweep adds `Loop` (red is held and reported, since the zone guard would stop it). A ticket whose `Loop` was ever removed is held too, because that removal was Oneshot stopping it (Not a Bug) or a person dropping it; only a person adds `Loop` back.
 - **Labels:** existing allow-listed labels apply automatically. `create` stops for a label new to GitLab, or one in `ask_first` (`Opensource`, `Plane team`: they move work between streams), until the user confirms it with `--confirm-labels`.
 
 - **Labels:** only from the allow-list; the GitLab API would otherwise create any typo.

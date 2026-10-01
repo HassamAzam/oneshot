@@ -236,10 +236,13 @@ def test_test_paths(path, is_test):
     assert bool(gl.TEST_PATH_RE.search(path)) is is_test
 
 
+LOOP_ADDED_THEN_REMOVED = [{"label": {"name": "Loop"}, "action": "add"}, {"label": {"name": "Loop"}, "action": "remove"}]
+
+
 def _fake_gitlab(monkeypatch, *, tests_state="closed", mr_branch="nouman/pin-org", mr_files=("apps/teams/tests/test_a.py",),
-                 marker=True):
+                 marker=True, labels=("AI", "Zone: Yellow"), label_events=()):
     writes = []
-    change = {"iid": 20, "description": "<!-- tests-first: #19 -->\nbody" if marker else "body"}
+    change = {"iid": 20, "labels": list(labels), "description": "<!-- tests-first: #19 -->\nbody" if marker else "body"}
 
     def call(method, path, payload=None):
         if method == "PUT":
@@ -247,6 +250,8 @@ def _fake_gitlab(monkeypatch, *, tests_state="closed", mr_branch="nouman/pin-org
             return {}
         if path.startswith("issues?"):
             return [change]
+        if path.startswith("issues/20/resource_label_events?"):
+            return list(label_events)
         if path == "issues/19":
             return {"state": tests_state}
         if path == "issues/19/closed_by":
@@ -263,6 +268,28 @@ def test_sweep_releases_a_person_written_tests_only_mr(monkeypatch):
     writes = _fake_gitlab(monkeypatch)
     assert gl.sweep(dry_run=False)[0]["action"] == "added Loop"
     assert writes == [("issues/20", {"add_labels": "Loop"})]
+
+
+def test_sweep_does_not_rerelease_a_change_whose_loop_was_removed_after_release(monkeypatch):
+    """The marker and the merged tests MR are permanent; the Loop removal is the stop."""
+    writes = _fake_gitlab(monkeypatch, label_events=LOOP_ADDED_THEN_REMOVED)
+    actions = gl.sweep(dry_run=False)
+    assert [a["why"] for a in actions] == [gl.LOOP_REMOVED] and actions[0]["action"] == "none" and not writes
+
+
+@pytest.mark.parametrize("stop", ["Merged", "Needs Human"])
+def test_sweep_leaves_a_yellow_change_oneshot_finished_or_blocked_alone(monkeypatch, stop):
+    writes = _fake_gitlab(monkeypatch, labels=("AI", "Zone: Yellow", stop))
+    assert gl.sweep(dry_run=False) == [] and not writes
+
+
+def test_loop_removal_is_found_past_the_first_page_of_label_events(monkeypatch):
+    other = [{"label": {"name": "Bug"}, "action": "add"}] * 100
+    pages = {1: other, 2: [{"label": None, "action": "remove"}, {"label": {"name": "Loop"}, "action": "remove"}]}
+    monkeypatch.setattr(gl, "call", lambda m, path, payload=None: pages[int(path.rsplit("page=", 1)[1])])
+    assert gl.loop_was_removed(20, "Loop")
+    pages[2] = [{"label": {"name": "Loop"}, "action": "add"}]
+    assert not gl.loop_was_removed(20, "Loop")
 
 
 @pytest.mark.parametrize("kw, why", [
@@ -402,6 +429,16 @@ def test_fallback_at_grooming_scores_as_load_everything(monkeypatch):
     row = hb.build_row({"iid": 1, "title": "t", "description": "d", "source": "fallback"},
                        {"layers": {"backend": True, "frontend": False, "migration": False}, "mrs": [2], "files": []}, [])
     assert row["jev_groom"] == {"backend": 1.0, "frontend": 1.0, "migration": 1.0} and row["groom_fallback"]
+
+
+def test_a_ticket_whose_loop_was_removed_counts_as_stopped_not_in_flight(monkeypatch):
+    """erp sets no Not a Bug label, so the label alone never saw Oneshot's Not a Bug stop."""
+    events = {5: LOOP_ADDED_THEN_REMOVED, 6: [{"label": {"name": "AI"}, "action": "add"}]}
+    monkeypatch.setattr(hb.gl, "call", lambda m, path, payload=None: events[int(path.split("/")[1])])
+    assert hb.outcome_of(5, {"labels": ["AI", "Bug"], "state": "opened"}) == "stopped"
+    assert hb.outcome_of(6, {"labels": ["AI", "Zone: Yellow"], "state": "opened"}) == "in flight"
+    assert hb.outcome_of(7, {"labels": ["AI", "Not a Bug"], "state": "opened"}) == "stopped"
+    assert hb.outcome_of(8, {"labels": ["AI", "Loop"], "state": "opened"}) == "in flight"
 
 
 def test_grooming_outcomes_are_grouped_by_skill_version(monkeypatch):
@@ -583,16 +620,26 @@ def test_sweep_promotes_an_ai_label_a_person_added(monkeypatch):
     assert [a["why"] for a in actions] == ["AI added by a person"] and writes == [("issues/20", {"add_labels": "Loop"})]
 
 
-@pytest.mark.parametrize("labels, promoted", [(["AI"], True), (["AI", "Zone: Red"], False), (["AI", "Needs Human"], False),
-                                              (["AI", "Merged"], False), (["AI", "Characterization Tests"], False)])
-def test_person_ai_promotion_rules(monkeypatch, labels, promoted):
+@pytest.mark.parametrize("labels, events, promoted, why", [
+    (["AI"], [{"label": {"name": "AI"}, "action": "add"}], True, "AI added by a person"),
+    (["AI"], LOOP_ADDED_THEN_REMOVED, False, gl.LOOP_REMOVED),
+    (["AI", "Zone: Red"], [], False, "zone is red"),
+    (["AI", "Needs Human"], [], False, None), (["AI", "Merged"], [], False, None),
+    (["AI", "Characterization Tests"], [], False, None)])
+def test_person_ai_promotion_rules(monkeypatch, labels, events, promoted, why):
+    """A ticket Oneshot stopped as Not a Bug (erp sets no Not a Bug label) or a person dropped is AI without
+    Loop, the same labels as a fresh hand-over: only the Loop removal in its history tells them apart."""
     writes = []
     issue = {"iid": 30, "labels": labels, "description": "body"}
-    monkeypatch.setattr(gl, "call", lambda m, path, payload=None: writes.append(path) if m == "PUT" else [issue])
+
+    def call(method, path, payload=None):
+        if method == "PUT":
+            return writes.append(path)
+        return list(events) if path.startswith("issues/30/resource_label_events?") else [issue]
+    monkeypatch.setattr(gl, "call", call)
     out = gl.promote_person_ai(dry_run=False)
     assert bool(writes) is promoted
-    if "Zone: Red" in labels:
-        assert "zone is red" in out[0]["why"]
+    assert (why in out[0]["why"]) if why else out == []
 
 
 def test_one_shot_gets_areas_and_zone_from_the_map(monkeypatch, tmp_path):

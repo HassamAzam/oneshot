@@ -312,15 +312,40 @@ def tests_mr_problem(mr: dict) -> str | None:
     return None
 
 
+# 'Not a Bug' stops a ticket only on a project whose Oneshot config sets labels.notABug. erp leaves it
+# empty, so that stop leaves no label at all and loop_was_removed is what actually catches it.
 STOP_LABELS = ("Needs Human", "Merged", "merged", "Not a Bug", "Characterization Tests")
+LOOP_REMOVED = ("Loop was removed from this ticket (Oneshot stopped it, or a person dropped it) — "
+                "add Loop by hand to overrule")
+
+
+def loop_was_removed(iid: int, loop: str) -> bool:
+    """Whether Loop was ever taken off this issue: Oneshot stopped it, or a person dropped it.
+
+    Both leave AI without Loop, which is exactly what a person's fresh AI label looks like. Oneshot's
+    Not a Bug stop removes Loop and adds labels.notABug only when one is configured, and erp has none;
+    removing Loop is also how runner.ts tells a person to drop a ticket. Reading the current labels,
+    the sweep put Loop back every hour, and a re-added Loop resumes a QA-confirmed Not a Bug run
+    straight into plan. Only the label history tells the two apart. A failed read raises, so the
+    sweep stops rather than guessing.
+    """
+    page = 1
+    while True:
+        batch = call("GET", f"issues/{iid}/resource_label_events?per_page=100&page={page}")
+        if any((event.get("label") or {}).get("name") == loop and event.get("action") == "remove" for event in batch):
+            return True
+        if len(batch) < 100:
+            return False
+        page += 1
 
 
 def promote_person_ai(dry_run: bool) -> list[dict]:
     """A person decided a ticket is Oneshot's by adding AI: add Loop so Oneshot picks it up.
 
     Skipped: yellow changes still waiting for their tests (the tests-first flow releases those), tickets
-    Oneshot already stopped or finished, and the tests issues themselves. Red is held and reported, because
-    Oneshot's zone guard would stop it at the plan anyway.
+    carrying a stop label, and the tests issues themselves. Held and reported: red, because Oneshot's
+    zone guard would stop it at the plan anyway, and any ticket whose Loop was ever removed, because
+    that removal was a stop (loop_was_removed).
     """
     flow, zone = label_map()["flow"], label_map()["zone"]
     query = urllib.parse.urlencode({"state": "opened", "labels": flow["ai"], "not[labels]": flow["loop"], "per_page": 100})
@@ -335,6 +360,9 @@ def promote_person_ai(dry_run: bool) -> list[dict]:
                             "why": "AI added by a person, but the zone is red — Oneshot's zone guard would stop it; "
                                    "keep it with people or change .claude/zones.json by MR"})
             continue
+        if loop_was_removed(issue["iid"], flow["loop"]):
+            actions.append({**entry, "action": "none", "why": LOOP_REMOVED})
+            continue
         if not dry_run:
             call("PUT", f"issues/{issue['iid']}", {"add_labels": flow["loop"]})
         actions.append({**entry, "action": "would add Loop" if dry_run else "added Loop"})
@@ -344,13 +372,18 @@ def promote_person_ai(dry_run: bool) -> list[dict]:
 def sweep(dry_run: bool) -> list[dict]:
     """Add Loop to each waiting yellow change whose tests issue was closed by a person's tests-only MR.
 
-    Every waiting change is reported, released or not — nothing is skipped silently.
+    A change Oneshot already stopped or finished carries a stop label and is not waiting, so it is left
+    alone. Every waiting change is reported, released or not — nothing is skipped silently, including
+    one whose Loop was removed after release: its marker and merged tests MR are permanent, so without
+    the label history it would be released again every hour.
     """
     flow, zone = label_map()["flow"], label_map()["zone"]
     query = urllib.parse.urlencode({"state": "opened", "labels": f"{flow['ai']},{zone['yellow']}",
                                     "not[labels]": flow["loop"], "per_page": 100})
     actions = []
     for issue in call("GET", f"issues?{query}"):
+        if set(issue.get("labels") or []) & set(STOP_LABELS):
+            continue
         entry = {"issue": issue["iid"]}
         match = TESTS_FIRST_RE.search(issue.get("description") or "")
         if not match:
@@ -368,6 +401,9 @@ def sweep(dry_run: bool) -> list[dict]:
         if not good:
             actions.append({**entry, "action": "none",
                             "why": "; ".join(p for _, p in verdicts) + " — a person decides"})
+            continue
+        if loop_was_removed(issue["iid"], flow["loop"]):
+            actions.append({**entry, "action": "none", "why": LOOP_REMOVED})
             continue
         if not dry_run:
             call("PUT", f"issues/{issue['iid']}", {"add_labels": flow["loop"]})
