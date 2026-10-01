@@ -23,18 +23,20 @@ const harness = require(
   needsCollectstatic: (wt: string) => boolean;
   disabledIntegrations: (wt: string) => Array<{ name: string; why: string }>;
   waitDjango: (port: number, pid: number, budgetMs: number) => Promise<boolean>;
-  settle: (session: unknown, selector: string, opts?: Budget) => Promise<Box | null>;
+  settle: (session: unknown, selector: string, opts?: Budget) => Promise<Settled>;
   overlap: (session: unknown, a: string, b: string, opts?: Budget) => Promise<Overlap>;
 };
 
 interface Box { x: number; y: number; width: number; height: number }
 interface Budget { timeout?: number; quiet?: number }
+interface Settled { box: Box | null; settled: boolean }
 interface Overlap {
   intersects: boolean | null;
   areaPx: number | null;
   region?: { width: number; height: number; areaPx: number };
   missing?: string[];
   hidden?: Array<{ selector: string; why: string | null }>;
+  unsettled: string[];
   outsideViewport?: boolean;
 }
 
@@ -301,6 +303,7 @@ test('two visible boxes that overlap report the area they share', async () => {
   assert.equal(r.intersects, true);
   assert.equal(r.areaPx, 2500);
   assert.deepEqual(r.region, { width: 50, height: 50, areaPx: 2500 });
+  assert.deepEqual(r.unsettled, []);
   assert.equal(r.outsideViewport, false);
 });
 
@@ -338,9 +341,31 @@ test('boxes that do not touch share zero area', async () => {
 
 test('a box that holds still settles well inside its budget', async () => {
   const started = Date.now();
-  const box = await harness.settle(staged({ boxes: { [POPPER]: at(10, 20) } }), POPPER, FAST);
-  assert.deepEqual(box, at(10, 20));
+  const r = await harness.settle(staged({ boxes: { [POPPER]: at(10, 20) } }), POPPER, FAST);
+  assert.deepEqual(r, { box: at(10, 20), settled: true });
   assert.ok(Date.now() - started < FAST.timeout, `took ${Date.now() - started}ms`);
+});
+
+/** A popper stuck re-anchoring: every probe finds it at the other placement. */
+function flipping(): () => Box {
+  let up = false;
+  return () => { up = !up; return at(0, up ? 0 : 150); };
+}
+
+test('a box still moving when the budget runs out is returned as unsettled', async () => {
+  const r = await harness.settle(staged({ boxes: { [POPPER]: flipping() } }), POPPER, FAST);
+  assert.equal(r.settled, false);
+  assert.ok(r.box, 'the last sample is still returned, for the evidence');
+});
+
+test('an overlay that never holds still is flagged unsettled rather than read as a measurement', async () => {
+  // A popper flipping between two placements, only one of which covers the field,
+  // gave whichever verdict the last sample happened to land on, with nothing to say
+  // the element never came to rest.
+  const r = await harness.overlap(
+    staged({ boxes: { [POPPER]: flipping(), [FIELD]: at(0, 0) } }), POPPER, FIELD, FAST,
+  );
+  assert.deepEqual(r.unsettled, [POPPER]);
 });
 
 test('an overlay that detaches before it can be inspected is reported as missing, not as uncovered', async () => {

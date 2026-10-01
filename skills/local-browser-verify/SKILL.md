@@ -178,9 +178,13 @@ pytest is unaffected and is fine to run.
     box as it is when asked. A popper re-anchors — it measures its reference,
     picks a placement, and flips it when that one does not fit — so consecutive
     reads during that negotiation gave y = 100, 220, 340, 460, 580, 700 with no
-    transition involved at all. `overlap` settles both boxes first; on a
-    hand-rolled check, poll until the box stops moving. A fixed `sleep` is not a
-    settle. Do not lean on animation timing for this: a 0.2-0.3s CSS fade is
+    transition involved at all. `overlap` settles both boxes first, and names in
+    `unsettled` any side still moving when its `timeout` ran out. That side's box
+    is a position it was passing through, so the result is a snapshot, not a
+    measurement, whichever way it reads: re-measure with a longer `timeout`, and
+    if it still will not hold still, record the case `blocked` and quote the `a`
+    and `b` boxes each read returned, never the `areaPx`. On a hand-rolled check,
+    poll until the box stops moving. A fixed `sleep` is not a settle. Do not lean on animation timing for this: a 0.2-0.3s CSS fade is
     frequently over before the first round-trip returns, so a naive read looks
     correct on a fast machine and wrong on a slow one.
   - **`intersects: null` is not "no overlap"** — it means one selector did not

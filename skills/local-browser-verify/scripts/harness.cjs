@@ -971,8 +971,17 @@ async function shot(session, name) {
  * pixel and stay that way for `quiet`. A blind `sleep` is either too short on a cold
  * machine or wasted budget on a warm one.
  *
- * Returns null when the element never resolves a box — absent, detached, or
- * `display:none`. Null means "not measurable", never "measured as zero".
+ * Returns `{ box, settled }`. `box` is null when the element never resolves a box —
+ * absent, detached, or `display:none`. Null means "not measurable", never "measured as
+ * zero".
+ *
+ * `settled` is false when the budget ran out while the box was still moving. `box` is
+ * then only the last sample, a position the element was passing through. Returning that
+ * bare made it indistinguishable from a settled box: a popper flipping between y=150 and
+ * y=300 every 100ms, covering the field only at 150, came back from overlap() as a clean
+ * `intersects:false` — the mid-flight read this function exists to prevent, delivered
+ * silently. A timeout is deliberately NOT turned into a null box: null routes to
+ * `missing`, which is a question about the selector, and this selector resolved fine.
  *
  * Each probe carries its own timeout. `boundingBox()` with no argument inherits
  * Playwright's 30s actionability default, so on a selector that matches nothing the first
@@ -998,14 +1007,14 @@ async function settle(session, selector, opts = {}) {
       && Math.abs(box.width - last.width) < 1 && Math.abs(box.height - last.height) < 1;
     if (steady) {
       if (stableSince === null) stableSince = Date.now();
-      if (Date.now() - stableSince >= quiet) return box;
+      if (Date.now() - stableSince >= quiet) return { box, settled: true };
     } else {
       stableSince = null;
     }
     last = box;
     await sleep(50);
   }
-  return last;
+  return { box: last, settled: false };
 }
 
 /**
@@ -1078,7 +1087,9 @@ function intersection(a, b) {
  * over a popover passes identically whether dismissal works or is entirely broken.
  *
  * Both boxes are settled first, so the result describes where the overlay came to rest
- * rather than where it started.
+ * rather than where it started — unless `unsettled` names a side. That side was still
+ * moving when its budget ran out, so its box is a snapshot, and the result is not a
+ * measurement of anything: re-measure with a longer `timeout`.
  *
  * `intersects: null` is NOT "no overlap" — it means one of the two could not be
  * measured (it never resolved a box, or it resolved and then detached before it could
@@ -1101,19 +1112,26 @@ function intersection(a, b) {
  * measuring — do not call this while something is still scrolling a field into view.
  */
 async function overlap(session, a, b, opts = {}) {
-  const boxA = await settle(session, a, opts);
-  const boxB = await settle(session, b, opts);
+  const settledA = await settle(session, a, opts);
+  const settledB = await settle(session, b, opts);
+  const boxA = settledA.box;
+  const boxB = settledB.box;
+  const unsettled = [[a, settledA], [b, settledB]]
+    .filter(([, s]) => s.box && !s.settled)
+    .map(([sel]) => sel);
   const viewport = session.page.viewportSize() || null;
   const missing = [];
   if (!boxA) missing.push(a);
   if (!boxB) missing.push(b);
   if (missing.length) {
-    return { intersects: null, areaPx: null, missing, a: boxA, b: boxB, viewport };
+    return { intersects: null, areaPx: null, missing, unsettled, a: boxA, b: boxB, viewport };
   }
   const seen = await Promise.all([visible(session, a, opts), visible(session, b, opts)]);
   const unmeasured = [a, b].filter((_, i) => seen[i].visible === null);
   if (unmeasured.length) {
-    return { intersects: null, areaPx: null, missing: unmeasured, a: boxA, b: boxB, viewport };
+    return {
+      intersects: null, areaPx: null, missing: unmeasured, unsettled, a: boxA, b: boxB, viewport,
+    };
   }
   const hidden = [a, b]
     .map((sel, i) => (seen[i].visible === false ? { selector: sel, why: seen[i].why } : null))
@@ -1121,7 +1139,8 @@ async function overlap(session, a, b, opts = {}) {
   const hit = intersection(boxA, boxB);
   if (hidden.length) {
     return {
-      intersects: false, areaPx: 0, region: hit, hidden, a: boxA, b: boxB, viewport, outsideViewport: false,
+      intersects: false, areaPx: 0, region: hit, hidden, unsettled, a: boxA, b: boxB, viewport,
+      outsideViewport: false,
     };
   }
   const outsideViewport = viewport
@@ -1132,6 +1151,7 @@ async function overlap(session, a, b, opts = {}) {
     areaPx: hit.areaPx,
     region: hit,
     hidden,
+    unsettled,
     a: boxA,
     b: boxB,
     viewport,
