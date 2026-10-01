@@ -39,12 +39,23 @@ export interface IndexLine {
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 const arr = <T = unknown>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
 
-/** "Expenses (Add Food Expense) — root cause in …" → "Expenses". */
-function moduleName(module: string): string {
-  return module.split(/\s+[—(-]|,|;/)[0]!.trim();
+/**
+ * "Expenses (Add Food Expense) — root cause in …" → "Expenses". A parenthesis
+ * or a dash ends the name only after a space, so "Self-Service Portal" stays
+ * whole; the en dash is in the class because "Leaves – annual" is the same
+ * aside as "Leaves — annual", and leaving it out kept the whole phrase as the
+ * module, which then matches no other run's.
+ */
+export function moduleName(module: string): string {
+  return module.split(/\s+[—–(-]|,|;/)[0]!.trim();
 }
 
-function verdictOf(verify: Obj | null | undefined): IndexLine['verdict'] {
+/**
+ * pass only when every verify case passed. The first version returned pass
+ * unless a case failed, so a run whose cases were all blocked or skipped —
+ * which verified nothing — entered memory as verified.
+ */
+export function verdictOf(verify: Obj | null | undefined): IndexLine['verdict'] {
   const results = arr<Obj>(verify?.results);
   if (!results.length) return 'unverified';
   if (results.some((r) => r.result === 'fail')) return 'fail';
