@@ -45,6 +45,7 @@ const RGBA_255_255_255_0_23 = 'rgba(255, 255, 255, 0.23)';
 const whiteTextColor = '#fff';
 const alsoWhite = whiteTextColor;
 const textPrimary = '#0088CC';
+const interpolated = \`#\${'f'}\`;
 
 export const getColors = (isDark = false) => ({
     primaryColor: isDark ? whiteTextColor : '#464C53',
@@ -55,7 +56,9 @@ export const getColors = (isDark = false) => ({
     mystery: isDark ? neverDeclared : '#111',
     inverted: !isDark ? '#aaa' : '#bbb',
     spread: { ...somethingElse },
+    templated: isDark ? \`\${whiteTextColor}\` : '#000',
     textPrimary,
+    interpolated,
     navyBlue: '#083671'
 });
 
@@ -133,6 +136,27 @@ test('a dark value that did not resolve is cleared in the dark block, not inheri
   assert.match(css, /not inherited from :root/);
 });
 
+test('a template literal that interpolates is named in unresolved, never emitted as its source', (t) => {
+  const { light, dark, css, unresolved } = extractDesignTokens(frontend(t, { theme: THEME }));
+
+  assert.equal(light.templated, '#000');
+  assert.equal(dark.templated, undefined);
+  assert.equal(light.interpolated, undefined);
+  assert.equal(dark.interpolated, undefined);
+  for (const name of ['dark.templated', 'light.interpolated', 'dark.interpolated']) {
+    assert.ok(unresolved.includes(name), `${name} missing from unresolved`);
+  }
+  assert.ok(!css.includes('${'), 'template source text reached the css');
+});
+
+test('a template literal with nothing interpolated is still a plain string', (t) => {
+  const theme = 'export const getColors = (isDark = false) => ({\n    plain: `#123`,\n});\n';
+  const { light, dark } = extractDesignTokens(frontend(t, { theme }));
+
+  assert.equal(light.plain, '#123');
+  assert.equal(dark.plain, '#123');
+});
+
 test('a ternary on anything but the dark parameter is refused rather than guessed', (t) => {
   const { light, dark, unresolved } = extractDesignTokens(frontend(t, { theme: THEME }));
 
@@ -158,14 +182,15 @@ test('getPalateColors in the same file contributes no tokens', (t) => {
 
   assert.equal(light.catalinaBlue, undefined);
   assert.equal(light.primary, undefined);
-  assert.equal(Object.keys(light).length, 8);
+  assert.equal(Object.keys(light).length, 9);
 });
 
 test('every palette key reaches a map or the unresolved list, never neither', (t) => {
   const { light, dark, unresolved } = extractDesignTokens(frontend(t, { theme: THEME }));
   const keys = [
     'primaryColor', 'btnBordercolor', 'fancyCard', 'warningColor',
-    'yellowColor', 'mystery', 'inverted', 'spread', 'textPrimary', 'navyBlue',
+    'yellowColor', 'mystery', 'inverted', 'spread', 'templated', 'textPrimary',
+    'interpolated', 'navyBlue',
   ];
 
   for (const key of keys) {
@@ -234,6 +259,30 @@ test('font constants are keyed without their prefix, non-strings ignored', (t) =
   assert.match(css, /--font-montserrat: Montserrat, sans-serif;/);
 });
 
+test('a font const that is not a plain string is named in unresolved, not left out', (t) => {
+  const style = [
+    "const fontLato = 'Lato, sans-serif';",
+    'const fontSerif = `${fontLato}, serif`;',
+    'const fontBody = fontLato;',
+    "const fontWeightBold = { fontWeight: 'bold' };",
+  ].join('\n');
+  const { fonts, css, unresolved } = extractDesignTokens(frontend(t, { style }));
+
+  assert.deepEqual(fonts, { lato: 'Lato, sans-serif' });
+  assert.ok(unresolved.includes('font.fontSerif'));
+  assert.ok(unresolved.includes('font.fontBody'));
+  // A style object is not a font stack, so it is neither a token nor a gap.
+  assert.ok(!unresolved.includes('font.fontWeightBold'));
+  assert.ok(!css.includes('${'));
+});
+
+test('a style file whose only font consts are unreadable names them, not "no font constants"', (t) => {
+  const { unresolved } = extractDesignTokens(frontend(t, { style: 'const fontX = `${base}`;\n' }));
+
+  assert.ok(unresolved.includes('font.fontX'));
+  assert.ok(!unresolved.includes('file:src/jss/style.js (no font constants found)'));
+});
+
 test('a missing file is reported, not thrown, and the rest still extracts', (t) => {
   const result = extractDesignTokens(frontend(t, { scss: '$white: #fff;\n' }));
 
@@ -269,7 +318,7 @@ test('the css header names every source read and every unresolved key', (t) => {
   }));
 
   assert.match(css, /Sources read:\n \*   src\/jss\/Theme\.js\n \*   src\/jss\/style\.js\n \*   src\/scss\/_variables\.scss/);
-  assert.match(css, /Tokens: 8 light, 6 dark, 1 font, 1 scss/);
+  assert.match(css, /Tokens: 9 light, 6 dark, 1 font, 1 scss/);
   assert.match(css, new RegExp(`UNRESOLVED \\(${unresolved.length}\\)`));
   for (const name of unresolved) assert.ok(css.includes(` *   ${name}`), `${name} absent from header`);
 });

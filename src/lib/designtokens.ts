@@ -36,8 +36,10 @@
  * (or one more than a single hop away), a ternary on anything other than the
  * dark-mode parameter, a nested ternary, an entry that is not a plain
  * `key: value`, an empty string literal — an empty value is not a colour, and
- * `--color-x: ;` is not valid CSS — a Sass value that needs Sass to evaluate
- * it, and a source file that is not there at all.
+ * `--color-x: ;` is not valid CSS — a template literal that interpolates, a
+ * `font…` const that is a string expression rather than a literal, a Sass
+ * value that needs Sass to evaluate it, and a source file that is not there
+ * at all.
  *
  * Nothing here throws on bad input. It runs against arbitrary worktrees, and a
  * frontend that looks nothing like this one must come back empty and honest
@@ -171,10 +173,17 @@ function matchingBrace(source: string, open: number): number {
   return -1;
 }
 
+/**
+ * The text of a string literal, or null. A template literal that interpolates
+ * is not a literal: `` `0 0 4px ${grey}` `` opens and closes on a backtick like
+ * any string, and copying it out emitted `--color-x: 0 0 4px ${grey};`, a
+ * declaration no browser can read, under a header claiming nothing was missing.
+ */
 function unquote(expression: string): string | null {
   const text = expression.trim();
   const first = text[0];
   if (text.length < 2 || !first || !QUOTES.has(first) || text[text.length - 1] !== first) return null;
+  if (first === '`' && text.includes('${')) return null;
   return text.slice(1, -1).replace(/\\(.)/g, '$1');
 }
 
@@ -186,11 +195,14 @@ function unquote(expression: string): string | null {
 interface Bindings {
   literals: Map<string, string>;
   aliases: Map<string, string>;
+  /** Consts that are a string expression `unquote` refused, like an interpolating template. */
+  strings: Set<string>;
 }
 
 function collectBindings(source: string): Bindings {
   const literals = new Map<string, string>();
   const aliases = new Map<string, string>();
+  const strings = new Set<string>();
   const declaration = /^[ \t]*(?:export[ \t]+)?const[ \t]+([A-Za-z_$][A-Za-z0-9_$]*)[ \t]*=[ \t]*([^\n]*?);[ \t]*$/gm;
   for (const match of source.matchAll(declaration)) {
     const name = match[1] as string;
@@ -198,8 +210,9 @@ function collectBindings(source: string): Bindings {
     const literal = unquote(value);
     if (literal !== null) literals.set(name, literal);
     else if (IDENTIFIER.test(value)) aliases.set(name, value);
+    else if (QUOTES.has(value[0] ?? '')) strings.add(name);
   }
-  return { literals, aliases };
+  return { literals, aliases, strings };
 }
 
 /** A string literal, a bound identifier, or one identifier hop. Else null. */
@@ -359,18 +372,32 @@ function stripQuoted(value: string): string {
   return value.replace(/"[^"]*"|'[^']*'/g, '""');
 }
 
-/** Top-level `const font… = '…'` string consts, keyed without the prefix. */
-function parseFonts(source: string): Record<string, string> {
-  const { literals } = collectBindings(source);
+const FONT_CONST = /^font/i;
+
+/**
+ * Top-level `const font… = '…'` string consts, keyed without the prefix.
+ *
+ * Only literals become tokens, so a `font…` const that is a string this cannot
+ * evaluate — another const's name, or a template literal that interpolates —
+ * is returned in `unresolved` as `font.<const name>`. Walking `literals` alone
+ * left those out of both lists. A `font…` const that is not a string at all
+ * (`fontWeightBold = { … }`) is a style object, not a font stack, and stays
+ * ignored.
+ */
+function parseFonts(source: string): { fonts: Record<string, string>; unresolved: string[] } {
+  const { literals, aliases, strings } = collectBindings(source);
   const fonts: Record<string, string> = {};
   for (const [name, value] of literals) {
-    if (!/^font/i.test(name)) continue;
+    if (!FONT_CONST.test(name)) continue;
     const stripped = name.slice(4);
     const short = stripped ? stripped.charAt(0).toLowerCase() + stripped.slice(1) : '';
     const key = short && fonts[short] === undefined ? short : name;
     fonts[key] = value;
   }
-  return fonts;
+  const unresolved = [...aliases.keys(), ...strings]
+    .filter((name) => FONT_CONST.test(name))
+    .map((name) => `font.${name}`);
+  return { fonts, unresolved };
 }
 
 function declarations(prefix: string, tokens: Record<string, string>, indent = '  '): string[] {
@@ -449,8 +476,12 @@ export function extractDesignTokens(frontendRoot: string): TokenExtraction {
     unresolved.push(`file:${STYLE_FILE} (missing)`);
   } else {
     sources.push(STYLE_FILE);
-    fonts = parseFonts(stripComments(style));
-    if (Object.keys(fonts).length === 0) unresolved.push(`file:${STYLE_FILE} (no font constants found)`);
+    const parsed = parseFonts(stripComments(style));
+    fonts = parsed.fonts;
+    unresolved.push(...parsed.unresolved);
+    if (Object.keys(fonts).length === 0 && parsed.unresolved.length === 0) {
+      unresolved.push(`file:${STYLE_FILE} (no font constants found)`);
+    }
   }
 
   const scssSource = readIfPresent(frontendRoot, SCSS_FILE);
