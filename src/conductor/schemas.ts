@@ -121,11 +121,12 @@ export const RESEARCH_SCHEMA = phaseSchema({
         line: {
           type: 'number',
           description:
-            "1-indexed line of the DEFINITION — the `def`, `class`, `function` or `const` " +
-            'line, never the line a search matched. The next phase opens what you cite, and ' +
-            'a match line drops it into the middle of a function it cannot see the shape of. ' +
-            'For a fragment, which has no definition of its own, this is the line of the ' +
-            'function CONTAINING it, and the role names the inner span.',
+            '1-indexed line of the DEFINITION — the `def`, `class`, `function` or ' +
+            'arrow-function `const` line, or for a constant its top-level assignment line — ' +
+            'never a line inside a body that a search matched. The next phase opens what you ' +
+            'cite, and a match line drops it into the middle of a function it cannot see the ' +
+            'shape of. For a fragment, which has no definition of its own, this is the line ' +
+            'of the function CONTAINING it, and the role names the inner span.',
         },
         role: str(
           'What this location does in the flow. For prior art, prefix the kind — ' +

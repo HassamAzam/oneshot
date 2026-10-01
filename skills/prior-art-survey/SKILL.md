@@ -79,11 +79,26 @@ This is the step that lapses, because it feels like bookkeeping while you are
 mid-trace. Make it a command rather than a memory:
 
 ```
-grep -n "^\s*\(def\|class\) " <file>                                  # python
-grep -n "^\s*\(export \|async \)*\(function\|const\|class\) " <file>  # js/ts
+grep -nE '^[[:space:]]*(async )?(def|class) ' <file>                          # python
+grep -nE '^(export (default )?)?(async )?(function|const|let|class) ' <file>  # js/ts, top level only
 ```
 
-The enclosing definition of a hit at line N is the last entry at or before N.
+These are Bash commands; the same patterns work unchanged as a Grep-tool
+pattern. Read the listing against the hit:
+
+- **A hit that is itself a listed entry is its own definition.**
+- **Python** — the enclosing definition of a hit at line N is the last listed
+  entry before N that is indented LESS than line N. That skips a nested `def`
+  the hit sits after rather than inside. A hit at column 0 that is not a `def`
+  or `class` is a module-level statement: for a constant, that assignment line
+  IS its definition.
+- **JS/TS** — the list is top-level only, because a component body is full of
+  local `const`s that are not definitions, so the enclosing definition is
+  simply the last entry before N. The trade-off: a hit inside an inner handler
+  or a class-component method resolves to the component or class line. Read
+  down from there to the inner `const handleX =` or method the hit sits in, and
+  cite that rather than the component line.
+
 One command per **file**, not per hit — the cost is one call however many hits
 that file returned.
 
@@ -171,7 +186,8 @@ the survey is what you pick up while producing it.
 - **Batch the sweep.** One pattern covering several identifiers beats one search
   each. You are finding where a kind of logic lives, not building an index.
 - **Resolve per file, not per hit.** One definition-listing call answers every
-  hit that file returned.
+  hit that file returned; only a js/ts hit inside an inner handler or method
+  costs the short read down from its component.
 - **Spend where being wrong is expensive.** A helper the next phase would
   otherwise rewrite is worth turns; confirming what you already believe is not.
 - **Stop when a line of search stops changing the answer.** Three files that
@@ -181,8 +197,8 @@ the survey is what you pick up while producing it.
 
 Everything lands in `codePath`, alongside the trace. That field's schema carries
 the `file` / `line` / `role` contract — including why `line` wants the
-definition and never the line a search matched — so fill them from there rather
-than from here.
+definition and never a line inside a body that a search matched — so fill them
+from there rather than from here.
 
 The six `role` prefixes are the four kinds you hunt — `callable:` / `mirror:` /
 `duplicate:` / `fragment:` — plus the two you pick up on the way: `constant:`

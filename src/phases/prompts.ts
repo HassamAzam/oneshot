@@ -831,14 +831,20 @@ Work out what this ticket actually requires, and trace the code that implements 
   One spelling returning nothing is half a search. A noun searched both ways and still not
   found goes in \`unknowns\`, so the next phase neither repeats it nor invents a near-match.
 - Resolve every hit to its enclosing DEFINITION before you judge it, and cite the definition's
-  own line — never the line the search matched. One command per FILE, not per hit:
-  \`grep -n "^\\s*\\(def\\|class\\) " <file>\` for python,
-  \`grep -n "^\\s*\\(export \\|async \\)*\\(function\\|const\\|class\\) " <file>\` for js/ts;
-  the enclosing definition of a hit at line N is the last entry at or before N. Stop a noun
-  after two definitions you have actually READ, and tighten any pattern returning more than
-  ~30 hits rather than skimming it. An unresolved hit is a location, not evidence: never
-  report one on its own, and never promote a signature you skimmed to a definition you read.
-  A fabricated near-match costs the next phase more than an empty answer would have.
+  own line — never a line inside a body that the search matched. One Bash grep per FILE, not
+  per hit: \`grep -nE '^[[:space:]]*(async )?(def|class) ' <file>\` for python, and
+  \`grep -nE '^(export (default )?)?(async )?(function|const|let|class) ' <file>\` for js/ts,
+  which lists top-level definitions only. A hit that is itself a listed entry is its own
+  definition. Otherwise, for python the enclosing definition of a hit at line N is the last
+  listed entry before N indented LESS than line N, and a python hit at column 0 that is not a
+  def or class is a module-level statement: for a constant, that assignment line IS its
+  definition. For js/ts it is the last entry before N; when that is a component or class and
+  the hit sits in an inner handler or method, read down to that \`const handleX =\` or method
+  line and cite it instead of the component's. Stop a noun after two definitions you have
+  actually READ, and tighten any pattern returning more than ~30 hits rather than skimming
+  it. An unresolved hit is a location, not evidence: never report one on its own, and never
+  promote a signature you skimmed to a definition you read. A fabricated near-match costs the
+  next phase more than an empty answer would have.
 - Say which bar each candidate clears, never a percentage: **call it**, **extend it** (naming
   the callers you counted), **mirror it** (not callable, but its shape and tests are the
   pattern), or **leave it** (close but not close enough — two honest functions beat one with

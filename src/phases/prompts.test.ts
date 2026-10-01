@@ -439,12 +439,90 @@ test('the research prompt still stands alone if the skill does not resolve', () 
   // carry one, and the only remaining carrier is the schema description.
   assert.match(p, /PREFIXED with its kind/, 'the prefix must be required, not just described');
   // The greps are the step that lapses, so they ship as commands rather than a
-  // habit — and a template literal eats a single backslash, which would leave
-  // the pattern matching a literal 's' instead of whitespace.
-  assert.match(p, /grep -n "\^\\s\*\\\(def\\\|class\\\) " <file>/, 'the python variant');
+  // habit. Both are -E with a POSIX class instead of `\s`: a template literal
+  // eats a single backslash, and BSD grep, GNU grep and ripgrep read this form
+  // the same way.
+  assert.ok(p.includes(`grep -nE '^[[:space:]]*(async )?(def|class) ' <file>`), 'the python variant');
   // Both variants, or a frontend ticket gets a Python-only command for the one
   // step this change calls load-bearing.
-  assert.match(p, /grep -n "\^\\s\*\\\(export \\\|async \\\)\*\\\(function\\\|const\\\|class\\\) " <file>/, 'the js/ts variant');
+  assert.ok(
+    p.includes(`grep -nE '^(export (default )?)?(async )?(function|const|let|class) ' <file>`),
+    'the js/ts variant',
+  );
+});
+
+/** The `grep -nE` patterns a text ships, in order, as RegExps. `[[:space:]]` is
+ *  the one construct they use that JS spells differently. */
+const definitionListings = (text: string): RegExp[] =>
+  [...text.matchAll(/grep -nE '([^']+)' <file>/g)].flatMap((m) =>
+    m[1] ? [new RegExp(m[1].replaceAll('[[:space:]]', '\\s'))] : []);
+
+/** The 1-indexed lines a listing prints for a file. */
+const listed = (pattern: RegExp, file: string): number[] =>
+  file.split('\n').flatMap((l, i) => (pattern.test(l) ? [i + 1] : []));
+
+const indent = (l: string): number => l.length - l.trimStart().length;
+
+/** The python rule as the prompt states it: a listed hit is its own definition,
+ *  otherwise the last listed entry before N indented LESS than line N. */
+const enclosingPy = (pattern: RegExp, file: string, n: number): number | undefined => {
+  const lines = file.split('\n');
+  const defs = listed(pattern, file);
+  if (defs.includes(n)) return n;
+  const at = indent(lines[n - 1] ?? '');
+  return defs.filter((d) => d < n && indent(lines[d - 1] ?? '') < at).at(-1);
+};
+
+const COMPONENT = [
+  "import { LEAVE_TYPES } from './constants';",
+  '',
+  '',
+  'const LeaveSummary = ({ person }) => {',
+  '  const [open, setOpen] = useState(false);',
+  '  const remaining = person.balance - person.used;',
+  '  const isMaternity = person.type === LEAVE_TYPES.MATERNITY;',
+  '  return isMaternity ? remaining : open;',
+  '};',
+  '',
+  'export default function E() {',
+  '  return LEAVE_TYPES.MATERNITY;',
+  '}',
+].join('\n');
+
+const VIEW = [
+  'class LeaveSummaryView:',
+  '    def get(self, request):',
+  '        def _fmt(x):',
+  '            return x',
+  '        quota = LeaveType.MATERNITY',
+  '        return _fmt(quota)',
+  '',
+  '    async def stream(self):',
+  '        yield LeaveType.MATERNITY',
+  '',
+  'MATERNITY_DAYS = 90',
+].join('\n');
+
+test('a hit resolves to the definition around it, not to a local or to the line it matched', () => {
+  // The first cut's js/ts pattern allowed leading whitespace, so it listed every
+  // local `const` in a component body, and a hit on line 7 resolved to line 7
+  // itself: the matched line the schema forbids citing. Its python pattern never
+  // listed `async def`, and "the last entry at or before N" sent a hit in
+  // `get`'s body to the nested `_fmt` above it.
+  const sources = [
+    ['research prompt', promptFor(cfg('research'), ctx(ticket()))],
+    ['prior-art-survey skill', readFileSync(join(ROOT, 'skills', 'prior-art-survey', 'SKILL.md'), 'utf8')],
+  ] as const;
+  for (const [where, text] of sources) {
+    const [py, js, ...rest] = definitionListings(text);
+    assert.ok(py && js && rest.length === 0, `${where} ships exactly a python and a js/ts listing`);
+    assert.deepEqual(listed(js, COMPONENT), [4, 11], `${where}: js/ts lists top-level definitions only`);
+    assert.equal(listed(js, COMPONENT).filter((d) => d <= 7).at(-1), 4, `${where}: the hit in the body is the component's`);
+    assert.deepEqual(listed(py, VIEW), [1, 2, 3, 8], `${where}: python lists async def`);
+    assert.equal(enclosingPy(py, VIEW, 5), 2, `${where}: a hit after a nested def is the outer def's`);
+    assert.equal(enclosingPy(py, VIEW, 9), 8, `${where}: a hit in an async def is that def's`);
+    assert.equal(enclosingPy(py, VIEW, 11), undefined, `${where}: a module-level constant has no enclosing def`);
+  }
 });
 
 test('the plan prompt still stands alone if the skill does not resolve', () => {
