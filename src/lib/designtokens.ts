@@ -86,18 +86,41 @@ function readIfPresent(frontendRoot: string, relative: string): string | null {
   }
 }
 
+/** An unquoted `url(` — Sass reads its body raw, so `//` in it is a URL, not a comment. */
+const SASS_RAW_URL = /url\(\s*[^'"\s)]/iy;
+
+function rawUrlAt(source: string, at: number): boolean {
+  if (/[\w-]/.test(source[at - 1] ?? '')) return false;
+  SASS_RAW_URL.lastIndex = at;
+  return SASS_RAW_URL.test(source);
+}
+
 /**
  * Comments out, strings intact. Every later scan assumes a `//` it sees is a
  * comment and a quote it sees opens a string, which is only true once the
  * commented-out code is gone. A regex literal containing a slash would confuse
  * this; neither file has one, and the damage would be a token landing in
  * `unresolved` rather than a wrong value.
+ *
+ * With `sass`, an unquoted `url(…)` that closes on its own line is copied
+ * through verbatim, as Sass parses it. Stripping the `//` in
+ * `url(http://cdn/a.png);` took the `);` with it, and the declaration then ran
+ * on into the next line and swallowed it.
  */
-function stripComments(source: string): string {
+function stripComments(source: string, sass = false): string {
   let out = '';
   let quote = '';
   for (let i = 0; i < source.length; i += 1) {
     const char = source[i] as string;
+    if (sass && !quote && rawUrlAt(source, i)) {
+      const close = source.indexOf(')', i);
+      const newline = source.indexOf('\n', i);
+      if (close !== -1 && (newline === -1 || close < newline)) {
+        out += source.slice(i, close + 1);
+        i = close;
+        continue;
+      }
+    }
     if (quote) {
       out += char;
       if (char === '\\' && i + 1 < source.length) {
@@ -312,10 +335,22 @@ function parseScss(source: string): Record<string, string> {
   const tokens: Record<string, string> = {};
   const declaration = /^[ \t]*\$([A-Za-z0-9_-]+)[ \t]*:[ \t]*([^;]*);/gm;
   for (const match of source.matchAll(declaration)) {
-    const value = (match[2] as string).replace(/!(default|global)\s*$/, '').trim();
+    const value = (match[2] as string).replace(/(?:\s*!(?:default|global))+\s*$/, '').trim();
     tokens[match[1] as string] = value;
   }
   return tokens;
+}
+
+/**
+ * Every `$name:` that starts a line but did not come out of parseScss. The
+ * value group spans newlines, so a declaration whose `;` went missing — an
+ * unterminated value, or one a stripped comment cut short — absorbs the next
+ * line's, and that name reaches neither the tokens nor `unresolved`. This
+ * names them whatever caused it, so a parser gap degrades to unresolved.
+ */
+function scssSwallowed(source: string, parsed: Record<string, string>): string[] {
+  const names = [...source.matchAll(/^[ \t]*\$([A-Za-z0-9_-]+)[ \t]*:/gm)].map((m) => m[1] as string);
+  return [...new Set(names)].filter((name) => !Object.hasOwn(parsed, name));
 }
 
 /** Functions a browser evaluates itself. Anything else in a value is Sass's to compute. */
@@ -491,12 +526,14 @@ export function extractDesignTokens(frontendRoot: string): TokenExtraction {
     unresolved.push(`file:${SCSS_FILE} (missing)`);
   } else {
     sources.push(SCSS_FILE);
-    const raw = parseScss(stripComments(scssSource));
+    const stripped = stripComments(scssSource, true);
+    const raw = parseScss(stripped);
     for (const [key, value] of Object.entries(raw)) {
       const css = scssValue(value, raw);
       if (css === null) unresolved.push(`scss.${key}`);
       else scss[key] = css;
     }
+    unresolved.push(...scssSwallowed(stripped, raw).map((name) => `scss.${name}`));
   }
 
   const extraction = { light, dark, fonts, scss, unresolved, sources };

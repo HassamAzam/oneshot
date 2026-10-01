@@ -226,6 +226,50 @@ test('scss parses tight colons, quotes, functions and comments', (t) => {
   assert.match(css, /--scss-blue-mid: #18a4fd;/);
 });
 
+test('a url with a scheme in scss is a value, not a comment that swallows the next line', (t) => {
+  const scssSource = [
+    '$bg: url(http://h/a.png);',
+    '$next: #fff;',
+    '$secure: url(https://h/b.png);',
+    '$relative: url(//h/c.png);',
+    '$after: #000;',
+  ].join('\n');
+  const { scss, unresolved } = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assert.equal(scss.bg, 'url(http://h/a.png)');
+  assert.equal(scss.next, '#fff');
+  assert.equal(scss.secure, 'url(https://h/b.png)');
+  assert.equal(scss.relative, 'url(//h/c.png)');
+  assert.equal(scss.after, '#000');
+  assert.deepEqual(unresolved.filter((name) => name.startsWith('scss.')), []);
+});
+
+test('a comment after a url is still stripped', (t) => {
+  const { scss } = extractDesignTokens(frontend(t, { scss: '$bg: url(http://h/a.png); // hero\n$next: #fff;\n' }));
+
+  assert.equal(scss.bg, 'url(http://h/a.png)');
+  assert.equal(scss.next, '#fff');
+});
+
+test('a scss declaration swallowed by the one before it is named in unresolved, never dropped', (t) => {
+  // An unterminated url( never closes on its line, so the `//` is read as a
+  // comment, the `;` goes with it, and $bg's value runs on through $next's.
+  const scssSource = '$bg: url(http://h/a.png;\n$next: #fff;\n$after: #000;\n';
+  const { scss, unresolved } = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assert.equal(scss.next, undefined);
+  assert.ok(unresolved.includes('scss.bg'));
+  assert.ok(unresolved.includes('scss.next'), 'the swallowed name vanished');
+  assert.equal(scss.after, '#000');
+});
+
+test('stacked !default and !global flags are all stripped', (t) => {
+  const { scss } = extractDesignTokens(frontend(t, { scss: '$flag: #abc !default !global;\n$other: #def !global  !default ;\n' }));
+
+  assert.equal(scss.flag, '#abc');
+  assert.equal(scss.other, '#def');
+});
+
 test('a scss name redeclared later takes the later value, as sass does', (t) => {
   const { scss } = extractDesignTokens(frontend(t, { scss: '$gallery:#eee;\n$gallery:#ebebeb;\n' }));
 
