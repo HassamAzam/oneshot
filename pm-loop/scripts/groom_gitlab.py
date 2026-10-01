@@ -18,9 +18,9 @@ from pathlib import Path
 import pm_http
 import pm_secrets
 
-API = "https://gitlab.arbisoft.com/api/v4/projects/arbisoft%2Ferp"
+GITLAB_API = "https://gitlab.arbisoft.com/api/v4"
+API = f"{GITLAB_API}/projects/arbisoft%2Ferp"
 ERP_PROJECT_ID = 304
-GITLAB_ASSIGNEE = 1167
 ERP_REPO = os.environ.get("ERP_REPO", str(Path.home() / "Documents/ai/claude/Workstream/erp"))
 MAP_REF = "origin/dev"
 TESTS_FIRST_RE = re.compile(r"<!--\s*tests-first:\s*#(\d+)\s*-->")
@@ -169,12 +169,33 @@ def active_milestone() -> dict:
 
 def user_id(username: str) -> int:
     """GitLab username → id, so the skill can assign by name."""
-    users = pm_http.json_request("GET", f"https://gitlab.arbisoft.com/api/v4/users?username="
-                                 f"{urllib.parse.quote(username.lstrip('@'))}",
+    users = pm_http.json_request("GET", f"{GITLAB_API}/users?username={urllib.parse.quote(username.lstrip('@'))}",
                                  headers={"PRIVATE-TOKEN": pm_secrets.get("GITLAB_TOKEN")})
     if not users:
         raise GroomError(f"no GitLab user {username!r}")
     return users[0]["id"]
+
+
+@lru_cache(maxsize=1)
+def operator() -> dict:
+    """The GITLAB_TOKEN owner: whoever runs this loop.
+
+    The requester and default assignee used to be the author's name and GitLab id, hardcoded, so a
+    second operator's one-shots were requested by, and their human and tests issues assigned to, him.
+    """
+    me = pm_http.json_request("GET", f"{GITLAB_API}/user", headers={"PRIVATE-TOKEN": pm_secrets.get("GITLAB_TOKEN")})
+    return {"name": me["name"], "id": me["id"]}
+
+
+def requester() -> str:
+    """Requested By on a one-shot: PM_LOOP_REQUESTER, else the token owner's name."""
+    return os.environ.get("PM_LOOP_REQUESTER") or operator()["name"]
+
+
+def default_assignee() -> int:
+    """Who gets a human-route or tests issue nobody was named for: PM_LOOP_DEFAULT_ASSIGNEE (a username), else the token owner."""
+    override = os.environ.get("PM_LOOP_DEFAULT_ASSIGNEE")
+    return user_id(override) if override else operator()["id"]
 
 
 # ── Issues ───────────────────────────────────────────────────────
@@ -263,11 +284,11 @@ def create_issues(spec: dict, title: str, body: str, tests_scope: str, assignee:
     if tests_labels:
         tests = ({k: resume_tests[k] for k in ("iid", "url", "labels")} if resume_tests else
                  _new_issue(f"Characterization tests: {title}", _tests_body(title, spec.get("areas") or [], tests_scope, ticket_id),
-                            tests_labels, milestone, assignee or GITLAB_ASSIGNEE))
+                            tests_labels, milestone, assignee or default_assignee()))
         body = (f"## Tests first\nOneshot starts after #{tests['iid']} closes with a merged MR "
                 f"(the sweep then adds `Loop`).\n<!-- tests-first: #{tests['iid']} -->\n\n{body}")
         out["tests_issue"] = tests
-    human_assignee = (assignee or GITLAB_ASSIGNEE) if spec["route"] == "human" else None
+    human_assignee = (assignee or default_assignee()) if spec["route"] == "human" else None
     try:
         out["issue"] = _new_issue(title, body, change_labels, milestone, human_assignee)
     except GroomError as exc:

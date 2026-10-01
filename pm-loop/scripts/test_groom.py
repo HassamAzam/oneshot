@@ -708,6 +708,27 @@ def test_person_ai_promotion_rules(monkeypatch, labels, events, promoted, why):
     assert (why in out[0]["why"]) if why else out == []
 
 
+# ── identity ──
+
+def test_requester_and_default_assignee_are_the_token_owner_unless_overridden(monkeypatch):
+    """Nobody's identity is hardcoded: a second operator's issues are theirs, not the author's."""
+    asked = []
+
+    def api(method, url, headers=None, payload=None):
+        asked.append(url.rsplit("/", 1)[-1])
+        return {"name": "An Operator", "id": 42} if url.endswith("/user") else [{"id": 7}]
+    monkeypatch.setattr(gl.pm_http, "json_request", api)
+    monkeypatch.setattr(gl.pm_secrets, "get", lambda name: "token")
+    monkeypatch.delenv("PM_LOOP_REQUESTER", raising=False)
+    monkeypatch.delenv("PM_LOOP_DEFAULT_ASSIGNEE", raising=False)
+    gl.operator.cache_clear()
+    assert gl.requester() == "An Operator" and gl.default_assignee() == 42 and asked == ["user"]
+    monkeypatch.setenv("PM_LOOP_REQUESTER", "A Lead")
+    monkeypatch.setenv("PM_LOOP_DEFAULT_ASSIGNEE", "@a.lead")
+    assert gl.requester() == "A Lead" and gl.default_assignee() == 7 and asked[-1] == "users?username=a.lead"
+    gl.operator.cache_clear()
+
+
 # ── MR-to-ticket ──
 
 ERP_8700 = "https://gitlab.arbisoft.com/arbisoft/erp/-/issues/8700"

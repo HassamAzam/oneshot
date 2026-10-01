@@ -47,7 +47,6 @@ SIZES = ("XS", "S", "M", "L", "XL")
 LAYER_LABELS = {"backend": "Backend", "frontend": "Frontend"}
 URGENT_PRIORITIES = ("high", "urgent")
 TESTS_SCOPE_MARK = "<!-- tests-scope -->"
-SELF_NAME = "Muhammad Nouman"
 SHEET_ERRORS = (pm_http.NetworkError, pm_http.HTTPStatusError, KeyError, OSError, ImportError)
 AC_BACKEND = "- [ ] Document API response times before and after MR"
 AC_FRONTEND = "- [ ] On <screen> with dark theme on, all text and controls are readable and nothing overlaps"
@@ -156,7 +155,7 @@ def create(args: argparse.Namespace) -> dict:
                             f"{spec['route']} — delete #{resume['iid']} on GitLab and rerun")
     body, _, scope = body.partition(TESTS_SCOPE_MARK)
     docs = collect_documents.collect(ticket["uuid"] if ticket else None, args.from_issues, dry_run=args.dry_run)
-    requested_by = ticket["requested_by"] if ticket else mr["author_name"] if mr else SELF_NAME
+    requested_by = ticket["requested_by"] if ticket else mr["author_name"] if mr else gl.requester()
     body = _finish_body(body, spec, ticket, docs, jev, requested_by)
     labels = gl.compose_labels(spec)
     tests_labels = gl.compose_labels(spec, for_tests_issue=True) if spec["route"] == "ai-tests" else []

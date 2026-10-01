@@ -55,6 +55,11 @@ The zone map, label allow-list and Jev facts are **not** here. They live in the 
    for f in pm-loop/scripts/*; do ln -sfn "$PWD/$f" ~/.claude/scripts/"$(basename "$f")"; done
    ```
 3. **Allow-list** `Bash(python3 ~/.claude/scripts/groom.py:*)` in `~/.claude/settings.json`.
+4. **Identity.** A one-shot's Requested By, and the assignee of a human-route or tests issue nobody was named for,
+   default to the `GITLAB_TOKEN` owner. Override them with `PM_LOOP_REQUESTER` (a name) and `PM_LOOP_DEFAULT_ASSIGNEE`
+   (a GitLab username) in the environment; they are not secrets, so they stay out of `secrets.env`. The rest still
+   assumes one operator's machine: the `ERP_REPO` default and the `~/Documents/ai/...` paths in `groom.py`,
+   `jev_heartbeat.py` and the cron scripts.
 
 ## Data leaving the machine
 
