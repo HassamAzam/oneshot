@@ -141,6 +141,9 @@ def create(args: argparse.Namespace) -> dict:
         if already:
             return {"id": ticket["id"], "skipped": f"already on GitLab: #{already} names this ticket (Plane back-link missing?)"}
     mr = gl.get_mr(args.mr) if args.mr else None
+    refs = gl.closing_refs(f"{mr['title']}\n{mr['description']}") if mr else []
+    if refs:
+        return {"mr": args.mr, "skipped": f"MR already closes {', '.join(refs)}: mr-to-ticket is only for an MR without a ticket"}
     body = sys.stdin.read()
     source_text = ticket["description"] if ticket else (mr["description"] if mr else body)
     jev = jev_layers.decide(args.title if not ticket else ticket["name"], source_text)
@@ -175,8 +178,8 @@ def create(args: argparse.Namespace) -> dict:
         note = f' (characterization tests first: <a href="{tests["url"]}">#{tests["iid"]}</a>)' if tests else ""
         out["plane"] = plane.post_groom(ticket["uuid"], made["issue"]["url"], made["issue"]["iid"], note)
     if mr:
-        gl.link_mr(args.mr, made["issue"]["iid"])
-        out["mr"] = f"!{args.mr} now closes #{made['issue']['iid']}"
+        gl.link_mr(args.mr, made["issue"]["url"])
+        out["mr"] = f"!{args.mr} now closes #{made['issue']['iid']} ([closes {made['issue']['url']}] ends its description)"
     rows = [{"url": made["issue"]["url"], "title": args.title}]
     if made["tests_issue"]:
         rows.append({"url": made["tests_issue"]["url"], "title": f"Characterization tests: {args.title}"})

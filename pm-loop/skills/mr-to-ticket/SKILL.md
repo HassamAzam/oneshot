@@ -1,6 +1,6 @@
 ---
 name: mr-to-ticket
-description: Create the missing arbisoft/erp GitLab issue for a merge request that has none, assign it to the MR author, and prepend "Closes #<issue>" to the MR. Use when given a GitLab MR URL/iid without a ticket.
+description: Create the missing arbisoft/erp GitLab issue for a merge request that has none, assign it to the MR author, and end the MR description with "[closes <issue URL>]". Use when given a GitLab MR URL/iid without a ticket.
 ---
 
 # MR → ticket
@@ -21,7 +21,8 @@ The work already exists, so the issue always goes to people. `groom.py` does eve
    !<iid> by <author> — `<source>` → `<target>`
    GROOM_BODY
    ```
-   The author is assigned and the MR description gets `Closes #<issue>` prepended; nothing else in it changes.
+   The author is assigned and the MR description gets `[closes <issue URL>]` as its last line; nothing else in it changes.
+   An MR that already closes an issue (`[closes …]`, `Closes #N`, `fixes #N`, …) is refused: report the `skipped` reason.
 
 ## Before you finish
 - [ ] If `create` stopped for a new or `ask_first` label, the user confirmed it

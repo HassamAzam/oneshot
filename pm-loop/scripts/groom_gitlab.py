@@ -24,7 +24,10 @@ GITLAB_ASSIGNEE = 1167
 ERP_REPO = os.environ.get("ERP_REPO", str(Path.home() / "Documents/ai/claude/Workstream/erp"))
 MAP_REF = "origin/dev"
 TESTS_FIRST_RE = re.compile(r"<!--\s*tests-first:\s*#(\d+)\s*-->")
-CLOSES_RE = re.compile(r"^Closes #\d+\s*\n*")
+# GitLab's default closing pattern: close/fix/resolve/implement in any tense, then #N, group/project#N or an issue URL.
+CLOSING_REF_RE = re.compile(
+    r"(?i)\b(?:clos(?:e[sd]?|ing)|fix(?:e[sd]|ing)?|resolv(?:e[sd]?|ing)|implement(?:s|ed|ing)?):?\s+(?:issues?\s+)?"
+    r"((?:[\w.-]+/)*[\w.-]*#\d+|https?://\S+?/-/(?:issues|work_items)/\d+)")
 
 
 class GroomError(RuntimeError):
@@ -276,10 +279,20 @@ def get_mr(iid: int) -> dict:
             "source_branch": mr["source_branch"], "target_branch": mr["target_branch"], "url": mr["web_url"]}
 
 
-def link_mr(mr_iid: int, issue_iid: int) -> None:
-    """Prepend `Closes #issue` to the MR description, replacing an existing leading Closes."""
-    desc = call("GET", f"merge_requests/{mr_iid}").get("description") or ""
-    call("PUT", f"merge_requests/{mr_iid}", {"description": f"Closes #{issue_iid}\n\n{CLOSES_RE.sub('', desc)}"})
+def closing_refs(text: str) -> list[str]:
+    """The issues this text would close on merge: #N, group/project#N or an issue URL, in GitLab's closing forms."""
+    return CLOSING_REF_RE.findall(text or "")
+
+
+def link_mr(mr_iid: int, issue_url: str) -> None:
+    """End the MR description with ERP's `[closes <issue url>]` line (mr-metadata); nothing else in it changes.
+
+    This used to prepend `Closes #N` after stripping a leading one, which silently dropped a link the
+    MR already had and never saw ERP's own `[closes <url>]`, so the MR ended up closing two issues.
+    create() now refuses an MR that closes anything, so there is nothing here to replace.
+    """
+    desc = (call("GET", f"merge_requests/{mr_iid}").get("description") or "").rstrip()
+    call("PUT", f"merge_requests/{mr_iid}", {"description": (f"{desc}\n\n" if desc else "") + f"[closes {issue_url}]\n"})
 
 
 # ── Sweep: release yellow changes whose tests merged ─────────────

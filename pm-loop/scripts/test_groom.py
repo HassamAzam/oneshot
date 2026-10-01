@@ -643,6 +643,44 @@ def test_person_ai_promotion_rules(monkeypatch, labels, events, promoted, why):
     assert (why in out[0]["why"]) if why else out == []
 
 
+# ── MR-to-ticket ──
+
+ERP_8700 = "https://gitlab.arbisoft.com/arbisoft/erp/-/issues/8700"
+
+
+@pytest.mark.parametrize("description, ref", [
+    (f"## Summary\n- x\n\n[closes {ERP_8700}]\n", ERP_8700),
+    ("Closes #8700\n\nbody", "#8700"),
+    ("This MR fixes #8700 on the list page", "#8700"),
+    ("Resolves arbisoft/erp#8700", "arbisoft/erp#8700"),
+])
+def test_an_mr_that_already_closes_an_issue_gets_no_second_ticket(monkeypatch, description, ref):
+    """A second ticket would leave the MR closing both, and a rerun would orphan the first."""
+    def never(*a, **k):
+        raise AssertionError("wrote to GitLab")
+    monkeypatch.setattr(gl, "get_mr", lambda iid: {"iid": iid, "title": "List page", "description": description,
+                                                   "author_id": 5, "author_name": "A Dev", "url": "u"})
+    monkeypatch.setattr(gl, "create_issues", never)
+    monkeypatch.setattr(gl, "link_mr", never)
+    out = groom.create(_args(id=None, mr=10400, dry_run=False, areas=""))
+    assert out["skipped"].startswith(f"MR already closes {ref}:")
+
+
+def test_text_that_closes_nothing_has_no_closing_refs():
+    assert gl.closing_refs("Related to #8700; prefixes #1, enclosed #2, see " + ERP_8700) == []
+
+
+@pytest.mark.parametrize("before, after", [
+    ("## Summary\n- does x\n\n## Changes\n- y\n\n", "## Summary\n- does x\n\n## Changes\n- y\n\n[closes URL]\n"),
+    ("", "[closes URL]\n"),
+])
+def test_link_mr_ends_the_description_with_the_erp_closing_line_and_changes_nothing_else(monkeypatch, before, after):
+    puts = []
+    monkeypatch.setattr(gl, "call", lambda m, path, payload=None: puts.append((path, payload)) if m == "PUT" else {"description": before})
+    gl.link_mr(10400, "URL")
+    assert puts == [("merge_requests/10400", {"description": after})]
+
+
 def test_one_shot_gets_areas_and_zone_from_the_map(monkeypatch, tmp_path):
     Path(tmp_path, "zones.json").write_text(json.dumps({"severity": ["green", "yellow", "red"], "default_zone": "yellow",
         "areas": [{"name": "training", "zone": "green", "keywords": ["training"]},
