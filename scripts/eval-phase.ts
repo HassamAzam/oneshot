@@ -37,11 +37,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DRY_RUN, MEMORY, ROOT, budgetConfig, phaseByName } from '../src/lib/config.js';
 import { allIssueNotes, getIssue } from '../src/lib/gitlab.js';
-import { isMachineNote } from '../src/lib/claims.js';
 import { currentProjectKey } from '../src/lib/journalproject.js';
 import { repoKey } from '../src/lib/repourl.cjs';
 import { promptFor, systemPromptFor, type PromptCtx } from '../src/phases/prompts.js';
 import { runPhase } from '../src/conductor/phase.js';
+import { ticketComments } from '../src/conductor/runner.js';
 import { transcriptPath, type RunJournal } from '../src/lib/artifacts.js';
 import type { Ticket } from '../src/phases/types.js';
 
@@ -358,14 +358,17 @@ async function loadTicket(iid: number, project: string | null, refetch: boolean)
     console.log(`#${iid}: GitLab comments unreachable — using the prompt the live run saw`);
     return save(offline);
   }
+  // The ticket as the live run found it, as replay-plan reads it: a comment
+  // posted afterwards ("same root cause as #29") would hand recall its answer
+  // and make `vs live` compare runs on different inputs. No live run of this
+  // project here, no cutoff.
+  const before = liveRunProject(iid) === project ? liveJournal(iid)?.createdAt : undefined;
   return save({
     iid: res.data.iid,
     title: res.data.title,
     description: res.data.description,
     labels: res.data.labels,
-    notes: notes.data
-      .filter((n) => !n.system && n.body && !isMachineNote(n.body) && !n.body.startsWith('Oneshot '))
-      .map((n) => n.body),
+    notes: ticketComments(notes.data, typeof before === 'number' ? before : undefined),
   });
 }
 
