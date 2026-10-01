@@ -1078,14 +1078,23 @@ function intersection(a, b) {
 }
 
 /**
- * Does `a` visually cover `b`? Answer as an area, in square pixels.
+ * Do `a` and `b` share screen area, and how much? Answered as an area, in square pixels.
  *
- * `areaPx` is `region.width * region.height` — the size of the covered patch, NOT a
- * distance. It is named `areaPx` rather than `px` because "10352px" reads as a length,
- * and a length that large is impossible on a 900px-tall screen, so the number invites
- * the reader to dismiss a real defect as a broken measurement. Divide by `region.width`
- * to recover the height a human would describe: 10352 over a 242px-wide popover is a
- * 43px band, i.e. one input row. Quote `region` when a reviewer needs to picture it.
+ * The answer is symmetric and says nothing about which of the two paints on top: a
+ * popper under the field and one over it return the same `areaPx`. Asked as "does `a`
+ * cover `b`?", a field painting over a portalled popper would be reported as the popper
+ * covering the field, the defect inverted. Check stacking separately
+ * (`document.elementsFromPoint` at the centre of `region`) when that is the question.
+ *
+ * `areaPx` is the size of the shared patch, NOT a distance. It is about
+ * `region.width * region.height`: each side of `region` is rounded on its own and
+ * `areaPx` from the unrounded product, so 10352 sits beside a 242 x 43 region (10406)
+ * because the band was 42.78px. It is named `areaPx` rather than `px` because "10352px"
+ * reads as a length, and a length that large is impossible on a 900px-tall screen, so
+ * the number invites the reader to dismiss a real defect as a broken measurement. Divide
+ * by `region.width` to recover the height a human would describe: 10352 over a
+ * 242px-wide popover is a 43px band, i.e. one input row. Quote `region` when a reviewer
+ * needs to picture it.
  *
  * "Obscured", "overlapping" and "covers the field below" are the one bug class this
  * harness could state a rule about but never measure: a screenshot proves it only to a
@@ -1099,9 +1108,13 @@ function intersection(a, b) {
  *
  * `intersects: null` is NOT "no overlap" — it means one of the two could not be
  * measured (it never resolved a box, or it resolved and then detached before it could
- * be inspected), and `missing` names which. Record that as a block, not a pass: a selector
- * matching nothing is a question about the selector, and reading it as "nothing on top
- * of the field" is how a working screen gets filed as a product bug.
+ * be inspected), and `missing` names which. Which side is missing decides what it means.
+ * A selector for something that should be there is a question about the selector:
+ * reading it as "nothing on top of the field" is how a working screen gets filed as a
+ * product bug, and reading it as "the popper closed" certifies a re-open absent when it
+ * was the FIELD selector that matched nothing. An overlay missing after a dismissal, with
+ * an earlier read that resolved both, is the overlay being gone. SKILL.md's calendar
+ * bullet is the procedure.
  *
  * `outsideViewport` catches the other direction. CSS `zoom` and a short viewport have
  * already put a real element at `top=1194px` in a 900px window, where it cannot overlap
@@ -1112,7 +1125,8 @@ function intersection(a, b) {
  *
  * `hidden` is the same guard for elements that kept their box but are not on screen. If
  * either side is invisible there is nothing for a user to see, so `intersects` is false
- * and `hidden` names which one and why.
+ * and `hidden` names which one and why. `areaPx` is then 0 by design, while `region`
+ * keeps the patch the invisible element would cover: diagnostics, not a defect to quote.
  *
  * One thing this does NOT handle: both boxes are viewport-relative and they are read one
  * after the other, so a page that scrolls between the two reads compares two different
