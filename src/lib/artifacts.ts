@@ -22,6 +22,7 @@
 import {
   cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { STATE, artifactDir, runDir } from './config.js';
 import type { MrFeedbackLedger } from '../mrfeedback/types.js';
@@ -105,11 +106,106 @@ export interface ReviewGateState {
   requestNoteId?: number | null;
   approved: boolean;
   feedback: string[];
+  /**
+   * Digest of the artifact that was approved, stamped when the sign-off lands.
+   *
+   * `approved: true` on its own records THAT a human approved, never WHAT. The
+   * design gate is armed by `!designApproval?.approved` and so runs exactly
+   * once; anything that rewrites design.json afterwards inherits the sign-off
+   * silently, and `ui-evidence` then tells the reviewer "a human approved these
+   * screens before the code was written" about screens nobody saw.
+   *
+   * ABSENT means an approval recorded before this field existed. Those are
+   * treated as matching -- see `approvalCovers()`. Re-arming every in-flight
+   * run's gate on upgrade would be a worse bug than the one this closes.
+   */
+  approvedDigest?: string;
+  /**
+   * Digest of the artifact the standing request SHOWED, stamped when it posts.
+   *
+   * The approval is read off that request's replies some ticks later, and the
+   * artifact can be rewritten in between -- a remediation resume or a forced
+   * re-run of the phase. Digesting the artifact on the tick that sees the
+   * `approved` would stamp the rewrite with a sign-off given for what the
+   * request showed, and the drift `approvedDigest` exists to catch would be
+   * invisible from then on. ABSENT means a request posted before this field
+   * existed -- see `requestCovers()`.
+   */
+  requestedDigest?: string;
+}
+
+/**
+ * A stable digest of whatever a gate approved.
+ *
+ * Key order in the artifact is an accident of how the phase serialised it, not
+ * a change a reviewer could see, so keys are sorted before hashing. Truncated
+ * because this is drift detection between two local values, not a security
+ * boundary.
+ */
+export function gateSubjectDigest(value: unknown): string {
+  const stable = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(stable);
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(
+        Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
+          .map(([k, val]) => [k, stable(val)]),
+      );
+    }
+    return v;
+  };
+  return createHash('sha256').update(JSON.stringify(stable(value) ?? null)).digest('hex').slice(0, 16);
+}
+
+/**
+ * Whether a recorded approval still covers `subject`.
+ *
+ * True when the gate never approved anything (the caller decides what an
+ * unapproved gate means), when no digest was stamped (pre-upgrade approvals),
+ * or when the digest still matches. False only on a PROVEN mismatch.
+ */
+export function approvalCovers(state: ReviewGateState | undefined, subject: unknown): boolean {
+  if (!state?.approved) return true;
+  if (!state.approvedDigest) return true;
+  return state.approvedDigest === gateSubjectDigest(subject);
+}
+
+/**
+ * Whether the standing request still shows `subject`.
+ *
+ * True when nothing is standing, when the gate tracks no subject, or when the
+ * request predates `requestedDigest`. False only on a PROVEN mismatch, which
+ * means a reply on that request is a verdict on something else and the gate
+ * has to ask again.
+ */
+export function requestCovers(state: ReviewGateState, subject: unknown): boolean {
+  if (state.requestNoteId == null) return true;
+  if (subject === undefined || !state.requestedDigest) return true;
+  return state.requestedDigest === gateSubjectDigest(subject);
+}
+
+/**
+ * The digest an approval landing on `state`'s request is stamped with: what
+ * the request showed, never what the artifact holds by the time the reply is
+ * read. A request posted before `requestedDigest` existed falls back to the
+ * current artifact, the same upgrade allowance `approvalCovers()` makes.
+ */
+export function approvedDigestFor(state: ReviewGateState, subject: unknown): string | undefined {
+  if (subject === undefined) return undefined;
+  return state.requestedDigest ?? gateSubjectDigest(subject);
 }
 
 export interface RunJournal {
   runId: string;
   iid: number;
+  /**
+   * Which GitLab project the run belongs to: repoKey(GITLAB_REPO_URL),
+   * `<host>/<group>/<project>` lower-cased. The directory is keyed by iid
+   * alone, and iids are only unique within a project — so after the URL moves
+   * to another project, issue #237's journal would otherwise be resumed for the
+   * new project's #237, worktree, MR iid and all. See journalproject.ts.
+   * Absent on journals written before it existed.
+   */
+  project?: string;
   title: string;
   url: string;
   createdAt: number;
@@ -143,6 +239,13 @@ export interface RunJournal {
   planApproval?: ReviewGateState;
   /** Test-case approval gate state (Review label, between `testcases` and `review`). */
   testcasesApproval?: ReviewGateState;
+  /**
+   * Not a Bug confirmation gate state (between `research` and the phase after
+   * it). Armed only when research could not reproduce a reported bug: a QA
+   * reviewer's `approved` labels the ticket Not a Bug and stops the run; any
+   * other reply is fed back into a fresh `research` that reproduces again.
+   */
+  notABugApproval?: ReviewGateState;
   /**
    * When the `merge` phase last asked GitLab whether a human has merged the
    * MR. A Review-labelled ticket is never merged by Oneshot, so this phase is

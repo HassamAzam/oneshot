@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { codePhaseStatus, mergePollWait, nextIndex, testcaseGateRoute } from './runner.js';
+import {
+  codePhaseStatus, decideClaim, mergePollWait, nextIndex, salvagedReview, testcaseGateRoute,
+  ticketComments, uiEvidenceRefusal,
+} from './runner.js';
+import type { IssueNote } from '../lib/gitlab.js';
 import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
+import type { RunJournal } from '../lib/artifacts.js';
+import type { JournalOwner } from '../lib/journalproject.js';
 
 function phase(name: string, n: number, group?: string): PhaseConfig {
   return { name, n, kind: 'session', timeoutMin: 30, onFail: 'abort', ...(group ? { group } : {}) };
@@ -74,6 +80,40 @@ test('an advance steps past the last member of a group, not past the current ind
     at('verify'),
   );
   assert.deepEqual([...forced], []);
+});
+
+// ------------------------------------------------ whose journal, at the claim
+
+const journal = (o: Partial<RunJournal> = {}): RunJournal => ({
+  runId: 'r1', iid: 237, project: 'gitlab.example.com/acme/erp', title: 't',
+  url: 'https://gitlab.example.com/acme/erp/-/issues/237', createdAt: 1, status: 'aborted',
+  worktree: '/wt/t237-r1', mrIid: 12,
+  phases: [{ phase: 'plan', status: 'ok' }, { phase: 'implement', status: 'ok' }] as RunJournal['phases'],
+  ...o,
+});
+const OURS: JournalOwner = { kind: 'ours', adopt: false };
+const DROP: JournalOwner = {
+  kind: 'ours', adopt: false, dropWorktree: true, why: 'its recorded worktree /wt/t237-r1 is a checkout of x',
+};
+
+test('a journal of another project is archived and the ticket starts fresh, whatever its status', () => {
+  for (const status of ['running', 'aborted', 'parked', 'blocked'] as const) {
+    const j = journal({ status, blockedAt: 0 });
+    assert.deepEqual(decideClaim(j, { kind: 'foreign', why: 'x' }), { kind: 'fresh', archive: 'r1' }, status);
+  }
+});
+
+test('an ours journal whose worktree is dropped still RESUMES — its phases and MR are never thrown away', () => {
+  for (const owner of [OURS, DROP, { kind: 'ours', adopt: true } as JournalOwner]) {
+    const j = journal();
+    const d = decideClaim(j, owner);
+    assert.equal(d.kind, 'resume', JSON.stringify(owner));
+    assert.equal(d.kind === 'resume' && d.journal, j);
+  }
+  // Only its own status decides otherwise, exactly as for any journal of ours.
+  assert.deepEqual(decideClaim(journal({ status: 'done' }), DROP), { kind: 'fresh', archive: 'r1' });
+  assert.equal(decideClaim(journal({ status: 'blocked', blockedAt: Date.now() }), DROP).kind, 'refuse');
+  assert.deepEqual(decideClaim(null, null), { kind: 'fresh', archive: null });
 });
 
 // ------------------------------------------------ merge parked on a human merge
@@ -149,4 +189,155 @@ test('a revision with no testcases phase to cycle parks, never silently proceeds
   // Treating a revision as an approval because the board is misconfigured would
   // turn a reviewer asking for changes into a sign-off they never gave.
   assert.equal(testcaseGateRoute('feedback', false), 'park');
+});
+
+/**
+ * `uiEvidenceRefusal` — the two ways a pack can report success and prove nothing.
+ *
+ * Both are reachable today: the schema requires `screenshots` and `observations`
+ * to be PRESENT, and an empty array satisfies that. `publish.ts` then returns
+ * null for a pack with nothing in it, so the MR gets no comment and the phase
+ * still records ok. The reviewer is told nothing and nobody is told why.
+ */
+const pack = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  screenshots: [], observations: [], designConformance: [], ...over,
+});
+const shot = { file: 'a.png', caption: 'the reset page', caseId: 'TC-1' };
+const obs = (before: string, after: string) => ({
+  what: 'document.title on /accounts/password_reset/',
+  before, after, how: 'Playwright page.title()', caseId: 'TC-1',
+});
+
+test('a pack with no screenshots and no observations is refused', () => {
+  const why = uiEvidenceRefusal(pack());
+  assert.ok(why, 'a pack that produced nothing must not record ok');
+  assert.match(why, /no screenshots/i);
+});
+
+test('either kind of evidence on its own is a complete pack', () => {
+  // The prompt explicitly promises this: a non-visual change is allowed to
+  // return zero screenshots and a full table, and must not be failed for it.
+  assert.equal(uiEvidenceRefusal(pack({ screenshots: [shot] })), null);
+  assert.equal(uiEvidenceRefusal(pack({ observations: [obs('', 'Forgot Password')] })), null);
+});
+
+test('a design-conformance pack with nothing else is not refused', () => {
+  const rows = [{ screenId: 's1', designShot: 'd.png', builtShot: 'b.png', differences: [] }];
+  assert.equal(uiEvidenceRefusal(pack({ designConformance: rows })), null);
+});
+
+test('an observation table where every value is unchanged is refused', () => {
+  const why = uiEvidenceRefusal(pack({ observations: [obs('en', 'en'), obs(' x ', 'x')] }));
+  assert.ok(why, 'a table that shows no change is not evidence of a change');
+  assert.match(why, /unchanged/i);
+});
+
+test('one unchanged row among changed ones is a control, not a refusal', () => {
+  // A row proving something did NOT regress is legitimate evidence. Only a
+  // table where NOTHING moved proves nothing.
+  const rows = [obs('', 'Forgot Password'), obs('en', 'en')];
+  assert.equal(uiEvidenceRefusal(pack({ observations: rows })), null);
+});
+
+test('an unmeasured base is not counted as unchanged', () => {
+  // `before` is allowed to be "not measured" with a reason. That row is honest
+  // about proving nothing; it must not be read as before === after.
+  const why = uiEvidenceRefusal(pack({ observations: [obs('not measured — no base app', 'en')] }));
+  assert.equal(why, null);
+});
+
+test('a phase that returned no artifact at all is left to the caller', () => {
+  // r.out.ok is false in that case and the runner already fails it; returning a
+  // second reason here would double-report one failure.
+  assert.equal(uiEvidenceRefusal(null), null);
+  assert.equal(uiEvidenceRefusal(undefined), null);
+});
+
+const finding = (id: string, severity: string) => ({
+  id, severity, file: 'apps/payroll/views.py', line: 10, what: 'w', why: 'y', fix: 'f',
+});
+
+test('a dead review with a blocker on record comes back as changes-requested', () => {
+  const out = salvagedReview([finding('F-01', 'blocker'), finding('F-02', 'minor')], 'timed out');
+  assert.equal(out?.verdict, 'changes-requested');
+  // The minor rides along: the verdict is decided by the serious findings, but
+  // implement reads the whole list and a written-down minor is still output.
+  assert.equal(out?.findings.length, 2);
+  assert.match(out!.summary, /PARTIAL/);
+  assert.match(out!.summary, /F-01 \[blocker\]/);
+});
+
+test('a major is salvageable too — the bar is blocker OR major', () => {
+  assert.equal(salvagedReview([finding('F-01', 'major')], null)?.verdict, 'changes-requested');
+});
+
+test('minors and suggestions alone are not a verdict, so the infra re-attempt stands', () => {
+  assert.equal(salvagedReview([finding('F-01', 'minor'), finding('F-02', 'suggestion')], 'x'), null);
+});
+
+test('an empty partial salvages nothing', () => {
+  assert.equal(salvagedReview([], 'timed out'), null);
+});
+
+test('a partial whose findings is not an array salvages nothing instead of throwing', () => {
+  // The file is freehand model output and readArtifact does not validate its
+  // shape; a throw here escapes runTicket and strands the claim.
+  for (const bad of [{ F1: finding('F-01', 'blocker') }, 'blocker', 3, {}]) {
+    assert.equal(salvagedReview(bad, 'timed out'), null);
+  }
+  // Non-object entries inside an array are dropped, not dereferenced.
+  assert.equal(salvagedReview([null, 'x', finding('F-01', 'blocker')], null)?.findings.length, 1);
+});
+
+// ------------------------------------------------- the comments a phase reads
+
+/**
+ * ticketComments() is the filter chain fetchTicket() runs over a ticket's
+ * notes. It is asserted on directly because a replay hands it a cutoff, and
+ * the whole claim that a replay driver leaves live runs alone rests on what
+ * this returns when there is no cutoff to apply.
+ */
+const note = (body: string, created_at?: string, system = false): IssueNote =>
+  ({ id: 1, body, system, ...(created_at ? { created_at } : {}) });
+
+const RUN_STARTED = Date.parse('2026-09-15T12:00:00Z');
+
+test('with no cutoff every human comment survives, so a live run reads the ticket unchanged', () => {
+  const notes = [
+    note('the oldest requirement', '2026-09-14T09:00:00Z'),
+    note('an amendment', '2026-09-16T09:00:00Z'),
+    note('one GitLab never timestamped'),
+  ];
+
+  assert.deepEqual(ticketComments(notes), [
+    'the oldest requirement', 'an amendment', 'one GitLab never timestamped',
+  ]);
+});
+
+test('a cutoff keeps only the comments that predate it', () => {
+  const notes = [
+    note('written before the run started', '2026-09-15T09:00:00Z'),
+    note('the plan this run published', '2026-09-15T13:00:00Z'),
+    note('the reviewer feedback on that plan', '2026-09-16T09:00:00Z'),
+  ];
+
+  assert.deepEqual(ticketComments(notes, RUN_STARTED), ['written before the run started']);
+});
+
+test('a comment GitLab did not timestamp is dropped under a cutoff rather than guessed at', () => {
+  // Unprovable order is the one case a replay cannot be relaxed about: a note
+  // that may be the plan under test is worth less than the one it displaces.
+  assert.deepEqual(ticketComments([note('undated')], RUN_STARTED), []);
+});
+
+test('the cutoff is layered on the existing filters, not substituted for them', () => {
+  const notes = [
+    note('a label swap', '2026-09-14T09:00:00Z', true),
+    note('Oneshot claimed this ticket — run `r-1`', '2026-09-14T09:00:00Z'),
+    note('a claim by marker <!-- oneshot:claim -->', '2026-09-14T09:00:00Z'),
+    note('a real requirement', '2026-09-14T09:00:00Z'),
+  ];
+
+  assert.deepEqual(ticketComments(notes, RUN_STARTED), ['a real requirement']);
+  assert.deepEqual(ticketComments(notes), ['a real requirement']);
 });

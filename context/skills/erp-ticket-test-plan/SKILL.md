@@ -24,7 +24,50 @@ Cover every category:
 - **Boundary** — limits, min/max, field lengths, zero/empty.
 - **Side-effects / regression** — what else touches this code path; confirm no lost features vs the current version.
 
-**Derive every "Expected" from the ticket's business logic, NOT the code's output.** If the expected value comes from the same code path you are testing, a systematic bug passes silently.
+**Derive every "Expected" for the change itself from the ticket's business logic, NOT the code's output.** If the expected value comes from the same code path you are testing, a systematic bug passes silently. This rule decides *whether the change works*. It does not cover the facts around the change — those come from the code, next section.
+
+## Trace every fact about the product to the line that produces it
+
+Everything else a case states about the product is a fact about code the ticket did not ask to change. The ticket cannot tell you any of it; only the code can. That covers:
+- label, heading, link and button text, message wording and casing, a file's header row
+- routes, selectors and `data-testid`s, and the option names a filter or dropdown offers
+- what an empty, zero or missing value shows, and which records are drawn at all
+- whether a field is read-only or required, and who can reach the screen
+- when a request fires, and how sort and filter behave
+
+Written from a field name, a class name, the plan's file list or a framework habit, these are wrong often enough to be the single biggest reason QA sends a list back: roughly 60% of the revision requests on erp#8745, #8768 and #8772, each costing a gate round.
+
+For each such fact:
+- **Read the line that emits it, and cite where it lives** — the file and the function, constant or template name (`views.py` `HoldPayslipView`, `displayText.js` `NO_CHANGES_IN_GIVEN_TIME_SPAN`). Add a line number only if you copied it from the file you opened: a guessed line number is a wrong fact like any other. Follow the value to where it is decided — the helper and the helpers it calls, serializer, reducer, model `verbose_name`/`Meta`/`__str__`, template or constant — not just the render line, and not just the line the plan quotes.
+- **Find the condition that makes it appear at all — and what can quietly drop it.** Before a step clicks, reads or counts something, read what renders, lists or opens it — a permission, a status, a waiting period, the page size, the queryset that decides which records can be listed or opened — and make the precondition satisfy it. Before expecting a record in a list, popup or export, read the code that builds that list: a filter, a value that fails to parse, or a guard that returns nothing removes it without an error. A helper that returns `None` for a top-level team can return `0` for a sub-team; an "Evaluate" button can stay hidden until months after completion; an all-day event whose bare date fails the popup's date-time parse is never listed.
+- **Same name is not the same code.** Check what is actually used: the template the admin theme resolves to (this repo runs Grappelli, not stock Django admin), the component the second screen imports (often its own copy), the admin class's real options (no `search_fields`, no search box), the element a `data-testid` sits on.
+- **A harness you write runs the whole path.** When a case builds its own shell snippet, test client or mocks, trace every step between the request and the changed line — permission, validator, lookup, serializer. Anything you do not mock runs for real, and one of them can end the request (a 400, a 403, an empty list) before the change is ever reached. The same goes for the command: a test runner only runs files its discovery pattern matches.
+- **Unchanged code, the framework and its libraries are in scope.** The diff and `uiPath` are where you start, not where you stop: model labels, admin templates, neighbouring components, and the installed framework's and libraries' own source and defaults (a component's default separator, a date library's strict parsing) all decide what the screen shows.
+- **Trace copied claims too.** A fact taken from the plan, the research block, the design note or a reviewer's comment is a claim about the code. Check it before it becomes a case.
+- **Cannot trace it? Do not guess an exact literal.** Assert it by structure or `data-testid`, or compare ignoring case, and say in the case that the literal is unverified.
+
+**The diff's own lines are never a source for an Expected.** Tracing sends you into code, and the changed code is right there — so check every citation behind an expected value against the diff. If the line is one the diff adds or changes (a new label or message, a new log line, a new condition, the argument form of a new call, a threshold in the branch's own test), that value is the change's result, not a fact about the product. Take it from the ticket, plan or approved design instead; where they do not fix the exact wording, assert loosely (the date is shown, the row is hidden) rather than copying the new string. Something the ticket never asks for — a log line, a keyword-argument form — is not a pass condition at all.
+
+**The branch's own new test is never the pass condition either.** Running it can be a step, but "the new test passes" proves only that the code agrees with a test its own author wrote — both can miss the ticket in the same way. Measure what the ticket or plan asks for yourself: ❌ `pass if test_pod_membership_data_query_count passes` → ✅ `count the queries for a POD and a non-POD request on the same team; the POD one issues exactly one more (plan step 12)`.
+
+❌ `Click 'Add another Subteam approver'` — built from the class name.
+✅ `Click 'Add another Custom Subteam Approver'` — the model's `Meta.verbose_name` (apps/teams/models.py).
+❌ `A missing team id returns HTTP 404` — framework habit.
+✅ `Redirects to the admin index with the warning 'Team with ID “…” doesn’t exist. Perhaps it was deleted?'` — what the installed Django version's `ModelAdmin` does, curly quotes included.
+❌ `Select 'PF Staff' in the Pay Structure filter` — the column's text reused as the option name.
+✅ `Select 'PF'` — the filter's options are the keys of `PAY_STRUCTURE`; only the column shows 'PF Staff'.
+
+## Walk the traps list before you present
+
+**Read `refs/traps.md` and walk it against your draft before the GATE.** It holds numbered **principles**, each generalising revision requests QA has already had to make on real tickets — cases that failed on a correct build, passed on an unchanged one, or were never written at all. Walk the principles, not the examples: the bullets under each one are illustrations of it, and the principle is what has to fire on a screen they never mention. It is the difference between a list that is approved in one round and one that costs three.
+
+Three checks to run over the finished draft:
+
+- **Can you point at the line behind every literal the case quotes — and is that line outside the diff?** If you cannot, trace it or loosen it; if the diff wrote it, take it from the ticket or plan instead (see "Trace every fact about the product").
+- **Would this case still pass if the diff were reverted?** If yes it proves nothing about the change. Keep it if it guards a regression, but label it a smoke check and give it a positive control (principle 5).
+- **Does this change REMOVE something that was hiding a state** — a blur, a disabled look, a muted colour, a collapsed row? Then write the cases for what it was hiding, not just for its absence (principle 6). This class is the most-missed one on record.
+
+Note in your output which traps you applied and which you considered and ruled out, so the reviewer can see the list was walked rather than skimmed.
 
 ## Present + GATE
 
@@ -82,7 +125,7 @@ This is the *only* route that creates a case. The reviewer's line is the input, 
 **3. Every added scenario needs its own Expected.**
 A restatement is not an Expected. Banned: "Matches the QA-reported edge case: `<scenario>`" (the string an append-only gate fills in for you), "As described by the user", "See scenario", or any paraphrase of the scenario text.
 
-The phase's core rule applies unchanged: derive the Expected from the ticket's business logic — not from the scenario's own wording, and not from the code. State both:
+The phase's core rule applies unchanged: derive the Expected for the change from the ticket's business logic — not from the scenario's own wording, and not from the changed code's output. Every other fact the case states — including one the reviewer's line states — is traced to its line first, as in "Trace every fact about the product". State both:
 - **the observable** — the value on screen / in the response / in the DB, with the concrete number where one is known
 - **the failure condition** — the specific observation that makes it FAIL
 
@@ -119,6 +162,8 @@ Delete (2), edit text/Expected (3), re-prioritize (4), reclassify Type (5), reor
 - **Split** — turn one case into two, each with its own Expected.
 
 Leave every other id untouched. **Never satisfy a delete, edit, or re-prioritize by appending anything** — the named case must actually change.
+
+**Check the reason behind a delete.** "Drop it, the unit tests already check this" or "another case covers it" is a claim like any other. Before deleting on that ground, confirm the covering test exists *and runs* — `testsRun` in implement's artifact, the CI config, the runner's discovery pattern. If it does not run (this repo's frontend Jest does not), keep the check, move it to a runner that works (Playwright, pytest), and say why in the re-confirm diff.
 
 **Where you own the list you must apply them — and in the Oneshot `testcases` phase you do.** A reply that is not a sign-off cycles this phase: the reviewer's words arrive in your prompt, `testcases.json` is in your worktree, and you output the whole revised list. A delete is a case you do not write out; an edit is a case you write out changed. Nothing is handed back to anybody, and a request to delete must never return as a case reading `Verify that TC-N is deleted` — that leaves the named case alive and adds a junk twin beside it.
 
@@ -160,6 +205,16 @@ The remaining intents change nothing structurally — they are answered, acted o
 
 **7. Re-confirm with a diff, then re-gate.**
 Show: count before → after; the ids added and what each one came from (intent 1); the ids changed or retired under rule 5 (intents 2–8), each with the line that did it; every line answered or discarded under rule 6 (intents 9–12) and why; and confirmation that no other existing case was touched. Then run the GATE again.
+
+Walk `refs/traps.md` over the revised list too — a revision round is exactly where a trap resurfaces, because the cases you just rewrote are the ones nobody has checked yet. And trace every literal you added or changed this round to its line: the fix for one wrong label is where the next wrong label usually comes from.
+
+**8. Name the trap this round taught you.**
+If the feedback names something `refs/traps.md` does not already cover, end your output with a `candidateTraps` block. **Say which of the two it is, because they are curated differently:**
+
+- **A new instance under principle N** — the principle already covers it and this is a shape of it nobody had written down. Name the principle, give the bullet, and say what in this ticket the existing bullets did not reach. This is the common case.
+- **A new principle** — no existing principle covers it. Say which ones you checked and why each missed, then state the principle as a rule about authoring a case. If stating it needs a sentence about how the code should be built or how the repo should be configured, it belongs to another phase and is not a candidate here.
+
+Either way: stated generally enough to fire on a different ticket, how it bites a case, what to assert instead, and the source as a full URL — ticket numbers are not unique across projects. Do not edit `refs/traps.md` yourself; it is shared by every run and a human curates it. Proposing the candidate is the whole job.
 
 > **The approve-and-add round is the only append-only path left.** When a reviewer signs off AND names a case in the same comment, the gate appends that case mechanically rather than cycling this phase: only bullet lines (`- Verify that …`) and lines opening with a test verb are read, every other line is dropped, and each appended case is tagged `boundary` / `medium` with `Matches the QA-reported edge case: …` as its Expected unless the line carries its own `expects:` clause. Every other reply cycles this phase, where you rewrite the list yourself under rules 1–6.
 

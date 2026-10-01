@@ -7,8 +7,9 @@
  * is wrong" and "that issue does not exist" demand completely different
  * responses, and a caller that blurs them retries forever against a dead link.
  */
-import { envOr, projectConfig, DRY_RUN } from './config.js';
-import { resolveToken, SETUP_HINT } from './token.js';
+import { envOr, projectConfig, repoIdentity, DRY_RUN } from './config.js';
+import type { GitlabRepo } from './repourl.cjs';
+import { resolveToken, setupHint, type ResolvedToken } from './token.js';
 import { log } from './log.js';
 import type { MrDiscussion } from '../mrfeedback/types.js';
 
@@ -34,24 +35,36 @@ export interface GitlabResult<T> {
  *
  * GITLAB_READ_TOKEN still wins for reads when set, because a read-only PAT is a
  * sensible thing to scope down and it changes no identity: the writes that
- * attribute work are what matter.
+ * attribute work are what matter. It does change VISIBILITY, which is the part
+ * this reasoning originally missed — a read token with no membership on the
+ * project reads an empty board rather than an error, and the desk then claims
+ * nothing while looking healthy. checkReadAccess() below refuses to start on
+ * exactly that.
  */
 function token(): string {
   const read = envOr('GITLAB_READ_TOKEN');
   if (read) return read;
   const t = resolveToken();
-  if (!t.token) throw new Error(`No GitLab token for this desk. ${SETUP_HINT}`);
+  if (!t.token) throw new Error(`No GitLab token for this desk. ${setupHint()}`);
   return t.token;
 }
 
 function writeToken(): string {
   const t = resolveToken();
-  if (!t.token) throw new Error(`No GitLab token for this desk. ${SETUP_HINT}`);
+  if (!t.token) throw new Error(`No GitLab token for this desk. ${setupHint()}`);
   return t.token;
 }
 
 function base(): string { return projectConfig().gitlab.apiUrl; }
-function projectId(): number { return projectConfig().gitlab.projectId; }
+
+/**
+ * The `:id` every project endpoint takes: the URL-encoded path (`group%2Fproject`),
+ * which GitLab accepts wherever it accepts the number. Using it means the project's
+ * identity is exactly one fact — GITLAB_REPO_URL — with no numeric id configured
+ * alongside it to go stale. The number, where something genuinely needs it, is
+ * asked of GitLab: see resolvedProjectId().
+ */
+function projectId(): string { return encodeURIComponent(projectConfig().gitlab.project); }
 
 /**
  * Classify a failure. 5xx counts as "network" for circuit-breaker purposes:
@@ -128,6 +141,118 @@ export async function issuesWithEntryLabel(): Promise<GitlabResult<Issue[]>> {
     'GET',
     `/projects/${projectId()}/issues?state=opened&labels=${label}&per_page=50&order_by=updated_at&sort=asc`,
   );
+}
+
+export interface ReadAccessCheck {
+  /** False only when the read token provably cannot see this project's issues. */
+  ok: boolean;
+  /** Whether GITLAB_READ_TOKEN is set at all — nothing to check when it is not. */
+  scoped: boolean;
+  /** `group/project`, or '' when GITLAB_REPO_URL names none. */
+  project: string;
+  /**
+   * GitLab refused the read token itself (401). Preflight advises differently:
+   * access to the project cannot help a token GitLab no longer accepts.
+   */
+  rejected?: boolean;
+  reason?: string;
+}
+
+/**
+ * Verify that the token doing the READS can actually see this project's board.
+ *
+ * GITLAB_READ_TOKEN wins over the desk credential for every read. Scoping a
+ * read PAT down is sensible; scoping it out of the project entirely is not, and
+ * the two are indistinguishable from the conductor's side. GitLab answers a
+ * list endpoint for a non-member with 200 and an EMPTY ARRAY — never 403 — so
+ * `issuesWithEntryLabel()` comes back clean and empty, the watcher reports "no
+ * tickets carry the entry label", and the desk claims nothing while the banner
+ * prints the project and an identity resolved from a DIFFERENT token. Every
+ * line of that is green. This is the check that tells the two apart.
+ *
+ * It asks the question the board asks — can this token list the project's
+ * issues — rather than reading membership. `permissions.project_access` and
+ * `group_access` are both null for tokens that read the issues perfectly well:
+ * an admin or auditor, a member of a group the project is shared with, a
+ * non-member on an internal project whose issues are public. Refusing those
+ * would break desks that work. An empty answer is only damning when the desk
+ * credential, asked the same question, sees issues the read token does not.
+ *
+ * A 404 or 403 to the read token's probe is fatal: GitLab reached, and that is
+ * how it tells a non-member a private project is not there. A 401 is fatal for
+ * the same reason — GitLab reached, and turned the token itself away as
+ * revoked, expired or mistyped. Booting on one fails every board read, and the
+ * only sign after boot is the watcher's scan error, which blames GITLAB_TOKEN:
+ * the wrong variable. A network error, a 5xx or any other failure is not
+ * fatal. The conductor already survives an offline laptop, and refusing to
+ * boot because a VPN was down would trade a silent failure for a noisy one
+ * that is just as wrong. Neither is a GITLAB_REPO_URL that names no project:
+ * preflight already refuses on that, and asking `projectConfig().gitlab` for
+ * one throws.
+ *
+ * Nothing the desk credential's probe answers is fatal — it is only the
+ * yardstick for an empty answer — so every warning names whose probe failed.
+ * A bare "(notfound, HTTP 404)" read the same for either probe, and a 404 to
+ * the desk passed for the read token's own: the answer that, by the rule
+ * above, refuses. `deskCredential` is resolveToken(), the chain writeToken()
+ * authenticates the desk's probe with, asked first so a warning can say where
+ * that credential lives, and so a desk with none is told so plainly rather
+ * than "(network, HTTP 0)" — which is how call() reports writeToken() throwing.
+ * Tests pass a desk with no credential through it, since no variable can
+ * promise that on a machine with a token file or a keychain entry.
+ */
+export async function checkReadAccess(
+  repo: GitlabRepo | null = repoIdentity().repo,
+  deskCredential: () => ResolvedToken = resolveToken,
+): Promise<ReadAccessCheck> {
+  const project = repo?.project ?? '';
+  const scoped = Boolean(envOr('GITLAB_READ_TOKEN'));
+  if (!scoped) return { ok: true, scoped, project };
+  if (!repo) return { ok: true, scoped, project, reason: 'not checked — GITLAB_REPO_URL names no project' };
+
+  const probe = (useWriteToken: boolean): Promise<GitlabResult<unknown[]>> =>
+    call<unknown[]>('GET', `/projects/${projectId()}/issues?per_page=1`, undefined, useWriteToken);
+  const unverified = (why: string): ReadAccessCheck =>
+    ({ ok: true, scoped, project, reason: `could not be verified: ${why}` });
+  const failed = (res: GitlabResult<unknown>): string => `failed (${res.kind}, HTTP ${res.status})`;
+
+  const read = await probe(false);
+  if (read.status === 401) {
+    return {
+      ok: false,
+      scoped,
+      project,
+      rejected: true,
+      reason: 'GitLab rejected the token itself (HTTP 401): it is revoked, expired or mistyped',
+    };
+  }
+  if (read.kind === 'notfound' || read.status === 403) {
+    return { ok: false, scoped, project, reason: `GitLab answered HTTP ${read.status} to it` };
+  }
+  if (!read.ok) return unverified(`the probe made with GITLAB_READ_TOKEN ${failed(read)}`);
+  if (read.data?.length) return { ok: true, scoped, project };
+
+  // The read token listed nothing. From here only the desk is being asked, so
+  // whatever goes wrong is the desk's, and the warning says so.
+  const deskToken = deskCredential();
+  if (!deskToken.token) {
+    return unverified('this desk has no GitLab token of its own, so GITLAB_READ_TOKEN\'s empty answer '
+      + 'could not be compared against one');
+  }
+  const desk = await probe(true);
+  if (!desk.ok) {
+    return unverified(`the probe made with the desk credential (${deskToken.where}) ${failed(desk)}, `
+      + 'so GITLAB_READ_TOKEN\'s empty answer could not be compared against it');
+  }
+  if (desk.data?.length) {
+    return {
+      ok: false,
+      scoped,
+      project,
+      reason: 'it lists no issues where the desk credential lists some, so every board read returns empty',
+    };
+  }
+  return { ok: true, scoped, project };
 }
 
 export interface IssueNote {
@@ -372,11 +497,22 @@ export async function swapLabel(
   );
 }
 
-export interface Branch { name: string; protected: boolean; commit: { id: string } }
+export interface Label { name: string }
 
-export function listBranches(): Promise<GitlabResult<Branch[]>> {
-  return call<Branch[]>('GET', `/projects/${projectId()}/repository/branches?per_page=100`);
+/**
+ * Every label defined on the project.
+ *
+ * Oneshot never creates a label, and every label check it performs is by NAME
+ * against whatever the ticket carries — so a name that is misspelled, renamed
+ * on the board, or never created simply never matches. Nothing raises: a swap
+ * writes a label the board does not show, and a `labelSkills` pair silently
+ * stops routing. This is the one call that can turn that into a sentence.
+ */
+export function listLabels(): Promise<GitlabResult<Label[]>> {
+  return call<Label[]>('GET', `/projects/${projectId()}/labels?per_page=100`);
 }
+
+export interface Branch { name: string; protected: boolean; commit: { id: string } }
 
 export function getBranch(name: string): Promise<GitlabResult<Branch>> {
   return call<Branch>(
@@ -712,14 +848,39 @@ export function mergeRefusal(res: GitlabResult<unknown>): MergeRefusal {
   return 'other';
 }
 
-/** Cheapest possible authenticated call — the reachability probe. */
-export async function ping(): Promise<GitlabResult<{ id: number }>> {
-  return call<{ id: number }>('GET', `/projects/${projectId()}?statistics=false`);
+let numericId: number | null = null;
+
+function remember(res: GitlabResult<{ id: number }>): void {
+  if (res.ok && typeof res.data?.id === 'number') numericId = res.data.id;
 }
 
+/** Cheapest possible authenticated call — the reachability probe. */
+export async function ping(): Promise<GitlabResult<{ id: number }>> {
+  const res = await call<{ id: number }>('GET', `/projects/${projectId()}?statistics=false`);
+  // The probe already carries the numeric id, so the first healthy tick
+  // answers resolvedProjectId() for free.
+  remember(res);
+  return res;
+}
+
+/**
+ * The project's NUMERIC id, asked of GitLab once and then remembered; null when
+ * GitLab could not be asked.
+ *
+ * Only for what the API cannot do with a path: recognising this project's own
+ * `/-/project/<id>/uploads/…` links in a ticket (src/lib/ticketdocs.ts). It is
+ * deliberately not configuration — a configured id is a second statement of the
+ * project's identity, and the one that silently goes stale when the first moves.
+ * A failure is not remembered, so the next caller asks again.
+ */
+export async function resolvedProjectId(): Promise<number | null> {
+  if (numericId === null) remember(await ping());
+  return numericId;
+}
+
+/** The project's web URL, scheme and any explicit port included, as GITLAB_REPO_URL gives them. */
 export function projectUrl(): string {
-  const c = projectConfig();
-  return `https://${c.gitlab.host}/${c.gitlab.project}`;
+  return projectConfig().gitlab.webUrl;
 }
 
 export function issueUrl(iid: number): string {

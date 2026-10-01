@@ -14,6 +14,34 @@ Covers three mandatory rules for every MR/PR that is created:
 
 ---
 
+## When the GitLab tools are absent
+
+The MR is normally opened through the GitLab MCP tools, and sometimes they are simply
+not in the toolset — three runs hit this (`GitLab MCP tools are absent from my
+toolset`), and `ONESHOT_DRY_RUN` or a failed MCP spawn both cause it. It is not a dead
+end and not a verdict on the ticket:
+
+1. Push the branch — that needs no MCP tool — **unless `ONESHOT_DRY_RUN=1`**. A dry run
+   is not allowed to reach the remote: the git guard refuses the push, and nothing will
+   open the MR afterwards either. Under a dry run, report the branch name and the
+   commits you would have pushed instead.
+2. Produce the title this skill defines. Inside Oneshot the phase's structured output
+   carries a `title` but has no field for a description, so the description cannot
+   travel: put it in `summary`, and say plainly that the MR body still needs a human.
+3. State plainly that the GitLab tools are absent and the MR itself must be opened by
+   the caller.
+
+Inside Oneshot's `mr` phase, the phase prompt wins where it is more specific: set
+`blocked` naming the absent tools. Outside a dry run the conductor then opens the MR in
+code from the pushed branch — reusing the Draft `mr-open` already opened when there is
+one, otherwise with your title and a description it composes itself from the ticket
+and the changed files. Under a dry run nobody opens it.
+
+What wastes a session is stopping at the missing tool with no title and, outside a dry
+run, no pushed branch, leaving the caller to redo the work.
+
+---
+
 ## Rule 1 — MR Title
 
 **The title must summarise the whole branch's changes — not just the last commit.**
@@ -167,6 +195,8 @@ Place the closes line at the **very top** of the description, before all other c
 - [ ] No migrations required (or migrations included)
 ```
 
+If the MR adds or changes a management command that needs to run on a schedule, add an explicit "Ops action required" checklist item (exact `manage.py` invocation + target servers) instead of assuming DevOps will infer it — fill in `.claude/skills/django-scheduled-jobs/templates/ops-checklist.md`.
+
 ### Updating an existing MR description
 
 When adding new changes to an MR that already has a description (e.g. an existing Adhoc branch with prior commits):
@@ -287,7 +317,14 @@ These rules apply to **every** MR/PR creation path:
 
 These govern **opening an MR**. They do not govern posting to an MR that already exists — a changelog or QA guide on an open MR is `mr-change-logger`'s job, and that skill deliberately never creates a ticket and never blocks on a missing one. When both skills are loaded in the same session, each applies to its own object: this skill owns the title and the closes line at creation time; `mr-change-logger` owns what gets posted afterwards and never overrides a closes line this skill set.
 
-- Never fabricate a ticket URL — only use URLs confirmed via session context, the GitLab API response, or user input.
-- Never skip the closes line — if no ticket exists yet, create one (after asking) rather than omitting it. (Exception: the automated docs / chore-sync case above creates the ticket non-interactively, without asking — it still gets a closes line.)
-- Never pick an unrelated ticket just to satisfy the requirement.
-- Never print `GITLAB_TOKEN` to the user.
+The `mr-gate` hook refuses an MR whose title carries a conventional-commit
+prefix or whose description has no `[closes <url>]` line, so neither can be
+forgotten.
+
+What no gate can check is whether the ticket is the RIGHT one, and that is the
+rule that matters most here:
+
+- Never fabricate a ticket URL — only use URLs confirmed via session context, the GitLab API response, or user input. A gate sees a well-formed link, not a real one.
+- Never pick an unrelated ticket just to satisfy the requirement. A closes line pointing at the wrong ticket is worse than none: it closes someone else's work.
+- If no ticket exists yet, create one (after asking) rather than omitting it. (Exception: the automated docs / chore-sync case above creates the ticket non-interactively, without asking — it still gets a closes line.)
+- Never print `GITLAB_TOKEN` to the user. `secret-guard` refuses the obvious reads of this repo's `.env` and the session environment does not carry the token, but neither is a guarantee — the rule is yours to keep.

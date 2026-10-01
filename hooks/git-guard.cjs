@@ -9,9 +9,9 @@
  * the Bash surface inside the implement/verify phases, and it is stricter:
  *
  *   - no force-push, ever, to anything
- *   - no push to a protected branch. 'main' is in that list even though
- *     GitLab currently reports can_push=true for our token on project 1491 —
- *     the server would accept the push and it must still be refused
+ *   - no push to a protected branch. 'main' is in that list whatever GitLab
+ *     reports for our token — on a project where it is unprotected or says
+ *     can_push=true, the server would accept the push and it must still be refused
  *   - no push to any ref other than this run's leased branch
  *   - no deleting protected branches, local or remote
  *   - no `git remote set-url` (repointing origin defeats every other rule)
