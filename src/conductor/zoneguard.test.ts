@@ -329,11 +329,26 @@ test('a file moved out of a red area counts at the path it left', () => {
   }
 });
 
+test('a branch not cut yet has nothing outside its zone', () => {
+  // A resume whose recorded worktree was dropped reaches implement before the
+  // lease that cuts the branch; there is nothing on it to judge yet.
+  const dir = workRepo();
+  try {
+    assert.deepEqual(branchFiles('oneshot/not-cut-yet', { repo: dir, base: 'dev' }), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a branch git cannot diff stops the run rather than passing it', () => {
   const dir = workRepo();
   try {
-    const changed = branchFiles('oneshot/no-such-branch', { repo: dir, base: 'dev' });
+    git(dir, 'branch', 'oneshot/ticket-3');
+    git(dir, 'update-ref', '-d', 'refs/remotes/origin/dev');
+    const changed = branchFiles('oneshot/ticket-3', { repo: dir, base: 'dev' });
     assert.equal(changed, null);
+    assert.equal(branchFiles('oneshot/ticket-3', { repo: join(dir, 'missing'), base: 'dev' }), null,
+      'a repo git cannot open is not an empty branch');
     const v = zoneVerdict(['AI', 'Loop'], changed, read, ZONES);
     assert.match(v.unreadable ?? '', /diff cannot be read/);
     assert.match(zoneBlockReason(v, ZONES), /or remove AI to run under the review gates$/);

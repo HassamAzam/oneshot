@@ -196,7 +196,7 @@ export function loadZoneMap(
 
 /**
  * Every file the branch changes against the base, from git rather than from
- * any phase's account of itself; null when git cannot say.
+ * any phase's account of itself; null when git cannot say, which stops the run.
  *
  * The check before review used to read declaredFiles(): the plan's steps plus
  * the `filesChanged` the implement session writes into implement.json. That
@@ -211,19 +211,29 @@ export function loadZoneMap(
  * not counted as the branch's work; the base is fetched first in case the
  * branch merged a newer one. --no-renames, so a file moved out of a red area
  * shows at the path it left: moving it is touching it. -z, so a path git would
- * quote (a non-ASCII name) arrives as written and still matches its area. Run
- * in WORK_REPO by branch name, not in the worktree, which a resumed run that
- * dropped its worktree does not have yet.
+ * quote (a non-ASCII name) arrives as written and still matches its area.
+ *
+ * By branch name, in the run's worktree when it has one (the checkout the
+ * branch lives in, whichever clone it was cut from) and in WORK_REPO when it
+ * has none yet, as on a resume whose recorded worktree was gone or dropped.
+ * A branch that does not exist there yet has no commits, so no files: the
+ * lease will cut it fresh from origin/<base>. Only that answer from git (exit
+ * 1 from `rev-parse --verify --quiet`) means empty; any other failure is null.
  */
 export function branchFiles(
   branch: string, { repo = WORK_REPO, base = projectConfig().branches.base }: GitSource = {},
 ): string[] | null {
   if (!repo || !branch) return null;
+  const git = (args: string[]): string => execFileSync('git', ['-C', repo, ...args],
+    { encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
+  } catch (err) {
+    return (err as { status?: unknown }).status === 1 ? [] : null;
+  }
   fetchBase(repo, base);
   try {
-    return execFileSync('git', ['-C', repo, 'diff', '--name-only', '--no-renames', '-z', `origin/${base}...${branch}`],
-      { encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] })
-      .split('\0').filter(Boolean);
+    return git(['diff', '--name-only', '--no-renames', '-z', `origin/${base}...${branch}`]).split('\0').filter(Boolean);
   } catch {
     return null;
   }

@@ -1119,7 +1119,7 @@ export async function runTicket(
         try {
           const declared = declaredFiles(prior.plan ?? readArtifact(iid, 'plan.json'),
             due === 'diff' ? prior.implement ?? readArtifact(iid, 'implement.json') : null);
-          const changed = branchFiles(branch);
+          const changed = branchFiles(branch, { repo: worktree });
           zone = zoneVerdict(ticket.labels, changed && [...declared, ...changed], zoneRead);
         } catch (err) {
           // A throw here used to escape runTicket with no finish(): the ticket kept
