@@ -568,3 +568,23 @@ test('the switch sits outside an approved design, so Design and Beta together as
     assert.match(flat(phase), /it is never a departure from the design/, phase);
   }
 });
+
+test('on a Design and Beta ticket the design pair is v2 below the switch, said before any row is filled', () => {
+  // The conformance block asks for every departure, small ones too, and comes
+  // before the beta block; read top-down, the switch the mockups never drew is a
+  // departure on every screen unless the block itself says otherwise.
+  const designed = (labels: string[]): string => promptFor(cfg('ui-evidence'), {
+    ...ctx(ticket({ labels })),
+    journal: { designApproval: { requestTs: 'x', approved: true, feedback: [] } },
+    prior: { design: DESIGN },
+  } as unknown as PromptCtx).replace(/\s+/g, ' ');
+  const p = designed(['Beta', 'Loop']);
+  const pointer = p.indexOf('This ticket is a beta: pair each approved screen against v2, reached through the switch');
+  assert.ok(pointer > p.indexOf('## Pair the shipped screens against the approved design'), 'pointer outside the block');
+  assert.ok(pointer < p.indexOf('carries **Beta**'), 'pointer after the beta block');
+  assert.match(p, /so leave it out of `differences`/);
+
+  const plain = designed(['Loop']);
+  assert.match(plain, /is this what I approved/);
+  assert.doesNotMatch(plain, /pair each approved screen against v2/);
+});
