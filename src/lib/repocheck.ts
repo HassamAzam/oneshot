@@ -34,6 +34,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import {
   REPO_URL_VAR, defaultWtRoot, expandPath, judgeOrigin as judgeOriginCjs, legacySelectors, originProject,
@@ -165,6 +166,41 @@ export function checkoutFindings(
     out.push(originFinding({ label: 'ONESHOT_SEED_FROM', from: p.sources.ONESHOT_SEED_FROM }, p.seed, env, read));
   }
   return out.filter((f): f is Finding => f !== null);
+}
+
+/** Where people keep checkouts, under the home directory; '' is home itself. */
+const CHECKOUT_BASES = ['Documents', 'Desktop', 'code', 'work', 'repos', 'projects', 'src', ''];
+
+/**
+ * A checkout of `repoUrl`'s project on this machine, or '' when none is found.
+ *
+ * Exists so a missing WORK_REPO can be answered with the path the person
+ * actually has, not only with advice to clone into the one they were told to
+ * type. Matched by ORIGIN, never by directory name: a folder called `erp` that
+ * is a clone of `erp-mobile` is not the project, and the layouts people really
+ * use (~/Desktop/workstream-repo/erp) are not guessable from the name. Looks
+ * for `<base>/<name>` and one level deeper, `<base>/<any>/<name>`, which covers
+ * every layout seen so far without walking the whole home directory.
+ */
+export function findCheckout(
+  repoUrl: string, name: string, home: string = homedir(), read: (d: string) => OriginRead = readOrigin,
+): string {
+  if (!repoUrl || !name) return '';
+  const isClone = (dir: string): boolean =>
+    existsSync(join(dir, '.git')) && checkoutProject(dir, repoUrl, read).kind === 'same';
+  for (const b of CHECKOUT_BASES) {
+    const base = b ? join(home, b) : home;
+    if (!existsSync(base)) continue;
+    if (isClone(join(base, name))) return join(base, name);
+    let entries: string[] = [];
+    try { entries = readdirSync(base); } catch { continue; }
+    for (const entry of entries) {
+      if (entry.startsWith('.')) continue;
+      const nested = join(base, entry, name);
+      if (isClone(nested)) return nested;
+    }
+  }
+  return '';
 }
 
 // ------------------------------------------------------------------ WT_ROOT

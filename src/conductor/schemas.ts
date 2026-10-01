@@ -14,6 +14,7 @@
 import { ADDRESSED_FEEDBACK_PROP, MR_FEEDBACK_PROPS } from '../mrfeedback/schema.js';
 import { FILE_ACTIONS, FILE_AREAS } from '../lib/planfiles.js';
 import { FLOW_CHANGES, FLOW_KINDS } from '../lib/planflow.js';
+import { BLOCKERS } from './reproduction.js';
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -166,8 +167,22 @@ export const RESEARCH_SCHEMA = phaseSchema({
       observed: str('What actually happened when you ran the steps — concrete values, not impressions.'),
       evidence: strArr('Bare filenames of screenshots written to the run artifacts dir, plus any measurement. For reproduced and not-reproduced the screenshots are attached to the ticket comment.'),
       reason: str('Why this verdict. For inconclusive or not-applicable, what stopped you.'),
+      blocker: {
+        type: 'string',
+        enum: [...BLOCKERS],
+        description:
+          'WHAT stopped you, when the verdict is inconclusive. `none` for every other verdict. ' +
+          'env: the app, the login or the harness (a named E_ code belongs in reason). ' +
+          'data: no record of the shape the bug needs exists on this database. ' +
+          'access: the role, permission or feature flag that reaches the screen. ' +
+          'surface: a browser, device or viewport the ticket names and this machine has not. ' +
+          'steps: the reported steps are too vague to follow faithfully. ' +
+          'flake: behaviour that would not hold still long enough to observe. ' +
+          'Without this the run records only THAT reproduction stopped, never why, so "the app ' +
+          'would not start" and "this is a feature request" are indistinguishable afterwards.',
+      },
     },
-    required: ['kind', 'verdict', 'testedCommit', 'account', 'steps', 'expected', 'observed', 'evidence', 'reason'],
+    required: ['kind', 'verdict', 'testedCommit', 'account', 'steps', 'expected', 'observed', 'evidence', 'reason', 'blocker'],
   },
 }, ['understanding', 'acceptanceCriteria', 'codePath', 'blastRadius', 'uiPath', 'unknowns', 'module', 'reproduction']);
 

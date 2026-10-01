@@ -30,7 +30,7 @@ import {
   auditAuth, envOr, pathSources, phases, portPool, projectConfig, repoIdentity, seedFrom, slackConfig,
 } from './lib/config.js';
 import {
-  checkoutFindings, identityFindings, relaxRepoChecks, repoCheckOverrideNotice, wtRootFinding, type Finding,
+  checkoutFindings, findCheckout, identityFindings, relaxRepoChecks, repoCheckOverrideNotice, wtRootFinding, type Finding,
 } from './lib/repocheck.js';
 import { foreignJournalFinding } from './lib/journalproject.js';
 import { activeRunsFleet, logEvent, reconcileForeignRuns } from './lib/db.js';
@@ -44,7 +44,7 @@ import {
   deregister, heartbeat, liveConductorIds, liveConductors, peersEverSeen, register,
 } from './lib/fleet.js';
 import { renewPromotion } from './lib/promotion.js';
-import { getIssue, projectUrl } from './lib/gitlab.js';
+import { checkReadAccess, getIssue, projectUrl } from './lib/gitlab.js';
 import { alert } from './lib/slack.js';
 import { checkIdentity, describeIdentity } from './lib/identity.js';
 import { log } from './lib/log.js';
@@ -266,10 +266,6 @@ async function banner(): Promise<void> {
 }
 
 /**
- * Refuse to start on a misconfiguration that would only surface as a confusing
- * failure three phases into a real ticket.
- */
-/**
  * Make sure something is shipping this desk's runs to the board.
  *
  * The conductor and the collector are separate processes by design — the
@@ -304,7 +300,11 @@ function ensureCollector(): void {
   }
 }
 
-function preflight(): boolean {
+/**
+ * Refuse to start on a misconfiguration that would only surface as a confusing
+ * failure three phases into a real ticket.
+ */
+async function preflight(): Promise<boolean> {
   let fatal = false;
 
   const auth = auditAuth();
@@ -338,9 +338,44 @@ function preflight(): boolean {
     fatal = true;
   }
 
+  const readAccess = await checkReadAccess(repo);
+  if (readAccess.rejected) {
+    log.error(`GITLAB_READ_TOKEN cannot read ${readAccess.project} — ${readAccess.reason}.`);
+    log.error('  Reads prefer that token, so every board read is refused. Replace it, or unset');
+    log.error('  GITLAB_READ_TOKEN so reads fall back to this desk\'s own credential.');
+    fatal = true;
+  } else if (!readAccess.ok) {
+    log.error(`GITLAB_READ_TOKEN cannot see ${readAccess.project} — ${readAccess.reason}.`);
+    log.error('  Reads prefer that token, so the board comes back empty and this desk claims');
+    log.error('  nothing, while the banner above reports a project and an identity resolved');
+    log.error('  from GITLAB_TOKEN instead. Either give it access to the project, or unset');
+    log.error('  GITLAB_READ_TOKEN so reads fall back to this desk\'s own credential.');
+    fatal = true;
+  } else if (readAccess.reason) {
+    log.warn(`GITLAB_READ_TOKEN access ${readAccess.project ? `to ${readAccess.project} ` : ''}${readAccess.reason}`);
+  }
+
   if (!WORK_REPO || !existsSync(WORK_REPO)) {
     log.error(`WORK_REPO does not exist: ${WORK_REPO || '(no path — GITLAB_REPO_URL is what derives one)'}`);
-    if (repo && WORK_REPO) log.error(`  git clone ${repo.sshUrl} ${WORK_REPO}`);
+    if (repo && WORK_REPO) {
+      // A path set in .env did not come from a missing clone, so cloning INTO
+      // it is advice for the wrong problem — worse when the value is a
+      // documented example pasted as-is. Name the line, and any checkout of
+      // this project the machine already has.
+      const sources = pathSources();
+      const key = sources.WORK_REPO.key || 'WORK_REPO';
+      const found = findCheckout(repo.url, repo.name);
+      if (found) {
+        log.error(`  your ${repo.project} checkout looks like it is at: ${found}`);
+        log.error(`  set it in .env:  ${key}=${found}`);
+        if (seedFrom() === WORK_REPO) {
+          log.error(`  and ${sources.ONESHOT_SEED_FROM.key || 'ONESHOT_SEED_FROM'}, which names the same missing path`);
+        }
+      } else {
+        if (sources.WORK_REPO.source !== 'default') log.error(`  ${key} in .env sets this path. Point it at your checkout, or clone:`);
+        log.error(`  git clone ${repo.sshUrl} ${WORK_REPO}`);
+      }
+    }
     fatal = true;
   } else if (repo) {
     // The stale-clone guard: a WORK_REPO or ONESHOT_SEED_FROM line left over
@@ -596,7 +631,7 @@ async function main(): Promise<void> {
   if (ensureClaudeDir(ROOT).length) log.ok('.claude    composed in the conductor repo');
 
   await banner();
-  if (!preflight()) process.exit(1);
+  if (!(await preflight())) process.exit(1);
   ensureCollector();
   // Before the first ticket is even looked at: one warm app for this loop, in its own
   // worktree. It is the shared babel cache under the seed repo's node_modules that

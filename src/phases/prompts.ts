@@ -25,7 +25,7 @@ import {
   type PhaseConfig,
 } from '../lib/config.js';
 import { join } from 'node:path';
-import { readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
+import { approvalCovers, readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import {
@@ -584,6 +584,20 @@ export function touchesRenderedUi(files: string[]): boolean {
     && !/\.test\.[jt]sx?$/.test(f));
 }
 
+/**
+ * What the `mr` prompt may say about an MR opened before it. Only a pipeline
+ * that carries `mr-open` has one waiting as a Draft; on any other target the
+ * claim would send the session hunting for an MR that cannot exist.
+ */
+export function mrOpenNote(mrOpenRuns: boolean): string {
+  if (!mrOpenRuns) return '';
+  return ` There will USUALLY be one: \`mr-open\` opened a **Draft** the moment
+   the code existed, so the gates before you had a diff to read. Updating it is the normal path
+   and creating a second one is the mistake. Two things you own that it could not:
+   the real description, and taking the \`Draft:\` prefix off the title — a draft cannot be
+   merged, so leaving it is how this run ends parked at \`merge\`.`;
+}
+
 /** Highest F-NN already issued, so a later lap continues the numbering. */
 function maxFindingId(list: Finding[]): number {
   return list.reduce((m, f) => Math.max(m, Number(String(f.id).replace(/\D+/g, '')) || 0), 0);
@@ -634,12 +648,13 @@ function approvedDesignBlock(ctx: PromptCtx): string {
       + `  - design: \`${join(dir, x.mockupHtml)}\`\n`
       + `  - rendered: \`${join(dir, x.screenshot)}\`${x.note ? `\n  - ${x.note}` : ''}`)
     .join('\n');
-  const approved = ctx.journal.designApproval?.approved === true;
+  const approved = ctx.journal.designApproval?.approved === true
+    && approvalCovers(ctx.journal.designApproval, ctx.prior.design);
 
   return `\n## The approved design — this is the specification
 ${approved
     ? 'A human approved these screens on the ticket before any of this was planned.'
-    : 'These screens were designed for this ticket. (No approval is recorded yet.)'}
+    : 'These screens were designed for this ticket. (No approval covers this version of them yet.)'}
 Build to them: the same layout, the same states, the same copy, and the same values from
 \`${join(dir, d.tokensFile ?? 'tokens.css')}\` rather than new ones. Where the design and your own
 judgement disagree, the design won the argument already — if it is genuinely wrong, say so
@@ -1656,7 +1671,15 @@ impossible.`;
     // Only a design a human signed off on is worth pairing against. An
     // unapproved one is a draft, and "the build departs from the draft" is not
     // a finding — the run never promised to match it.
-    const conformance = ctx.journal.designApproval?.approved && designed.length
+    //
+    // approvalCovers() is the second half of that: this block tells the
+    // reviewer "a human approved these screens before the code was written",
+    // and design.json can be rewritten after the sign-off. Saying it about
+    // screens nobody approved is worse than saying nothing, so a stale approval
+    // drops the block rather than captioning the wrong thing as approved.
+    const approvedDesign = ctx.journal.designApproval?.approved
+      && approvalCovers(ctx.journal.designApproval, ctx.prior.design);
+    const conformance = approvedDesign && designed.length
       ? `
 ## Pair the shipped screens against the approved design
 This ticket went through the \`design\` gate: a human approved these screens before the code was
@@ -1812,11 +1835,7 @@ regressions found: ${(v.regressions ?? []).join('; ') || 'none'}
 Push this run's branch and open the merge request.
 
 1. LOOK FOR AN EXISTING MR for source branch \`${ctx.branch ?? '(unleased)'}\` before you create
-   anything. There will USUALLY be one: \`mr-open\` opened a **Draft** the moment the code
-   existed, so the gates before you had a diff to read. Updating it is the normal path and
-   creating a second one is the mistake. Two things you own that it could not:
-   the real description, and taking the \`Draft:\` prefix off the title — a draft cannot be
-   merged, so leaving it is how this run ends parked at \`merge\`. This run may be a resumption${ctx.journal.mrIid ? ` — the journal already records !${ctx.journal.mrIid}` : ''}, and a second MR for one branch is a mess
+   anything.${mrOpenNote(Boolean(phaseByName('mr-open')))} This run may be a resumption${ctx.journal.mrIid ? ` — the journal already records !${ctx.journal.mrIid}` : ''}, and a second MR for one branch is a mess
    a human has to clean up. If one exists, you are updating it, not opening another: return ITS
    iid and url and say so in \`summary\`.
 
