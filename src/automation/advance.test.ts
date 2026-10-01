@@ -26,7 +26,9 @@
  *
  * Journals live under STATE/automation/<IID> like journal.test.ts's, with an
  * invented iid, and are removed afterwards together with the event rows this
- * file's runs log.
+ * file's runs log in the database. The readiness script runs with a scratch
+ * ONESHOT_HOME (AutomationOpts.guardEnv), so the verdicts it appends to
+ * hook-events.jsonl go to a temp dir, not this checkout's live state/.
  */
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -35,6 +37,7 @@ import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Issue } from '../lib/gitlab.js';
+import { scratchHome } from '../lib/test-scratch-home.js';
 
 const T = 'Ready For Automation';
 const L = 'Loop';
@@ -116,8 +119,12 @@ const J = await import('./journal.js');
 const { getIssue } = await import('../lib/gitlab.js');
 const { db } = await import('../lib/db.js');
 
+const scratch = scratchHome();
 // Never the machine's real state/PAUSE: an operator's pause must not change what these assert.
-const opts = { conductor: 'test-conductor', signal: new AbortController().signal, paused: () => false };
+const opts = {
+  conductor: 'test-conductor', signal: new AbortController().signal, paused: () => false,
+  guardEnv: { ONESHOT_HOME: scratch.home },
+};
 const MERGED = {
   iid: 51, project_id: 7, state: 'merged', source_branch: 'fix/profile', target_branch: 'dev',
   merged_at: '2026-09-20T00:00:00Z', title: 'Fix profile', web_url: 'http://127.0.0.1/mr/51',
@@ -128,6 +135,7 @@ after(() => {
   rmSync(J.automationDir(IID), { recursive: true, force: true });
   for (const id of runIds) db.prepare('DELETE FROM events WHERE run_id = ?').run(id);
   db.prepare('DELETE FROM events WHERE detail LIKE ?').run(`%"iid":${IID}%`);
+  scratch.cleanup();
   server.close();
 });
 

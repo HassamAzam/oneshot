@@ -136,6 +136,13 @@ export interface AutomationOpts {
   conductor: string;
   signal: AbortSignal;
   /**
+   * Extra env for the readiness script, merged last (runAutomationReadyGuard's
+   * `override`). Tests point its ONESHOT_HOME at a scratch home: the script
+   * appends its verdict to $ONESHOT_HOME/state/hook-events.jsonl, and the
+   * default home is this checkout's live state/.
+   */
+  guardEnv?: Record<string, string>;
+  /**
    * Whether the operator has paused this machine. Default: state/PAUSE exists.
    * A test answers it directly, because touching the real file pauses every
    * phase in flight on the machine.
@@ -470,7 +477,7 @@ function describeMrs(ms: MrRef[]): string {
  * caller holds on.
  */
 async function checkReadiness(ctx: Ctx): Promise<Readiness> {
-  return readinessFromHookOutput(await runAutomationReadyGuard(ctx.iid), ctx.iid);
+  return readinessFromHookOutput(await runAutomationReadyGuard(ctx.iid, ctx.opts.guardEnv), ctx.iid);
 }
 
 /**

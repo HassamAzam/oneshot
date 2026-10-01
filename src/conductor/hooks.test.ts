@@ -20,11 +20,9 @@ import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { DRY_RUN, ROOT } from '../lib/config.js';
+import { DRY_RUN } from '../lib/config.js';
 import { editIssueLabels, issuesWithLabel, readToken } from '../lib/gitlab.js';
+import { scratchHome } from '../lib/test-scratch-home.js';
 import { AUTOMATION_PHASE, readinessFromHookOutput } from '../automation/readiness.js';
 import { guardTimeoutMs, hooksFor, runAutomationReadyGuard } from './hooks.js';
 
@@ -59,17 +57,6 @@ test('the readiness script gives its own answer before runGuard kills it', () =>
   assert.equal(guardTimeoutMs('pause-check.cjs'), 15_000);
   assert.equal(guardTimeoutMs('py-lint.cjs'), 60_000);
 });
-
-/**
- * A throwaway ONESHOT_HOME whose config/ is this repo's, so the spawned script
- * reads the real labels and branch policy but writes its event log to a temp
- * dir instead of this checkout's state/.
- */
-function scratchHome(): { home: string; cleanup: () => void } {
-  const home = mkdtempSync(join(tmpdir(), 'oneshot-ready-'));
-  symlinkSync(join(ROOT, 'config'), join(home, 'config'));
-  return { home, cleanup: () => rmSync(home, { recursive: true, force: true }) };
-}
 
 test('runAutomationReadyGuard with GitLab unreachable reads as unknown, with the reason', async () => {
   const { home, cleanup } = scratchHome();
