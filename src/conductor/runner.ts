@@ -1637,6 +1637,10 @@ export async function runTicket(
           kind: 'stop',
           status: 'blocked',
           reason: 'subscription usage limit — parked until the window resets',
+          // The limit is the account's, and the remediate session would hit it
+          // on its first turn. Offering it the stop only records a second,
+          // misleading remediation against a block that clears on its own.
+          noRemediation: true,
         }, r.cfg.name);
         continue;
       }
