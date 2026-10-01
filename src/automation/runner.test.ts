@@ -15,13 +15,13 @@ import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
-import { DRY_RUN, automationConfig, projectConfig } from '../lib/config.js';
+import { DRY_RUN, automationConfig, automationTriggerLabel, projectConfig } from '../lib/config.js';
 import { editIssueLabels, type Issue, type IssueNote } from '../lib/gitlab.js';
 import { CANCELLED_BY_CONDUCTOR, NO_STRUCTURED_OUTPUT, type PhaseOutput } from '../conductor/phase.js';
 import type { AutomationJournal, VersionRecord } from './journal.js';
 import {
   AUTOMATION_DENY, automationScan, automationTick, doneLabelEdit, isNearApproval,
-  nextStep, outcomeLine, reviewVerdict, runAutomationOnce, scanFilter, sessionCharge, stuckReleased,
+  nextStep, outcomeLine, reviewVerdict, runAutomationOnce, scanFilter, sessionCharge, sheetConfigProblem, stuckReleased,
 } from './runner.js';
 import { automationDir, readAutoJournal } from './journal.js';
 
@@ -181,6 +181,14 @@ test('--automation on a ticket without Loop says there is nothing to do, and rea
       rmSync(automationDir(iid), { recursive: true, force: true });  // only there if this failed
     }
   }
+});
+
+test('the shipped sheet is a placeholder the preflight refuses by name, and the Loop still routes on the trigger', () => {
+  const cfg = automationConfig();
+  assert.match(sheetConfigProblem(cfg.sheet) ?? '', /spreadsheetId is still the placeholder \(REPLACE_ME\)/);
+  assert.equal(automationTriggerLabel(), TRIGGER, 'a placeholder sheet must not switch the routing off');
+  // Invented, shaped like a real id.
+  assert.equal(sheetConfigProblem({ ...cfg.sheet, spreadsheetId: '1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd' }), null);
 });
 
 test('finishing takes Automation Test Case Review AND Loop off and puts Automation Done on, in one edit', async () => {

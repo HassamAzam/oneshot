@@ -48,6 +48,7 @@ import {
   projectConfig, reviewersConfig, type AutomationConfig,
 } from '../lib/config.js';
 import { currentProjectKey } from '../lib/journalproject.js';
+import { isPlaceholder } from '../lib/repourl.cjs';
 import {
   addIssueNote, allIssueNotes, editIssueLabels, getIssue, issueNotes, issueUrl, issuesWithLabel, readToken, uploadFile,
   type GitlabResult, type Issue, type IssueNote,
@@ -1488,6 +1489,23 @@ export async function runAutomationOnce(iid: number, opts: AutomationOpts): Prom
 }
 
 /**
+ * Pure. Why the configured sheet cannot be written to yet, or null.
+ *
+ * config/project.json ships `spreadsheetId` as the placeholder REPLACE_ME,
+ * because which sheet approved cases are filed in is a decision. A real id
+ * that is not the team's sheet would have the first desk to switch the mode
+ * on file cases there, flip tickets to done and tell QA "filed" for a sheet
+ * QA does not read. Refusing it here, and not in automationConfig(), keeps
+ * the Loop's routing of trigger-labelled tickets on: automationTriggerLabel()
+ * turns that off on any automationConfig() error.
+ */
+export function sheetConfigProblem(sheet: AutomationConfig['sheet']): string | null {
+  if (!isPlaceholder(sheet.spreadsheetId)) return null;
+  return `config/project.json automation.sheet.spreadsheetId is still the placeholder (${sheet.spreadsheetId}) — `
+    + 'set it, and trackerTab, to the sheet approved cases belong in before switching this mode on';
+}
+
+/**
  * Problems that keep the mode off (Loop unaffected). Includes one read-only spreadsheets.get.
  * Each is a sentence saying what is wrong and, where there is one, what to do.
  */
@@ -1519,7 +1537,9 @@ export async function automationPreflight(): Promise<string[]> {
   } catch (err) {
     problems.push(`${errText(err)} — the conductor reads the ticket and the merged change with it`);
   }
-  if (cfg && email) {
+  const sheetProblem = cfg ? sheetConfigProblem(cfg.sheet) : null;
+  if (sheetProblem) problems.push(sheetProblem);
+  if (cfg && email && !sheetProblem) {
     const s = await getSpreadsheet(cfg.sheet.spreadsheetId, saFile);
     if (!s.ok) {
       problems.push(`cannot read sheet ${cfg.sheet.spreadsheetId} as ${email} (${s.kind}): ${s.error}`

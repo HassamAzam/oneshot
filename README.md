@@ -404,11 +404,12 @@ nobody.
 
 - **Switching it on.** `ONESHOT_AUTOMATION=1` in `.env`, on **one desk only**: the per-ticket lock
   is a local file, so two desks would each spend a session on the same ticket. Boot runs a
-  preflight (config, the service-account key, the phase and its schema, the hook, the QA list,
-  this desk's GitLab read token, and one read of the sheet); any problem turns the mode off for
-  that process and leaves the Loop as it was. `npm start -- --automation <iid>` runs one pass for
-  one ticket and exits, with or without the switch, and refuses to start on a preflight problem;
-  on a ticket missing `Loop` or `Ready For Automation` it says there is nothing to do.
+  preflight (config, the service-account key, the phase and its schema, the readiness script, the
+  QA list, this desk's GitLab read token, a sheet id that is not the placeholder, and one read of
+  the sheet); any problem turns the mode off for that process and leaves the Loop as it was.
+  `npm start -- --automation <iid>` runs one pass for one ticket and exits, with or without the
+  switch, and refuses to start on a preflight problem; on a ticket missing `Loop` or
+  `Ready For Automation` it says there is nothing to do.
 - **Ready means `Loop` is on the ticket and both rules hold** (`hooks/automation-ready.cjs`):
   `Ready For Deployment` was added before the latest `Ready For Automation`, or the ticket is
   closed and still carries `Ready For Automation`; and at least one MR in the same project that is
@@ -442,13 +443,17 @@ nobody.
   only the other approvers are notified.
 - **The sheet** is `automation.sheet` in `config/project.json`, written with the service account
   in `ONESHOT_GOOGLE_SA_FILE` (default `~/.claude/google-service-account.json`), which must be an
-  **Editor** on it. The cases go to the module's existing tab (matched by name, whatever its
-  prefix), or a new orange `TestCases_<Module>` tab; the year's tracker gets a row in the module's
-  section with the ticket link, `Done`, the automation status and a deep link to the block. Oneshot
-  tags the rows it writes with developer metadata, so a retried write never duplicates them and
-  the team's own rows for the same ticket are never mistaken for its own. Everything is read back
-  before the labels move. A failure that will not clear by waiting (permission, a merged range in
-  the way, a read-back mismatch) is reported on the ticket once, with what to do.
+  **Editor** on it. Its `spreadsheetId` ships as the placeholder `REPLACE_ME`, which the preflight
+  refuses by name, so the mode cannot be switched on until someone chooses the sheet. Pointing it
+  at the team's sheet takes two values: the id, and `trackerTab` set to the team's
+  `Test Cases Updates [{year}]`. The cases go to the module's existing tab (matched by name,
+  whatever its prefix), or a new orange `TestCases_<Module>` tab; the year's tracker gets a row in
+  the module's section with the ticket link, `Done`, the automation status and a deep link to the
+  block. Oneshot tags the rows it writes with developer metadata, so a retried write never
+  duplicates them and the team's own rows for the same ticket are never mistaken for its own.
+  Everything is read back before the labels move. A failure that will not clear by waiting
+  (permission, a merged range in the way, a read-back mismatch) is reported on the ticket once,
+  with what to do.
 - **`DRY_RUN`** runs the whole ticket in one pass in `state-dry/`: a real session is still spent,
   comments and label changes are logged instead of made, QA's approval is assumed, and the sheet
   is read but not written.
