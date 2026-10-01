@@ -2087,7 +2087,10 @@ For each screen below, navigate to it in the running app, capture it at the SAME
 mockup was drawn at, and fill one \`designConformance\` row: the approved render, your capture,
 and every way they differ. An empty \`differences\` IS the claim that it matches, so list the
 small departures too — a spacing change, a reworded label, a missing empty state. Deciding for
-the reviewer which ones were fine is the one thing this row must not do.
+the reviewer which ones were fine is the one thing this row must not do.${betaRequested(ctx, 'ui-evidence') ? `
+This ticket is a beta: pair each approved screen against v2, reached through the switch, and
+compare the page BELOW the switch. The switch belongs to the route wrapper, not the screen
+(point 4 of the beta block below), so leave it out of \`differences\`.` : ''}
 
 Also put both files in \`screenshots\`, approved first and built immediately after, captioned so
 the pair reads in order. The ordering is what makes them comparable at a glance.
