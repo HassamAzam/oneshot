@@ -5,10 +5,17 @@
  * score on the same inputs. Not a framework — one phase is wired (`recall`),
  * and the next one is a grader function added to GRADERS.
  *
- * Inputs are frozen so two runs differ only by the prompt:
+ * Inputs are frozen on this machine so two runs differ only by the prompt:
  *   - tickets are fetched from GitLab once and cached in state/evals/tickets/
  *   - the memory is snapshotted once into state/evals/memory/ and copied into
  *     the dry home before every replay
+ * Frozen per machine, not shipped: both live under the gitignored state/, and
+ * the gold labels were judged against one particular snapshot of one
+ * machine's runs. So evals/<phase>/gold.json says what it was judged against —
+ * each case's project, and the memory iids — and the eval holds the machine to
+ * it rather than grading its own state against labels written for another's:
+ * a case from another project is read from that run's transcript or refused,
+ * and a snapshot that holds different runs skips the gold check (see main).
  *
  * It runs the phase through the production runPhase — same prompt builder,
  * model tier, schema, hooks and tool policy — under DRY_RUN, whose shadow home
@@ -28,9 +35,11 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { DRY_RUN, MEMORY, ROOT, budgetConfig, phaseByName, repoIdentity } from '../src/lib/config.js';
+import { DRY_RUN, MEMORY, ROOT, budgetConfig, phaseByName } from '../src/lib/config.js';
 import { allIssueNotes, getIssue } from '../src/lib/gitlab.js';
 import { isMachineNote } from '../src/lib/claims.js';
+import { currentProjectKey } from '../src/lib/journalproject.js';
+import { repoKey } from '../src/lib/repourl.cjs';
 import { promptFor, systemPromptFor, type PromptCtx } from '../src/phases/prompts.js';
 import { runPhase } from '../src/conductor/phase.js';
 import { transcriptPath, type RunJournal } from '../src/lib/artifacts.js';
@@ -50,7 +59,10 @@ const SNAPSHOT = join(EVALS, 'memory');
 const TICKETS = join(EVALS, 'tickets');
 const PARALLEL = 4;
 
-interface Gold { must: number[]; ok: number[]; why: string }
+/** `project` is the GitLab project the case's ticket lives in, as a web URL. */
+interface Gold { project: string; must: number[]; ok: number[]; why: string }
+/** `memory`: the iids the snapshot held when the cases were labelled. */
+interface GoldFile { memory?: number[]; cases: Record<string, Gold> }
 interface Check { name: string; pass: boolean; note?: string }
 interface ToolCall { name: string; input: Record<string, unknown> }
 type Grader = (out: Record<string, unknown>, ticket: Ticket, gold: Gold | undefined) => Check[];
@@ -247,67 +259,106 @@ function ticketFromTranscript(iid: number): Ticket | null {
   return null;
 }
 
+/** The live run's journal: state/runs on this machine, never the dry home. */
+function liveJournal(iid: number): Partial<RunJournal> | null {
+  const file = join(ROOT, 'state', 'runs', String(iid), 'run.json');
+  if (!existsSync(file)) return null;
+  try { return JSON.parse(readFileSync(file, 'utf8')) as Partial<RunJournal>; } catch { return null; }
+}
+
 /**
- * The project the live run on this iid belonged to, or null with no live run.
+ * The project the live run on this iid belonged to, as a repoKey, or null with
+ * no live run or one that cannot say.
  *
  * Memory and the gold set hold iids only, and those are per project: the gold
  * tickets were run on arbisoft/workstreamai, while GITLAB_REPO_URL now names
  * arbisoft/erp, whose #74 is a different ticket. Asking GitLab for such an iid
- * would grade recall on the wrong ticket and say nothing about it.
+ * would grade recall on the wrong ticket and say nothing about it. Read the way
+ * judgeJournalHome reads a journal: its stamp, else its ticket URL.
  */
 function liveRunProject(iid: number): string | null {
-  const file = join(ROOT, 'state', 'runs', String(iid), 'run.json');
-  if (!existsSync(file)) return null;
-  const url = String((JSON.parse(readFileSync(file, 'utf8')) as { url?: string }).url ?? '');
-  return url.split('/-/issues/')[0] || null;
+  const j = liveJournal(iid);
+  return j ? j.project || repoKey(j.url ?? '') : null;
+}
+
+/**
+ * The project an iid's ticket is read from, as a repoKey. A gold case's own
+ * `project` wins, because it says which ticket the labels were judged against
+ * — and this machine's state/runs, the only other witness, holds none of them
+ * on any machine but the one that labelled them. An iid named on the command
+ * line with no gold entry falls back to its live run, then to the configured
+ * project, which is all a bare number can mean there.
+ */
+function expectedProject(iid: number, gold: Gold | undefined): string | null {
+  if (gold) return repoKey(gold.project);
+  return liveRunProject(iid) ?? currentProjectKey();
 }
 
 /**
  * What the live run's first attempt at this phase cost — lap 0, because later
- * laps run on a different journal and some were cut short by a gate.
+ * laps run on a different journal and some were cut short by a gate. Null when
+ * the live run on this iid was for another project: that is another ticket.
  */
-function liveCost(iid: number, phase: string): { turns: number; weighted: number; secs: number } | null {
-  const file = join(ROOT, 'state', 'runs', String(iid), 'run.json');
-  if (!existsSync(file)) return null;
-  const phases = (JSON.parse(readFileSync(file, 'utf8')) as { phases?: Array<{ phase: string; lap: number; turns: number; weighted: number; startedAt: number; endedAt: number }> }).phases ?? [];
+function liveCost(iid: number, phase: string, project: string | null): { turns: number; weighted: number; secs: number } | null {
+  if (!project || liveRunProject(iid) !== project) return null;
+  const phases = (liveJournal(iid) as { phases?: Array<{ phase: string; lap: number; turns: number; weighted: number; startedAt: number; endedAt: number }> } | null)?.phases ?? [];
   const first = phases.find((p) => p.phase === phase && p.lap === 0);
   return first ? { turns: first.turns, weighted: first.weighted, secs: (first.endedAt - first.startedAt) / 1000 } : null;
 }
 
-/** The same ticket the runner builds (runner.ts fetchTicket), minus documents. */
-async function loadTicket(iid: number, refetch: boolean): Promise<Ticket> {
+/** A cached ticket, stamped with the project (repoKey) it was read for. */
+interface CachedTicket { project: string; ticket: Ticket }
+
+/**
+ * The same ticket the runner builds (runner.ts fetchTicket), minus documents,
+ * as it stands in `project` (a repoKey).
+ *
+ * GitLab is asked only when `project` is the configured one, since it answers
+ * for GITLAB_REPO_URL's ticket of that number whatever was meant. Any other
+ * project's ticket comes from the recall transcript of a live run of that same
+ * project on this machine, or the eval refuses it. The cache carries the
+ * project too: an entry read for another one, or before the stamp existed —
+ * which is how erp tickets got cached under workstreamai gold iids — is read
+ * again rather than reused.
+ */
+async function loadTicket(iid: number, project: string | null, refetch: boolean): Promise<Ticket> {
+  if (!project) throw new Error(`#${iid}: no project to read it from — GITLAB_REPO_URL is unset or invalid`);
   const cached = join(TICKETS, `${iid}.json`);
-  if (!refetch && existsSync(cached)) return JSON.parse(readFileSync(cached, 'utf8')) as Ticket;
-  const project = liveRunProject(iid);
-  const configured = repoIdentity().repo?.webUrl ?? null;
-  if (project && project !== configured) {
-    const offline = ticketFromTranscript(iid);
-    if (!offline) throw new Error(`#${iid}: its live run was on ${project}, not ${configured ?? 'GITLAB_REPO_URL'}, and its recall transcript is gone`);
-    console.log(`#${iid}: live run was on ${project} — using the prompt it saw, not GitLab`);
+  if (!refetch && existsSync(cached)) {
+    const hit = JSON.parse(readFileSync(cached, 'utf8')) as Partial<CachedTicket>;
+    if (hit.project === project && hit.ticket) return hit.ticket;
+    console.log(`#${iid}: cached ticket was read for ${hit.project ?? 'an unrecorded project'}, not ${project} — reading it again`);
+  }
+  const save = (ticket: Ticket): Ticket => {
     mkdirSync(TICKETS, { recursive: true });
-    writeFileSync(cached, JSON.stringify(offline, null, 2));
-    return offline;
+    writeFileSync(cached, JSON.stringify({ project, ticket } satisfies CachedTicket, null, 2));
+    return ticket;
+  };
+  // A transcript under state/runs/<iid> is only this ticket's if that run was in the same project.
+  const fromTranscript = (): Ticket | null => (liveRunProject(iid) === project ? ticketFromTranscript(iid) : null);
+  const configured = currentProjectKey();
+  if (project !== configured) {
+    const offline = fromTranscript();
+    if (!offline) throw new Error(`#${iid} belongs to ${project}; its recall transcript is not on this machine`);
+    console.log(`#${iid}: belongs to ${project}, not ${configured ?? 'GITLAB_REPO_URL'} — using the prompt its live run saw`);
+    return save(offline);
   }
   const res = await getIssue(iid);
   if (!res.ok || !res.data) {
-    const offline = ticketFromTranscript(iid);
+    const offline = fromTranscript();
     if (!offline) throw new Error(`#${iid}: could not read the ticket from GitLab (${res.error ?? 'no data'}) nor from its recall transcript`);
     console.log(`#${iid}: GitLab unreachable — using the prompt the live run saw`);
-    mkdirSync(TICKETS, { recursive: true });
-    writeFileSync(cached, JSON.stringify(offline, null, 2));
-    return offline;
+    return save(offline);
   }
   const notes = await allIssueNotes(iid);
   // Never cache a ticket without its comments: the cache outlives the outage.
   if (!notes.ok || !notes.data) {
-    const offline = ticketFromTranscript(iid);
+    const offline = fromTranscript();
     if (!offline) throw new Error(`#${iid}: could not read the ticket's comments from GitLab (${notes.error ?? 'no data'}) nor its recall transcript`);
     console.log(`#${iid}: GitLab comments unreachable — using the prompt the live run saw`);
-    mkdirSync(TICKETS, { recursive: true });
-    writeFileSync(cached, JSON.stringify(offline, null, 2));
-    return offline;
+    return save(offline);
   }
-  const ticket: Ticket = {
+  return save({
     iid: res.data.iid,
     title: res.data.title,
     description: res.data.description,
@@ -315,17 +366,14 @@ async function loadTicket(iid: number, refetch: boolean): Promise<Ticket> {
     notes: notes.data
       .filter((n) => !n.system && n.body && !isMachineNote(n.body) && !n.body.startsWith('Oneshot '))
       .map((n) => n.body),
-  };
-  mkdirSync(TICKETS, { recursive: true });
-  writeFileSync(cached, JSON.stringify(ticket, null, 2));
-  return ticket;
+  });
 }
 
 function snapshotMemory(refresh: boolean): void {
   if (existsSync(SNAPSHOT) && !refresh) return;
   rmSync(SNAPSHOT, { recursive: true, force: true });
   cpSync(LIVE_MEMORY, SNAPSHOT, { recursive: true });
-  console.log(`memory snapshot taken from ${LIVE_MEMORY} — re-check evals/*/gold.json against it`);
+  console.log(`memory snapshot taken from ${LIVE_MEMORY}`);
 }
 
 /** Every replay starts from the snapshot, whatever the last one left behind. */
@@ -367,20 +415,39 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const goldFile = join(ROOT, 'evals', phase, 'gold.json');
-  const gold: Record<string, Gold> = existsSync(goldFile) ? JSON.parse(readFileSync(goldFile, 'utf8')).cases : {};
+  const goldSet: GoldFile = existsSync(goldFile) ? JSON.parse(readFileSync(goldFile, 'utf8')) as GoldFile : { cases: {} };
+  const gold = goldSet.cases;
+  const unplaced = Object.keys(gold).filter((iid) => !repoKey(gold[iid]?.project ?? ''));
+  if (unplaced.length) {
+    console.error(`${goldFile}: no \`project\` on ${unplaced.map((i) => `#${i}`).join(', ')} — an iid alone does not say which ticket was labelled`);
+    process.exit(2);
+  }
   const iids = argv.slice(1).filter((a, i, all) => /^\d+$/.test(a) && all[i - 1] !== '--n').map(Number);
   const targets = iids.length ? iids : Object.keys(gold).map(Number);
 
   snapshotMemory(argv.includes('--refresh-memory'));
   stageMemory();
+  // `gold` names which runs may be cited, so it holds only for the memory it was
+  // labelled against; every other check holds for any memory. A different
+  // snapshot drops that one check rather than scoring citations against labels
+  // that name runs it does not hold.
+  const held = [...memoryIids()].sort((a, b) => a - b);
+  const labelled = goldSet.memory ? [...new Set(goldSet.memory)].sort((a, b) => a - b) : null;
+  const goldHolds = !labelled || labelled.join() === held.join();
+  const iidList = (xs: number[]): string => (xs.length ? xs.map((i) => `#${i}`).join(',') : 'nothing');
+  if (!goldHolds) {
+    console.warn(`snapshot holds ${iidList(held)}; gold was labelled against ${iidList(labelled ?? [])}: gold check skipped. `
+      + `Restore that snapshot into ${SNAPSHOT} or re-label ${goldFile}.`);
+  }
   const tag = new Date().toISOString().replace(/[:.]/g, '-');
   // Reported beside the score, never folded into it: the phase's own quota
   // budget and turn cap, so a runaway sample stands out.
   const budget = budgetConfig().phases?.[phase] ?? Infinity;
   const outDir = join(EVALS, phase, tag);
 
+  const projects = new Map(targets.map((iid) => [iid, expectedProject(iid, gold[iid])]));
   const tickets = new Map<number, Ticket>();
-  for (const iid of targets) tickets.set(iid, await loadTicket(iid, argv.includes('--refetch')));
+  for (const iid of targets) tickets.set(iid, await loadTicket(iid, projects.get(iid) ?? null, argv.includes('--refetch')));
 
   const jobs = targets.flatMap((iid) => Array.from({ length: n }, (_, k) => async (): Promise<Sample> => {
     const ticket = tickets.get(iid)!;
@@ -397,7 +464,7 @@ async function main(): Promise<void> {
       prompt: promptFor(cfg, ctx), systemPrompt: systemPromptFor(cfg, ctx),
     });
     const secs = (Date.now() - startedAt) / 1000;
-    const checks: Check[] = res.data ? grade(res.data, ticket, gold[iid]) : [{ name: 'produced', pass: false, note: res.error ?? res.blocked ?? 'no output' }];
+    const checks: Check[] = res.data ? grade(res.data, ticket, goldHolds ? gold[iid] : undefined) : [{ name: 'produced', pass: false, note: res.error ?? res.blocked ?? 'no output' }];
     const strays = outOfMemory(toolCalls(tee, from));
     const over = res.weighted > budget || res.turns >= (cfg.maxTurns ?? Infinity) || secs >= cfg.timeoutMin * 60;
     const score = checks.filter((c) => c.pass).length / checks.length;
@@ -420,7 +487,7 @@ async function main(): Promise<void> {
       secs: mine.reduce((a, s) => a + s.secs, 0) / mine.length,
       over: mine.filter((s) => s.over).length,
       stray: mine.reduce((a, s) => a + s.stray, 0) / mine.length,
-      live: liveCost(iid, phase),
+      live: liveCost(iid, phase, projects.get(iid) ?? null),
       failed: [...fails].map(([c, k]) => `${c} ${k}/${mine.length}`).join(', '),
     };
   });
@@ -433,7 +500,7 @@ async function main(): Promise<void> {
     ? JSON.parse(readFileSync(join(EVALS, phase, previous, 'summary.json'), 'utf8')) as { overall: number; rows: Array<{ iid: number; weighted: number }> }
     : null;
   mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, 'summary.json'), JSON.stringify({ phase, tag, n, overall, rows }, null, 2));
+  writeFileSync(join(outDir, 'summary.json'), JSON.stringify({ phase, tag, n, overall, goldSkipped: !goldHolds, rows }, null, 2));
 
   /** Signed percent change, or a dash when there is nothing to compare with. */
   const delta = (now: number, then: number | undefined): string =>
@@ -457,6 +524,7 @@ async function main(): Promise<void> {
   console.log(`secs     = mean wall clock per sample, ${PARALLEL} replays at a time, so it runs above a lone live run`);
   console.log('stray    = mean tool calls outside memory, reported and not scored');
   console.log(`over     = samples past ${budget} weighted, ${cfg.maxTurns ?? '∞'} turns or the ${cfg.timeoutMin}m timeout`);
+  if (!goldHolds) console.log('gold     = SKIPPED: the snapshot is not the memory gold.json was labelled against');
   const live = rows.filter((r) => r.live);
   console.log(`\noverall ${overall.toFixed(2)}   weighted ${Math.round(sum(rows.map((r) => r.weighted)))}`
     + (live.length ? `   vs live ${delta(sum(live.map((r) => r.weighted)), sum(live.map((r) => r.live!.weighted)))} over ${live.length} ticket(s)` : ''));

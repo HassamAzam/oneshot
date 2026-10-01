@@ -24,9 +24,17 @@ and #193 and #259 filled it with their own code research. That text is pasted in
 research, plan and implement all the same.
 
 `gold` is the only check that needs a person. `evals/recall/gold.json` says,
-per ticket, which past runs MUST be found and which MAY be. It is judged against the
-frozen memory snapshot, not the live memory, so it stays true until the snapshot is
-refreshed. Re-label it whenever you pass `--refresh-memory`.
+per ticket, which past runs MUST be found and which MAY be. Those labels are true only
+against the one snapshot they were judged against, whose iids gold.json lists as `memory`.
+The snapshot lives under the gitignored `state/`, so another machine's first snapshot is
+of its own memory, and `--refresh-memory` replaces it on any machine. The eval compares
+its snapshot with `memory` and, when they differ, skips `gold` with a warning and still
+runs the other checks. Re-label (and update `memory`) whenever you pass `--refresh-memory`.
+
+Each case also names its ticket's `project`. Gold iids belong to the project they were
+run in, and GitLab answers for GITLAB_REPO_URL's ticket of that number whatever was meant.
+A case from another project is read from its live run's recall transcript on this machine,
+or the eval refuses it.
 
 The score judges the ANSWER only. Out-of-scope work counts against it when it reaches the
 output, because that is what research, plan, implement and review are handed: code
