@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
 import { qualityGate } from './codephases.js';
@@ -28,6 +28,14 @@ function cleanup() {
   rmSync(runDir(IID), { recursive: true, force: true });
 }
 
+/**
+ * Registered once rather than called at the end of each test: a failing assert
+ * throws before a trailing cleanup() runs, and the directory stays in
+ * state/runs, where serve.ts, report.ts and journalproject.ts all list it. Each
+ * test still starts with its own cleanup(), for whatever a killed run left.
+ */
+afterEach(cleanup);
+
 test('a failing case on disk refuses the merge when that is all there is', () => {
   cleanup();
   writeArtifact(IID, 'verify.json', FAILING_VERIFY);
@@ -35,7 +43,6 @@ test('a failing case on disk refuses the merge when that is all there is', () =>
   const gate = qualityGate(ctx({}));
   assert.ok(gate, 'a failing case must refuse the merge');
   assert.match(gate, /TC-1/);
-  cleanup();
 });
 
 test('a blocker finding on disk refuses the merge', () => {
@@ -45,7 +52,6 @@ test('a blocker finding on disk refuses the merge', () => {
   const gate = qualityGate(ctx({}));
   assert.ok(gate, 'an unaddressed blocker must refuse the merge');
   assert.match(gate, /F-1/);
-  cleanup();
 });
 
 test('a clean run merges', () => {
@@ -53,7 +59,6 @@ test('a clean run merges', () => {
   writeArtifact(IID, 'verify.json', CLEAN_VERIFY);
   writeArtifact(IID, 'findings.json', CLEAN_REVIEW);
   assert.equal(qualityGate(ctx({})), null);
-  cleanup();
 });
 
 /**
@@ -75,7 +80,6 @@ test('the in-memory artifact beats a tampered file on disk', () => {
   const gate = qualityGate(ctx({ verify: FAILING_VERIFY, review: BLOCKED_REVIEW }));
   assert.ok(gate, 'the merge must be refused on what the phases actually returned');
   assert.match(gate, /TC-1/, 'the failing case is named, not the rewritten pass');
-  cleanup();
 });
 
 test('a tampered file cannot turn a failure into a pass, nor the reverse', () => {
@@ -86,7 +90,6 @@ test('a tampered file cannot turn a failure into a pass, nor the reverse', () =>
   writeArtifact(IID, 'verify.json', FAILING_VERIFY);
   writeArtifact(IID, 'findings.json', BLOCKED_REVIEW);
   assert.equal(qualityGate(ctx({ verify: CLEAN_VERIFY, review: CLEAN_REVIEW })), null);
-  cleanup();
 });
 
 test('disk is the fallback when prior is empty — a run resumed in a fresh process', () => {
@@ -97,5 +100,4 @@ test('disk is the fallback when prior is empty — a run resumed in a fresh proc
   const gate = qualityGate(ctx({ review: CLEAN_REVIEW }));
   assert.ok(gate, 'a resumed run still refuses a merge its cases did not pass');
   assert.match(gate, /TC-1/);
-  cleanup();
 });
