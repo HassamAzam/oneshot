@@ -580,3 +580,33 @@ test('the prior-art kinds are one set, in every place that names them', () => {
     }
   }
 });
+
+const PLAN_WITH_A_REJECTION = {
+  approach: 'Count maternity days with the existing helper.',
+  reuse: [
+    'reuse: leave_days() in apps/leaves/utils.py, called as it stands',
+    'rejected: carry_forward() — it has 12 callers, and a flag would split them',
+  ],
+  migrations: false,
+  steps: [],
+};
+
+test('implement is told a rejected reuse entry is a candidate not to build on', () => {
+  // `reuse` became four verdicts, rejections included, and the line below the
+  // plan still said to reuse everything named there.
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
+  assert.doesNotMatch(p, /Reuse what the plan named under `reuse`/);
+  assert.match(p, /A reuse, extend or collapse\s+entry is binding/);
+  assert.match(p, /A rejected entry is a candidate the plan decided NOT to build on/);
+});
+
+test('review sees the plan\'s reuse verdicts one per line, under a heading that admits rejections', () => {
+  // A comma-join lost the boundary between entries whose reasons carry commas,
+  // and put the rejection under a bare `reuse:` label.
+  const p = promptFor(cfg('review'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
+  assert.ok(p.includes(
+    'reuse verdicts (rejections included):\n' +
+    '  - reuse: leave_days() in apps/leaves/utils.py, called as it stands\n' +
+    '  - rejected: carry_forward() — it has 12 callers, and a flag would split them\n',
+  ));
+});

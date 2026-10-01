@@ -1316,7 +1316,9 @@ Write the code.
   helper it names does not do what it claims — do the right thing instead and say so in
   \`summary\`. Do not silently implement a different design, and do not implement a design you
   know to be wrong because the plan said so.
-- Reuse what the plan named under \`reuse\` before writing anything new.
+- Apply the plan's \`reuse\` verdicts before writing anything new. A reuse, extend or collapse
+  entry is binding. A rejected entry is a candidate the plan decided NOT to build on: do not
+  reuse, extend or collapse onto it, for the reason on its line.
 - Every acceptance criterion above must be met by the code you leave behind. The next phase
   writes the test cases that \`verify\` and \`qa\` will execute, and it writes them from those
   same criteria — so a criterion you quietly dropped becomes a failing case, not a saved step.
@@ -1453,7 +1455,8 @@ Blast radius: ${(r.blastRadius ?? []).join(', ') || '(none recorded)'}
 
 ## The plan this was built against (phase 2)
 approach: ${p.approach || '(none recorded)'}
-reuse: ${(p.reuse ?? []).join(', ') || '(none named)'}
+reuse verdicts (rejections included):
+${(p.reuse ?? []).map((x) => `  - ${x}`).join('\n') || '  (none named)'}
 migrations required: ${p.migrations === true}
 steps:
 ${(p.steps ?? []).map((s) => `  ${s.n}. [${s.layer}] ${s.what} — ${(s.files ?? []).join(', ')}`).join('\n') || '  (none recorded)'}
