@@ -2,15 +2,18 @@
 
     python3 mutation_check.py      (from this folder; works on a temporary copy, never on these files)
 
-A survivor is a rule no test protects: add a test, or delete the rule. Last run (2026-09-30):
-177 mutants, 158 killed (89%); the 19 survivors are tuning values, fallbacks and formatting.
+A survivor is a rule no test protects: add a test, or delete the rule. Paste the counts into the PR, not
+here: a count written into the source goes stale on the next commit, which is what happened to the last one.
+
+Paginating `while True` loops (loop_was_removed, _live_labels, _mr_files) are not targets: flipping their
+page-size test makes a stubbed call return the same page forever, and a mutant that hangs stops the run.
 """
 import ast, json, subprocess, sys
 from pathlib import Path
 
 TARGETS = {
     "groom_gitlab.py": ["compose_labels", "check_labels", "existing_issues", "orphan_tests_issue", "tests_mr_problem", "sweep", "promote_person_ai",
-                        "loop_was_removed", "add_section", "unlabelled"],
+                        "add_section", "unlabelled"],
     "groom.py": ["_spec", "_finish_body", "create", "notify_sweep"],
     "resolve_plane_ticket.py": ["effective_route", "normalise_id", "resolve"],
     "jev_layers.py": ["decide"],

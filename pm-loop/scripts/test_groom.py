@@ -575,10 +575,11 @@ def test_ensure_labels_creates_only_confirmed_new_labels(monkeypatch):
 
 
 def test_existing_issue_matches_the_exact_ticket_line_only(monkeypatch):
-    issues = [{"iid": 5, "description": "## Plane Ticket\nWORKSTREAMRE-230\n"},
+    issues = [{"iid": 5, "web_url": "u5", "labels": ["Characterization Tests"], "description": "## Plane Ticket\nWORKSTREAMRE-230\n"},
               {"iid": 6, "description": "## Plane Ticket\nWORKSTREAMRE-2301\n"}]
     monkeypatch.setattr(gl, "call", lambda m, path, payload=None: issues)
-    assert [i["iid"] for i in gl.existing_issues("WORKSTREAMRE-230")] == [5]
+    assert gl.existing_issues("WORKSTREAMRE-230") == [{"iid": 5, "url": "u5", "labels": ["Characterization Tests"],
+                                                       "description": "## Plane Ticket\nWORKSTREAMRE-230\n"}]
     monkeypatch.setattr(gl, "call", lambda m, path, payload=None: issues[1:])
     assert gl.existing_issues("WORKSTREAMRE-230") == []
 

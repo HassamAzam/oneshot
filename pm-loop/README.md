@@ -29,7 +29,7 @@ Tracking ticket: arbisoft/erp#8777.
 | `scripts/jev_heartbeat.py` | Every 50 finished tickets: re-scores Jev, ablates each fact, and tabulates Oneshot outcomes per grooming-skill version. Output in `~/Documents/ai/jev-findings/heartbeat/HEARTBEAT.md` |
 | `scripts/pm_http.py`, `scripts/pm_secrets.py` | HTTP with timeouts and retries; credentials |
 | `scripts/*_cron.sh` | Cron entry points: triage 11:00 and 17:00, sync + sweep hourly, heartbeat 10:30 |
-| `scripts/test_groom.py` | `python3 -m pytest pm-loop/scripts -q` (88 tests) |
+| `scripts/test_groom.py` | `python3 -m pytest pm-loop/scripts -q` (112 tests; needs pytest: `pip install -r pm-loop/requirements-dev.txt`) |
 | `scripts/mutation_check.py` | Mutation check for the rules (works on a copy) |
 
 The zone map, label allow-list and Jev facts are **not** here. They live in the erp repo
@@ -48,16 +48,21 @@ alone. It does not read Oneshot's `config/risk-modules.json`, so the cron export
    PLANE_API_KEY=…
    TYPESAFE_API_KEY=…
    ```
-   Check with `python3 scripts/pm_secrets.py --check`, which reports sources, never values.
+   Check with `python3 pm-loop/scripts/pm_secrets.py --check` from the repo root, which reports sources, never values.
    Slack posting reads `~/.claude/.secrets.env` (see `slack_post.py`). The sprint sheet needs a
    service-account key at `~/.claude/service-accounts/workstream-sprint-plan.json` and `pip install cryptography`.
 2. **Install.** Claude Code loads skills from `~/.claude/skills` and the skills call scripts in
-   `~/.claude/scripts`. Link them to this checkout so the repo is the source of truth:
+   `~/.claude/scripts`. Link both to a worktree pinned to the merged code, so the repo is the source of truth.
+   Do not link to a checkout whose branch gets switched: any branch without `pm-loop/` leaves every link
+   dangling, and the hourly sync, the twice-daily triage and the heartbeat crons then fail.
    ```sh
-   ln -sfn "$PWD/pm-loop/skills/ticket-grooming" ~/.claude/skills/ticket-grooming
-   ln -sfn "$PWD/pm-loop/skills/ticket-triage"   ~/.claude/skills/ticket-triage
+   git worktree add --detach ~/pm-loop-live origin/main
+   cd ~/pm-loop-live
+   for s in pm-loop/skills/*/; do ln -sfn "$PWD/$s" ~/.claude/skills/"$(basename "$s")"; done
    for f in pm-loop/scripts/*; do ln -sfn "$PWD/$f" ~/.claude/scripts/"$(basename "$f")"; done
    ```
+   The first loop links every skill, `mr-to-ticket` included. A detached worktree does not follow main by
+   itself; to update it: `git -C ~/pm-loop-live fetch origin && git -C ~/pm-loop-live checkout --detach origin/main`.
 3. **Allow-list** `Bash(python3 ~/.claude/scripts/groom.py:*)` in `~/.claude/settings.json`.
 4. **Identity.** A one-shot's Requested By, and the assignee of a human-route or tests issue nobody was named for,
    default to the `GITLAB_TOKEN` owner. Override them with `PM_LOOP_REQUESTER` (a name) and `PM_LOOP_DEFAULT_ASSIGNEE`
@@ -77,14 +82,12 @@ alone. It does not read Oneshot's `config/risk-modules.json`, so the cron export
 - **Jev:** accuracy per batch of 50 against merged diffs, vs the keyword baseline; wrong skips must stay 0.
 - **Facts:** each is re-scored with itself removed. A fact that changes nothing is dropped.
 - **Grooming skill:** Oneshot outcomes (merged / Needs Human / stopped) and `unknown` lines per skill version, so a skill edit is judged by what Oneshot then did. Stopped means Not a Bug or a person's drop, read from `Loop`'s removal: erp sets no Not a Bug label.
-- **Code rules:** `python3 scripts/mutation_check.py` mutates the rule-bearing functions on a temporary copy. A rule whose mutation no test catches gets a test or gets deleted. Last run: 177 mutants, 89% killed (up from 72% after closing the gaps); the 19 survivors are tuning values, fallbacks and formatting.
+- **Code rules:** `python3 pm-loop/scripts/mutation_check.py` mutates the rule-bearing functions on a temporary copy. A rule whose mutation no test catches gets a test or gets deleted. Last run (2026-10-02): 213 mutants, 193 killed (91%, up from 72% before the gaps were closed); the 20 survivors are tuning values (page sizes, timeouts, thresholds), fallbacks, formatting, and the title handed to Jev, which the tests stub.
 
 ## Rules that live in code (don't re-add them to the skills)
 
 - **Route is a person's call when triage never saw the ticket:** one-shot and MR tickets get areas and a zone the way triage computes them, but always go to people. A person adding `AI` on GitLab hands the ticket to Oneshot: the hourly sweep adds `Loop`. Red is held and reported, since the zone guard would stop it. Yellow is held too, until a person opens a `Characterization Tests` issue and adds `<!-- tests-first: #N -->` to the ticket; the sweep then releases it like any yellow change. With `default_zone` set to yellow in zones.json, that holds most one-shots that hit no keyword. Also held: any ticket whose `Loop` was ever removed, because that removal was Oneshot stopping it (Not a Bug) or a person dropping it; only a person adds `Loop` back.
-- **Labels:** existing allow-listed labels apply automatically. `create` stops for a label new to GitLab, or one in `ask_first` (`Opensource`, `Plane team`: they move work between streams), until the user confirms it with `--confirm-labels`.
-
-- **Labels:** only from the allow-list; the GitLab API would otherwise create any typo.
+- **Labels:** only from the allow-list (the GitLab API would otherwise create any typo). Existing allow-listed labels apply automatically; `create` stops for a label new to GitLab, or one in `ask_first` (`Opensource`, `Plane team`: they move work between streams), until the user confirms it with `--confirm-labels`.
 - **Duplicate protection:** eligibility needs a readable Plane back-link check, plus a GitLab search for the ticket ID. The one match that is not a duplicate is a `Characterization Tests` issue left without its change issue, by a run that died between the two writes: rerunning `create` finishes it.
 - **Routes:**
   - green → `AI` + `Loop`
