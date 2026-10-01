@@ -365,10 +365,18 @@ export const BASE_CHECK_SCHEMA = phaseSchema({
             'passes: it behaved as expected on the base — so this change broke it. ' +
             'inconclusive: you could not run it to the end on the base (app, login, data).',
         },
+        inTicketScope: {
+          type: 'boolean',
+          description:
+            "true if this case exercises an acceptance criterion of this ticket, or the behaviour " +
+            'the ticket reports as broken — judged from the ticket and its criteria, never from ' +
+            "verify's evidence. Such a case fails on the base by definition, so it is never " +
+            'pre-existing whatever the base shows.',
+        },
         evidence: str('What you observed on the base, actual vs expected, in one line.'),
         screenshot: str('Filename under artifacts/, or empty string.'),
       },
-      required: ['id', 'onBase', 'evidence', 'screenshot'],
+      required: ['id', 'onBase', 'inTicketScope', 'evidence', 'screenshot'],
     },
   },
 }, ['baseCommit', 'results']);

@@ -168,10 +168,13 @@ pytest is unaffected and is fine to run.
   it.** It fails the same way on the base branch. Prove that in `evidence`:
   say you saw it on the base, or give the base `file:line` that produces it and
   confirm the diff does not touch it. It never applies to a case covering the
-  ticket's own criteria, or to the bug the ticket reports. Oneshot re-runs
-  every `pre-existing` case on the base branch, and a case that does not fail
-  there turns back into a `fail`. A confirmed one does not send the run back or
-  block the merge; it is listed on the MR. If you are unsure, it is a `fail`.
+  ticket's own criteria, or to the bug the ticket reports: those fail on the
+  base by definition. Oneshot refuses the label on a `happy`-tagged case, and
+  re-runs every other `pre-existing` case on the base branch with a check that
+  also judges scope; a case that does not fail there, or that the check finds
+  in this ticket's scope, turns back into a `fail`. A confirmed one does not
+  send the run back or block the merge; it is listed on the MR. If you are
+  unsure, it is a `fail`.
 - Evidence is **actual vs expected**, in the case's own terms — not "looks
   right".
 - `skipped` requires a reason. `blocked` names the missing precondition.

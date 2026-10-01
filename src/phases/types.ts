@@ -74,6 +74,26 @@ export function countsAsFailure(r: { result?: string; evidence?: string }): bool
   return r.result === 'pre-existing' && !String(r.evidence ?? '').trim();
 }
 
+/**
+ * The ids of the cases that exercise this ticket's own acceptance criteria:
+ * those tagged with the `happy` pass, which the testcases prompt defines as
+ * "every acceptance criterion, exercised the way the ticket describes it".
+ *
+ * Such a case can never be 'pre-existing'. On the base branch it fails by
+ * definition — the change it checks is not there yet, and on a bug ticket the
+ * bug is — so a base-branch re-run cannot tell the ticket's own unfixed bug
+ * from somebody else's: both "fail the same way". An implement lap that fixed
+ * the wrong code path left verify citing a base file:line the diff truly does
+ * not touch, and the base check then confirmed the ticket's own bug as not
+ * this change's. This is the floor that needs nobody's judgement: the tags
+ * were written by testcases before implement ran, so no outcome can move them.
+ */
+export function ticketScopeIds(cases: ReadonlyArray<{ id?: unknown; pass?: unknown }>): Set<string> {
+  return new Set(cases
+    .filter((c) => typeof c.id === 'string' && Array.isArray(c.pass) && c.pass.includes('happy'))
+    .map((c) => c.id as string));
+}
+
 export interface Finding {
   id: string;
   severity: 'blocker' | 'major' | 'minor' | 'suggestion';

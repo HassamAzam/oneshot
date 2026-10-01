@@ -103,7 +103,9 @@ import {
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
-import { countsAsFailure, type CaseResult, type Ticket, type TestCase } from '../phases/types.js';
+import {
+  countsAsFailure, ticketScopeIds, type CaseResult, type Ticket, type TestCase,
+} from '../phases/types.js';
 import {
   activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
   roundsUsed, startRound,
@@ -516,7 +518,7 @@ export function failedCases(name: string, data: Record<string, unknown> | null |
 /** base-check.json, as far as applyBaseCheck reads it. */
 export interface BaseCheck {
   baseCommit?: string;
-  results?: Array<{ id?: string; onBase?: string; evidence?: string }>;
+  results?: Array<{ id?: string; onBase?: string; inTicketScope?: boolean; evidence?: string }>;
 }
 
 /**
@@ -525,15 +527,33 @@ export interface BaseCheck {
  * The label lets a failing case past both the verify cycle and the merge gate,
  * and until now it rested on verify's word alone. `base-check` re-ran those
  * cases on the base branch; a case keeps the label only if it failed there
- * too. Everything else — it passed on the base, the check could not run it, or
- * no check ran at all (`check` null) — goes back to 'fail', which is exactly
- * what it was before the label existed. Unproven is not proven.
+ * too AND the check judged it outside this ticket's scope. Everything else —
+ * it passed on the base, the check could not run it, no check ran at all
+ * (`check` null), or it covers what the ticket asked for — goes back to
+ * 'fail', which is exactly what it was before the label existed. Unproven is
+ * not proven.
+ *
+ * "Fails on the base" alone proves only half the claim. A case covering the
+ * ticket's own criteria, or the bug it reports, fails on the base by
+ * definition, so the base check confirmed exactly the mislabel it exists to
+ * catch: an implement lap that fixed the wrong path left the reported bug
+ * standing, verify cited a base line the diff really does not touch, the base
+ * failed the same way, and the merge gate opened on a non-fix. Scope is
+ * therefore judged twice, neither time by verify: deterministically, from the
+ * cases testcases tagged `happy` (`ownScope`, see ticketScopeIds), and by the
+ * check session from the ticket and its criteria (`inTicketScope`, which
+ * fails closed when missing).
+ *
+ * `unavailable` is why no trustworthy check could run, when the caller knows
+ * it; every label is then refused with that reason instead of a bare "no check
+ * ran".
  *
  * The evidence is rewritten either way, so the MR note and implement's fix
  * list say what the base showed rather than what verify guessed.
  */
 export function applyBaseCheck(
   results: CaseResult[], check: BaseCheck | null, base: string,
+  opts: { ownScope?: ReadonlySet<string>; unavailable?: string } = {},
 ): { results: CaseResult[]; confirmed: string[]; rejected: string[] } {
   const confirmed: string[] = [];
   const rejected: string[] = [];
@@ -541,17 +561,39 @@ export function applyBaseCheck(
   const out = results.map((r) => {
     if (r.result !== 'pre-existing') return r;
     const seen = (check?.results ?? []).find((c) => c.id === r.id);
-    if (seen?.onBase === 'fails' && String(r.evidence ?? '').trim()) {
+    const why = labelRefusal(r, seen, base, at, opts);
+    if (why === null) {
       confirmed.push(r.id);
-      return { ...r, evidence: `confirmed on ${base}${at}: ${seen.evidence ?? ''} — verify: ${r.evidence}` };
+      return { ...r, evidence: `confirmed on ${base}${at}: ${seen?.evidence ?? ''} — verify: ${r.evidence}` };
     }
     rejected.push(r.id);
-    const why = seen
-      ? `${seen.onBase === 'passes' ? `passes on ${base}${at}` : `could not be checked on ${base}`}: ${seen.evidence ?? ''}`
-      : `no base-branch check ran for it`;
     return { ...r, result: 'fail' as const, evidence: `claimed pre-existing, NOT confirmed — ${why} — verify: ${r.evidence}` };
   });
   return { results: out, confirmed, rejected };
+}
+
+/** Why a 'pre-existing' label is refused, or null when the base check proved it. */
+function labelRefusal(
+  r: CaseResult, seen: NonNullable<BaseCheck['results']>[number] | undefined, base: string, at: string,
+  opts: { ownScope?: ReadonlySet<string>; unavailable?: string },
+): string | null {
+  const ownScope = `failing on ${base} is what the change was meant to fix`;
+  if (opts.ownScope?.has(r.id)) {
+    return `tagged 'happy', so it exercises this ticket's own acceptance criteria — ${ownScope}`;
+  }
+  if (opts.unavailable) return opts.unavailable;
+  if (!seen) return 'no base-branch check ran for it';
+  const observed = `: ${seen.evidence ?? ''}`;
+  if (seen.onBase === 'passes') return `passes on ${base}${at}${observed}`;
+  if (seen.onBase !== 'fails') return `could not be checked on ${base}${observed}`;
+  if (!String(r.evidence ?? '').trim()) {
+    return `fails on ${base}${at}, but verify recorded no evidence for the label${observed}`;
+  }
+  if (seen.inTicketScope === true) return `covers this ticket's own scope — ${ownScope}${observed}`;
+  if (seen.inTicketScope !== false) {
+    return `fails on ${base}${at}, but the check did not judge whether it is this ticket's scope${observed}`;
+  }
+  return null;
 }
 
 /**
@@ -1520,10 +1562,14 @@ export async function runTicket(
       if (r.cfg.name === 'verify' && r.out.ok && !overruled.has(r)) {
         const res = (r.out.data?.results ?? []) as CaseResult[];
         if (res.some((x) => x.result === 'pre-existing')) {
-          const check = res.some((x) => x.result === 'pre-existing' && !countsAsFailure(x))
+          // A label the scope floor already refuses is not worth a session.
+          const ownScope = ticketScopeIds(
+            readArtifact<{ cases?: Array<{ id?: unknown; pass?: unknown }> }>(iid, 'testcases.json')?.cases ?? [],
+          );
+          const check = res.some((x) => x.result === 'pre-existing' && !countsAsFailure(x) && !ownScope.has(x.id))
             ? await runBaseCheck()
             : null;
-          const applied = applyBaseCheck(res, check, cfg.branches.base);
+          const applied = applyBaseCheck(res, check, cfg.branches.base, { ownScope });
           r.out.data = { ...r.out.data, results: applied.results };
           writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
           if (applied.confirmed.length) {

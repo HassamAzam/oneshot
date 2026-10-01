@@ -5,7 +5,7 @@ import {
   salvagedReview, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
 } from './runner.js';
 import type { IssueNote } from '../lib/gitlab.js';
-import type { CaseResult } from '../phases/types.js';
+import { ticketScopeIds, type CaseResult } from '../phases/types.js';
 import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
 import type { RunJournal } from '../lib/artifacts.js';
 import type { JournalOwner } from '../lib/journalproject.js';
@@ -377,9 +377,11 @@ test('a pre-existing label with no evidence is counted as the fail it would hide
 const res = (id: string, result: CaseResult['result'], evidence = 'fails on dev: views.py:40'): CaseResult =>
   ({ id, result, evidence, screenshot: '' });
 
-test('a pre-existing case the base branch also fails keeps its label', () => {
-  const out = applyBaseCheck([res('TC-01', 'pass'), res('TC-15', 'pre-existing')],
-    { baseCommit: 'abcdef1234', results: [{ id: 'TC-15', onBase: 'fails', evidence: '500 on save' }] }, 'dev');
+test('a pre-existing case the base branch also fails, outside the ticket scope, keeps its label', () => {
+  const out = applyBaseCheck([res('TC-01', 'pass'), res('TC-15', 'pre-existing')], {
+    baseCommit: 'abcdef1234',
+    results: [{ id: 'TC-15', onBase: 'fails', inTicketScope: false, evidence: '500 on save' }],
+  }, 'dev');
   assert.deepEqual(out.confirmed, ['TC-15']);
   assert.equal(out.results[1]!.result, 'pre-existing');
   assert.match(out.results[1]!.evidence, /confirmed on dev @ abcdef12: 500 on save/);
@@ -406,10 +408,14 @@ test('unproven is not proven: inconclusive, a missing entry, or no check at all 
   assert.match(none.results[0]!.evidence, /no base-branch check ran/);
 });
 
-test('a label with no evidence is not rescued by the base check', () => {
+test('a label with no evidence is not rescued by the base check, and says so', () => {
   const out = applyBaseCheck([res('TC-15', 'pre-existing', '')],
-    { results: [{ id: 'TC-15', onBase: 'fails', evidence: 'x' }] }, 'dev');
+    { results: [{ id: 'TC-15', onBase: 'fails', inTicketScope: false, evidence: 'x' }] }, 'dev');
   assert.equal(out.results[0]!.result, 'fail');
+  // The base WAS checked and failed; "could not be checked" would tell
+  // implement and the reviewer the opposite of what the check found.
+  assert.match(out.results[0]!.evidence, /fails on dev.*no evidence/);
+  assert.doesNotMatch(out.results[0]!.evidence, /could not be checked/);
 });
 
 test('results that are not pre-existing pass through untouched', () => {
@@ -417,4 +423,57 @@ test('results that are not pre-existing pass through untouched', () => {
   const out = applyBaseCheck(input, null, 'dev');
   assert.deepEqual(out.results, input);
   assert.deepEqual([out.confirmed, out.rejected], [[], []]);
+});
+
+// ------------------------------------- the ticket's own scope is never pre-existing
+
+/**
+ * "Fails on the base" is true by definition of the ticket's own bug, so the
+ * base check alone confirmed exactly the mislabel it exists to catch: an
+ * implement lap that fixed the wrong path left the reported bug standing,
+ * verify cited a base line the diff really does not touch, the base failed
+ * the same way, and the merge gate opened on a non-fix.
+ */
+const ownBug = (): CaseResult =>
+  res('TC-02', 'pre-existing', 'shows 0, expected 5; same on dev at apps/leaves/utils.py:88, untouched by the diff');
+
+test('a case the check finds in the ticket scope goes back to fail even though the base fails it', () => {
+  const out = applyBaseCheck([res('TC-01', 'pass'), ownBug()],
+    { results: [{ id: 'TC-02', onBase: 'fails', inTicketScope: true, evidence: 'shows 0 on dev' }] }, 'dev');
+  assert.deepEqual(out.rejected, ['TC-02']);
+  assert.equal(out.results[1]!.result, 'fail');
+  assert.match(out.results[1]!.evidence, /this ticket's own scope — failing on dev is what the change was meant to fix/);
+  assert.match(failedCases('verify', { results: out.results }) ?? '', /TC-02/,
+    'a refused label must cycle back to implement, not just be renamed');
+});
+
+test('a check that never judged scope confirms nothing', () => {
+  const out = applyBaseCheck([ownBug()],
+    { results: [{ id: 'TC-02', onBase: 'fails', evidence: 'shows 0 on dev' }] }, 'dev');
+  assert.equal(out.results[0]!.result, 'fail');
+  assert.match(out.results[0]!.evidence, /did not judge whether it is this ticket's scope/);
+});
+
+test('a happy-tagged case is refused the label whatever the base check says', () => {
+  const ownScope = ticketScopeIds([
+    { id: 'TC-01', pass: ['regression'] },
+    { id: 'TC-02', pass: ['happy', 'boundary'] },
+  ]);
+  const out = applyBaseCheck([res('TC-01', 'pass'), ownBug()],
+    { results: [{ id: 'TC-02', onBase: 'fails', inTicketScope: false, evidence: 'shows 0 on dev' }] },
+    'dev', { ownScope });
+  assert.deepEqual(out.confirmed, []);
+  assert.equal(out.results[1]!.result, 'fail');
+  assert.match(out.results[1]!.evidence, /tagged 'happy'/);
+});
+
+test('only the happy pass marks a case as the ticket scope, and a malformed case is skipped', () => {
+  const ids = ticketScopeIds([
+    { id: 'TC-01', pass: ['happy'] },
+    { id: 'TC-02', pass: ['regression', 'cross-module'] },
+    { id: 'TC-03' },
+    { id: 4, pass: ['happy'] },
+    { id: 'TC-05', pass: 'happy' },
+  ]);
+  assert.deepEqual([...ids], ['TC-01']);
 });

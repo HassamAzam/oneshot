@@ -403,3 +403,37 @@ test('without mr-open in the pipeline the mr prompt makes no claim about it', ()
   assert.equal(mrOpenNote(false), '');
   assert.match(mrOpenNote(true), /`Draft:` prefix off the title/);
 });
+
+// ------------------------------------------------- base-check judges scope
+
+/**
+ * "Fails on the base" is true by definition of the ticket's own bug, so the
+ * base check has to judge scope as well, and it can only do that against the
+ * criteria the cases were written from. ticketHead() leaves them out.
+ * An iid in the reserved 990000+ band, so the verify.json it reads is never a
+ * real run's.
+ */
+const baseCheckPrompt = (): string => promptFor(cfg('base-check'), ctx(ticket({ iid: 990102 }), {
+  research: { acceptanceCriteria: ['Leave balance carries forward at year end'] },
+}));
+
+test('base-check is given the acceptance criteria to judge scope against', () => {
+  const p = baseCheckPrompt();
+  assert.match(p, /## Acceptance criteria/);
+  assert.match(p, /Leave balance carries forward at year end/);
+});
+
+test("base-check judges scope from the ticket, never from verify's evidence", () => {
+  const p = baseCheckPrompt();
+  assert.match(p, /`inTicketScope`/);
+  assert.match(p, /never from verify's evidence/);
+  assert.match(p, /When you cannot tell, it is true/);
+});
+
+test('verify is not told a wrong label always ends as a fail', () => {
+  // It did not: a case in the ticket's own scope fails on the base by
+  // definition, so the old deterrent described a closed hatch that was open.
+  const p = promptFor(cfg('verify'), ctx(ticket()));
+  assert.doesNotMatch(p, /A wrong label saves nothing/);
+  assert.match(p, /tagged `happy` covers this ticket's own\s+criteria/);
+});

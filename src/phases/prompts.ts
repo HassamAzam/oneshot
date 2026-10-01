@@ -29,7 +29,7 @@ import { approvalCovers, readArtifact, type Remediation, type RunJournal } from 
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import {
-  GITLAB_PROJECT_URL, countsAsFailure,
+  GITLAB_PROJECT_URL, countsAsFailure, ticketScopeIds,
   type CaseResult, type DesignArtifact, type Finding, type Screenshot, type TestCase,
   type Ticket, type TicketDoc,
 } from './types.js';
@@ -1597,9 +1597,11 @@ Never 'pre-existing':
   - a failure the diff makes worse, even if some of it was already there.
 When you cannot tell, it is a 'fail'.
 
-The conductor does not take your word for it: every 'pre-existing' case is re-run on
-\`${baseBranch()}\` by a separate check, and one that does not fail there the same way goes back
-to 'fail'. A wrong label saves nothing — it costs that check's time and ends as a fail anyway.
+The conductor does not take your word for it. A case tagged \`happy\` covers this ticket's own
+criteria and is refused the label outright. Every other 'pre-existing' case is re-run on
+\`${baseBranch()}\` by a separate check, which also judges, from the ticket and its criteria and
+not from your evidence, whether the case is this ticket's own scope. One that does not fail there
+the same way, or that the check finds in scope, goes back to 'fail' whatever the base shows.
 
 ## Turn economy — this is what killed the last session, so it is a protocol, not advice
 
@@ -1649,16 +1651,27 @@ impossible.`;
   },
 
   'base-check': (ctx) => {
+    // A happy-tagged case is refused the label before this session runs, so
+    // it is not handed over to be checked (see ticketScopeIds).
+    const ownScope = ticketScopeIds(testCases(ctx));
     const claimed = (readArtifact<{ results?: CaseResult[] }>(ctx.ticket.iid, 'verify.json')?.results ?? [])
-      .filter((r) => r.result === 'pre-existing');
+      .filter((r) => r.result === 'pre-existing' && !ownScope.has(r.id));
     const ids = new Set(claimed.map((r) => r.id));
     const cases = testCases(ctx).filter((c) => ids.has(c.id));
 
     return `${ticketHead(ctx.ticket)}
 
+## Acceptance criteria (phase 1)
+${criteria(ctx)}
+
 \`verify\` ran this ticket's case list against the branch and said the cases below fail for a
 reason this change did NOT cause — that they fail the same way on \`origin/${baseBranch()}\`.
 That label lets them past the merge gate, so it has to be proven, and you are the proof.
+
+The claim has two halves and you check both. Whether the case fails the same way on the base is
+\`onBase\`. Whether it is THIS ticket's own scope is \`inTicketScope\`, and that one you decide
+from the ticket and the criteria above — never from verify's evidence below, which is the claim
+being checked.
 
 ## What verify claimed
 ${claimed.map((r) => `  - ${r.id}: ${r.evidence}`).join('\n') || '  (nothing — say so in `summary`)'}
@@ -1699,6 +1712,12 @@ database is the one local Postgres every worktree shares.
 
 An 'inconclusive' is treated as a failure of the change, the same as 'passes'. So never guess
 'fails' to be kind to the run: only what you observed on the base counts.
+
+\`inTicketScope\` is true for a case that exercises an acceptance criterion above, or the
+behaviour the ticket reports as broken, whatever the base shows. Such a case fails on the base by
+definition — on a bug ticket the bug is there, on a feature ticket the feature is not — so
+'fails' proves nothing about it, and it goes back to being a fail. False only for a case about
+the surrounding product that the ticket does not ask to change. When you cannot tell, it is true.
 
 ${ORACLE}
 
