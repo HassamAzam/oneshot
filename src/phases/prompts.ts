@@ -759,8 +759,9 @@ behave differently, give v2 its own.`,
     (\`regression\`) — the case that proves v1 was left alone;
   - the choice surviving a reload, and a logout and login (\`state\`);
   - a user who never touched the switch landing on v2 (\`boundary\`). Its first step removes the
-    stored choice, because the harness carries browser storage from one case to the next: that
-    restores the precondition, it does not reach a version.
+    stored choice, naming its localStorage key exactly as the diff spells it, because the harness
+    carries browser storage from one case to the next: that restores the precondition, it does
+    not reach a version.
 A second account not inheriting the choice is point 5 too, but it is not a case here: \`verify\`
 has one login, so the case would end \`blocked\`, which no gate refuses. \`review\` checks it in
 the code instead.
@@ -796,8 +797,8 @@ storage, which wipes the very choice a case is measuring. The one write you may 
 for the never-touched case: the harness saves the browser's storage when it logs in and loads it
 into every later case, phase and lap, so a choice an earlier case (or \`ui-evidence\`) made is
 still there. Remove that one key — not the rest of storage, which holds the login — then load
-the feature's URL, and say so in the case's steps. That restores the precondition; it does not
-reach a version. v1's regression cases pass only when v1 behaves as it does on
+the feature's URL, and say so in that case's \`evidence\`. That restores the precondition; it
+does not reach a version. v1's regression cases pass only when v1 behaves as it does on
 \`origin/${baseBranch()}\`, whatever v2 now does.`,
 
   'ui-evidence': () => `Your 'before' is already running: v1, reached through the switch on YOUR instance. That is the

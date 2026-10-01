@@ -510,6 +510,8 @@ test('the never-touched case starts by removing the stored choice, and no case n
   // login, so a second-account case could only end blocked, which no gate refuses.
   const p = flat('testcases');
   assert.match(p, /a user who never touched the switch landing on v2 \(`boundary`\)\. Its first step removes the stored choice/);
+  // verify reads that step to learn which key to remove; nothing else tells it.
+  assert.match(p, /naming its localStorage key exactly as the diff spells it/);
   assert.match(p, /it is not a case here: `verify` has one login/);
   assert.doesNotMatch(p, /a second account on the same browser not inheriting/);
 });
@@ -527,6 +529,10 @@ test('verify may remove the stored choice only to set up the never-touched case'
   assert.match(p, /Never set the stored choice directly/);
   assert.match(p, /The one write you may make is SETUP for the never-touched case/);
   assert.match(p, /Remove that one key — not the rest of storage, which holds the login/);
+  // A case result is {id, result, evidence, screenshot}: `steps` is testcases'
+  // field, so an order to record the setup there had nowhere to go.
+  assert.match(p, /say so in that case's `evidence`/);
+  assert.doesNotMatch(p, /say so in the case's steps/);
 });
 
 test('review proves in code that the choice is per user, since no browser case can', () => {
