@@ -184,7 +184,8 @@ pytest is unaffected and is fine to run.
     frequently over before the first round-trip returns, so a naive read looks
     correct on a fast machine and wrong on a slow one.
   - **`intersects: null` is not "no overlap"** — it means one selector did not
-    resolve a box, and `missing` says which. That is a `blocked` with
+    resolve a box, or resolved and then detached before it could be inspected,
+    and `missing` says which. That is a `blocked` with
     `locator:`, never a pass. A popover absence-assertion passes identically
     whether dismissal works or the popover never opened at all, so prove the
     thing you expect to be there IS there before concluding the thing you expect

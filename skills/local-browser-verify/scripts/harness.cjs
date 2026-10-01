@@ -1022,9 +1022,20 @@ async function settle(session, selector, opts = {}) {
  * Playwright's own `isVisible()` does not cover this: it treats `opacity:0` as visible.
  * Opacity also compounds down the tree, so a faded ancestor hides a fully opaque child —
  * hence the walk to the root rather than reading the one element.
+ *
+ * `visible: null` means the element could not be inspected at all — it detached between
+ * settle() finding its box and this read, or the page navigated. That is "could not
+ * measure", and overlap() files it under `missing`; filing it under `hidden` reported a
+ * popper that vanished mid-measure as a clean `intersects:false`.
+ *
+ * The probe's timeout is evaluate's THIRD argument. The second is the page function's
+ * argument, and passed there `{ timeout }` was handed to the page function and ignored:
+ * the wait for a detached element ran under Playwright's 30s default, and an overlap()
+ * whose popper was removed 550ms in took 30677ms against a 1200ms budget.
  */
-async function visible(session, selector) {
+async function visible(session, selector, opts = {}) {
   const loc = session.page.locator(selector).first();
+  const cap = Math.min(2000, Number(opts.timeout || 5000));
   return loc.evaluate((el) => {
     let effective = 1;
     for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
@@ -1037,7 +1048,7 @@ async function visible(session, selector) {
     }
     if (effective < 0.05) return { visible: false, why: `opacity:${effective.toFixed(2)}` };
     return { visible: true, why: null };
-  }, { timeout: 2000 }).catch(() => ({ visible: false, why: 'unmeasurable' }));
+  }, undefined, { timeout: cap }).catch(() => ({ visible: null, why: 'unmeasurable' }));
 }
 
 function intersection(a, b) {
@@ -1070,7 +1081,8 @@ function intersection(a, b) {
  * rather than where it started.
  *
  * `intersects: null` is NOT "no overlap" — it means one of the two could not be
- * measured, and `missing` names which. Record that as a block, not a pass: a selector
+ * measured (it never resolved a box, or it resolved and then detached before it could
+ * be inspected), and `missing` names which. Record that as a block, not a pass: a selector
  * matching nothing is a question about the selector, and reading it as "nothing on top
  * of the field" is how a working screen gets filed as a product bug.
  *
@@ -1098,9 +1110,13 @@ async function overlap(session, a, b, opts = {}) {
   if (missing.length) {
     return { intersects: null, areaPx: null, missing, a: boxA, b: boxB, viewport };
   }
-  const seen = await Promise.all([visible(session, a), visible(session, b)]);
+  const seen = await Promise.all([visible(session, a, opts), visible(session, b, opts)]);
+  const unmeasured = [a, b].filter((_, i) => seen[i].visible === null);
+  if (unmeasured.length) {
+    return { intersects: null, areaPx: null, missing: unmeasured, a: boxA, b: boxB, viewport };
+  }
   const hidden = [a, b]
-    .map((sel, i) => (seen[i].visible ? null : { selector: sel, why: seen[i].why }))
+    .map((sel, i) => (seen[i].visible === false ? { selector: sel, why: seen[i].why } : null))
     .filter(Boolean);
   const hit = intersection(boxA, boxB);
   if (hidden.length) {

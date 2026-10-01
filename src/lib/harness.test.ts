@@ -244,6 +244,10 @@ const FAST = { timeout: 300, quiet: 60 };
 interface Stage {
   boxes: Record<string, Box | (() => Box)>;
   seen?: Record<string, { visible: boolean; why: string | null }>;
+  /** Selectors whose element is gone by the time it is inspected. */
+  detached?: string[];
+  /** Every inspection, with the argument and options it was handed. */
+  probes?: Array<{ arg: unknown; options: unknown }>;
 }
 
 function staged(stage: Stage) {
@@ -256,7 +260,13 @@ function staged(stage: Stage) {
             const box = stage.boxes[selector];
             return typeof box === 'function' ? box() : box ?? null;
           },
-          evaluate: async () => stage.seen?.[selector] ?? { visible: true, why: null },
+          evaluate: async (_fn: unknown, arg?: unknown, options?: unknown) => {
+            stage.probes?.push({ arg, options });
+            if (stage.detached?.includes(selector)) {
+              throw new Error('locator.evaluate: element is not attached to the DOM');
+            }
+            return stage.seen?.[selector] ?? { visible: true, why: null };
+          },
         }),
       }),
     },
@@ -331,4 +341,31 @@ test('a box that holds still settles well inside its budget', async () => {
   const box = await harness.settle(staged({ boxes: { [POPPER]: at(10, 20) } }), POPPER, FAST);
   assert.deepEqual(box, at(10, 20));
   assert.ok(Date.now() - started < FAST.timeout, `took ${Date.now() - started}ms`);
+});
+
+test('an overlay that detaches before it can be inspected is reported as missing, not as uncovered', async () => {
+  // The popper resolved a box in settle() and was gone when its visibility was read.
+  // That read failing used to land in `hidden`, so a measurement that never happened
+  // came back as a clean intersects:false.
+  const r = await harness.overlap(staged({
+    boxes: { [POPPER]: at(0, 0), [FIELD]: at(50, 50) },
+    detached: [POPPER],
+  }), POPPER, FIELD, FAST);
+  assert.equal(r.intersects, null);
+  assert.equal(r.areaPx, null);
+  assert.deepEqual(r.missing, [POPPER]);
+});
+
+test('the visibility probe carries its timeout as an option, inside the caller budget', async () => {
+  // Locator.evaluate(fn, arg, options): a timeout passed second is the page function's
+  // argument and is ignored, leaving the inspection on Playwright's 30s default.
+  const probes: Array<{ arg: unknown; options: unknown }> = [];
+  await harness.overlap(
+    staged({ boxes: { [POPPER]: at(0, 0), [FIELD]: at(50, 50) }, probes }), POPPER, FIELD, FAST,
+  );
+  assert.equal(probes.length, 2);
+  for (const probe of probes) {
+    assert.equal(probe.arg, undefined);
+    assert.deepEqual(probe.options, { timeout: FAST.timeout });
+  }
 });
