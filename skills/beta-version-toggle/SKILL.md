@@ -184,7 +184,8 @@ it costs a model, a migration and an endpoint.
 - **plan** — `approach` names v1's directory, the `<module>_v2/` files, the routes the
   switch point wraps, each v1 file v2 must extend (and how that stays backward
   compatible), any `api/v2/` twin, and where the choice is kept. The switch point and
-  the switch are their own steps.
+  the switch are their own steps. v2's copies of v1's components are not prior art to
+  extend or collapse, and neither is a duplicate already inside v1.
 - **implement** — builds it in that order: v2's pages and screens, then the switch
   point, the switch and the routes as one commit. Names every touched v1 file in
   `summary`, with why.

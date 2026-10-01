@@ -839,6 +839,17 @@ test('the skill the Beta label loads ships in this repo', () => {
   assert.ok(existsSync(join(ROOT, 'skills', BETA, 'SKILL.md')));
 });
 
+test('plan is told v1\'s components are not prior art for v2, and a duplicate inside v1 is not its to collapse', () => {
+  // plan loads util-reuse-methodology, whose reuse-first hunt finds v1's component
+  // as the obvious thing for v2 to extend; implement and review already carve the
+  // copy out, and without the same line here the plan they inherit has folded it.
+  const p = flat('plan');
+  assert.match(p, /v1's COMPONENTS are not prior art for v2 to extend/);
+  assert.match(p, /not a duplicate to reuse or collapse/);
+  assert.match(p, /Collapsing a duplicate that already sits in v1's directory is out of scope too/);
+  assert.doesNotMatch(flat('plan', ctx(ticket({ labels: ['Loop'] }))), /not prior art for v2/);
+});
+
 test('implement is told the v2 copy is the requirement, not duplication to fold away', () => {
   // ponytail is always loaded and asks whether code needs to exist at all; on a
   // Beta ticket its honest answer would collapse v2 back into an edit of v1.
