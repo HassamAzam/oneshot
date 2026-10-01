@@ -74,8 +74,9 @@ export interface BaseCheck {
  * 'pre-existing' is a failure verify traced to the base branch: the case fails
  * the same way without this diff. Sending it back to implement cannot fix it
  * and blocking the merge on it holds a correct change hostage, so it is
- * reported to the MR reviewer instead. #258 and #259 both burned their verify
- * laps on one such case and #259 blocked on it.
+ * reported to the MR reviewer instead. Two runs spent their verify laps on one
+ * case that verify itself traced to a pre-existing backend bug, and the second
+ * blocked on it.
  *
  * The label is the phase's own claim, and a check phase's claim is not
  * evidence on its own: one that arrives with no evidence is counted as the

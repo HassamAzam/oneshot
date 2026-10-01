@@ -351,8 +351,8 @@ const verified = (...results: Array<{ id: string; result: string; evidence?: str
   results: results.map((r) => ({ evidence: 'e', screenshot: '', ...r })),
 });
 
-// #258 and #259 both failed a TC-15 that verify itself called a pre-existing
-// backend bug; #259 failed it again on its second lap and blocked.
+// Two runs failed a case that verify itself called a pre-existing backend bug;
+// the second failed it again on its next lap and blocked.
 test('a pre-existing failure alone does not fail verify, so the run does not cycle', () => {
   const data = verified(
     { id: 'TC-01', result: 'pass' },
