@@ -24,7 +24,10 @@
  * and any normalisation would collide them into one:
  *   --color-<key>   from getColors(); light values in `:root`, dark values in
  *                   a `[data-theme="dark"]` block (explicit, not a media query,
- *                   so a mockup renders the same on every reviewer's machine)
+ *                   so a mockup renders the same on every reviewer's machine).
+ *                   A dark value that did not resolve is set to `initial` there:
+ *                   both selectors match a dark page, so leaving it out would
+ *                   hand the mockup the LIGHT value through the cascade.
  *   --font-<key>    from style.js, with a leading `font` stripped off the const
  *                   name (`fontMontserrat` → `--font-montserrat`)
  *   --scss-<key>    from _variables.scss, verbatim
@@ -401,7 +404,8 @@ function header(extraction: Omit<TokenExtraction, 'css'>, missing: string[]): st
   }
   lines.push(' *');
   if (extraction.unresolved.length) {
-    lines.push(` * UNRESOLVED (${extraction.unresolved.length}) — no value emitted for these:`);
+    lines.push(` * UNRESOLVED (${extraction.unresolved.length}) — no value emitted for these`
+      + ' (a dark.* entry is set to initial in the dark block, not inherited from :root):');
     lines.push(...extraction.unresolved.map((name) => ` *   ${name}`));
   } else {
     lines.push(' * UNRESOLVED: none — every token in every source file resolved.');
@@ -472,8 +476,15 @@ export function extractDesignTokens(frontendRoot: string): TokenExtraction {
     ...declarations('scss', scss),
     '}',
   ];
-  const darkBlock = Object.keys(dark).length
-    ? ['', '[data-theme="dark"] {', ...declarations('color', dark), '}']
+  // Every light key the dark theme could not resolve. On `<html data-theme="dark">`
+  // both blocks match, so a key the dark block leaves out falls through to its
+  // :root (light) value: dark.yellowColor is '' in the real Theme.js, so the app
+  // paints no colour in dark mode, yet a dark mockup rendered #ffff48. `initial`
+  // is the guaranteed-invalid value, so var() takes its fallback instead.
+  const darkHoles = Object.keys(light).filter((key) => !Object.hasOwn(dark, key));
+  const darkBlock = Object.keys(dark).length || darkHoles.length
+    ? ['', '[data-theme="dark"] {', ...declarations('color', dark),
+      ...darkHoles.map((key) => `  --color-${key}: initial;`), '}']
     : [];
 
   return { ...extraction, css: [header(extraction, missing), '', ...root, ...darkBlock, ''].join('\n') };

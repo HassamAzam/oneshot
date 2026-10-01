@@ -118,6 +118,21 @@ test('an empty string literal counts as no value', (t) => {
   assert.ok(!/--color-yellowColor:\s*;/.test(css));
 });
 
+test('a dark value that did not resolve is cleared in the dark block, not inherited from the light one', (t) => {
+  const { css } = extractDesignTokens(frontend(t, { theme: THEME }));
+  const darkBlock = css.slice(css.indexOf('[data-theme="dark"] {'));
+
+  // Both selectors match <html data-theme="dark">, so a key the dark block
+  // leaves out renders its :root value: a light colour on a dark mockup, with
+  // nothing in the output looking wrong.
+  assert.match(darkBlock, /--color-mystery: initial;/);
+  assert.match(darkBlock, /--color-yellowColor: initial;/);
+  assert.match(css, /:root \{[^}]*--color-yellowColor: #ffff48;/);
+  // A key with no light value either has nothing in :root to leak.
+  assert.doesNotMatch(css, /--color-inverted:/);
+  assert.match(css, /not inherited from :root/);
+});
+
 test('a ternary on anything but the dark parameter is refused rather than guessed', (t) => {
   const { light, dark, unresolved } = extractDesignTokens(frontend(t, { theme: THEME }));
 
