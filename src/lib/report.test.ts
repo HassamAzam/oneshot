@@ -15,6 +15,12 @@ test('redact still hides a real HTTP Basic credential', () => {
   assert.equal(redact('Basic dXNlcjpwYXNzd29yZA== sent'), 'Basic [redacted: basic credentials] sent');
 });
 
+test('redact hides a Basic credential whose password is not ASCII', () => {
+  for (const pair of ['user:pässwörd', 'svc:p@ss€']) {
+    assert.equal(redact(`Basic ${Buffer.from(pair).toString('base64')}`), 'Basic [redacted: basic credentials]', pair);
+  }
+});
+
 test('redact still hides an Authorization header whatever its scheme', () => {
   assert.equal(redact('Authorization: Basic dXNlcjpwYXNz'), 'Authorization: [redacted: credential header]');
 });

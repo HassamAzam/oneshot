@@ -111,10 +111,16 @@ const SECRET_RULES: Array<[RegExp, string | ((match: string, ...groups: string[]
     '$1$2[redacted: $1]'],
 ];
 
-/** True when a `Basic` token decodes to printable `user:password` text, which is what HTTP Basic carries. */
+/**
+ * True when a `Basic` token decodes to printable UTF-8 `user:password` text,
+ * which is what HTTP Basic carries (RFC 7617). UTF-8, not ASCII: a check for
+ * bytes 0x20-0x7e alone let `user:pässwörd` and `svc:p@ss€` through
+ * unredacted. A user-id before the colon is required, which keeps out most of
+ * the ordinary words whose letters happen to decode to text with a colon.
+ */
 function isBasicCredential(token: string): boolean {
-  const decoded = Buffer.from(token, 'base64').toString('latin1');
-  return /^[\x20-\x7e]+$/.test(decoded) && decoded.includes(':');
+  const decoded = Buffer.from(token, 'base64').toString('utf8');
+  return decoded.indexOf(':') > 0 && !decoded.includes('\uFFFD') && !/[\u0000-\u001f\u007f]/.test(decoded);
 }
 
 /**
