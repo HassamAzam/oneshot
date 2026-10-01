@@ -34,6 +34,14 @@ import { log } from '../lib/log.js';
 import { approverLine, type GateAttachment } from './reviewgate.js';
 import { thread } from '../lib/slack.js';
 
+/**
+ * The seven blocker values, in one place. They appear in the schema the model
+ * fills, in the type, and in the normaliser below; three hand-kept copies is
+ * how they drift apart.
+ */
+export const BLOCKERS = ['none', 'env', 'data', 'access', 'surface', 'steps', 'flake'] as const;
+export type Blocker = typeof BLOCKERS[number];
+
 export interface Reproduction {
   kind: 'bug' | 'feature';
   verdict: 'reproduced' | 'not-reproduced' | 'inconclusive' | 'not-applicable';
@@ -44,6 +52,8 @@ export interface Reproduction {
   observed: string;
   evidence: string[];
   reason: string;
+  /** What stopped an inconclusive run; 'none' on every other verdict. */
+  blocker: Blocker;
 }
 
 export type ReproductionDecision =
@@ -64,10 +74,14 @@ function listOf(v: unknown): string[] {
 export function reproductionOf(research: Record<string, unknown> | null | undefined): Reproduction | null {
   const r = research?.reproduction as Record<string, unknown> | undefined;
   if (!r || typeof r !== 'object') return null;
+  // Normalised first, because the blocker is derived from it: an unrecognised
+  // verdict becomes `inconclusive`, and an inconclusive verdict is the only one
+  // whose blocker means anything.
+  const verdict = (['reproduced', 'not-reproduced', 'inconclusive', 'not-applicable'] as const)
+    .find((v) => v === r.verdict) ?? 'inconclusive';
   return {
     kind: r.kind === 'feature' ? 'feature' : 'bug',
-    verdict: (['reproduced', 'not-reproduced', 'inconclusive', 'not-applicable'] as const)
-      .find((v) => v === r.verdict) ?? 'inconclusive',
+    verdict,
     testedCommit: strOf(r.testedCommit),
     account: strOf(r.account),
     steps: listOf(r.steps),
@@ -75,7 +89,21 @@ export function reproductionOf(research: Record<string, unknown> | null | undefi
     observed: strOf(r.observed),
     evidence: listOf(r.evidence),
     reason: strOf(r.reason),
+    blocker: blockerOf(verdict, r.blocker),
   };
+}
+
+/**
+ * A blocker only means anything on `inconclusive`, so it is derived from the
+ * verdict rather than trusted alongside it. Three combinations the skill forbids
+ * used to survive into the record: `reproduced` with a blocker set, and an
+ * artifact written before the field existed. It takes the NORMALISED verdict, so
+ * an unrecognised one — which becomes `inconclusive` — keeps the blocker that
+ * came with it rather than silently losing it.
+ */
+function blockerOf(verdict: Reproduction['verdict'], blocker: unknown): Blocker {
+  if (verdict !== 'inconclusive') return 'none';
+  return BLOCKERS.find((b) => b === blocker) ?? 'none';
 }
 
 /**

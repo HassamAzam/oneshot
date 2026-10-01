@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
   CONTEXT_REPO, PROJECT_TARGET, SKILLS_ROOT, WORK_REPO, WT_ROOT, pathSources, seedFrom,
-  auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, phases, portPool,
+  auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, phases, phasesOutsideTarget, portPool,
   projectConfig, repoIdentity, requiredLabels, reviewersConfig, slackConfig,
 } from '../src/lib/config.js';
 import { ping, getBranch, listLabels } from '../src/lib/gitlab.js';
@@ -106,6 +106,10 @@ async function main(): Promise<void> {
   const ph = phases();
   const codePhases = ph.filter((p) => p.kind === 'code').map((p) => p.name);
   pass(`${ph.length} phases`, `deterministic: ${codePhases.join(', ')}`);
+  for (const o of phasesOutsideTarget()) {
+    pass(`phase ${o.name} left out for this project`,
+      `targets: ${o.targets.join(', ') || '(none)'}; this project is '${PROJECT_TARGET || '(unset)'}'`);
+  }
   const missingTier = ph.filter((p) => p.kind === 'session' && !p.tier);
   if (missingTier.length) fail('phases without a tier', missingTier.map((p) => p.name).join(', '));
 
@@ -338,8 +342,8 @@ async function main(): Promise<void> {
     // for real rather than checking that config looks plausible: an
     // unresolvable reviewer fails silently — the ask posts unaddressed and
     // they never learn they are being waited on.
-    const { dev, qa, emailDomain, slackIds } = reviewersConfig();
-    const names = [...new Set([...dev, ...qa])];
+    const { dev, qa, design, emailDomain, slackIds } = reviewersConfig();
+    const names = [...new Set([...dev, ...qa, ...design])];
     if (names.length) {
       // A pinned id is trusted at runtime without a lookup, so this is the
       // only place it is ever checked. Verify it against the live workspace
