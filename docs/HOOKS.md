@@ -41,7 +41,8 @@ What remains after structure is the real hook list.
 |---|---|
 | `label-guard.js` (235 lines + `config/labels.json`) | **Deleted.** No label machine, and label writes are code. |
 | `git-guard.js` — approval-label verification before merge | **Deleted half.** Merge is code. The Bash-surface half stays and gets stronger. |
-| `pause-check` · `write-scope` · `sleep-cap` · `budget-gate` · `injection-scan` · `log-event` · `archive-transcript` · `subagent-capture` · `precompact-guard` · `dryrun-guard` | **Kept**, several re-scoped |
+| `pause-check` · `write-scope` · `sleep-cap` · `budget-gate` · `injection-scan` · `log-event` · `archive-transcript` · `subagent-capture` · `precompact-guard` | **Kept**, several re-scoped |
+| `dryrun-guard` | **Not built.** `DRY_RUN` cuts the tool list instead, and only partly — see its row in §3. |
 | — | **7 new**, listed below |
 
 Net: 12 → 18 hooks, but the two most complex ones shrink or vanish, and every new one exists
@@ -62,7 +63,7 @@ between phases).
 | `browser-scope` | Playwright / browser tools | Navigation allowlist: `localhost:<leased-port>`, the GitLab host of `GITLAB_REPO_URL`. Everything else denied. | **P1 (M3)** |
 | `sleep-cap` | `Bash` | Caps `sleep N`. Phase 6 legitimately waits (webpack ~30 min) — it must poll and report instead of sleeping through its own wall clock. | **P1 (M3)** |
 | `secret-guard` | `Read\|NotebookRead\|Grep\|Bash` | Denies reads **and writes** of this repo's own `.env` (`$ONESHOT_HOME/.env`) only: the Read/Grep tools by path, and Bash that reads it (`cat`, `grep`, `sed`, `cp`, `source`, `<` …) or writes it (`>`, `>>`, `tee`, `mv`, `sed -i` …), with `~`, `$HOME` and `$ONESHOT_HOME` expanded and relative paths resolved against the session cwd. `.env.example`/`.env.local` and the work repo's `.env` are allowed. **Not covered, deliberately:** `local_settings.py`, `~/.claude.json`, `~/.ssh/**`, `*.pem`, echoing `*TOKEN*` variables (the session env is a whitelist and carries no token), and any interpreter or `sudo` that opens the file itself — it is best-effort, and the skills keep their "never print `GITLAB_TOKEN`" rule. | P2 |
-| ~~`dryrun-guard`~~ | — | **Superseded by structure; never built.** `toolPolicy()` in `src/conductor/phase.ts` strips `Write`, `Edit`, `NotebookEdit` and every GitLab mutation tool from every phase under `DRY_RUN`, so there is no write tool left for a hook to deny. The one surface the tool list cannot describe is Bash, and `git-guard` covers it there (`ONESHOT_DRY_RUN` → no push). | — |
+| `dryrun-guard` | — | **Not built; partly covered by structure.** Under `DRY_RUN`, `toolPolicy()` in `src/conductor/phase.ts` strips `Write`, `Edit` and `NotebookEdit` from every phase, plus seven MR/issue tools (`create_`/`update_merge_request`, `create_`/`update_issue`, the MR and issue notes, `upload_markdown`). That is a deny-list, so it is not closed. `mr` skips the wider GitLab deny-list (`mayTouchGitlab`), so under `DRY_RUN` it still holds `push_files`, `create_or_update_file`, `create_branch` and the thread, note and draft-note writes. Every phase still holds the mutation tools that are on no list at all: `delete_issue`, the label and issue-link writes, `delete_draft_note`, `create_`/`retry_`/`cancel_pipeline`, `fork_repository` and `create_repository`. `git-guard` covers only `git push` on Bash (`ONESHOT_DRY_RUN`). Closing the rest belongs in `toolPolicy()`/`mcpServers()` — the GitLab MCP server has a read-only mode — not in a hook. | — |
 | `log-event` | *(all)* | Event tail / dashboard. | **P0** |
 
 **Fail-open is the default, and the exception is wired in `src/conductor/hooks.ts`.** Every
@@ -189,8 +190,9 @@ failure.)
 **M5** — `deploy-guard`. Shipped with phase 10, then **removed with it**: the pipeline ends at
 the merge, and a guard whose only job was the deploy has nothing left to guard.
 
-**M7** — `secret-guard`, `dryrun-guard`, `precompact-guard`, `subagent-capture`,
-`archive-transcript`.
+**M7** — `secret-guard`, `precompact-guard`, `subagent-capture`, `archive-transcript`.
+(`dryrun-guard` was dropped here: `DRY_RUN` is enforced by cutting the tool list, and what that
+does not yet cut belongs in the same place — see its row in §3.)
 
 Every hook keeps v1's two properties: shell-gated on the role env var so your interactive
 sessions pay ~1 ms, and self-gating inside the script as defense in depth.
