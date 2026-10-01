@@ -118,8 +118,32 @@ Login goes through the real form with `ONESHOT_TEST_LOGIN`. Record the account.
 | `inconclusive` | Anything that stopped you short of that: missing data, wrong role, feature flag, env error, a browser you don't have (Safari, Firefox, mobile), a device/viewport the ticket names that you could not match, production-only data, intermittent behaviour, or steps too vague to follow faithfully. |
 | `not-applicable` | Feature request, no runnable surface. |
 
+### An `inconclusive` must say WHAT stopped it
+
+`inconclusive` on its own records that reproduction stopped, never why — which
+makes "the app would not start" and "this is a feature request" the same entry in
+the log. Set `blocker` alongside it. `none` on every other verdict.
+
+| `blocker` | You were stopped by | Who can clear it |
+|---|---|---|
+| `env` | the app, the login, the port, the harness — put the named `E_` code in `reason` | the machine: this is what `remediate` exists for |
+| `data` | no record of the shape the bug needs exists on this database | a person, in seconds — they know which account has one |
+| `access` | the role, permission or feature flag that reaches the screen | a person |
+| `surface` | a browser, device or viewport the ticket names and this machine has not | a person, or nobody |
+| `steps` | the reported steps are too vague to follow faithfully | the reporter |
+| `flake` | behaviour that would not hold still long enough to observe | nobody yet |
+
+Pick the FIRST thing that stopped you, not the last thing you tried. A run that
+never got the app up is `env` even if you then also found the data missing.
+
 Rules that keep `not-reproduced` honest:
 
+- **Read [`refs/why-it-did-not-reproduce.md`](refs/why-it-did-not-reproduce.md)
+  before you record it.** One principle from QA's own history — you ran it under
+  different conditions than the reporter, and the difference is the bug — and the
+  five conditions that differ most often. The first is that the test accounts are
+  superusers, so a permission bug behaves correctly for you and wrongly for
+  whoever reported it.
 - **Different environment is not "not a bug".** The ticket may come from
   stage/production data, another browser, a narrow viewport or a specific user. If
   the conditions the ticket names are not the ones you ran, that is `inconclusive`.
@@ -144,17 +168,21 @@ means fix the record, or change the verdict to `inconclusive`.
       dir and shows the element in question, plus the measurement.
 - [ ] `expected` is quoted or paraphrased from the ticket, not from the code.
 - [ ] `reason` could be checked by a QA engineer who never saw this session.
+- [ ] `blocker` names the FIRST thing that stopped an `inconclusive`, and is
+      `none` on every other verdict.
 - [ ] If anything you observed was a different defect (an unrelated 500, a
       console error elsewhere), it is not counted as this bug. Mention it in
       `reason` if a later phase needs it.
 - [ ] For `not-reproduced`: you observed the correct value you planned for, on
       the ticket's own conditions.
+- [ ] For `not-reproduced`: `refs/why-it-did-not-reproduce.md` walked, and the
+      account you used is not a superuser where the ticket is about permissions.
 
 ## Output
 
 Fill `reproduction` in the research output: `kind`, `verdict`, `testedCommit`,
 `account`, `steps`, `expected` (from the ticket), `observed` (what happened, as values),
-`evidence` (filenames and measurements), `reason`.
+`evidence` (filenames and measurements), `reason`, `blocker`.
 
 The conductor turns that record into a ticket comment, with the screenshots
 attached, for both `reproduced` (straight away) and `not-reproduced` (the Not a Bug

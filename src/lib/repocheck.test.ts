@@ -11,7 +11,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
-  checkoutFindings, identityFindings, judgeOrigin, judgeWtRoot, originFinding, readOrigin, relaxRepoChecks,
+  checkoutFindings, findCheckout, identityFindings, judgeOrigin, judgeWtRoot, originFinding, readOrigin, relaxRepoChecks,
   repoCheckOverrideNotice, sameDir, worktreeOwners, wtRootFinding, type Finding, type OriginProject, type OriginRead,
 } from './repocheck.js';
 
@@ -678,4 +678,23 @@ test('the override is parsed like any flag, in either spelling, and off changes 
     assert.equal(repoCheckOverrideNotice(env), null, JSON.stringify(env));
   }
   assert.equal(repoCheckOverrideNotice(OVERRIDE), 'repo checks downgraded by ONESHOT_SKIP_REPO_CHECK — remove it once fixed');
+});
+
+test('findCheckout finds the project by origin, nested one level, and skips a same-named clone of another', () => {
+  const home = mkdtempSync(join(tmpdir(), 'oneshot-findcheckout-'));
+  try {
+    const decoy = join(home, 'Documents', 'erp');
+    const real = join(home, 'Desktop', 'workstream-repo', 'erp');
+    for (const d of [decoy, real]) mkdirSync(join(d, '.git'), { recursive: true });
+    const origins: Record<string, string> = {
+      [decoy]: 'git@gitlab.example.com:acme/erp-mobile.git',
+      [real]: 'git@gitlab.example.com:acme/erp.git',
+    };
+    const read = (d: string): OriginRead => (origins[d] ? { url: origins[d] } : { error: 'no origin' });
+    assert.equal(findCheckout(URL, 'erp', home, read), real);
+    assert.equal(findCheckout('https://gitlab.example.com/acme/other', 'erp', home, read), '');
+    assert.equal(findCheckout('', 'erp', home, read), '');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

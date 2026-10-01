@@ -105,6 +105,8 @@ export declare function resolveTarget(env: Env, root: string): {
   workRepo: ResolvedPath;
   wtRoot: ResolvedPath;
 };
+/** A name resolveTarget() can derive for a project: a lower-case path segment, not ending in `.git`. */
+export declare function isTargetName(name: string): boolean;
 export declare const LEGACY_SELECTOR_KEYS: string[];
 export declare function legacySelectors(env: Env, repo: GitlabRepo | null): LegacySelector[];
 export declare const SKIP_REPO_CHECK_VAR: 'ONESHOT_SKIP_REPO_CHECK';

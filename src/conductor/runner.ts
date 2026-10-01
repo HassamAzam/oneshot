@@ -61,7 +61,7 @@ import {
   currentProjectKey, journalOwner, worktreeToResume, type JournalOwner,
 } from '../lib/journalproject.js';
 import {
-  archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
+  approvalCovers, archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
   phaseSucceeded, phaseSettled, readArtifact,
   readJournal, recordPhase, recordRemediation, reapScratch, updateJournal, writeArtifact,
   writeJournal,
@@ -97,6 +97,7 @@ import { schemaFor } from './schemas.js';
 import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, declaredFiles, designApprovalRequestBody,
+  rearmGate,
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
@@ -1141,12 +1142,25 @@ export async function runTicket(
     // person — the same posture `bugReproduction` takes on 'inconclusive'.
     const design = prior.design ?? null;
     const designNeedsSignoff = design !== null && (design as { applicable?: unknown }).applicable !== false;
+    // `!approved` alone armed this gate exactly once. Anything that rewrote
+    // design.json after the sign-off -- a forced re-run, a resumed run
+    // re-executing the phase -- inherited the approval silently, and plan then
+    // built to a design no human had seen. approvalCovers() re-arms the gate on
+    // a proven mismatch; an approval stamped before digests existed carries no
+    // digest and still counts as covering, so in-flight runs are untouched.
+    const designApprovalStale = !approvalCovers(j.designApproval, design);
     if (phase.name === 'plan' && phaseSucceeded(iid, 'design')
-      && designGateApplies(ticket.labels) && designNeedsSignoff && !j.designApproval?.approved) {
+      && designGateApplies(ticket.labels) && designNeedsSignoff
+      && (!j.designApproval?.approved || designApprovalStale)) {
+      if (designApprovalStale) {
+        log.warn(`design.json changed since its approval on #${iid} — re-arming the design gate`);
+        j = rearmGate(iid, 'design') ?? j;
+      }
       const gate = await checkApprovalGate({
         iid,
         gate: 'design',
         requestBody: designApprovalRequestBody(design),
+        subject: design,
         attachments: designAttachments(iid, design),
         onApproved: async () => { await addIssueNote(iid, designApprovedRecordBody(design)); },
       });
@@ -1691,6 +1705,19 @@ export async function runTicket(
         const decision = notABugDecision(r.out.data);
         if (!decision.stop && decision.note) log.warn(`research: ${decision.note}`);
         const repro = reproductionOf(r.out.data);
+        // The verdict has to reach the database or it is unmeasurable: it lives
+        // in research.json on disk, so "how often does reproduction stop, and on
+        // what" is a question nobody can ask. `blocker` is the whole point of the
+        // row — skills/bug-reproduction/refs/why-it-did-not-reproduce.md retires
+        // an entry that no blocker ever matches, and that rule needs something to
+        // count.
+        if (repro) {
+          logEvent('reproduction', {
+            iid, kind: repro.kind, verdict: repro.verdict, blocker: repro.blocker,
+            steps: repro.steps.length,
+            shots: repro.evidence.filter((e) => e.endsWith('.png')).length,
+          }, { runId, phase: 'research' });
+        }
         if (repro?.verdict === 'reproduced') await declareReproduced(iid, repro);
       }
       if (r.cfg.name === 'implement' && activeRound(j.mrFeedback)?.status === 'fixing') {
