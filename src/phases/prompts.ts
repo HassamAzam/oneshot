@@ -26,6 +26,7 @@ import {
 } from '../lib/config.js';
 import { join } from 'node:path';
 import { approvalCovers, readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
+import { planFilePaths } from '../lib/planfiles.js';
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import {
@@ -146,14 +147,21 @@ interface PlanForecast {
  * field the planner fills from a model change it can see, while `steps[].files`
  * is a list of files it INTENDS to touch. Both are read here, and either one
  * alone is enough to keep a skill.
+ *
+ * The intended files are read through `planFilePaths`, so `fileChanges` counts
+ * as well as the steps — the same list the guarded-path gate reads. With the
+ * steps alone, a migration named only in the file table, under
+ * `migrations: false`, sent implement out without django-migration-standards
+ * while the gate was already counting that file.
  */
 function planForecast(ctx: PromptCtx): PlanForecast {
   const p = artifact<{
     migrations: boolean;
     steps: Array<{ files: string[]; layer: string }>;
+    fileChanges: unknown;
   }>(ctx, 'plan');
   const steps = p.steps ?? [];
-  const files = steps.flatMap((s) => s.files ?? []);
+  const files = planFilePaths(p);
   const layers = layersOf(files);
   return {
     migration: p.migrations === true || steps.some((s) => s.layer === 'migration')

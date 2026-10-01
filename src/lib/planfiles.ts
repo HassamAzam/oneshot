@@ -66,6 +66,27 @@ export function fileChangesOf(plan: FilesPlan | null, warnings: string[]): FileC
   return out;
 }
 
+/**
+ * Every path the plan says it will touch — `steps[].files`, then each
+ * `fileChanges[].path` — trimmed, de-duplicated, empty ones dropped.
+ *
+ * Deliberately not read through `fileChangesOf`. That normaliser decides what
+ * the table can DRAW, and drops a row whose action or area is off the enum;
+ * this list decides whether the guarded-path gate arms (`declaredFiles`) and
+ * which skills and agents implement is given (`planForecast`). A row with
+ * `area: 'Backend'` is a bad table row but still a file the planner said it
+ * would change — read through the renderer, `apps/payroll/views.py` on such a
+ * row never reached the gate. Both readers share this so they cannot disagree
+ * about what the plan declares, which they did when only the gate read the
+ * table and the forecast read only the steps.
+ */
+export function planFilePaths(plan: FilesPlan | null): string[] {
+  const fromSteps = asArray(plan?.steps).flatMap((s) => asArray((s as { files?: unknown } | null)?.files));
+  const fromTable = asArray(plan?.fileChanges).map((c) => (c as { path?: unknown } | null)?.path);
+  const paths = [...fromSteps, ...fromTable].map((p) => String(p ?? '').trim()).filter(Boolean);
+  return [...new Set(paths)];
+}
+
 /** A path as a table-safe code span: GFM splits a row on `|` before it sees any span. */
 const cellCode = (s: string): string => codeSpan(s).replace(/\|/g, '\\|');
 

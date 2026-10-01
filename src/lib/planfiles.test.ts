@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fileChangesOf, fileChangesSection, renderFileChanges } from './planfiles.js';
+import { fileChangesOf, fileChangesSection, planFilePaths, renderFileChanges } from './planfiles.js';
 
 const fc = (path: string, action: string, area: string, what = 'x') => ({ path, action, area, what });
 
@@ -124,4 +124,27 @@ test('a plan without fileChanges — written before the field existed — render
   assert.equal(fileChangesSection(null), '');
   assert.equal(fileChangesSection({ fileChanges: 'nope' }), '');
   assert.deepEqual(fileChangesOf({ fileChanges: [] }, []), []);
+});
+
+test('the paths a plan declares include a table row the table itself would drop', () => {
+  // The guarded-path gate and the skill forecast read this list. A row with an
+  // off-enum area is unfit to draw, but it still names a file the planner said
+  // it would change, so whether payroll arms the gate cannot hinge on the enum.
+  const paths = planFilePaths({
+    steps: [{ files: ['apps/leaves/views.py', ' apps/leaves/utils.py '] }, null, { files: 'nope' }],
+    fileChanges: [
+      fc('apps/payroll/views.py', 'modify', 'Backend'),
+      fc('apps/leaves/views.py', 'rename', 'backend'),
+      fc('', 'create', 'backend'),
+      'not an object',
+    ],
+  });
+  assert.deepEqual(paths, ['apps/leaves/views.py', 'apps/leaves/utils.py', 'apps/payroll/views.py']);
+  assert.equal(fileChangesOf({ fileChanges: [fc('apps/payroll/views.py', 'modify', 'Backend')] }, []).length, 0,
+    'the renderer still drops the row; only the path list keeps it');
+});
+
+test('a plan with no files anywhere declares no paths', () => {
+  assert.deepEqual(planFilePaths(null), []);
+  assert.deepEqual(planFilePaths({ steps: 'nope', fileChanges: {} }), []);
 });

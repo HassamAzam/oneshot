@@ -240,6 +240,12 @@ test('a file named only in fileChanges still counts toward the guarded-path gate
   assert.deepEqual(declaredFiles(plan, { filesChanged: ['apps/leaves/tests.py'] }),
     ['apps/leaves/views.py', 'apps/payroll/utils.py', 'apps/leaves/tests.py']);
   assert.deepEqual(declaredFiles(null, null), []);
+  // A row the table cannot draw (area off the enum) is still a file the planner
+  // named: the gate reads the raw path, not the renderer's validated rows.
+  assert.deepEqual(declaredFiles({
+    steps: [],
+    fileChanges: [{ path: 'apps/payroll/views.py', action: 'modify', area: 'Backend', what: 'x' }],
+  }, null), ['apps/payroll/views.py']);
 });
 
 const tcase = (over: Record<string, unknown> = {}) => ({
