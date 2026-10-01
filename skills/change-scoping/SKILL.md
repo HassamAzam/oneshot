@@ -182,12 +182,12 @@ What a schema cannot tell you is who reads the field, and three readers decide
 between them whether this plan is actionable:
 
 - **The comment the approver answers does not render `reuse`.** It renders the
-  approach, open questions, steps, acceptance coverage, risks and out-of-scope —
-  and nothing else. The full plan is attached beside it, `reuse` included, but an
-  attachment is reference and the comment is the decision. So anything a person
-  must be able to *decline* cannot live in `reuse`: route it to `approach`,
-  `openQuestions`, `outOfScope`, or a step's `what`. Nor to `risks`, where a
-  scope choice becomes something they can only accept or reject whole.
+  approach, open questions, steps, acceptance coverage, risks and out-of-scope.
+  The full plan is attached beside it, `reuse` included, but an attachment is
+  reference and the comment is the decision. So anything a person must be able
+  to *decline* cannot live in `reuse`: route it to `approach`, `openQuestions`,
+  `outOfScope`, or a step's `what`. Nor to `risks`, where a scope choice becomes
+  something they can only accept or reject whole.
 - **`implement` reads `openQuestions` too, not just the approver.** So **say
   which step can be dropped**, as a question — they render *above* the steps,
   under "answer these in a comment, or the stated default is used", and **the
@@ -223,7 +223,7 @@ working, not the phase cutting corners.
 - Do not accept a handed `file:line` you never opened, and do not report "no
   prior art" against one.
 - Do not drop a rejected candidate silently — it stays in `reuse` with a reason.
-- Do not put an approver-facing choice in `reuse`; they never see it.
+- Do not put an approver-facing choice in `reuse`; the comment they answer omits it.
 - Do not name a directory for a placement you did not search.
 - Do not estimate a consumer count, or file a risk with no check.
 - Do not leave a file off the step that touches it.
