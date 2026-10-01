@@ -368,9 +368,9 @@ work — and each of those phases is handed the same contract and its own part i
 |---|---|
 | `plan` | names v1's directory, the `<module>_v2/` files, the routes the switch wraps, any v1 file v2 must extend, and where the choice is kept; the switch gets its own steps |
 | `implement` | builds v2 beside v1, then the switch point and the switch as their own commit; extends a v1 file only backward-compatibly, and names each one |
-| `testcases` | the criteria in v2, the switch both ways, v1's main flow as a regression case, the choice across a reload and a re-login, and the default |
+| `testcases` | the criteria in v2, the switch both ways, v1's main flow as a regression case, the choice across a reload and a re-login, and the never-touched case landing on v2 |
 | `review` | reads every v1 file the diff touches — anything but a backward-compatible extension is a `major` finding, and so is v1 importing v2 — and checks in the code that the choice is keyed by the signed-in user, since `verify` has one login and cannot try a second account |
-| `verify` | reaches each version by clicking the switch, never by writing the stored choice, and logs out through the app; it removes the stored choice only as setup for the default case |
+| `verify` | reaches each version by clicking the switch, never by writing the stored choice, and logs out through the app; it removes the stored choice only as setup for the never-touched case |
 | `ui-evidence` | v1 (through the switch) and v2 of each changed screen, and the switch in both states; against a base-branch shot, only the page below the switch is compared |
 | `mr` | says where v1 and v2 live, where the choice is kept, and what retiring v1 later takes |
 
