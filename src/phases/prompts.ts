@@ -740,7 +740,12 @@ the choice is kept. The switch point and the switch get their own steps: they ar
 this a beta, and a plan that folds them into "build v2" is how they get forgotten.
 \`acceptanceCoverage\` places each criterion in v2. If there is nothing to switch back to — the
 ticket creates a screen that does not exist today — say so in \`openQuestions\` with the default
-"ship it without a switch" rather than inventing a v1.`,
+"ship it without a switch" rather than inventing a v1.
+The reuse hunt still runs, but v1's COMPONENTS are not prior art for v2 to extend: v2's copy of
+a component is the requirement, not a duplicate to reuse or collapse — the same carve-out
+\`implement\` and \`review\` are given. Collapsing a duplicate that already sits in v1's
+directory is out of scope too: under point 1 it is an edit to v1. What v2 reuses from v1 is its
+data layer — actions, selectors, utils, API helpers — imported from where it lives.`,
 
   implement: () => `Load \`${BETA_SKILL}\` before you write anything: its layout is what \`review\` checks the
 diff against. Build v2 beside v1 as the plan lays it out, and commit the switch point and the
