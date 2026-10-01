@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyBaseCheck, codePhaseStatus, decideClaim, failedCases, mergePollWait, nextIndex,
-  salvagedReview, sharedDatabaseRefusal, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
+  applyBaseCheck, baseCheckOutcome, codePhaseStatus, decideClaim, failedCases, mergePollWait,
+  nextIndex, salvagedReview, sharedDatabaseRefusal, statusForFailure, testcaseGateRoute,
+  ticketComments, uiEvidenceRefusal, verifyAfterBaseCheckDeath,
 } from './runner.js';
+import type { PhaseOutput } from './phase.js';
 import type { IssueNote } from '../lib/gitlab.js';
 import { ticketScopeIds, type CaseResult } from '../phases/types.js';
-import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
+import { MERGE_POLL_MS, phaseByName, type PhaseConfig } from '../lib/config.js';
 import type { RunJournal } from '../lib/artifacts.js';
 import type { JournalOwner } from '../lib/journalproject.js';
 
@@ -511,4 +513,65 @@ test('an evidenced label on a migrating branch goes back to fail with that reaso
   assert.equal(out.results[1]!.result, 'fail');
   assert.match(out.results[1]!.evidence, /NOT confirmed — this branch migrates the shared database/);
   assert.match(failedCases('verify', { results: out.results }) ?? '', /TC-07/);
+});
+
+// ------------------------------------- a dead base check is infra, not a verdict
+
+const session = (over: Partial<PhaseOutput> = {}): PhaseOutput => ({
+  ok: false, data: null, blocked: null, summary: '', turns: 0, weighted: 0, sessionId: 's',
+  rateLimited: false, ...over,
+});
+
+test('a base check that answered is read as its artifact', () => {
+  const data = { baseCommit: 'abc', results: [{ id: 'TC-15', onBase: 'fails', inTicketScope: false, evidence: 'x' }] };
+  assert.deepEqual(baseCheckOutcome(session({ ok: true, data }), 0, false), { kind: 'answered', data });
+});
+
+test('a base check that timed out is re-attempted in place before it counts as a death', () => {
+  const timedOut = session({ infra: true, error: 'timed out after 40m' });
+  assert.equal(baseCheckOutcome(timedOut, 0, false).kind, 'retry');
+  const last = baseCheckOutcome(timedOut, 2, false);
+  assert.equal(last.kind, 'died');
+  assert.match(last.kind === 'died' ? last.why : '', /timed out after 40m/);
+});
+
+test('a run that is stopping, a usage limit or an account gate is not re-attempted', () => {
+  assert.equal(baseCheckOutcome(session({ infra: true }), 0, true).kind, 'died');
+  assert.equal(baseCheckOutcome(session({ rateLimited: true }), 0, false).kind, 'died');
+  assert.equal(baseCheckOutcome(session({ infra: true, accountAction: 'accept the terms' }), 0, false).kind, 'died');
+});
+
+test('a base check that finished without an answer is unavailable, which still fails closed', () => {
+  const blocked = baseCheckOutcome(session({ blocked: 'E_NO_PORTS' }), 0, false);
+  assert.equal(blocked.kind, 'unavailable');
+  assert.match(blocked.kind === 'unavailable' ? blocked.why : '', /E_NO_PORTS/);
+  const out = applyBaseCheck([res('TC-15', 'pre-existing')], null, 'dev',
+    { unavailable: blocked.kind === 'unavailable' ? blocked.why : '' });
+  assert.equal(out.results[0]!.result, 'fail');
+  assert.match(out.results[0]!.evidence, /E_NO_PORTS/);
+});
+
+test('a reason a check was refused before it ran reaches the evidence', () => {
+  const out = applyBaseCheck([res('TC-15', 'pre-existing')], null, 'dev',
+    { unavailable: 'no base-branch check ran (quota: parked until 14:00)' });
+  assert.match(out.results[0]!.evidence, /NOT confirmed — no base-branch check ran \(quota: parked until 14:00\)/);
+});
+
+test('a base check that died leaves verify recorded as infra, so no verify lap is spent', () => {
+  // verify's own session succeeded; scoring its record from its own clear
+  // infra flag recorded 'failed', which failedLapsOf counts as a lap.
+  const verify = session({ ok: true, data: { results: [] } });
+  verifyAfterBaseCheckDeath(verify, session({ infra: true }), 'the base-check session died: timed out');
+  assert.equal(verify.ok, false);
+  assert.equal(statusForFailure(phaseByName('verify')!, verify.infra), 'infra');
+  assert.equal(verify.error, 'the base-check session died: timed out');
+});
+
+test('a base check stopped by an account gate or a usage limit carries it to verify', () => {
+  const gated = session({ ok: true });
+  verifyAfterBaseCheckDeath(gated, session({ infra: true, accountAction: 'accept the terms' }), 'gate');
+  assert.equal(gated.accountAction, 'accept the terms');
+  const limited = session({ ok: true });
+  verifyAfterBaseCheckDeath(limited, session({ rateLimited: true }), 'limit');
+  assert.equal(limited.rateLimited, true);
 });

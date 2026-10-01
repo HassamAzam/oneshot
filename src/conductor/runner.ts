@@ -388,7 +388,7 @@ function withInReview(cfg: ReturnType<typeof projectConfig>, labels: string[]): 
   return cfg.labels.inReview ? [...labels, cfg.labels.inReview] : labels;
 }
 
-function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] {
+export function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] {
   if (p.onFail === 'skip') return 'skipped';
   if (p.onFail === 'warn') return 'warned';
   // Recorded before the onFail policy is consulted, because the policy is about
@@ -570,6 +570,57 @@ export function applyBaseCheck(
     return { ...r, result: 'fail' as const, evidence: `claimed pre-existing, NOT confirmed — ${why} — verify: ${r.evidence}` };
   });
   return { results: out, confirmed, rejected };
+}
+
+/**
+ * What one base-check session's outcome means for the labels it was proving.
+ *
+ * 'died' is a timeout, a cancel, a pause, a usage limit or an account gate:
+ * the machinery, not a verdict. It used to fold into "not confirmed", which
+ * scored verify 'failed' — verify's own session had succeeded, so its infra
+ * flag was clear — spent a verify lap, and sent implement to fix a case nobody
+ * had checked on the base. Two such deaths are exactly the laps-burned-then-
+ * blocked shape this phase exists to prevent. An infra death is re-attempted
+ * in place first (`retry`) up to MAX_INFRA_ATTEMPTS, but never a usage limit
+ * or an account gate, which every re-attempt hits again, and never once the
+ * run is stopping (`stopping`: aborted or paused).
+ *
+ * 'unavailable' is a session that finished without an answer it would stand
+ * behind (blocked, or no artifact): a fail-closed "not confirmed", as before.
+ */
+export function baseCheckOutcome(
+  out: Pick<PhaseOutput, 'ok' | 'data' | 'blocked' | 'error' | 'infra' | 'rateLimited' | 'accountAction'>,
+  attempt: number, stopping: boolean,
+):
+  | { kind: 'answered'; data: BaseCheck }
+  | { kind: 'retry' }
+  | { kind: 'unavailable'; why: string }
+  | { kind: 'died'; why: string } {
+  if (out.ok && out.data) return { kind: 'answered', data: out.data as BaseCheck };
+  const dead = Boolean(out.infra || out.rateLimited || out.accountAction);
+  if (!dead) {
+    return { kind: 'unavailable', why: `the base-check session gave no answer: ${out.blocked ?? out.error ?? 'no result'}` };
+  }
+  if (!out.rateLimited && !out.accountAction && !stopping && attempt < MAX_INFRA_ATTEMPTS) {
+    return { kind: 'retry' };
+  }
+  return { kind: 'died', why: `the base-check session died: ${out.accountAction ?? out.error ?? 'no error text'}` };
+}
+
+/**
+ * Hand a base-check death to verify, so the existing infra paths decide it:
+ * the record is 'infra' and costs no lap, an account gate stops the run, a
+ * usage limit parks it, an abort or a pause ends it and the resume re-runs
+ * verify, and a plain death takes afterFailure()'s capped re-attempt.
+ */
+export function verifyAfterBaseCheckDeath(
+  verify: PhaseOutput, died: Pick<PhaseOutput, 'rateLimited' | 'accountAction'>, why: string,
+): void {
+  verify.ok = false;
+  verify.infra = true;
+  verify.rateLimited ||= died.rateLimited;
+  verify.accountAction ??= died.accountAction;
+  verify.error = why;
 }
 
 /** Every migration file, at any depth of the work repo. */
@@ -1601,21 +1652,34 @@ export async function runTicket(
           );
           let check: BaseCheck | null = null;
           let unavailable: string | undefined;
+          let died: { why: string; out: PhaseOutput } | undefined;
           if (checkable) {
             // Decided here, from git, rather than left to the session: a base
             // app on a database this branch migrated is not a second opinion.
             unavailable = sharedDatabaseRefusal(await branchMigrations(), cfg.branches.base) ?? undefined;
             if (unavailable) log.warn(`base-check not run — ${unavailable}`);
-            else check = await runBaseCheck();
+            else {
+              const ran = await runBaseCheck();
+              if (ran.kind === 'answered') check = ran.data;
+              else unavailable = ran.why;
+              if (ran.kind === 'died') died = ran;
+            }
           }
+          // Written fail-closed even when the check died, so no reader of
+          // verify.json — the merge gate, the MR note — ever sees an unchecked label.
           const applied = applyBaseCheck(res, check, cfg.branches.base, { ownScope, unavailable });
           r.out.data = { ...r.out.data, results: applied.results };
           writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
-          if (applied.confirmed.length) {
-            log.ok(`base-check confirmed pre-existing on ${cfg.branches.base}: ${applied.confirmed.join(', ')}`);
-          }
-          if (applied.rejected.length) {
-            log.warn(`base-check did not confirm ${applied.rejected.join(', ')} — scored as fail`);
+          if (died) {
+            verifyAfterBaseCheckDeath(r.out, died.out, died.why);
+            log.warn(`verify recorded as infra — ${died.why}; no lap spent`);
+          } else {
+            if (applied.confirmed.length) {
+              log.ok(`base-check confirmed pre-existing on ${cfg.branches.base}: ${applied.confirmed.join(', ')}`);
+            }
+            if (applied.rejected.length) {
+              log.warn(`base-check did not confirm ${applied.rejected.join(', ')} — scored as fail`);
+            }
           }
         }
       }
@@ -2295,45 +2359,79 @@ export async function runTicket(
   }
 
   /**
-   * Run the on-demand `base-check` session and return its artifact, or null.
+   * Run the on-demand `base-check` session, re-attempting an infra death in
+   * place, and say what came of it.
    *
-   * Null for every way it can fail to answer — the phase switched off, no port,
-   * no quota, a session that died — and null means "not confirmed" to
-   * applyBaseCheck(), so none of these can wave a failure through. Recorded in
-   * the journal and ledger like any phase: it spends budget and holds a browser.
+   * 'unavailable' is every way it can fail to answer that is not a death — the
+   * phase switched off, no lease, no quota, a session that finished without an
+   * answer — and applyBaseCheck() reads it as "not confirmed", so none of them
+   * can wave a failure through. Each is logged with its reason, and the reason
+   * lands in the refused case's evidence. A refusal before the session starts
+   * writes no journal record, because no session ran; one that ran is recorded
+   * in the journal and ledger like any phase.
+   *
+   * 'died' is the machinery rather than a verdict (see baseCheckOutcome). It is
+   * re-attempted here first, on a LOCAL counter: base-check's own records are
+   * not what infraAttemptsOf() reads for verify.
    */
-  async function runBaseCheck(): Promise<BaseCheck | null> {
+  async function runBaseCheck(): Promise<
+    | { kind: 'answered'; data: BaseCheck }
+    | { kind: 'unavailable'; why: string }
+    | { kind: 'died'; why: string; out: PhaseOutput }
+  > {
+    const refused = (why: string): { kind: 'unavailable'; why: string } => {
+      log.warn(`base-check not run — ${why}`);
+      return { kind: 'unavailable', why: `no base-branch check ran (${why})` };
+    };
     const cfgB = list.find((q) => q.name === 'base-check');
-    if (!cfgB || !isImplemented(cfgB.name)) return null;
-    if (ensureLeases(cfgB)) return null;
-    const lap = lapsOf(iid, cfgB.name);
-    if (!checkQuota(runId, cfgB.name, lap).allowed) return null;
+    if (!cfgB || !isImplemented(cfgB.name)) return refused('the base-check phase is not configured');
+    const leaseError = ensureLeases(cfgB);
+    if (leaseError) return refused(leaseError);
 
-    const startedAt = Date.now();
-    await updateCard(j.slackTs ?? '', cardState(j, [cfgB.name]));
-    updateRun(runId, { phase: cfgB.name, status: 'running', owner_seen_at: Date.now() });
+    for (let attempt = 0; ; attempt++) {
+      const lap = lapsOf(iid, cfgB.name);
+      const quota = checkQuota(runId, cfgB.name, lap);
+      if (!quota.allowed) return refused(`quota: ${quota.reason}`);
 
-    const ctx: PromptCtx = { ticket, runId, lap, branch, worktree, port, prior, journal: j };
-    const rowId = phaseStart(runId, cfgB.name, lap, modelFor(cfgB));
-    const out = await runPhase({
-      iid, runId, lap, cfg: cfgB,
-      prompt: promptFor(cfgB, ctx),
-      systemPrompt: systemPromptFor(cfgB, ctx),
-      worktree, port, branch,
-      signal: opts.signal,
-    });
-    const status = out.ok ? 'ok' : statusForFailure(cfgB, out.infra);
-    phaseEnd(rowId, status, {
-      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
-      detail: out.error ?? out.blocked ?? undefined,
-    });
-    recordPhase(iid, {
-      phase: cfgB.name, lap, status, startedAt, endedAt: Date.now(), model: modelFor(cfgB),
-      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
-      error: out.accountAction ?? out.error ?? out.blocked ?? undefined,
-    });
-    j = readJournal(iid) ?? j;
-    return out.ok ? (out.data as BaseCheck | undefined) ?? null : null;
+      const startedAt = Date.now();
+      await updateCard(j.slackTs ?? '', cardState(j, [cfgB.name]));
+      updateRun(runId, { phase: cfgB.name, status: 'running', owner_seen_at: Date.now() });
+
+      const ctx: PromptCtx = { ticket, runId, lap, branch, worktree, port, prior, journal: j };
+      const rowId = phaseStart(runId, cfgB.name, lap, modelFor(cfgB));
+      const out = await runPhase({
+        iid, runId, lap, cfg: cfgB,
+        prompt: promptFor(cfgB, ctx),
+        systemPrompt: systemPromptFor(cfgB, ctx),
+        worktree, port, branch,
+        signal: opts.signal,
+      });
+      // 'infra' ahead of the onFail policy: statusForFailure() answers 'warned'
+      // for a warn phase before it looks at infra, and phaseSucceeded() and the
+      // card both count 'warned' as done.
+      const status = out.ok ? 'ok' : out.infra ? 'infra' : statusForFailure(cfgB);
+      phaseEnd(rowId, status, {
+        turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+        detail: out.error ?? out.blocked ?? undefined,
+      });
+      recordPhase(iid, {
+        phase: cfgB.name, lap, status, startedAt, endedAt: Date.now(), model: modelFor(cfgB),
+        turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+        error: out.accountAction ?? out.error ?? out.blocked ?? undefined,
+      });
+      j = readJournal(iid) ?? j;
+
+      const outcome = baseCheckOutcome(out, attempt, Boolean(opts.signal?.aborted) || existsSync(PAUSE));
+      if (outcome.kind === 'retry') {
+        log.warn('base-check died of infrastructure — re-attempting in place', {
+          attempt: attempt + 1, of: MAX_INFRA_ATTEMPTS, why: (out.error ?? '').slice(0, 120),
+        });
+        continue;
+      }
+      if (outcome.kind === 'died') return { ...outcome, out };
+      if (outcome.kind === 'unavailable') log.warn(`base-check gave no answer — ${outcome.why}`);
+      return outcome;
+    }
   }
 
   /**
