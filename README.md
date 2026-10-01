@@ -67,8 +67,9 @@ Three things fall out of that:
    6  verify          Sonnet 5  dev server + Playwright, runs THE list
                                 fail ──► back to 3 (max 2 laps)
                                 pre-existing ──► base-check re-runs it on dev:
-                                  fails there too ──► listed on the MR, no lap
-                                  otherwise ──► a fail, as above
+                                  fails there too, outside the ticket's
+                                  scope ──► listed on the MR, no lap
+                                  otherwise, or the branch migrates ──► a fail
    7  ui-evidence  ∥  Sonnet 5  screenshots
    8  mr           ∥  Sonnet 5  MR + description
    9  merge           code      merge into dev — dev is final, nothing promotes on
