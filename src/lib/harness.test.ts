@@ -1,5 +1,6 @@
 /**
- * The browser harness's bring-up preconditions.
+ * The browser harness's bring-up preconditions, and the contract of its overlap
+ * measurement.
  *
  * Lives under src/ because that is the only tree `npm test` globs, while the
  * harness itself ships inside the skill that uses it. It is reached through
@@ -22,7 +23,20 @@ const harness = require(
   needsCollectstatic: (wt: string) => boolean;
   disabledIntegrations: (wt: string) => Array<{ name: string; why: string }>;
   waitDjango: (port: number, pid: number, budgetMs: number) => Promise<boolean>;
+  settle: (session: unknown, selector: string, opts?: Budget) => Promise<Box | null>;
+  overlap: (session: unknown, a: string, b: string, opts?: Budget) => Promise<Overlap>;
 };
+
+interface Box { x: number; y: number; width: number; height: number }
+interface Budget { timeout?: number; quiet?: number }
+interface Overlap {
+  intersects: boolean | null;
+  areaPx: number | null;
+  region?: { width: number; height: number; areaPx: number };
+  missing?: string[];
+  hidden?: Array<{ selector: string; why: string | null }>;
+  outsideViewport?: boolean;
+}
 
 /**
  * The template the app repo commits at its root, trimmed to the keys these tests
@@ -212,4 +226,109 @@ test('an environment it cannot interrogate reports nothing, and does not throw',
   // rule testlogin.ts states: a pre-check must never be the thing that fails a run.
   const wt = seeded();
   assert.deepEqual(harness.disabledIntegrations(wt), []);
+});
+
+/* ---------------------------------------------------------------- overlap */
+
+const POPPER = '.react-datepicker-popper';
+const FIELD = '[name="training.end_date"]';
+/** Small enough that a side which never resolves costs 300ms, not the 5s default. */
+const FAST = { timeout: 300, quiet: 60 };
+
+/**
+ * The page a measurement sees, answered from tables. settle() and overlap() touch only
+ * `locator(sel).first().boundingBox()`, `.evaluate()` and `viewportSize()`, so a plain
+ * object drives them with no browser. A box given as a function is re-read on every
+ * probe, which is how a moving element is staged.
+ */
+interface Stage {
+  boxes: Record<string, Box | (() => Box)>;
+  seen?: Record<string, { visible: boolean; why: string | null }>;
+}
+
+function staged(stage: Stage) {
+  return {
+    page: {
+      viewportSize: () => ({ width: 1440, height: 900 }),
+      locator: (selector: string) => ({
+        first: () => ({
+          boundingBox: async () => {
+            const box = stage.boxes[selector];
+            return typeof box === 'function' ? box() : box ?? null;
+          },
+          evaluate: async () => stage.seen?.[selector] ?? { visible: true, why: null },
+        }),
+      }),
+    },
+  };
+}
+
+const at = (x: number, y: number, width = 100, height = 100): Box => ({ x, y, width, height });
+
+test('a field that never resolves a box is reported as missing, not as no overlap', async () => {
+  // The dangerous reading: "I could not find it" taken as "nothing is covering it"
+  // files a working screen as a product bug, which is what ticket 244 paid for.
+  const r = await harness.overlap(staged({ boxes: { [POPPER]: at(0, 0) } }), POPPER, FIELD, FAST);
+  assert.equal(r.intersects, null);
+  assert.equal(r.areaPx, null);
+  assert.deepEqual(r.missing, [FIELD]);
+});
+
+test('a missing field and a missing popper are told apart by which one is named', async () => {
+  // The calendar check reads a vanished popper as "closed and stayed closed" and a
+  // vanished field as a locator question. Both come back as intersects:null, so
+  // `missing` is the only thing that separates a pass from a false pass.
+  const noField = await harness.overlap(staged({ boxes: { [POPPER]: at(0, 0) } }), POPPER, FIELD, FAST);
+  const noPopper = await harness.overlap(staged({ boxes: { [FIELD]: at(0, 0) } }), POPPER, FIELD, FAST);
+  assert.deepEqual(noField.missing, [FIELD]);
+  assert.deepEqual(noPopper.missing, [POPPER]);
+});
+
+test('two visible boxes that overlap report the area they share', async () => {
+  const r = await harness.overlap(
+    staged({ boxes: { [POPPER]: at(0, 0), [FIELD]: at(50, 50) } }), POPPER, FIELD, FAST,
+  );
+  assert.equal(r.intersects, true);
+  assert.equal(r.areaPx, 2500);
+  assert.deepEqual(r.region, { width: 50, height: 50, areaPx: 2500 });
+  assert.equal(r.outsideViewport, false);
+});
+
+test('areaPx comes from the unrounded sides, so it need not equal the rounded region', async () => {
+  // Shaped like the live Training reading (10352 px² under a 242px popover): a band
+  // 42.78px tall rounds to 43 in region, and 242 x 43 is 10406, but the area is 10353.
+  // A reader checking areaPx against width x height must expect "about", not "equal".
+  const r = await harness.overlap(
+    staged({ boxes: { [POPPER]: at(0, 0, 242, 300), [FIELD]: at(0, 300 - 42.78, 242, 60) } }),
+    POPPER, FIELD, FAST,
+  );
+  assert.equal(r.areaPx, 10353);
+  assert.deepEqual(r.region, { width: 242, height: 43, areaPx: 10353 });
+});
+
+test('an overlay the user cannot see reports no intersection and names why', async () => {
+  // opacity:0 keeps the box, so geometry alone measured a dismissed popover as
+  // covering the field it no longer covers.
+  const r = await harness.overlap(staged({
+    boxes: { [POPPER]: at(0, 0), [FIELD]: at(50, 50) },
+    seen: { [POPPER]: { visible: false, why: 'opacity:0.00' } },
+  }), POPPER, FIELD, FAST);
+  assert.equal(r.intersects, false);
+  assert.equal(r.areaPx, 0);
+  assert.deepEqual(r.hidden, [{ selector: POPPER, why: 'opacity:0.00' }]);
+});
+
+test('boxes that do not touch share zero area', async () => {
+  const r = await harness.overlap(
+    staged({ boxes: { [POPPER]: at(0, 0), [FIELD]: at(300, 300) } }), POPPER, FIELD, FAST,
+  );
+  assert.equal(r.intersects, false);
+  assert.equal(r.areaPx, 0);
+});
+
+test('a box that holds still settles well inside its budget', async () => {
+  const started = Date.now();
+  const box = await harness.settle(staged({ boxes: { [POPPER]: at(10, 20) } }), POPPER, FAST);
+  assert.deepEqual(box, at(10, 20));
+  assert.ok(Date.now() - started < FAST.timeout, `took ${Date.now() - started}ms`);
 });
