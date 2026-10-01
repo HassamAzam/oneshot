@@ -195,6 +195,8 @@ Place the closes line at the **very top** of the description, before all other c
 - [ ] No migrations required (or migrations included)
 ```
 
+If the MR adds or changes a management command that needs to run on a schedule, add an explicit "Ops action required" checklist item (exact `manage.py` invocation + target servers) instead of assuming DevOps will infer it — fill in `.claude/skills/django-scheduled-jobs/templates/ops-checklist.md`.
+
 ### Updating an existing MR description
 
 When adding new changes to an MR that already has a description (e.g. an existing Adhoc branch with prior commits):
