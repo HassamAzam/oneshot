@@ -769,6 +769,17 @@ expect_allow "Write artifacts/verify.json (a subdirectory, not a handoff)" \
 expect_allow "Write scratch/plan.json" artifact-guard.cjs "$(write_payload "$RUN/scratch/plan.json")"
 expect_allow "Write a worktree file"   artifact-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/apps/x/views.py")"
 
+# APFS is case-insensitive: Findings.json IS findings.json there, and so is a
+# path whose directories are spelled in capitals.
+expect_deny  "Write Findings.json (another spelling of the same file)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/Findings.json")"
+if [ -d "$ROOT/state" ] && [ -d "$ROOT/STATE" ]; then
+    expect_deny  "Write through STATE/ on a case-insensitive volume" \
+                                       artifact-guard.cjs "$(write_payload "$ROOT/STATE/runs/0/findings.json")"
+else
+    skip "Write through STATE/ on a case-insensitive volume" "case-sensitive volume, or no state/ yet"
+fi
+
 # The Bash surface. write-scope.cjs never sees these, which is the whole reason
 # this guard watches both.
 expect_deny  "redirect over verify.json" \
@@ -826,6 +837,28 @@ expect_allow "mv within scratch/"      artifact-guard.cjs "$(bash_payload "mv $R
 expect_allow "mv a partial out"        artifact-guard.cjs "$(bash_payload "mv $RUN/verify-partial.json /tmp/x")"
 expect_allow "cp a handoff out (a read)" \
                                        artifact-guard.cjs "$(bash_payload "cp $RUN/findings.json /tmp/copy.json")"
+
+# The other spellings of a write.
+expect_deny  "pathlib write_text"      artifact-guard.cjs "$(bash_payload "python3 -c \"from pathlib import Path; Path('$RUN/findings.json').write_text('{}')\"")"
+expect_deny  "os.remove"               artifact-guard.cjs "$(bash_payload "python3 -c \"import os; os.remove('$RUN/findings.json')\"")"
+expect_deny  "os.rename onto verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import os; os.rename('/tmp/f', '$RUN/verify.json')\"")"
+expect_deny  "shutil.copy onto verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import shutil; shutil.copy('/tmp/f', '$RUN/verify.json')\"")"
+expect_deny  "open(..., 'r+')"         artifact-guard.cjs "$(bash_payload "python3 -c \"f=open('$RUN/findings.json','r+'); f.truncate(0)\"")"
+expect_deny  "Path(...).open('r+')"    artifact-guard.cjs "$(bash_payload "python3 -c \"from pathlib import Path; Path('$RUN/verify.json').open('r+')\"")"
+expect_deny  "sed -i.bak"              artifact-guard.cjs "$(bash_payload "sed -i.bak 's/fail/pass/' $RUN/verify.json")"
+expect_deny  "sed --in-place"          artifact-guard.cjs "$(bash_payload "sed --in-place 's/fail/pass/' $RUN/verify.json")"
+expect_deny  "find -name findings.json -delete" \
+                                       artifact-guard.cjs "$(bash_payload "find $RUN -name findings.json -delete")"
+expect_deny  "find over every run's verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "find $ROOT/state -name verify.json -delete")"
+expect_deny  "rm FINDINGS.JSON"        artifact-guard.cjs "$(bash_payload "rm $RUN/FINDINGS.JSON")"
+expect_allow "shutil.copy a handoff out (a read)" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import shutil; shutil.copy('$RUN/findings.json', '/tmp/f.json')\"")"
+expect_allow "sed -n over verify.json" artifact-guard.cjs "$(bash_payload "sed -n '/fail/p' $RUN/verify.json")"
+expect_allow "find findings.json without deleting" \
+                                       artifact-guard.cjs "$(bash_payload "find $RUN -name findings.json")"
 
 expect_allow "cat findings.json (reads are never refused)" \
                                        artifact-guard.cjs "$(bash_payload "cat $RUN/findings.json")"

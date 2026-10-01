@@ -61,6 +61,7 @@
  *
  * Fail-open, like every guard here.
  */
+const fs = require('node:fs');
 const path = require('node:path');
 const C = require(path.join(__dirname, '_common.cjs'));
 
@@ -84,23 +85,56 @@ const FALLBACK = [
   'ui-evidence.json', 'mr.json', 'merge.json', 'remediate.json', 'mr-feedback.json',
 ];
 
+/**
+ * Lower-cased, because the volume this runs on is not case-sensitive: on APFS a
+ * Write of `<run>/Findings.json` lands on findings.json, and a set holding only
+ * the spelling config uses let it straight through.
+ */
 function protectedNames() {
   const cfg = C.loadConfig('phases.json');
   const phases = cfg && Array.isArray(cfg.phases) ? cfg.phases : null;
-  if (!phases) return new Set([...FALLBACK, JOURNAL]);
   const names = phases
-    .filter((p) => p && p.name)
-    .map((p) => p.artifact || `${p.name}.json`);
-  return new Set([...names, JOURNAL]);
+    ? phases.filter((p) => p && p.name).map((p) => p.artifact || `${p.name}.json`)
+    : FALLBACK;
+  return new Set([...names, JOURNAL].map((n) => n.toLowerCase()));
 }
 
-function runsRoot() { return path.join(C.STATE, 'runs'); }
+/**
+ * C.realish(), resolved with realpathSync.native, which returns the case a
+ * path has ON DISK.
+ *
+ * realish() uses the JS realpath, which keeps the case as typed. On a
+ * case-insensitive APFS volume `<home>/STATE/runs/0/findings.json` IS the
+ * handoff, yet compared as typed it is not even inside the runs root. The
+ * native call settles every part of the path that exists; a part that does not
+ * exist yet keeps its typed case, which the lower-cased name compare covers.
+ */
+function canonical(p) {
+  let abs = path.resolve(p);
+  const tail = [];
+  for (let i = 0; i < 64; i += 1) {
+    if (fs.existsSync(abs)) {
+      try {
+        return path.join(fs.realpathSync.native(abs), ...tail.reverse());
+      } catch {
+        return path.join(abs, ...tail.reverse());
+      }
+    }
+    const parent = path.dirname(abs);
+    if (parent === abs) break;
+    tail.push(path.basename(abs));
+    abs = parent;
+  }
+  return path.resolve(p);
+}
+
+function runsRoot() { return canonical(path.join(C.STATE, 'runs')); }
 
 /** The path's components below the runs root ([] for the root), or null when outside it. */
 function belowRuns(p) {
   if (!p) return null;
-  const root = C.realish(runsRoot());
-  const abs = C.realish(p);
+  const root = runsRoot();
+  const abs = canonical(p);
   if (!C.isInside(abs, root)) return null;
   return abs === root ? [] : path.relative(root, abs).split(path.sep);
 }
@@ -117,7 +151,7 @@ function belowRuns(p) {
 function protectedArtifact(p, names) {
   const parts = belowRuns(p);
   if (!parts || parts.length !== 2) return null;
-  if (!names.has(parts[1])) return null;
+  if (!names.has(parts[1].toLowerCase())) return null;
   return { iid: parts[0], name: parts[1] };
 }
 
@@ -148,10 +182,10 @@ function refuse(hit, how) {
       + '(`scratch/`, `artifacts/`) is yours to delete.',
     );
   }
-  const own = hit.name === JOURNAL
+  const own = hit.name.toLowerCase() === JOURNAL
     ? 'That file is the run journal: it holds the plan and test-case approvals a '
       + 'human gave on the ticket, and the merge SHA. Nothing in a session writes it.'
-    : `That file is the '${hit.name.replace(/\.json$/, '')}' phase's handoff. The conductor `
+    : `That file is the '${hit.name.replace(/\.json$/i, '')}' phase's handoff. The conductor `
       + 'writes it from a phase\'s structured output, and reads it back to decide whether this '
       + 'change merges.';
   C.deny(
@@ -248,10 +282,23 @@ function writeTargets(seg, { argv0, rest, args }) {
   // Interpreter one-liners. `python3 -c "... json.dump(d, open(p,'w'))"` is the
   // shape the transcripts show these sessions reaching for, so the write MODE
   // is what is matched — an `open(p)` or `open(p,'r')` is a read and ignored.
-  const pyOpen = /open\(\s*(["'])([^"']+)\1\s*,\s*(["'])[wax]/g;
+  // 'r+' is a write that starts with an r, so it is spelled out.
+  const pyOpen = /open\(\s*(["'])([^"']+)\1\s*,\s*(["'])(?:[wax]|r\+|rb\+)/g;
   for (let m = pyOpen.exec(seg); m; m = pyOpen.exec(seg)) found.push(m[2]);
-  const pyWrite = /(?:write_text|write_bytes)\(|Path\(\s*(["'])([^"']+)\1\s*\)\s*\.\s*open\(\s*(["'])[wa]/g;
-  for (let m = pyWrite.exec(seg); m; m = pyWrite.exec(seg)) if (m[2]) found.push(m[2]);
+  // Every alternative hangs off the one Path(...) capture: a bare
+  // `write_text(` alternative matched without capturing a path, and the write
+  // it was written to catch was dropped.
+  const pyPath = /Path\(\s*(["'])([^"']+)\1\s*\)\s*\.\s*(?:write_text|write_bytes|unlink|rename|replace|open\(\s*(["'])(?:[wax]|r\+|rb\+))/g;
+  for (let m = pyPath.exec(seg); m; m = pyPath.exec(seg)) found.push(m[2]);
+  // os/shutil by literal path. A move or rename takes its source away and
+  // overwrites its destination, so both count; a copy only writes its
+  // destination — copying a handoff OUT is a read.
+  const pyFs = /\b(os\.(?:remove|unlink|rename|replace)|shutil\.(?:move|copy|copy2|copyfile))\(\s*(["'])([^"']+)\2(?:\s*,\s*(["'])([^"']+)\4)?/g;
+  for (let m = pyFs.exec(seg); m; m = pyFs.exec(seg)) {
+    const copies = m[1].startsWith('shutil.copy');
+    if (!copies) found.push(m[3]);
+    if (m[5]) found.push(m[5], path.join(m[5], path.basename(m[3])));
+  }
   const nodeWrite = /(?:writeFileSync|appendFileSync|createWriteStream|writeFile)\(\s*(["'`])([^"'`]+)\1/g;
   for (let m = nodeWrite.exec(seg); m; m = nodeWrite.exec(seg)) found.push(m[2]);
 
@@ -259,7 +306,10 @@ function writeTargets(seg, { argv0, rest, args }) {
   // the `for` below swallows the following `else if`s as the body of its own
   // inner `if`, and `rm`/`tee`/`cp` silently stop being checked while the
   // rest of the guard still passes its tests.
-  if (argv0 === 'sed' && rest.includes('-i')) {
+  //
+  // sed's in-place flag comes as `-i`, `-i.bak`, `-Ei` or `--in-place[=…]`;
+  // matching only the bare `-i` let the other three through.
+  if (argv0 === 'sed' && rest.some((a) => /^-[^-]*i/.test(a) || a.startsWith('--in-place'))) {
     found.push(...args);
   } else if (argv0 === 'dd') {
     for (const a of rest) {
@@ -289,6 +339,28 @@ function removedPaths({ argv0, rest, args }) {
   if (argv0 === 'mv') return args.slice(0, -1);
   if (argv0 === 'rsync' && rest.includes('--remove-source-files')) return args.slice(0, -1);
   return [];
+}
+
+/**
+ * `find <root> -name findings.json -delete` (or `-exec rm`) deletes a handoff
+ * without ever spelling its path. Returns the search roots and the protected
+ * names the command filters on, or null when it is not a destructive find over
+ * a protected name.
+ */
+function findDeletes({ argv0, rest }, names) {
+  if (argv0 !== 'find') return null;
+  const destructive = rest.includes('-delete') || rest.some((a, i) =>
+    /^-(?:exec|execdir|ok|okdir)$/.test(a)
+    && ['rm', 'unlink', 'shred', 'mv'].includes(path.basename(rest[i + 1] || '')));
+  if (!destructive) return null;
+  const named = rest.filter((a, i) => /^-i?name$/.test(rest[i - 1] || '') && names.has(a.toLowerCase()));
+  if (!named.length) return null;
+  const roots = [];
+  for (const a of rest) {
+    if (/^[-(!]/.test(a)) break;
+    roots.push(a);
+  }
+  return { roots: roots.length ? roots : ['.'], named };
 }
 
 /**
@@ -338,7 +410,8 @@ try {
     // basename is mentioned at all, which is the overwhelming majority of
     // commands. Deleting a whole run directory names none, so that check runs
     // in front of it.
-    const mentionsName = [...names].some((n) => cmd.includes(n));
+    const lc = cmd.toLowerCase();
+    const mentionsName = [...names].some((n) => lc.includes(n));
     // Segments are walked in order so that a `cd` moves where every later
     // relative path resolves, and `cd <run> && cd artifacts && …` ends up in
     // artifacts/ rather than in both.
@@ -357,6 +430,19 @@ try {
       }
       if (!mentionsName) continue;
 
+      const find = findDeletes(c, names);
+      for (const root of find ? find.roots : []) {
+        for (const candidate of resolveFrom(root, dirs)) {
+          // A root at or above state/runs reaches that name in EVERY run.
+          if (C.isInside(runsRoot(), canonical(candidate))) {
+            refuse({ iid: '*', name: find.named[0] }, 'this command');
+          }
+          for (const n of find.named) {
+            const hit = protectedArtifact(path.join(candidate, n), names);
+            if (hit) refuse(hit, 'this command');
+          }
+        }
+      }
       for (const raw of writeTargets(seg, c)) {
         for (const candidate of resolveFrom(raw, dirs)) {
           const hit = protectedArtifact(candidate, names);
