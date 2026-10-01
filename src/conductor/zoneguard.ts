@@ -33,7 +33,16 @@ const liveZones = (): ZonesConfig | null => projectConfig().zones ?? null;
 export interface ZoneArea { name: string; zone: string; paths: string[] }
 export interface ZoneMap { severity: string[]; default_zone: string; areas: ZoneArea[] }
 export interface ZoneHit { file: string; zone: string; areas: string[] }
-export interface ZoneVerdict { applies: boolean; violations: ZoneHit[]; unreadable: boolean }
+export interface ZoneVerdict {
+  applies: boolean;
+  violations: ZoneHit[];
+  /** Why the guard could not judge the files at all, or null when it could. Non-null stops the run. */
+  unreadable: string | null;
+}
+/** What reading the map gave: the map, or why there is none, in words a person can act on. */
+export type ZoneMapRead = { map: ZoneMap } | { error: string };
+/** Where the guard reads git: the shared work repo and the base branch, overridable for tests. */
+export interface GitSource { repo?: string; base?: string }
 
 /** zones.json path rules: 'dir/' is a prefix, '**\/name' matches anywhere, anything else is exact. */
 export function matches(pattern: string, path: string): boolean {
@@ -73,18 +82,112 @@ export function zoneGuardApplies(labels: string[], zones: ZonesConfig | null = l
   return Boolean(label) && labels.includes(label!);
 }
 
-/** Read the merged map from the work repo; null when it cannot be read. */
-export function loadZoneMap(): ZoneMap | null {
-  const z = projectConfig().zones;
-  if (!z?.file || !WORK_REPO) return null;
-  try {
-    const raw = execFileSync('git', ['-C', WORK_REPO, 'show', `origin/${projectConfig().branches.base}:${z.file}`],
-      { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] });
-    const map = JSON.parse(raw) as ZoneMap;
-    return Array.isArray(map.areas) && Array.isArray(map.severity) ? map : null;
-  } catch {
-    return null;
+const isStrings = (x: unknown): x is string[] => Array.isArray(x) && x.every((v) => typeof v === 'string');
+
+/** What is wrong with one entry of `areas`, or null. */
+function areaProblem(item: unknown, severity: string[]): string | null {
+  const a = (item ?? {}) as Partial<Record<keyof ZoneArea, unknown>>;
+  if (typeof a.name !== 'string' || !a.name) return 'has no name';
+  if (typeof a.zone !== 'string' || !severity.includes(a.zone)) {
+    return `has zone ${JSON.stringify(a.zone)}, which is not one of \`severity\``;
   }
+  if (!isStrings(a.paths) || !a.paths.length) return 'has no paths';
+  const unmatched = a.paths.find((p) => !p || p.replace(/^\*\*\//, '').includes('*'));
+  if (unmatched !== undefined) {
+    return `has path ${JSON.stringify(unmatched)}, which the guard cannot match `
+      + "(only 'dir/', '**/name' and exact paths)";
+  }
+  return null;
+}
+
+/**
+ * The map's shape, checked field by field before the guard trusts it.
+ *
+ * The `as ZoneMap` cast this replaces checked only that `areas` and `severity`
+ * were arrays, and four mistakes in a hand-written map got through it. An area
+ * whose zone is not in `severity` (a typo'd "Red") ranks -1, so an overlapping
+ * green area outranked it and the file PASSED: the guard failed open. An area
+ * with no `paths` threw out of runTicket, where nothing called finish(), so the
+ * ticket kept Loop with no note and threw again on every scan. A missing
+ * `default_zone` put "(undefined)" in the stop reason. And a pattern such as
+ * `apps/*\/permissions.py` or `*.sql` never matches under matches(), so its
+ * files fell silently to the default zone. Each is a map the guard cannot judge
+ * by, so each fails closed, naming the first problem found.
+ */
+export function validateZoneMap(raw: unknown): ZoneMapRead {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'it is not a JSON object' };
+  const m = raw as Record<string, unknown>;
+  const severity = m.severity;
+  if (!isStrings(severity) || !severity.length) return { error: '`severity` is not a list of zone names' };
+  if (!severity.includes('green')) return { error: '`severity` has no "green"' };
+  if (typeof m.default_zone !== 'string' || !severity.includes(m.default_zone)) {
+    return { error: `\`default_zone\` ${JSON.stringify(m.default_zone)} is not one of \`severity\`` };
+  }
+  if (!Array.isArray(m.areas)) return { error: '`areas` is not a list' };
+  for (const [k, item] of m.areas.entries()) {
+    const problem = areaProblem(item, severity);
+    if (!problem) continue;
+    const name = (item as { name?: unknown } | null)?.name;
+    return { error: `area ${typeof name === 'string' && name ? `"${name}"` : `#${k + 1}`} ${problem}` };
+  }
+  return { map: m as unknown as ZoneMap };
+}
+
+/**
+ * Bring origin/<base> in the shared work repo up to date, if git can.
+ *
+ * Best effort on purpose. The ref was fetched when some worktree was last
+ * leased, which can be long ago; a map merged since then would read as missing.
+ * But a failed fetch (the network, or a concurrent fetch holding the ref lock)
+ * is not a verdict: the ref still answers, and whatever reads it next reports
+ * honestly if it cannot.
+ */
+function fetchBase(repo: string, base: string): void {
+  try {
+    execFileSync('git', ['-C', repo, 'fetch', '--no-tags', '--quiet', 'origin', base],
+      { timeout: 60_000, stdio: 'ignore' });
+  } catch {
+    // See the docstring: the ref already present is what gets read.
+  }
+}
+
+/**
+ * Read the merged map from the work repo's origin/<base>, or say why it cannot be.
+ *
+ * "Missing" and "invalid" are told apart because they need different people.
+ * The first reason this guard ever gave was "zone map unreadable — fetch
+ * origin" for a map that was not on dev at all (arbisoft/erp!11060 had not
+ * merged), which sent a person to a fetch that could not help. git's own
+ * stderr is what tells the cases apart, so it is kept, not discarded.
+ */
+export function loadZoneMap(
+  file: string | undefined = liveZones()?.file,
+  { repo = WORK_REPO, base = projectConfig().branches.base }: GitSource = {},
+): ZoneMapRead {
+  if (!file) return { error: 'no zone map file is configured (zones.file is empty)' };
+  if (!repo) return { error: `WORK_REPO is not set, so zone map ${file} cannot be read` };
+  fetchBase(repo, base);
+  let raw: string;
+  try {
+    raw = execFileSync('git', ['-C', repo, 'show', `origin/${base}:${file}`],
+      { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (err) {
+    const stderr = String((err as { stderr?: unknown }).stderr ?? '');
+    if (/does not exist in|exists on disk, but not in/.test(stderr)) {
+      return { error: `zone map ${file} is not on origin/${base} — merge it there` };
+    }
+    const line = stderr.split('\n').find((l) => l.trim()) ?? (err as Error).message;
+    return { error: `zone map ${file} cannot be read from origin/${base} (${line.trim()})` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { error: `zone map ${file} on origin/${base} is not valid JSON — fix it by MR` };
+  }
+  const read = validateZoneMap(parsed);
+  if ('error' in read) return { error: `zone map ${file} on origin/${base} is invalid: ${read.error} — fix it by MR` };
+  return read;
 }
 
 /**
@@ -95,11 +198,12 @@ export function loadZoneMap(): ZoneMap | null {
  * tests merged first. Red never is. Without the guard label nothing applies.
  */
 export function zoneVerdict(
-  labels: string[], files: string[], map: ZoneMap | null, zones: ZonesConfig | null = liveZones(),
+  labels: string[], files: string[], read: ZoneMapRead, zones: ZonesConfig | null = liveZones(),
 ): ZoneVerdict {
   const applies = zoneGuardApplies(labels, zones);
-  if (!applies) return { applies, violations: [], unreadable: false };
-  if (!map) return { applies, violations: [], unreadable: true };
+  if (!applies) return { applies, violations: [], unreadable: null };
+  if ('error' in read) return { applies, violations: [], unreadable: read.error };
+  const { map } = read;
   const yellow = zones?.yellowLabel;
   const allowed = new Set(['green', ...(yellow && labels.includes(yellow) ? ['yellow'] : [])]);
   const seen = new Set<string>();
@@ -107,12 +211,14 @@ export function zoneVerdict(
     .filter((f) => (seen.has(f) ? false : (seen.add(f), true)))
     .map((f) => zoneOf(map, f))
     .filter((hit) => !allowed.has(hit.zone));
-  return { applies, violations, unreadable: false };
+  return { applies, violations, unreadable: null };
 }
 
 /** The stop reason posted on the ticket: which files, which zone, and what a person can do. */
-export function zoneBlockReason(verdict: ZoneVerdict): string {
-  if (verdict.unreadable) return 'zone map unreadable — fetch origin, or remove AI to run under the review gates';
+export function zoneBlockReason(verdict: ZoneVerdict, zones: ZonesConfig | null = liveZones()): string {
+  if (verdict.unreadable) {
+    return `${verdict.unreadable}, or remove ${zones?.guardLabel || 'AI'} to run under the review gates`;
+  }
   const shown = verdict.violations.slice(0, 8)
     .map((v) => `${v.file} (${v.zone}${v.areas.length ? `: ${v.areas.join(', ')}` : ''})`).join('; ');
   const more = verdict.violations.length > 8 ? ` +${verdict.violations.length - 8} more` : '';

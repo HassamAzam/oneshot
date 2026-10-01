@@ -102,7 +102,9 @@ import {
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
-import { loadZoneMap, refusedTicket, zoneBlockReason, zoneGuardApplies, zoneVerdict } from './zoneguard.js';
+import {
+  loadZoneMap, refusedTicket, zoneBlockReason, zoneGuardApplies, zoneVerdict, type ZoneVerdict,
+} from './zoneguard.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { Ticket, TestCase } from '../phases/types.js';
 import {
@@ -1011,6 +1013,11 @@ export async function runTicket(
     for (const name of phasesOwedByRound(j.mrFeedback, j.phases, window)) forced.add(name);
   }
 
+  // The delivery-zone map, read once per run and only for a ticket the guard
+  // holds to it (src/conductor/zoneguard.ts). Null for every other ticket, and
+  // for every ticket while config/project.json carries no `zones` block.
+  const zoneRead = zoneGuardApplies(ticket.labels) ? loadZoneMap() : null;
+
   const researchIdx = list.findIndex((p) => p.name === 'research');
   let i = 0;
   while (i < list.length) {
@@ -1030,6 +1037,11 @@ export async function runTicket(
       logEvent('zone_refused', { iid }, { runId: j.runId });
       return finish(j, 'blocked', refused);
     }
+
+    // A map the guard cannot judge by stops the run here, before any session.
+    // Read first at implement, it cost recall, research and plan to learn that
+    // the map was never there.
+    if (zoneRead && 'error' in zoneRead) return stopForZone(zoneVerdict(ticket.labels, [], zoneRead));
 
     // On-demand phases are stepped over before anything else looks at them:
     // they are invoked by name when something needs them, so an unimplemented
@@ -1172,15 +1184,17 @@ export async function runTicket(
     // asked to approve a plan that is about to be stopped.
     const zoneCheckpoint = (phase.name === 'implement' && phaseSucceeded(iid, 'plan'))
       || (phase.name === 'review' && phaseSucceeded(iid, 'implement'));
-    if (zoneCheckpoint && zoneGuardApplies(ticket.labels)) {
-      const zone = zoneVerdict(ticket.labels, declaredFiles(prior.plan ?? null,
-        phase.name === 'review' ? prior.implement ?? null : null), loadZoneMap());
-      if (zone.unreadable || zone.violations.length) {
-        log.warn('zone guard stopped the run', { iid, violations: zone.violations, unreadable: zone.unreadable });
-        logEvent('zone_guard_stop', { iid, files: zone.violations.length, unreadable: zone.unreadable,
-          zones: [...new Set(zone.violations.map((v) => v.zone))] }, { runId: j.runId });
-        return finish(j, 'blocked', zoneBlockReason(zone));
+    if (zoneCheckpoint && zoneRead) {
+      let zone: ZoneVerdict;
+      try {
+        zone = zoneVerdict(ticket.labels, declaredFiles(prior.plan ?? null,
+          phase.name === 'review' ? prior.implement ?? null : null), zoneRead);
+      } catch (err) {
+        // A throw here used to escape runTicket with no finish(): the ticket kept
+        // Loop, got no note, and threw again on every scan. A stop says why.
+        zone = { applies: true, violations: [], unreadable: `the zone guard failed (${(err as Error).message})` };
       }
+      if (zone.unreadable || zone.violations.length) return stopForZone(zone);
     }
 
     // The Review label's plan-approval gate — opt-in, additive, and checked
@@ -1743,6 +1757,20 @@ export async function runTicket(
   return finish(j, 'done');
 
   // ------------------------------------------------------------- run helpers
+
+  /**
+   * Stop the run on a zone verdict that did not pass. One place, so the map
+   * check at the top of the run and the checkpoints log, count and word a stop
+   * the same way.
+   */
+  function stopForZone(zone: ZoneVerdict): Promise<RunOutcome> {
+    log.warn('zone guard stopped the run', { iid, violations: zone.violations, unreadable: zone.unreadable });
+    logEvent('zone_guard_stop', {
+      iid, files: zone.violations.length, unreadable: zone.unreadable !== null,
+      zones: [...new Set(zone.violations.map((v) => v.zone))],
+    }, { runId: j.runId });
+    return finish(j, 'blocked', zoneBlockReason(zone));
+  }
 
   /**
    * phaseSettled, not phaseSucceeded: 'skipped' is a settled decision.
