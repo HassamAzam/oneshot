@@ -132,7 +132,21 @@ export const AUTOMATION_DENY: readonly string[] = [
   ].map((t) => `mcp__gitlab__${t}`),
 ];
 
-export interface AutomationOpts { conductor: string; signal: AbortSignal }
+export interface AutomationOpts {
+  conductor: string;
+  signal: AbortSignal;
+  /**
+   * Whether the operator has paused this machine. Default: state/PAUSE exists.
+   * A test answers it directly, because touching the real file pauses every
+   * phase in flight on the machine.
+   */
+  paused?: () => boolean;
+}
+
+/** state/PAUSE, unless the caller answers it (AutomationOpts.paused). */
+function isPaused(opts: AutomationOpts): boolean {
+  return opts.paused ? opts.paused() : existsSync(PAUSE);
+}
 export interface AutomationOutcome { iid: number; state: AutomationState | 'skipped'; did: string }
 
 /**
@@ -790,7 +804,7 @@ async function stepAuthor(ctx: Ctx, mode: 'write' | 'revise'): Promise<StepResul
   const { iid, cfg } = ctx;
 
   // Holds that cost nothing, before anything that costs a GET or a session.
-  if (existsSync(PAUSE)) return stop('hold — paused (state/PAUSE)');
+  // (state/PAUSE is checked before every step, in advanceTicket.)
   if (quotaParked()) return stop('hold — parked after a subscription usage limit');
   const quota = checkQuota(j.runId, AUTOMATION_PHASE, j.sessions);
   if (!quota.allowed) return stop(`hold — ${quota.reason ?? 'over budget'}`);
@@ -1350,6 +1364,10 @@ export async function advanceTicket(issue: Issue, opts: AutomationOpts): Promise
   let did = 'nothing to do';
   for (let n = 0; ; n++) {
     if (opts.signal.aborted) { did = 'stopped for shutdown'; break; }
+    // Before EVERY step, not only before a session: the writes that follow
+    // one (the version note, the labels, the sheet) come up to half an hour
+    // after it started, and the session itself has no tool PAUSE could deny.
+    if (isPaused(opts)) { did = 'hold — paused (state/PAUSE)'; break; }
     if (n >= MAX_STEPS) {
       did = `stopped after ${MAX_STEPS} steps — continuing next tick`;
       log.warn(`${tag(iid)} ${did}`);
@@ -1411,7 +1429,7 @@ export async function automationTick(opts: AutomationOpts): Promise<void> {
   }
 
   for (const issue of candidates) {
-    if (opts.signal.aborted) break;
+    if (opts.signal.aborted || isPaused(opts)) break;
     try {
       const o = await advanceLocked(issue, opts);
       if (o.did.startsWith('another conductor')) log.info(`${tag(issue.iid)} skipped — ${o.did}`);

@@ -16,6 +16,10 @@
  * - The version comment waits on the whole readiness check, not only the
  *   labels: a ticket reopened while its list was being written gets the
  *   not-ready comment instead of the list (stepPost).
+ * - A pause holds every step, not only the session: a version comment and a
+ *   finishing label edit both wait while paused, and go once when it lifts
+ *   (advanceTicket). The pause is AutomationOpts.paused, never the real
+ *   state/PAUSE, which would pause every phase in flight on the machine.
  * - Finishing takes `Automation Test Case Review` AND `Loop` off in the one
  *   label edit, and the done comment still posts once `Loop` is gone (stepSheet,
  *   stepDoneNote, `--automation`).
@@ -112,7 +116,8 @@ const J = await import('./journal.js');
 const { getIssue } = await import('../lib/gitlab.js');
 const { db } = await import('../lib/db.js');
 
-const opts = { conductor: 'test-conductor', signal: new AbortController().signal };
+// Never the machine's real state/PAUSE: an operator's pause must not change what these assert.
+const opts = { conductor: 'test-conductor', signal: new AbortController().signal, paused: () => false };
 const MERGED = {
   iid: 51, project_id: 7, state: 'merged', source_branch: 'fix/profile', target_branch: 'dev',
   merged_at: '2026-09-20T00:00:00Z', title: 'Fix profile', web_url: 'http://127.0.0.1/mr/51',
@@ -242,6 +247,37 @@ test('approved, but Loop taken off before the sheet step: silent stop, labels un
   assert.equal(o.did, `"${L}" is not on the ticket — stopped`);
   assert.deepEqual(world.writes, []);
   assert.equal(journalText(), before);
+});
+
+// ------------------------------------------------------------------ pause
+
+test('paused while the session ran: the version comment waits, then posts once when the pause lifts', async () => {
+  reset([L, T]);
+  unpostedVersionJournal();
+  const before = journalText();
+  const held = await advanceTicket(await readIssue(), { ...opts, paused: () => true });
+  assert.equal(held.did, 'hold — paused (state/PAUSE)');
+  assert.equal(world.writes.length, 0, `no comment, no upload, no label: ${JSON.stringify(world.writes)}`);
+  assert.equal(journalText(), before);
+
+  const on = await advanceTicket(await readIssue(), opts);
+  assert.equal(on.did, 'v1 waiting on QA');
+  assert.equal(writesTo('/notes', 'POST'), 1);
+});
+
+test('paused with an approved list: no label edit and no done note until the pause lifts', async () => {
+  reset([L, T, R]);
+  approvedJournal();
+  const before = journalText();
+  const held = await advanceTicket(await readIssue(), { ...opts, paused: () => true });
+  assert.equal(held.did, 'hold — paused (state/PAUSE)');
+  assert.equal(world.writes.length, 0, JSON.stringify(world.writes));
+  assert.equal(journalText(), before);
+
+  const done = await advanceTicket(await readIssue(), opts);
+  assert.equal(done.state, 'done');
+  assert.equal(world.writes.filter((w) => w.method === 'PUT').length, 1);
+  assert.equal(writesTo('/notes', 'POST'), 1);
 });
 
 // ------------------------------------------------------------------ finishing
