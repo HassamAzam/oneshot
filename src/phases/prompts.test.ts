@@ -437,3 +437,17 @@ test('verify is not told a wrong label always ends as a fail', () => {
   assert.doesNotMatch(p, /A wrong label saves nothing/);
   assert.match(p, /tagged `happy` covers this ticket's own\s+criteria/);
 });
+
+test('base-check never scores a failure on the branch\'s own rows as the base failing', () => {
+  // verify ran the change against the one shared Postgres first, so a row it
+  // left behind was written by the change.
+  const p = baseCheckPrompt();
+  assert.match(p, /never reuse a row verify created or\s+marked/);
+  assert.match(p, /created or modified during this run/);
+});
+
+test('verify is told a migrating branch cannot carry a confirmed label', () => {
+  const p = promptFor(cfg('verify'), ctx(ticket()));
+  assert.match(p, /a failure on data this branch's migrations or code wrote/);
+  assert.match(p, /adds or changes a migration the label is\s+never confirmed/);
+});

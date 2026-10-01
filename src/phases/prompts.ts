@@ -1594,8 +1594,10 @@ Never 'pre-existing':
   - a case exercising an acceptance criterion of THIS ticket, or the behaviour the ticket reports
     as broken — on a bug ticket the bug is pre-existing by definition and fixing it is the job;
   - a case that passed on an earlier lap of this run (that is a regression);
-  - a failure the diff makes worse, even if some of it was already there.
-When you cannot tell, it is a 'fail'.
+  - a failure the diff makes worse, even if some of it was already there;
+  - a failure on data this branch's migrations or code wrote.
+When you cannot tell, it is a 'fail'. On a branch that adds or changes a migration the label is
+never confirmed — a base app would run on this branch's schema — so record the failure as 'fail'.
 
 The conductor does not take your word for it. A case tagged \`happy\` covers this ticket's own
 criteria and is refused the label outright. Every other 'pre-existing' case is re-run on
@@ -1699,8 +1701,16 @@ Record \`git -C <that checkout> rev-parse HEAD\` as \`baseCommit\`.
 ${testLoginBlock()}
 
 Drive it with Playwright from Bash with \`node\`, one script for all the cases, the same way
-\`verify\` did. Arrange data with \`erp-ticket-test-data\` exactly as verify's rules say: the
-database is the one local Postgres every worktree shares.
+\`verify\` did. Arrange data with \`erp-ticket-test-data\` as verify's rules say, with one
+difference. The database is the one local Postgres every worktree shares, including the branch
+verify just ran, so the rows verify left behind were written by the CHANGE: create every record
+a case needs fresh, through the base app or its shell, and never reuse a row verify created or
+marked.
+
+Two failures are 'inconclusive', not 'fails', however closely they match: an error that names a
+table or column, and a failure that turns on a record created or modified during this run. In
+both the base is reading this branch's schema or data, and a failure on it proves nothing about
+the base.
 
 ## How to score each case
 

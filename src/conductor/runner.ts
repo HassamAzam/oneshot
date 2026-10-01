@@ -572,6 +572,36 @@ export function applyBaseCheck(
   return { results: out, confirmed, rejected };
 }
 
+/** Every migration file, at any depth of the work repo. */
+const MIGRATION_PATHSPEC = '*/migrations/*.py';
+
+/**
+ * Why a base-branch check cannot be independent of this change, or null when
+ * it can.
+ *
+ * Every app instance runs on the one local Postgres (app.cjs copies
+ * hrdb/local_settings.py unchanged into each checkout), verify has already
+ * applied this branch's migrations to it and written its data there, and
+ * nothing ever unapplies them: app.cjs only migrates forward, and Django does
+ * not reverse a migration the base's graph has never heard of. So the base app
+ * runs base code on THIS branch's schema and rows. A buggy data migration, or a
+ * NOT NULL column one create path forgot, then fails the same way on both
+ * sides, the check scores 'fails', and a regression the change introduced is
+ * confirmed as "not caused by this change". `migrations` null means git could
+ * not say, which is not the same as "none".
+ */
+export function sharedDatabaseRefusal(migrations: string[] | null, base: string): string | null {
+  if (migrations === null) {
+    return `could not list this branch's migrations, so a failure on ${base} cannot be shown to be ` +
+      'independent of the change';
+  }
+  if (!migrations.length) return null;
+  const named = migrations.slice(0, 3).join(', ')
+    + (migrations.length > 3 ? ` and ${migrations.length - 3} more` : '');
+  return `this branch migrates the shared database (${named}), so a failure on ${base} is not ` +
+    'independent of the change';
+}
+
 /** Why a 'pre-existing' label is refused, or null when the base check proved it. */
 function labelRefusal(
   r: CaseResult, seen: NonNullable<BaseCheck['results']>[number] | undefined, base: string, at: string,
@@ -1566,10 +1596,19 @@ export async function runTicket(
           const ownScope = ticketScopeIds(
             readArtifact<{ cases?: Array<{ id?: unknown; pass?: unknown }> }>(iid, 'testcases.json')?.cases ?? [],
           );
-          const check = res.some((x) => x.result === 'pre-existing' && !countsAsFailure(x) && !ownScope.has(x.id))
-            ? await runBaseCheck()
-            : null;
-          const applied = applyBaseCheck(res, check, cfg.branches.base, { ownScope });
+          const checkable = res.some(
+            (x) => x.result === 'pre-existing' && !countsAsFailure(x) && !ownScope.has(x.id),
+          );
+          let check: BaseCheck | null = null;
+          let unavailable: string | undefined;
+          if (checkable) {
+            // Decided here, from git, rather than left to the session: a base
+            // app on a database this branch migrated is not a second opinion.
+            unavailable = sharedDatabaseRefusal(await branchMigrations(), cfg.branches.base) ?? undefined;
+            if (unavailable) log.warn(`base-check not run — ${unavailable}`);
+            else check = await runBaseCheck();
+          }
+          const applied = applyBaseCheck(res, check, cfg.branches.base, { ownScope, unavailable });
           r.out.data = { ...r.out.data, results: applied.results };
           writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
           if (applied.confirmed.length) {
@@ -2220,6 +2259,39 @@ export async function runTicket(
       return { kind: 'cycle', jumpTo, windowEnd: mergeIndex };
     }
     return { kind: 'retry', at: mergeIndex };
+  }
+
+  /**
+   * Every migration file this branch carries against the base — committed,
+   * staged, modified or untracked — plus whatever implement reported, or null
+   * when git could not answer.
+   *
+   * The diff is from the merge-base to the WORKING TREE, so an uncommitted
+   * migration counts and one that landed only on the base does not.
+   * implement.json's `migrationsAdded` is folded in but never relied on alone:
+   * it is the session's own report, not a fact.
+   */
+  async function branchMigrations(): Promise<string[] | null> {
+    if (!worktree) return null;
+    const wt = worktree;
+    const git = async (...args: string[]): Promise<string[]> => {
+      const { stdout } = await exec('git', ['-C', wt, ...args], { timeout: 60_000 });
+      return stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    };
+    try {
+      const [mergeBase] = await git('merge-base', `origin/${cfg.branches.base}`, 'HEAD');
+      if (!mergeBase) return null;
+      const changed = await git('diff', '--name-only', mergeBase, '--', MIGRATION_PATHSPEC);
+      const untracked = await git('ls-files', '--others', '--exclude-standard', '--', MIGRATION_PATHSPEC);
+      const reported = readArtifact<{ migrationsAdded?: unknown }>(iid, 'implement.json')?.migrationsAdded;
+      const claimed = Array.isArray(reported)
+        ? reported.filter((m): m is string => typeof m === 'string' && m.trim() !== '')
+        : [];
+      return [...new Set([...changed, ...untracked, ...claimed])].sort();
+    } catch (err) {
+      log.warn('could not list this branch\'s migrations', { error: (err as Error).message.slice(0, 160) });
+      return null;
+    }
   }
 
   /**

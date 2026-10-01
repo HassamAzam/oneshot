@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyBaseCheck, codePhaseStatus, decideClaim, failedCases, mergePollWait, nextIndex,
-  salvagedReview, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
+  salvagedReview, sharedDatabaseRefusal, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
 } from './runner.js';
 import type { IssueNote } from '../lib/gitlab.js';
 import { ticketScopeIds, type CaseResult } from '../phases/types.js';
@@ -476,4 +476,39 @@ test('only the happy pass marks a case as the ticket scope, and a malformed case
     { id: 'TC-05', pass: 'happy' },
   ]);
   assert.deepEqual([...ids], ['TC-01']);
+});
+
+// ------------------------------------- a base app on a migrated database proves nothing
+
+/**
+ * Every app shares one Postgres that verify has already migrated forward, and
+ * nothing unapplies a migration, so the base app runs base code on the
+ * branch's schema. A failure the change caused then reproduces on the base.
+ */
+test('a branch with migrations gets no base-check, and says why', () => {
+  const why = sharedDatabaseRefusal(['apps/leaves/migrations/0042_total.py'], 'dev');
+  assert.match(why ?? '', /migrates the shared database \(apps\/leaves\/migrations\/0042_total\.py\)/);
+  assert.match(why ?? '', /not independent of the change/);
+});
+
+test('a branch without migrations may be checked on the base', () => {
+  assert.equal(sharedDatabaseRefusal([], 'dev'), null);
+});
+
+test('a migration list git could not produce is not read as "none"', () => {
+  assert.match(sharedDatabaseRefusal(null, 'dev') ?? '', /could not list this branch's migrations/);
+});
+
+test('a long migration list is named in part, not dumped into every case', () => {
+  const files = ['a/migrations/1.py', 'a/migrations/2.py', 'a/migrations/3.py', 'a/migrations/4.py', 'a/migrations/5.py'];
+  assert.match(sharedDatabaseRefusal(files, 'dev') ?? '', /a\/migrations\/3\.py and 2 more\)/);
+});
+
+test('an evidenced label on a migrating branch goes back to fail with that reason, and cycles', () => {
+  const unavailable = sharedDatabaseRefusal(['apps/x/migrations/0002_amount_cents.py'], 'dev')!;
+  const out = applyBaseCheck([res('TC-01', 'pass'), res('TC-07', 'pre-existing')], null, 'dev', { unavailable });
+  assert.deepEqual(out.rejected, ['TC-07']);
+  assert.equal(out.results[1]!.result, 'fail');
+  assert.match(out.results[1]!.evidence, /NOT confirmed — this branch migrates the shared database/);
+  assert.match(failedCases('verify', { results: out.results }) ?? '', /TC-07/);
 });
