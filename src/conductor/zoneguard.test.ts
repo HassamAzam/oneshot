@@ -1,6 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { matches, refusedTicket, zoneBlockReason, zoneOf, zoneVerdict, type ZoneMap } from './zoneguard.js';
+import {
+  matches, refusedTicket, zoneBlockReason, zoneGuardApplies, zoneOf, zoneVerdict, type ZoneMap, type ZonesConfig,
+} from './zoneguard.js';
+
+/**
+ * The `zones` block as it reads when the guard is switched on. Passed to every
+ * call rather than read from config/project.json, which ships without the block.
+ */
+const ZONES: ZonesConfig = {
+  file: '.claude/zones.json', guardLabel: 'AI', yellowLabel: 'Zone: Yellow', testsLabel: 'Characterization Tests',
+};
 
 const map: ZoneMap = {
   severity: ['green', 'yellow', 'red'],
@@ -33,39 +43,39 @@ test('an unmapped file takes the default zone', () => {
 });
 
 test('a ticket without the AI label is never stopped', () => {
-  const v = zoneVerdict(['Loop'], ['apps/payroll/models.py'], map);
+  const v = zoneVerdict(['Loop'], ['apps/payroll/models.py'], map, ZONES);
   assert.equal(v.applies, false);
   assert.deepEqual(v.violations, []);
 });
 
 test('a green AI ticket that stays green passes', () => {
-  const v = zoneVerdict(['AI', 'Loop'], ['apps/training/views.py', 'frontend/src/components/training/A.js'], map);
+  const v = zoneVerdict(['AI', 'Loop'], ['apps/training/views.py', 'frontend/src/components/training/A.js'], map, ZONES);
   assert.deepEqual(v.violations, []);
 });
 
 test('a green AI ticket reaching into shared code is stopped', () => {
-  const v = zoneVerdict(['AI', 'Loop'], ['apps/training/views.py', 'frontend/src/common/utils/misc.js'], map);
+  const v = zoneVerdict(['AI', 'Loop'], ['apps/training/views.py', 'frontend/src/common/utils/misc.js'], map, ZONES);
   assert.deepEqual(v.violations.map((h) => h.file), ['frontend/src/common/utils/misc.js']);
 });
 
 test('yellow is allowed only once released by the yellow label', () => {
-  assert.equal(zoneVerdict(['AI', 'Loop'], ['apps/teams/views.py'], map).violations.length, 1);
-  assert.equal(zoneVerdict(['AI', 'Loop', 'Zone: Yellow'], ['apps/teams/views.py'], map).violations.length, 0);
+  assert.equal(zoneVerdict(['AI', 'Loop'], ['apps/teams/views.py'], map, ZONES).violations.length, 1);
+  assert.equal(zoneVerdict(['AI', 'Loop', 'Zone: Yellow'], ['apps/teams/views.py'], map, ZONES).violations.length, 0);
 });
 
 test('red is never allowed, whatever the labels', () => {
-  const v = zoneVerdict(['AI', 'Loop', 'Zone: Yellow', 'Review'], ['apps/payroll/models.py'], map);
+  const v = zoneVerdict(['AI', 'Loop', 'Zone: Yellow', 'Review'], ['apps/payroll/models.py'], map, ZONES);
   assert.equal(v.violations[0]?.zone, 'red');
 });
 
 test('an unreadable map stops an AI ticket', () => {
-  const v = zoneVerdict(['AI', 'Loop'], ['apps/training/views.py'], null);
+  const v = zoneVerdict(['AI', 'Loop'], ['apps/training/views.py'], null, ZONES);
   assert.equal(v.unreadable, true);
   assert.match(zoneBlockReason(v), /unreadable/);
 });
 
 test('files are reported once each, with zone and area', () => {
-  const v = zoneVerdict(['AI'], ['apps/payroll/a.py', 'apps/payroll/a.py', 'README.md'], map);
+  const v = zoneVerdict(['AI'], ['apps/payroll/a.py', 'apps/payroll/a.py', 'README.md'], map, ZONES);
   assert.equal(v.violations.length, 2);
   const reason = zoneBlockReason(v);
   assert.match(reason, /apps\/payroll\/a\.py \(red: payroll\)/);
@@ -73,12 +83,20 @@ test('files are reported once each, with zone and area', () => {
 });
 
 test('a characterization-test ticket is always refused, whatever else it carries', () => {
-  assert.match(refusedTicket(['Characterization Tests', 'Loop', 'AI']) ?? '', /written by a person/);
-  assert.match(refusedTicket(['Characterization Tests', 'Loop']) ?? '', /never Oneshot/);
+  assert.match(refusedTicket(['Characterization Tests', 'Loop', 'AI'], ZONES) ?? '', /written by a person/);
+  assert.match(refusedTicket(['Characterization Tests', 'Loop'], ZONES) ?? '', /never Oneshot/);
 });
 
 test('an ordinary ticket is not refused', () => {
-  assert.equal(refusedTicket(['AI', 'Loop', 'Zone: Green']), null);
+  assert.equal(refusedTicket(['AI', 'Loop', 'Zone: Green'], ZONES), null);
+});
+
+test('with no zones block nothing is guarded and nothing is refused', () => {
+  // How config/project.json ships until the map is on the base branch: an AI
+  // ticket runs under the review gates exactly as it did before the guard.
+  assert.equal(zoneGuardApplies(['AI', 'Loop'], null), false);
+  assert.equal(zoneVerdict(['AI', 'Loop'], ['apps/payroll/models.py'], null, null).applies, false);
+  assert.equal(refusedTicket(['Characterization Tests', 'Loop'], null), null);
 });
 
 import { labelledLayers } from '../phases/prompts.js';

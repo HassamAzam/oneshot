@@ -16,7 +16,19 @@
  * worktree, so a branch cannot widen its own zone by editing the map.
  */
 import { execFileSync } from 'node:child_process';
-import { WORK_REPO, projectConfig } from '../lib/config.js';
+import { WORK_REPO, projectConfig, type ProjectConfig } from '../lib/config.js';
+
+/**
+ * The `zones` block of config/project.json, or null when there is none.
+ *
+ * The functions that read the block take it as a defaulted last argument
+ * rather than only reading the live config, because it is absent in the
+ * shipped config (the guard is switched off until the map is on the base
+ * branch). Tests that read the live switch would test nothing while it is off
+ * and break the day it is turned on; they pass a fixture instead.
+ */
+export type ZonesConfig = NonNullable<ProjectConfig['zones']>;
+const liveZones = (): ZonesConfig | null => projectConfig().zones ?? null;
 
 export interface ZoneArea { name: string; zone: string; paths: string[] }
 export interface ZoneMap { severity: string[]; default_zone: string; areas: ZoneArea[] }
@@ -49,15 +61,15 @@ export function zoneOf(map: ZoneMap, file: string): ZoneHit {
  * suite would only confirm whatever the agent decided — so these are a
  * person's work, whatever other labels the ticket carries.
  */
-export function refusedTicket(labels: string[]): string | null {
-  const label = projectConfig().zones?.testsLabel;
+export function refusedTicket(labels: string[], zones: ZonesConfig | null = liveZones()): string | null {
+  const label = zones?.testsLabel;
   if (!label || !labels.includes(label)) return null;
   return `"${label}" tickets are written by a person, never Oneshot — remove Loop; the change is released when these merge`;
 }
 
 /** Whether this ticket was routed by zone, and so is held to its zone. */
-export function zoneGuardApplies(labels: string[]): boolean {
-  const label = projectConfig().zones?.guardLabel;
+export function zoneGuardApplies(labels: string[], zones: ZonesConfig | null = liveZones()): boolean {
+  const label = zones?.guardLabel;
   return Boolean(label) && labels.includes(label!);
 }
 
@@ -82,12 +94,14 @@ export function loadZoneMap(): ZoneMap | null {
  * yellow release label — grooming puts it on a change whose characterization
  * tests merged first. Red never is. Without the guard label nothing applies.
  */
-export function zoneVerdict(labels: string[], files: string[], map: ZoneMap | null): ZoneVerdict {
-  const z = projectConfig().zones;
-  const applies = zoneGuardApplies(labels);
+export function zoneVerdict(
+  labels: string[], files: string[], map: ZoneMap | null, zones: ZonesConfig | null = liveZones(),
+): ZoneVerdict {
+  const applies = zoneGuardApplies(labels, zones);
   if (!applies) return { applies, violations: [], unreadable: false };
   if (!map) return { applies, violations: [], unreadable: true };
-  const allowed = new Set(['green', ...(z!.yellowLabel && labels.includes(z!.yellowLabel) ? ['yellow'] : [])]);
+  const yellow = zones?.yellowLabel;
+  const allowed = new Set(['green', ...(yellow && labels.includes(yellow) ? ['yellow'] : [])]);
   const seen = new Set<string>();
   const violations = files
     .filter((f) => (seen.has(f) ? false : (seen.add(f), true)))
