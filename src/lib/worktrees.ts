@@ -552,30 +552,29 @@ export function runForkPoint(branch: string, cwd = WORK_REPO): string {
  * Empty is not proof the run was blind. This greps commit messages, so a fix
  * whose messages never name the ticket — a squash merge titled after the
  * change — is not found.
+ *
+ * Throws when git cannot list the commits, rather than answering []: an empty
+ * list is the one result a caller reads as reassurance, so a check that did
+ * not run must not be able to produce it. The caller decides what "not
+ * checked" looks like in its artifact.
  */
 export function answerKeyCommits(iid: number, base: string, cwd = WORK_REPO): string[] {
-  let candidates: string[];
-  try {
-    // `([^0-9]|$)` rather than `\b`: git's ERE has no word-boundary escape, and
-    // a bare `#18` would otherwise match #189 and report every low-numbered
-    // ticket as contaminated until the warning stopped meaning anything.
-    candidates = git(['log', '--all', '--format=%H %s', `--grep=#${iid}([^0-9]|$)`, '-E'], cwd)
-      .split('\n').map((l) => l.trim()).filter(Boolean);
-  } catch {
-    // A repo with no matching commits, or no refs at all, is not an error here.
-    return [];
-  }
-  return candidates.filter((line) => {
-    const sha = line.split(' ')[0];
-    if (!sha) return false;
-    try {
-      // In the base already: it is history the phase is entitled to read.
-      git(['merge-base', '--is-ancestor', sha, base], cwd);
-      return false;
-    } catch {
-      return true;
-    }
-  });
+  // `([^0-9]|$)` rather than `\b`: git's ERE has no word-boundary escape, and
+  // a bare `#18` would otherwise match #189 and report every low-numbered
+  // ticket as contaminated until the warning stopped meaning anything.
+  //
+  // `--not <base>` drops history the phase is entitled to read, in the same
+  // walk. It replaced a `merge-base --is-ancestor` spawn per candidate, which
+  // gave the same set (32 of 32 on ERP #8783) but read a failed merge-base as
+  // "not in the base" and over-reported.
+  //
+  // No catch. No matching commit exits 0 and gives [] on its own; git fails
+  // only when it cannot walk the repo or resolve the base, and one dangling ref
+  // anywhere in the work repo is enough (`fatal: bad object`, exit 128). The
+  // catch this replaced swallowed that as [], which the caller recorded as the
+  // reassuring reading for a check that never ran.
+  return git(['log', '--all', '--not', base, '--format=%H %s', '-E', `--grep=#${iid}([^0-9]|$)`], cwd)
+    .split('\n').map((l) => l.trim()).filter(Boolean);
 }
 
 /** Counterpart to replayWorktree. No branch to preserve, and no port to release. */

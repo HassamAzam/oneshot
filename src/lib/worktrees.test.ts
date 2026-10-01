@@ -266,6 +266,19 @@ test('history already inside the base is not an answer key', () => {
   }
 });
 
+test('a repo git cannot walk is an error, not an empty answer key', () => {
+  // One dangling ref is enough to make `git log --all` exit 128. Returning []
+  // there wrote "nothing reachable" into meta.json for a check that never ran.
+  const { dir, base } = repoWithLandedFix(189);
+  try {
+    writeFileSync(join(dir, '.git', 'refs', 'heads', 'broken'), '0123456789abcdef0123456789abcdef01234567\n');
+
+    assert.throws(() => answerKeyCommits(189, base, dir), /bad object/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a ticket number that is a prefix of another does not match it', () => {
   // #18 must not be answered by #189's fix, or every low-numbered ticket reads
   // as contaminated and the warning stops meaning anything.
