@@ -56,6 +56,18 @@ export interface CaseResult {
 }
 
 /**
+ * base-check.json: the on-demand check of verify's 'pre-existing' labels on the
+ * base branch. Here rather than beside applyBaseCheck in the runner because the
+ * MR note reads it too, and lib/ does not import from conductor/.
+ */
+export interface BaseCheck {
+  baseCommit?: string;
+  results?: Array<{
+    id?: string; onBase?: string; inTicketScope?: boolean; evidence?: string; screenshot?: string;
+  }>;
+}
+
+/**
  * Whether a case result is a failure OF THIS CHANGE — the one question the
  * verify cycle, implement's fix list and the merge gate all ask.
  *

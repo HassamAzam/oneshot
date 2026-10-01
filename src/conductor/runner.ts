@@ -104,7 +104,7 @@ import {
 } from './reviewgate.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import {
-  countsAsFailure, ticketScopeIds, type CaseResult, type Ticket, type TestCase,
+  countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type Ticket, type TestCase,
 } from '../phases/types.js';
 import {
   activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
@@ -513,12 +513,6 @@ export function failedCases(name: string, data: Record<string, unknown> | null |
   const other = results.filter((r) => r.result === 'blocked' || r.result === 'skipped').length;
   const tail = other ? ` (${other} further case(s) blocked or never run)` : '';
   return `${name} recorded ${failed.length} failing case(s) of ${results.length}: ${ids}${tail}`;
-}
-
-/** base-check.json, as far as applyBaseCheck reads it. */
-export interface BaseCheck {
-  baseCommit?: string;
-  results?: Array<{ id?: string; onBase?: string; inTicketScope?: boolean; evidence?: string }>;
 }
 
 /**
