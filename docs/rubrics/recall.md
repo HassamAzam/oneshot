@@ -16,7 +16,7 @@ than hiding behind one lucky replay.
 | `cites-iid` | every ticket in `priorTickets` is named as `#<iid>` in the brief | "Name each ticket by iid" |
 | `short` | `brief` is at most 1000 characters | "Write a brief that survives being pasted into three prompts" |
 | `gold` | every `must` iid is cited, and nothing outside `must ∪ ok` is | the ladder, applied by a person once |
-| `files-grounded` | every file path in `brief` or `gotchas` appears in a cited run's index `files` or card | "An empty brief is a correct answer" (an invented resemblance is worse than nothing) |
+| `files-grounded` | every file path in `brief` or `gotchas` is a path in a cited run's index `files` or card, or a trailing part of one that starts at a `/` (`views/shared.py` and `shared.py` for `apps/core/api/v1/views/shared.py`) | "An empty brief is a correct answer" (an invented resemblance is worse than nothing) |
 
 `empty-is-empty` is the check live runs fail most. #123, #179, #193, #200, #241 and #259
 all returned no prior tickets but a non-empty brief. Some said "no prior art" at length,

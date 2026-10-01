@@ -130,12 +130,15 @@ const gradeRecall: Grader = (out, ticket, gold) => {
   // is the phase's own code research (or an invention), and it is pasted into
   // research, plan, implement and review all the same.
   const citedText = cited.map((i) => memoryRecords().get(i) ?? '').join('\n');
-  // Whole paths, not substrings: components/Button.tsx is not src/components/Button.tsx.
-  // A bare name is grounded by a cited file of that name in any directory.
-  const citedPaths = new Set(paths(citedText));
-  const citedNames = new Set([...citedPaths].map((p) => p.split('/').pop()!));
+  // A named path is grounded when it is a cited path or a trailing run of its
+  // segments: views/shared.py and shared.py both point at
+  // apps/core/api/v1/views/shared.py; ents/shared.py and other/views/shared.py do not.
+  // Matching on a segment boundary, not as a substring, is what keeps a path
+  // that merely ends in the same characters from passing; scoring a partly
+  // qualified path below the bare filename would reward vaguer answers.
+  const citedPaths = [...new Set(paths(citedText))];
   const named = paths([brief, ...prior.flatMap((p) => p.gotchas ?? [])].join('\n'));
-  const ungrounded = [...new Set(named)].filter((p) => !citedPaths.has(p) && !(!p.includes('/') && citedNames.has(p)));
+  const ungrounded = [...new Set(named)].filter((p) => !citedPaths.some((c) => c === p || c.endsWith(`/${p}`)));
   const checks: Check[] = [
     { name: 'no-self', pass: !cited.includes(ticket.iid) },
     {
