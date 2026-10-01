@@ -4,17 +4,17 @@
  * PreToolUse: a phase may not rewrite another phase's handoff, or the journal.
  *
  * WHY THIS IS A HOOK. Every session phase declares `writes: ['run']`, which
- * hands it the whole run directory — and that directory is where all thirteen
- * handoff artifacts and `run.json` live. What a phase is actually TOLD to write
+ * hands it the whole run directory — and that directory is where every phase's
+ * handoff artifact and `run.json` live. What a phase is actually TOLD to write
  * there is three files: `testcases-partial.json`, `review-partial.json` and
  * `verify-partial.json` (the crash backstops). `src/phases/prompts.ts` is
  * explicit about it — "Your one legal write is the review-partial.json backstop
- * above, under the run directory — nothing else." The permission is thirteen
- * files wider than the need, and the gap is not cosmetic:
+ * above, under the run directory — nothing else." The permission is wider than
+ * the need by every handoff in that directory, and the gap is not cosmetic:
  *
  *   - `qualityGate()` in src/conductor/codephases.ts decides the merge by
- *     reading `verify.json` and `findings.json` back off disk. `verify` (n:8),
- *     `ui-evidence` (n:9) and `mr` (n:10) all run AFTER `review` (n:7) and all
+ *     reading `verify.json` and `findings.json` back off disk. `verify` (n:6),
+ *     `ui-evidence` (n:7) and `mr` (n:8) all run AFTER `review` (n:5) and all
  *     hold this scope. A verify session that cannot make its cases pass could
  *     instead delete the blocker findings that stand in front of its merge.
  *   - `run.json` is the journal. It carries `planApproval`, `testcasesApproval`
@@ -44,10 +44,11 @@
  *
  * The Bash arm is pattern matching, not a shell parser, and is therefore
  * best-effort in the same way secret-guard.cjs declares itself to be. What
- * keeps that honest is the narrowness of the subject: it considers ONLY these
- * fourteen exact basenames directly inside a run directory, and reads are left
- * completely alone. There is no legitimate command that writes one of them, so
- * the cost of the patterns it misses is a gap, never a false positive.
+ * keeps that honest is the narrowness of the subject: it considers ONLY the
+ * exact basenames of every declared artifact plus run.json, directly inside a
+ * run directory, and reads are left completely alone. There is no legitimate
+ * command that writes one of them, so the cost of the patterns it misses is a
+ * gap, never a false positive.
  *
  * The names are derived from config/phases.json rather than listed here, the
  * way frontend-test-guard derives Jest's collection rules from the app repo's
