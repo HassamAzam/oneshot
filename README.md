@@ -165,7 +165,7 @@ reviewer who never learned they were being waited on. A Slack ping reaches the p
 them where they already are.
 
 Approval is read on the ticket rather than in Slack for one reason: **authorisation**. Sign-off is
-restricted to two named groups (`config/reviewers.json`), and the only identity a Slack reply
+restricted to named groups (`config/reviewers.json`), and the only identity a Slack reply
 carries is a Slack user id, which cannot be matched against a GitLab username. Reading the verdict
 where the reviewer is signed in under their own GitLab account is what makes "only these people may
 approve" enforceable rather than advisory. So Slack here is strictly **write-only**: nothing is
@@ -306,11 +306,12 @@ nobody is running. `ONESHOT_SKIP_PHASES=design` switches it off globally without
 about the work, and a team that turns the code-review posture off has not thereby said designs may
 ship unreviewed. The same label decides both the phase and the gate, so the two cannot disagree.
 
-**Approval is a dev sign-off** — `config/reviewers.json`'s `dev` list, read exactly the way the
-plan gate reads it. Comment the single word `approved` on the ticket to release the run into
-`plan`; any other comment from that list is feedback, `design` re-runs with it, and the gate asks
-again with the redrawn screens. No cap on rounds. Widening this to QA, or to a named product
-owner, is a config edit and not a code change.
+**Approval is a design sign-off** — `config/reviewers.json`'s `design` list: the developers who
+sign off plans, plus the product owner. It is its own list rather than `dev` so that the product
+owner can approve a design without also approving plans or being asked to review every MR.
+Comment the single word `approved` on the ticket to release the run into `plan`; any other comment
+from that list is feedback, `design` re-runs with it, and the gate asks again with the redrawn
+screens. No cap on rounds. Changing who is on the list is a config edit, not a code change.
 
 **A Design ticket with no UI is not an error.** The phase can answer `applicable: false` — the
 ticket turned out backend-only, or someone labelled optimistically — and the run continues to

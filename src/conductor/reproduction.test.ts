@@ -172,3 +172,22 @@ test('the Not a Bug gate\'s Slack ask and resolution read as a stop, not a conti
   assert.match(ask, /reproduced again/);
   assert.equal(gateApprovedText(j, 'notABug', '<@U1>').includes('the run stops'), true);
 });
+
+test('blocker is derived from the verdict, never trusted beside it', () => {
+  const at = (verdict: string, blocker?: unknown) =>
+    reproductionOf({ reproduction: { kind: 'bug', verdict, blocker } })!.blocker;
+
+  // Only inconclusive carries one.
+  assert.equal(at('inconclusive', 'env'), 'env');
+  assert.equal(at('inconclusive', 'data'), 'data');
+
+  // The three combinations the skill forbids, which used to survive.
+  assert.equal(at('reproduced', 'env'), 'none');
+  assert.equal(at('not-reproduced', 'access'), 'none');
+  assert.equal(at('not-applicable', 'steps'), 'none');
+
+  // Unknown verdict coerces to inconclusive; an unknown or missing blocker is none.
+  assert.equal(at('nonsense', 'env'), 'env');
+  assert.equal(at('inconclusive', 'wat'), 'none');
+  assert.equal(at('inconclusive'), 'none');
+});

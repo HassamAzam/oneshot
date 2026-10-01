@@ -1,7 +1,8 @@
 import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
+import { mrOpenNote, promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
+import { gateSubjectDigest } from '../lib/artifacts.js';
 import { ROOT, phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -107,6 +108,35 @@ test('the recall prompt still stands alone if the skill does not resolve', () =>
   assert.match(p, /then module, then label, then\s+title-token overlap/);
 });
 
+// ------------------------------------------ plan knows how scheduling is done
+
+test('plan is told how recurring work gets scheduled, for every ticket', () => {
+  // ERP #8344: the plan proposed seeding PeriodicTask rows in a data migration
+  // for a recurring reminder. The mechanism is chosen here and implement cannot
+  // walk it back — by then the migration exists and review checks the diff
+  // against the plan, not the plan against the repo. Unlabelled on purpose: a
+  // labelSkills entry needs triage to already know it is a scheduling ticket,
+  // and not knowing is the failure this closes.
+  const got = names(systemPromptFor(cfg('plan'), ctx(ticket())));
+  assert.ok(got.includes('django-scheduled-jobs'), 'plan must declare the scheduling skill');
+});
+
+test('plan gets the scheduling skill eagerly, not lazily', () => {
+  // Only implement uses the lazy SKILL_LINE. A lazily-offered skill is one the
+  // session may skip after reading the plan — but here the skill is what tells
+  // it the plan may be wrong, so it has to be read before the plan is written.
+  const p = systemPromptFor(cfg('plan'), ctx(ticket()));
+  assert.match(p, /Invoke these with the Skill tool BEFORE you start/);
+  assert.doesNotMatch(p, /Read the plan first/, 'plan must not get implement\'s lazy wording');
+});
+
+test('the scheduling skill plan declares actually ships in the snapshot', () => {
+  // plan runs at cwd 'worktree', so it resolves skills from the .claude that
+  // ensureClaudeDir composes there — context/skills first. A name in config with
+  // no directory behind it fails silently and the phase just runs without it.
+  assert.ok(existsSync(join(ROOT, 'context', 'skills', 'django-scheduled-jobs', 'SKILL.md')));
+});
+
 // --------------------------------------------- implement's gating is unchanged
 
 test('implement keeps a plan-gated skill when there is no plan to gate on', () => {
@@ -121,6 +151,68 @@ test('implement drops a plan-gated skill the plan rules out', () => {
   })));
   assert.ok(!got.includes('django-migration-standards'));
   assert.ok(!got.includes('script-writing-standards'));
+});
+
+// ------------------------------------------- ui-evidence only claims a real approval
+
+const DESIGN = {
+  applicable: true,
+  screens: [{ id: 's1', name: 'Completed list', screenshot: 's1.png' }],
+};
+
+function uiEvidencePrompt(gate: Record<string, unknown>, design: unknown): string {
+  return promptFor(cfg('ui-evidence'), {
+    ticket: ticket(), runId: 'r-test', lap: 0,
+    journal: { designApproval: gate },
+    prior: { design },
+  } as unknown as PromptCtx);
+}
+
+test('ui-evidence pairs against the design when the approval covers it', () => {
+  const gate = {
+    requestTs: 'x', approved: true, feedback: [],
+    approvedDigest: gateSubjectDigest(DESIGN),
+  };
+  assert.match(uiEvidencePrompt(gate, DESIGN), /is this what I approved/);
+});
+
+test('ui-evidence stops claiming approval once the design was rewritten', () => {
+  // The caption is a factual claim to the reviewer -- "a human approved these
+  // screens before the code was written". Against a design rewritten after the
+  // sign-off that is false, and saying nothing is better than captioning the
+  // wrong screens as approved.
+  const gate = {
+    requestTs: 'x', approved: true, feedback: [],
+    approvedDigest: gateSubjectDigest({ ...DESIGN, screens: [] }),
+  };
+  assert.ok(!uiEvidencePrompt(gate, DESIGN).includes('is this what I approved'));
+});
+
+test('an approval predating digests still pairs, so upgrades do not regress', () => {
+  const gate = { requestTs: 'x', approved: true, feedback: [] };
+  assert.match(uiEvidencePrompt(gate, DESIGN), /is this what I approved/);
+});
+
+test('plan does not tell itself a stale design was approved', () => {
+  const gate = {
+    requestTs: 'x', approved: true, feedback: [],
+    approvedDigest: gateSubjectDigest({ ...DESIGN, screens: [] }),
+  };
+  const planDesign = {
+    applicable: true,
+    screens: [{ id: 's1', name: 'Completed list', purpose: 'p', mockupHtml: 's1.html', screenshot: 's1.png' }],
+  };
+  const stale = promptFor(cfg('plan'), {
+    ...ctx(ticket()), journal: { designApproval: gate }, prior: { design: planDesign },
+  } as unknown as PromptCtx);
+  assert.ok(!stale.includes('A human approved these screens'));
+  assert.match(stale, /No approval covers this version/);
+
+  const covering = { ...gate, approvedDigest: gateSubjectDigest(planDesign) };
+  const fresh = promptFor(cfg('plan'), {
+    ...ctx(ticket()), journal: { designApproval: covering }, prior: { design: planDesign },
+  } as unknown as PromptCtx);
+  assert.match(fresh, /A human approved these screens/);
 });
 
 // ------------------------------------------- plan does not order frontend unit tests
@@ -152,6 +244,26 @@ test('without the bug label research is not offered the reproduction skill', () 
   // spent 57 turns failing to bring the app up, for a verdict of 'inconclusive'.
   const prompt = systemPromptFor(cfg('research'), ctx(ticket({ labels: ['Loop'] })));
   assert.ok(!names(prompt).includes('bug-reproduction'));
+});
+
+// ------------------------------------------- research's external-document rule
+
+test('research is told not to spend a fetch on a chat permalink it cannot read', () => {
+  // #8652 was linked to a sibling whose description cited a Slack thread as the
+  // original report. Research followed it and got a 403: archive URLs need an
+  // authenticated session, and a phase session is given only the GitLab MCP, so
+  // the call can never succeed. The rule above it -- try every external document
+  // -- is right, and this is the one class worth carving out of it.
+  const prompt = promptFor(cfg('research'), ctx(ticket()));
+  assert.match(prompt, /Slack\s+archive URL answers 403/);
+  assert.match(prompt, /Record it in `unknowns` by URL/);
+});
+
+test('research still opens every other external document', () => {
+  // The carve-out must not read as permission to skip links in general.
+  const prompt = promptFor(cfg('research'), ctx(ticket()));
+  assert.match(prompt, /Try each document linked outside GitLab with WebFetch/);
+  assert.match(prompt, /Never guess what an\s+unopened document says/);
 });
 
 test('the reproduction instructions follow the same gate as the skill', () => {
@@ -277,4 +389,17 @@ test('a passing verify contributes no failure block', () => {
     assert.doesNotMatch(p, /## Verify failed these cases/);
     assert.match(p, /## Review findings to fix/);
   });
+});
+
+// ------------------------------------------------------------ mr-open's draft
+
+test('the mr prompt tells the erp pipeline a Draft is waiting from mr-open', () => {
+  const prompt = promptFor(cfg('mr'), ctx(ticket()));
+  assert.match(prompt, /`mr-open` opened a \*\*Draft\*\*/);
+  assert.match(prompt, /LOOK FOR AN EXISTING MR/);
+});
+
+test('without mr-open in the pipeline the mr prompt makes no claim about it', () => {
+  assert.equal(mrOpenNote(false), '');
+  assert.match(mrOpenNote(true), /`Draft:` prefix off the title/);
 });

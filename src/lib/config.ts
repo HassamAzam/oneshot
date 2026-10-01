@@ -17,8 +17,8 @@ import { homedir, userInfo } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
 import { deskUsername } from './identity.js';
 import {
-  LEGACY_SELECTOR_KEYS, REPO_URL_VAR, SKIP_REPO_CHECK_VAR, expandPath as expandPathFrom, readEnv, repoCheckOverride,
-  resolvePath, resolveTarget, scopedEnvName as scopedEnvNameFor, spellings,
+  LEGACY_SELECTOR_KEYS, REPO_URL_VAR, SKIP_REPO_CHECK_VAR, expandPath as expandPathFrom, isTargetName, readEnv,
+  repoCheckOverride, resolvePath, resolveTarget, scopedEnvName as scopedEnvNameFor, spellings,
   type GitlabRepo, type ResolvedPath,
 } from './repourl.cjs';
 import { parseMrFeedbackConfig } from '../mrfeedback/config.js';
@@ -243,6 +243,20 @@ export interface PhaseConfig {
    * at all is what lets ONESHOT_SKIP_PHASES switch it off exactly like the rest.
    */
   onDemand?: boolean;
+  /**
+   * Restrict this phase to named targets — PROJECT_TARGET, the last path
+   * segment of GITLAB_REPO_URL.
+   *
+   * Absent — which is every phase that shipped before this field — means the
+   * phase runs for every target and for no target at all, so adding the field
+   * changes nothing about the pipeline anybody is already running.
+   *
+   * Present, the phase is dropped unless the active target is listed. That is
+   * what lets a change of pipeline SHAPE ride along with the project switch
+   * instead of landing on everyone the moment they pull: a phase nobody else
+   * asked for is a phase nobody else gets.
+   */
+  targets?: string[];
 }
 
 export interface BudgetConfig {
@@ -344,14 +358,60 @@ export function bugReproductionEnabled(): boolean {
   return projectConfig().bugReproduction !== false;
 }
 
+/**
+ * Whether `phase` belongs to `target`. Compared the way PROJECT_TARGET is
+ * derived — trimmed and lower-cased — so `ERP` in phases.json is the erp
+ * target rather than a phase that silently never runs.
+ */
+export function runsForTarget(phase: Pick<PhaseConfig, 'targets'>, target: string): boolean {
+  return !phase.targets || phase.targets.some((t) => t.trim().toLowerCase() === target);
+}
+
+/**
+ * Refuses a `targets` list that no project's GITLAB_REPO_URL could ever select:
+ * not an array, or an entry that, trimmed and lower-cased as runsForTarget
+ * compares it, is not a name resolveTarget can derive for a project. The test
+ * is repourl.cjs isTargetName, the URL parser's own rule rather than a copy of
+ * it. It fails an entry that is blank or carries a slash or whitespace, which a
+ * project's last path segment never does; one the parser refuses as a path
+ * segment (`.erp`, `erp.`, `erp?`); and one ending in the `.git` it strips from
+ * a clone URL (`erp.git`). Any of those would drop its phase on every project
+ * without a word. There is no list of known projects to check a spelling
+ * against, so a well-formed typo still drops the phase; doctor names every
+ * phase the active target leaves out so that is visible.
+ */
+export function assertTargets(phase: Pick<PhaseConfig, 'name' | 'targets'>): void {
+  if (phase.targets === undefined) return;
+  const where = `config/phases.json: phase '${phase.name}'`;
+  if (!Array.isArray(phase.targets)) throw new Error(`${where}: \`targets\` must be an array of project names`);
+  const bad = phase.targets.filter((t) => typeof t !== 'string' || !isTargetName(t.trim().toLowerCase()));
+  if (bad.length) {
+    throw new Error(`${where} names target(s) no project can match: ${bad.map((t) => JSON.stringify(t)).join(', ')}. `
+      + 'A target is the last path segment of GITLAB_REPO_URL, like `erp`.');
+  }
+}
+
+/** Configured phases the active target leaves out, with the targets each one names. */
+export function phasesOutsideTarget(): Array<{ name: string; targets: string[] }> {
+  return loadJson<{ phases: PhaseConfig[] }>('phases.json').phases
+    .filter((p) => !runsForTarget(p, PROJECT_TARGET))
+    .map((p) => ({ name: p.name, targets: p.targets ?? [] }));
+}
+
 let _phases: PhaseConfig[] | null = null;
 export function phases(): PhaseConfig[] {
   if (!_phases) {
     const skip = new Set(
       envOr('ONESHOT_SKIP_PHASES').split(',').map((s) => s.trim()).filter(Boolean),
     );
-    _phases = loadJson<{ phases: PhaseConfig[] }>('phases.json').phases
+    const all = loadJson<{ phases: PhaseConfig[] }>('phases.json').phases;
+    all.forEach(assertTargets);
+    _phases = all
       .filter((p) => !skip.has(p.name))
+      // A phase that names targets belongs to those targets only. An empty
+      // array is read the same as naming none of them: the phase never runs,
+      // which is a switched-off phase rather than an unrestricted one.
+      .filter((p) => runsForTarget(p, PROJECT_TARGET))
       .sort((a, b) => a.n - b.n);
   }
   return _phases;
@@ -359,6 +419,47 @@ export function phases(): PhaseConfig[] {
 
 export function phaseByName(name: string): PhaseConfig | undefined {
   return phases().find((p) => p.name === name);
+}
+
+export interface RequiredLabel { name: string; why: string }
+
+/**
+ * Every label this harness acts on by name, with what depends on it.
+ *
+ * Pure and fully parameterised so the SELECTION can be tested: checking the
+ * result against a live project only proves the labels it happened to list
+ * exist, never that the right ones were collected. An optional label that is
+ * unset is not required — an empty string is "this gate is off", not a label
+ * called "". `notABug` is required only while reproduction is on, for the same
+ * reason.
+ */
+export function requiredLabels(
+  labels: ProjectConfig['labels'],
+  phaseList: Pick<PhaseConfig, 'name' | 'labelSkills' | 'labelGated'>[],
+  bugReproduction: boolean,
+): RequiredLabel[] {
+  const out = new Map<string, string>();
+  const need = (name: string | undefined, why: string): void => {
+    if (name && !out.has(name)) out.set(name, why);
+  };
+  need(labels.entry, 'entry — nothing is picked up without it');
+  need(labels.exit, 'exit — set when the run merges');
+  need(labels.blocked, 'blocked — set when a run stops for a human');
+  need(labels.review, 'review gate');
+  need(labels.testcaseReview, 'testcase QA gate');
+  need(labels.designReview, 'design gate');
+  need(labels.inReview, 'in-review marker');
+  if (bugReproduction) need(labels.notABug, 'bug reproduction verdict');
+  for (const ph of phaseList) {
+    // Before the routing loop, so a label doing both jobs reports under the
+    // worse consequence: a missing routing key loses a skill, a missing gate
+    // label loses the phase and the human sign-off that goes with it.
+    need(ph.labelGated, `gates the '${ph.name}' phase — without it the phase never runs, and nothing says so`);
+    for (const [label, skill] of Object.entries(ph.labelSkills ?? {})) {
+      need(label, `routes '${skill}' to ${ph.name}`);
+    }
+  }
+  return [...out].map(([name, why]) => ({ name, why }));
 }
 
 let _budgets: BudgetConfig | null = null;
@@ -387,7 +488,7 @@ export function slackConfig(): SlackConfig {
 }
 
 /**
- * The two sign-off groups, by GitLab username (config/reviewers.json).
+ * The sign-off groups, by GitLab username (config/reviewers.json).
  *
  * Not merged into `slackConfig().allowlist`, which it replaces as the review
  * gates' authorisation source: that list holds SLACK user ids, and the gates
@@ -404,6 +505,12 @@ export function slackConfig(): SlackConfig {
 export interface ReviewersConfig {
   dev: string[];
   qa: string[];
+  /**
+   * The design gate's group. Deliberately neither `dev` nor derived from it:
+   * it holds a product owner who signs off designs but not plans, and a list
+   * inherited from `dev` would change whenever the plan approvers do.
+   */
+  design: string[];
   /**
    * The work-email domain a GitLab username is completed with to find that
    * person's SLACK id (`<username>@<emailDomain>` → `users.lookupByEmail` →
@@ -446,6 +553,7 @@ export function reviewersConfig(): ReviewersConfig {
     _reviewers = {
       dev: Array.isArray(c.dev) ? c.dev : [],
       qa: Array.isArray(c.qa) ? c.qa : [],
+      design: Array.isArray(c.design) ? c.design : [],
       emailDomain: envOr('ONESHOT_REVIEWER_EMAIL_DOMAIN', typeof c.emailDomain === 'string' ? c.emailDomain : ''),
       slackIds: (c.slackIds && typeof c.slackIds === 'object') ? c.slackIds : {},
     };
