@@ -72,7 +72,7 @@ The zone map, label allow-list and Jev facts are **not** here. They live in the 
 
 ## Rules that live in code (don't re-add them to the skills)
 
-- **Route is a person's call when triage never saw the ticket:** one-shot and MR tickets get areas and a zone the way triage computes them, but always go to people. A person adding `AI` on GitLab hands the ticket to Oneshot: the hourly sweep adds `Loop` (red is held and reported, since the zone guard would stop it). A ticket whose `Loop` was ever removed is held too, because that removal was Oneshot stopping it (Not a Bug) or a person dropping it; only a person adds `Loop` back.
+- **Route is a person's call when triage never saw the ticket:** one-shot and MR tickets get areas and a zone the way triage computes them, but always go to people. A person adding `AI` on GitLab hands the ticket to Oneshot: the hourly sweep adds `Loop`. Red is held and reported, since the zone guard would stop it. Yellow is held too, until a person opens a `Characterization Tests` issue and adds `<!-- tests-first: #N -->` to the ticket; the sweep then releases it like any yellow change. With `default_zone` set to yellow in zones.json, that holds most one-shots that hit no keyword. Also held: any ticket whose `Loop` was ever removed, because that removal was Oneshot stopping it (Not a Bug) or a person dropping it; only a person adds `Loop` back.
 - **Labels:** existing allow-listed labels apply automatically. `create` stops for a label new to GitLab, or one in `ask_first` (`Opensource`, `Plane team`: they move work between streams), until the user confirms it with `--confirm-labels`.
 
 - **Labels:** only from the allow-list; the GitLab API would otherwise create any typo.

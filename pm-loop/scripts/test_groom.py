@@ -615,7 +615,7 @@ def test_dry_run_explains_labels_and_flags_only_ask_first(monkeypatch):
 
 def test_sweep_promotes_an_ai_label_a_person_added(monkeypatch):
     """No tests-first marker = a person decided: add Loop so Oneshot picks it up."""
-    writes = _fake_gitlab(monkeypatch, marker=False)
+    writes = _fake_gitlab(monkeypatch, marker=False, labels=("AI", "Zone: Green"))
     actions = gl.sweep(dry_run=False)
     assert [a["why"] for a in actions] == ["AI added by a person"] and writes == [("issues/20", {"add_labels": "Loop"})]
 
@@ -624,6 +624,7 @@ def test_sweep_promotes_an_ai_label_a_person_added(monkeypatch):
     (["AI"], [{"label": {"name": "AI"}, "action": "add"}], True, "AI added by a person"),
     (["AI"], LOOP_ADDED_THEN_REMOVED, False, gl.LOOP_REMOVED),
     (["AI", "Zone: Red"], [], False, "zone is red"),
+    (["AI", "Zone: Yellow"], [], False, "zone is yellow — open a Characterization Tests issue"),
     (["AI", "Needs Human"], [], False, None), (["AI", "Merged"], [], False, None),
     (["AI", "Characterization Tests"], [], False, None)])
 def test_person_ai_promotion_rules(monkeypatch, labels, events, promoted, why):

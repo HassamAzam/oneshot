@@ -344,8 +344,10 @@ def promote_person_ai(dry_run: bool) -> list[dict]:
 
     Skipped: yellow changes still waiting for their tests (the tests-first flow releases those), tickets
     carrying a stop label, and the tests issues themselves. Held and reported: red, because Oneshot's
-    zone guard would stop it at the plan anyway, and any ticket whose Loop was ever removed, because
-    that removal was a stop (loop_was_removed).
+    zone guard would stop it at the plan anyway; yellow with no tests-first marker, because releasing it
+    here let Oneshot edit a yellow area with no characterization tests pinned, which is the one thing the
+    yellow route exists to prevent (the marker hands it to sweep(), which waits for a person's tests MR);
+    and any ticket whose Loop was ever removed, because that removal was a stop (loop_was_removed).
     """
     flow, zone = label_map()["flow"], label_map()["zone"]
     query = urllib.parse.urlencode({"state": "opened", "labels": flow["ai"], "not[labels]": flow["loop"], "per_page": 100})
@@ -359,6 +361,12 @@ def promote_person_ai(dry_run: bool) -> list[dict]:
             actions.append({**entry, "action": "none",
                             "why": "AI added by a person, but the zone is red — Oneshot's zone guard would stop it; "
                                    "keep it with people or change .claude/zones.json by MR"})
+            continue
+        if zone["yellow"] in labels:
+            actions.append({**entry, "action": "none",
+                            "why": "AI added by a person, but the zone is yellow — open a Characterization Tests issue "
+                                   "and add `<!-- tests-first: #N -->` to this issue's description; the sweep adds Loop "
+                                   "once a person's tests-only MR closes it"})
             continue
         if loop_was_removed(issue["iid"], flow["loop"]):
             actions.append({**entry, "action": "none", "why": LOOP_REMOVED})
