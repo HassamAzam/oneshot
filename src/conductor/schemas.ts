@@ -348,7 +348,7 @@ export const VERIFY_SCHEMA = phaseSchema({
 
 /** The on-demand `base-check` phase: do verify's pre-existing cases fail on the base branch too? */
 export const BASE_CHECK_SCHEMA = phaseSchema({
-  baseCommit: str('git rev-parse of the base-branch checkout the app ran on. Empty if it never ran.'),
+  baseCommit: str("The `app.head` that `ensure` printed: the full sha of the base-branch checkout the app ran on. Empty if it never ran."),
   results: {
     type: 'array',
     description: 'One entry per case you were given, by its id.',

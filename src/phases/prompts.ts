@@ -1685,18 +1685,21 @@ ${caseList(cases, { steps: true })}
 
 Your worktree holds the CHANGE. Do not run the cases there, and do not check anything out in it —
 you cannot write to it, and the git guard refuses checkout/restore/stash/reset. Bring up a second
-app on \`${baseBranch()}\` in its own checkout, exactly as \`ui-evidence\` takes its 'before' shots:
+app on \`${baseBranch()}\` in its own checkout, the way \`ui-evidence\` takes its 'before' shots:
 
-1. \`node $ONESHOT_HOME/scripts/app.cjs list\` — if an instance that is healthy with bundleReady
-   is already at \`origin/${baseBranch()}\`, use its \`baseUrl\`.
-2. Otherwise:
-   \`env -u ONESHOT_WORKTREE -u ONESHOT_PORT -u ONESHOT_TICKET -u ONESHOT_IID
-   ONESHOT_RUN_DIR=$ONESHOT_HOME/state/runs/$ONESHOT_TICKET/base-app node
-   $ONESHOT_HOME/scripts/app.cjs ensure --ref ${baseBranch()}\`
-   and use the \`baseUrl\` it prints. A named error code (\`E_NO_PORTS\`, …) means you cannot
-   check anything: report every case 'inconclusive' with that code, and stop.
+\`env -u ONESHOT_WORKTREE -u ONESHOT_PORT -u ONESHOT_TICKET -u ONESHOT_IID
+ONESHOT_RUN_DIR=$ONESHOT_HOME/state/runs/$ONESHOT_TICKET/base-app node
+$ONESHOT_HOME/scripts/app.cjs ensure --ref ${baseBranch()}\`
 
-Record \`git -C <that checkout> rev-parse HEAD\` as \`baseCommit\`.
+Always run exactly that. It reuses a healthy instance already on that commit, so there is
+nothing to look up first — and \`app.cjs list\` prints no URL anyway. From the JSON it prints:
+  - drive the cases against \`app.baseUrl\`;
+  - record \`app.head\`, the full sha of the checkout the app ran from, as \`baseCommit\` (it is
+    also in \`$ONESHOT_HOME/state/runs/$ONESHOT_TICKET/base-app/harness/app-env.json\`). Do not
+    \`cd\` into that checkout or run \`git -C\` on it: the git guard refuses any path outside your
+    worktree.
+A named error code (\`E_NO_PORTS\`, …) means you cannot check anything: report every case
+'inconclusive' with that code, and stop.
 
 ${testLoginBlock()}
 

@@ -451,3 +451,15 @@ test('verify is told a migrating branch cannot carry a confirmed label', () => {
   assert.match(p, /a failure on data this branch's migrations or code wrote/);
   assert.match(p, /adds or changes a migration the label is\s+never confirmed/);
 });
+
+test('base-check takes its URL and commit from ensure, never from list or git -C', () => {
+  // `app.cjs list` prints no baseUrl, and git-guard refuses `git -C` on the base
+  // checkout because it sits outside the leased worktree; an empty baseCommit
+  // drops the sha from every "confirmed on" line.
+  const p = baseCheckPrompt();
+  assert.match(p, /app\.cjs ensure --ref/);
+  assert.match(p, /`app\.baseUrl`/);
+  assert.match(p, /record `app\.head`/);
+  assert.doesNotMatch(p, /use its `baseUrl`/);
+  assert.doesNotMatch(p, /git -C <that checkout>/);
+});
