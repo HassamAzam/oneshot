@@ -853,6 +853,16 @@ expect_deny  "find -name findings.json -delete" \
                                        artifact-guard.cjs "$(bash_payload "find $RUN -name findings.json -delete")"
 expect_deny  "find over every run's verify.json" \
                                        artifact-guard.cjs "$(bash_payload "find $ROOT/state -name verify.json -delete")"
+expect_deny  "find . -delete from a session standing in the run dir" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$RUN" "find . -name findings.json -delete")"
+expect_deny  "find . -delete from a conductor phase standing in \$ONESHOT_HOME" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$ROOT" "find . -name verify.json -delete")"
+expect_deny  "cd above state/runs, then find . -delete" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$ONESHOT_WORKTREE" "cd $ROOT/state && find . -name verify.json -delete")"
+# `.` is above state/runs only when the shell really stands there. Resolved
+# against the $ONESHOT_HOME fallback as well, every worktree `find .` was.
+expect_allow "find -name <handoff> -delete inside the worktree" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$ONESHOT_WORKTREE" "find . -name verify.json -delete")"
 expect_deny  "rm FINDINGS.JSON"        artifact-guard.cjs "$(bash_payload "rm $RUN/FINDINGS.JSON")"
 expect_allow "shutil.copy a handoff out (a read)" \
                                        artifact-guard.cjs "$(bash_payload "python3 -c \"import shutil; shutil.copy('$RUN/findings.json', '/tmp/f.json')\"")"

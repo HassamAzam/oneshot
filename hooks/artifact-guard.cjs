@@ -370,11 +370,18 @@ function findDeletes({ argv0, rest }, names) {
  * The hook input carries the session's `cwd`, and secret-guard already reads
  * it. Ignoring it — and any `cd` earlier in the same command — is what let
  * `cd <run> && rm findings.json` through, which is the commonest shape these
- * sessions use on these files. The worktree and $ONESHOT_HOME stay in the
- * starting set as well: resolving against a base the session was not standing
- * in can only ever produce a path that is not a handoff, so the extra candidate
- * costs nothing, and the observed `cat state/runs/182/findings.json` was
- * relative, from a conductor-cwd phase.
+ * sessions use on these files.
+ *
+ * startingDirs() adds the worktree and $ONESHOT_HOME to that, and the extra
+ * bases cost nothing ONLY to a check that asks whether a path IS one exact spot
+ * below state/runs — a handoff (protectedArtifact) or a run directory
+ * (runDirectory). From a base the session was not standing in, a relative path
+ * lands on such a spot only when it spells the way down itself, as the observed
+ * `cat state/runs/182/findings.json` from a conductor-cwd phase did. A check
+ * that asks whether a path is at or ABOVE state/runs gets no such protection:
+ * `.` resolved against $ONESHOT_HOME always is, which refused `find . -name
+ * plan.json -delete` run inside a worktree. That check resolves against
+ * shellDirs() alone.
  */
 function resolveFrom(p, dirs) {
   const target = expandVars(p);
@@ -382,9 +389,13 @@ function resolveFrom(p, dirs) {
   return dirs.map((b) => path.join(b, target));
 }
 
+/** Where the shell is known to stand: the hook input's `cwd`, or nowhere when it is absent. */
+function shellDirs(data) {
+  return typeof data.cwd === 'string' && data.cwd ? [data.cwd] : [];
+}
+
 function startingDirs(data) {
-  const cwd = typeof data.cwd === 'string' ? data.cwd : '';
-  return [...new Set([cwd, process.env.ONESHOT_WORKTREE, C.ONESHOT].filter(Boolean))];
+  return [...new Set([...shellDirs(data), process.env.ONESHOT_WORKTREE, C.ONESHOT].filter(Boolean))];
 }
 
 // ----------------------------------------------------------------- dispatch
@@ -414,12 +425,15 @@ try {
     const mentionsName = [...names].some((n) => lc.includes(n));
     // Segments are walked in order so that a `cd` moves where every later
     // relative path resolves, and `cd <run> && cd artifacts && …` ends up in
-    // artifacts/ rather than in both.
+    // artifacts/ rather than in both. `shell` follows the same `cd`s from the
+    // real cwd only, for the one check the fallback bases would break.
     let dirs = startingDirs(data);
+    let shell = shellDirs(data);
     for (const seg of segments(cmd)) {
       const c = command(seg);
       if (c.argv0 === 'cd' || c.argv0 === 'pushd') {
         dirs = chdir(dirs, c.argv0, c.rest);
+        shell = chdir(shell, c.argv0, c.rest);
         continue;
       }
       for (const raw of removedPaths(c)) {
@@ -432,11 +446,15 @@ try {
 
       const find = findDeletes(c, names);
       for (const root of find ? find.roots : []) {
-        for (const candidate of resolveFrom(root, dirs)) {
-          // A root at or above state/runs reaches that name in EVERY run.
+        // A root at or above state/runs reaches that name in EVERY run. Only
+        // where the shell really stands counts: against $ONESHOT_HOME, every
+        // relative root is above state/runs.
+        for (const candidate of resolveFrom(root, shell)) {
           if (C.isInside(runsRoot(), canonical(candidate))) {
             refuse({ iid: '*', name: find.named[0] }, 'this command');
           }
+        }
+        for (const candidate of resolveFrom(root, dirs)) {
           for (const n of find.named) {
             const hit = protectedArtifact(path.join(candidate, n), names);
             if (hit) refuse(hit, 'this command');
