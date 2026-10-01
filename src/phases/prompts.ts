@@ -135,10 +135,18 @@ function labelSkills(cfg: PhaseConfig, ticket: Ticket): string[] {
 
 /**
  * The layers grooming labelled this ticket with (Backend / Frontend, decided by
- * Jev from the ticket text). They only ever ADD an agent to the plan's
- * forecast: the forecast reads the files the plan intends to touch, the label
- * reads what the ticket asks for, and either one alone is a reason to dispatch
- * that layer's agent. Case-insensitive, like labelSkills.
+ * Jev from the ticket text). Where the plan forecasts a layer, the labels only
+ * ever ADD an agent to that forecast, never take one away: the forecast reads
+ * the files the plan intends to touch, the label reads what the ticket asks
+ * for, and either one alone is a reason to dispatch that layer's agent.
+ *
+ * With no plan, or a plan that names no layer, the labels DECIDE instead of
+ * the old default of both agents. That is deliberate, and it is skillsFor()'s
+ * rule that an absent label is an answer rather than a missing signal: Jev's
+ * labels skipped no layer wrongly on 42 tickets (`_why_layer_skills` in
+ * config/phases.json). The other agent is still not forbidden; the implement
+ * prompt says to dispatch it if the change turns out to need that layer.
+ * Case-insensitive, like labelSkills.
  */
 export function labelledLayers(ticket: Pick<Ticket, 'labels'>): { backend: boolean; frontend: boolean } {
   const carried = new Set(ticket.labels.map((l) => l.toLowerCase()));
@@ -1113,12 +1121,13 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
     // reproducible h3 duplication — observed, with evidence — went untouched.
     const verifyFailures = verifyFailuresOf(ctx);
 
-    // Named from the plan's forecast, phrased as a default rather than a
-    // permission. The conductor cannot enforce this — `agents` in phases.json
-    // is documentation, nothing reads it — and the forecast is wrong often
-    // enough that a hard "backend only" would strand the two-line frontend
-    // edit a backend ticket picks up. So the unplanned layer keeps its agent
-    // and simply stops being advertised.
+    // Named from the plan's forecast and the ticket's layer labels (see
+    // labelledLayers), phrased as a default rather than a permission. The
+    // conductor cannot enforce this — `agents` in phases.json is
+    // documentation, nothing reads it — and the forecast is wrong often enough
+    // that a hard "backend only" would strand the two-line frontend edit a
+    // backend ticket picks up. So the unplanned layer keeps its agent and
+    // simply stops being advertised.
     const planned = ctx.prior.plan ? planForecast(ctx) : null;
     const labelled = labelledLayers(ctx.ticket);
     const backend = Boolean(planned?.backend) || labelled.backend;
@@ -1126,9 +1135,15 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
     const wanted = backend || frontend
       ? [backend ? '`backend-agent`' : '', frontend ? '`frontend-agent`' : ''].filter(Boolean)
       : ['`backend-agent`', '`frontend-agent`'];
+    // With no plan, or one that names no layer, only the labels narrowed the
+    // list, and the sentence must not cite a forecast that does not exist.
+    const other = backend ? 'frontend' : 'backend';
+    const why = planned && (planned.backend || planned.frontend)
+      ? `Neither the plan nor the ticket's layer labels call for ${other} work`
+      : `The ticket's layer labels do not call for ${other} work`;
     const unplanned = wanted.length === 1
-      ? ` Neither the plan nor the ticket's layer labels call for ${backend ? 'frontend' : 'backend'} work, so the other
-agent is not listed — but the forecast is not a rule. If the change turns out to need that layer,
+      ? ` ${why}, so the other
+agent is not listed — but that is not a rule. If the change turns out to need that layer,
 dispatch its agent for it rather than writing that layer yourself.`
       : '';
     const agentBlock = `Delegate implementation work to ${wanted.join(' and ')} for changes in `

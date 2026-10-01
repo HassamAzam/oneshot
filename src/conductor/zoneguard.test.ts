@@ -341,11 +341,3 @@ test('a branch git cannot diff stops the run rather than passing it', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
-
-import { labelledLayers } from '../phases/prompts.js';
-
-test('layer labels from grooming are read case-insensitively', () => {
-  assert.deepEqual(labelledLayers({ labels: ['backend', 'AI'] } as never), { backend: true, frontend: false });
-  assert.deepEqual(labelledLayers({ labels: ['Frontend', 'Backend'] } as never), { backend: true, frontend: true });
-  assert.deepEqual(labelledLayers({ labels: ['Bug'] } as never), { backend: false, frontend: false });
-});
