@@ -203,8 +203,10 @@ pytest is unaffected and is fine to run.
     }
     ```
   - **An element off-screen cannot overlap anything.** CSS `zoom` and a short
-    viewport have put a real element at `top=1194px` in a 900px window. Check
-    `outsideViewport` before believing a zero. `hidden` is the same guard for an
+    viewport have put a real element at `top=1194px` in a 900px window, and a
+    popper scrolled above the viewport sits at a negative `y`. `outsideViewport`
+    is true when either box lies wholly past any edge; check it before believing
+    a zero. `hidden` is the same guard for an
     element that kept its box but is not on screen — `visibility:hidden` and
     `opacity:0` both measure full size, so a popover that is hidden rather than
     unmounted would otherwise be reported as covering the field it no longer

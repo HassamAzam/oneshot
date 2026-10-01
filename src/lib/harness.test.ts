@@ -394,3 +394,32 @@ test('the visibility probe carries its timeout as an option, inside the caller b
     assert.deepEqual(probe.options, { timeout: FAST.timeout });
   }
 });
+
+test('an element above or left of the viewport is flagged outside it', async () => {
+  // Boxes are viewport-relative, so a popper scrolled above the screen has a negative y.
+  // Only the bottom and right edges were checked, so its zero read as a real one.
+  for (const offscreen of [at(0, -500), at(-500, 0)]) {
+    const r = await harness.overlap(
+      staged({ boxes: { [POPPER]: offscreen, [FIELD]: at(0, 200) } }), POPPER, FIELD, FAST,
+    );
+    assert.equal(r.areaPx, 0);
+    assert.equal(r.outsideViewport, true, JSON.stringify(offscreen));
+  }
+});
+
+test('a box only partly past an edge is still on screen', async () => {
+  const r = await harness.overlap(
+    staged({ boxes: { [POPPER]: at(0, -50), [FIELD]: at(0, 0) } }), POPPER, FIELD, FAST,
+  );
+  assert.equal(r.outsideViewport, false);
+  assert.equal(r.areaPx, 5000);
+});
+
+test('a hidden overlay reports outsideViewport from its box, not a fixed false', async () => {
+  const r = await harness.overlap(staged({
+    boxes: { [POPPER]: at(0, 1000), [FIELD]: at(0, 200) },
+    seen: { [POPPER]: { visible: false, why: 'opacity:0.00' } },
+  }), POPPER, FIELD, FAST);
+  assert.equal(r.intersects, false);
+  assert.equal(r.outsideViewport, true);
+});

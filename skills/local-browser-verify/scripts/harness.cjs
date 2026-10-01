@@ -1030,7 +1030,14 @@ async function settle(session, selector, opts = {}) {
  *
  * Playwright's own `isVisible()` does not cover this: it treats `opacity:0` as visible.
  * Opacity also compounds down the tree, so a faded ancestor hides a fully opaque child —
- * hence the walk to the root rather than reading the one element.
+ * hence the walk to the root rather than reading the one element. `display:none` walks
+ * for the same reason.
+ *
+ * `visibility` does NOT walk. It is inherited and a child can override it, so the
+ * element's own computed value already accounts for a hidden ancestor, and a child set
+ * back to `visibility:visible` under a hidden wrapper is painted and hit-testable.
+ * Walking the ancestors reported exactly that child, on screen and over the field, as
+ * `hidden` with `intersects:false` — a missed defect.
  *
  * `visible: null` means the element could not be inspected at all — it detached between
  * settle() finding its box and this read, or the page navigated. That is "could not
@@ -1046,13 +1053,12 @@ async function visible(session, selector, opts = {}) {
   const loc = session.page.locator(selector).first();
   const cap = Math.min(2000, Number(opts.timeout || 5000));
   return loc.evaluate((el) => {
+    const own = getComputedStyle(el).visibility;
+    if (own !== 'visible') return { visible: false, why: `visibility:${own}` };
     let effective = 1;
     for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
       const cs = getComputedStyle(node);
       if (cs.display === 'none') return { visible: false, why: 'display:none' };
-      if (cs.visibility === 'hidden' || cs.visibility === 'collapse') {
-        return { visible: false, why: `visibility:${cs.visibility}` };
-      }
       effective *= Number(cs.opacity);
     }
     if (effective < 0.05) return { visible: false, why: `opacity:${effective.toFixed(2)}` };
@@ -1099,7 +1105,10 @@ function intersection(a, b) {
  *
  * `outsideViewport` catches the other direction. CSS `zoom` and a short viewport have
  * already put a real element at `top=1194px` in a 900px window, where it cannot overlap
- * anything because it is not on screen at all — a green result that means nothing.
+ * anything because it is not on screen at all — a green result that means nothing. It is
+ * true when either box lies wholly past ANY edge: boxes are viewport-relative, so one
+ * scrolled above or left of the viewport has a negative y or x, and checking only the
+ * bottom and right edges read a popper above the screen as a believable zero.
  *
  * `hidden` is the same guard for elements that kept their box but are not on screen. If
  * either side is invisible there is nothing for a user to see, so `intersects` is false
@@ -1137,15 +1146,15 @@ async function overlap(session, a, b, opts = {}) {
     .map((sel, i) => (seen[i].visible === false ? { selector: sel, why: seen[i].why } : null))
     .filter(Boolean);
   const hit = intersection(boxA, boxB);
+  const offscreen = (box) => box.y >= viewport.height || box.x >= viewport.width
+    || box.y + box.height <= 0 || box.x + box.width <= 0;
+  const outsideViewport = viewport ? [boxA, boxB].some(offscreen) : false;
   if (hidden.length) {
     return {
       intersects: false, areaPx: 0, region: hit, hidden, unsettled, a: boxA, b: boxB, viewport,
-      outsideViewport: false,
+      outsideViewport,
     };
   }
-  const outsideViewport = viewport
-    ? [boxA, boxB].some((box) => box.y >= viewport.height || box.x >= viewport.width)
-    : false;
   return {
     intersects: hit.areaPx > 0,
     areaPx: hit.areaPx,
