@@ -76,7 +76,7 @@ The zone map, label allow-list and Jev facts are **not** here. They live in the 
 - **Labels:** existing allow-listed labels apply automatically. `create` stops for a label new to GitLab, or one in `ask_first` (`Opensource`, `Plane team`: they move work between streams), until the user confirms it with `--confirm-labels`.
 
 - **Labels:** only from the allow-list; the GitLab API would otherwise create any typo.
-- **Duplicate protection:** eligibility needs a readable Plane back-link check, plus a GitLab search for the ticket ID.
+- **Duplicate protection:** eligibility needs a readable Plane back-link check, plus a GitLab search for the ticket ID. The one match that is not a duplicate is a `Characterization Tests` issue left without its change issue, by a run that died between the two writes: rerunning `create` finishes it.
 - **Routes:**
   - green → `AI` + `Loop`
   - yellow → a person's `Characterization Tests` issue first; the sweep adds `Loop` only after a

@@ -56,11 +56,11 @@ def _args(**kw):
     return argparse.Namespace(**{**base, **kw})
 
 
-def _dry_create(monkeypatch, ticket, body, layers=(), **kw):
+def _dry_create(monkeypatch, ticket, body, layers=(), existing=(), **kw):
     monkeypatch.setattr(jev_layers, "decide", lambda title, text: {
         "layers": list(layers), "probabilities": {}, "source": "jev", "note": None})
     monkeypatch.setattr(plane, "resolve", lambda _id: ticket)
-    monkeypatch.setattr(gl, "existing_issue", lambda _id: None)
+    monkeypatch.setattr(gl, "existing_issues", lambda _id: list(existing))
     monkeypatch.setattr(collect_documents, "collect", lambda *a, **k: {
         "attached": [], "needs_connector": [], "references": [], "failed": []})
     monkeypatch.setattr("sys.stdin", io.StringIO(body))
@@ -578,9 +578,74 @@ def test_existing_issue_matches_the_exact_ticket_line_only(monkeypatch):
     issues = [{"iid": 5, "description": "## Plane Ticket\nWORKSTREAMRE-230\n"},
               {"iid": 6, "description": "## Plane Ticket\nWORKSTREAMRE-2301\n"}]
     monkeypatch.setattr(gl, "call", lambda m, path, payload=None: issues)
-    assert gl.existing_issue("WORKSTREAMRE-230") == 5
+    assert [i["iid"] for i in gl.existing_issues("WORKSTREAMRE-230")] == [5]
     monkeypatch.setattr(gl, "call", lambda m, path, payload=None: issues[1:])
-    assert gl.existing_issue("WORKSTREAMRE-230") is None
+    assert gl.existing_issues("WORKSTREAMRE-230") == []
+
+
+def _orphan(**kw):
+    return {"iid": 19, "url": "u19", "labels": ["Zone: Yellow", "Training", "Characterization Tests"],
+            "description": gl._tests_body("T", ["training"], "", "WORKSTREAMRE-9"), **kw}
+
+
+@pytest.mark.parametrize("matches, orphan", [
+    ([_orphan()], True),
+    ([_orphan(description="## Change it unblocks\n#20\n\n## Plane Ticket\nWORKSTREAMRE-9\n")], False),
+    ([_orphan(labels=["Zone: Yellow", "AI", "Review"])], False),
+    ([_orphan(), _orphan(iid=20, labels=["AI"], description="WORKSTREAMRE-9")], False),
+    ([], False)])
+def test_only_a_lone_tests_issue_still_holding_the_placeholder_is_an_orphan(matches, orphan):
+    assert (gl.orphan_tests_issue(matches) is not None) is orphan
+
+
+def test_a_real_duplicate_is_still_skipped(monkeypatch):
+    out = _dry_create(monkeypatch, _ticket(), GOOD, existing=[{"iid": 5, "url": "u5", "labels": ["AI"], "description": "x"}])
+    assert out["skipped"].startswith("already on GitLab: #5 names this ticket")
+
+
+def test_a_tests_issue_left_without_its_change_issue_is_resumed_not_skipped(monkeypatch, tmp_path):
+    """A tests-first run that died between its two POSTs used to block the ticket for good."""
+    orphan, posts, puts = _orphan(), [], []
+
+    def call(method, path, payload=None):
+        if path.startswith("milestones?"):
+            return [{"id": 1, "title": "Sprint 65"}]
+        if (method, path) == ("POST", "issues"):
+            posts.append(payload)
+            return {"iid": 20, "web_url": "u20"}
+        if (method, path) == ("GET", "issues/19"):
+            return {"description": orphan["description"]}
+        if method == "PUT" or (method, path) == ("POST", "issues/20/links"):
+            puts.append((method, path, payload))
+            return {}
+        raise AssertionError((method, path))
+    monkeypatch.setattr(gl, "call", call)
+    monkeypatch.setattr(groom, "JEV_DECISIONS", tmp_path / "d.jsonl")
+    monkeypatch.setattr(plane, "post_groom", lambda *a: {"backlink": "ok"})
+    monkeypatch.setattr(groom.sprint_plan_append, "append_rows", lambda m, rows: {"appended": len(rows)})
+    out = _dry_create(monkeypatch, _ticket(route="ai-tests", zone="yellow"), GOOD, existing=[orphan], dry_run=False)
+    assert len(posts) == 1 and "<!-- tests-first: #19 -->" in posts[0]["description"]
+    assert puts == [("PUT", "issues/19", {"description": orphan["description"].replace("CHANGE_ISSUE_PLACEHOLDER", "#20")}),
+                    ("POST", "issues/20/links", {"target_project_id": gl.ERP_PROJECT_ID, "target_issue_iid": 19})]
+    assert out["tests_issue"]["iid"] == 19 and out["issue"]["iid"] == 20
+
+
+def test_an_orphan_on_a_ticket_that_no_longer_routes_ai_tests_is_refused(monkeypatch):
+    with pytest.raises(gl.GroomError, match="#19 is a tests issue left without its change issue"):
+        _dry_create(monkeypatch, _ticket(), GOOD, existing=[_orphan()])
+
+
+def test_a_failed_change_issue_names_the_tests_issue_it_left_behind(monkeypatch):
+    def call(method, path, payload=None):
+        if path.startswith("milestones?"):
+            return [{"id": 1, "title": "Sprint 65"}]
+        if payload["title"].startswith("Characterization tests"):
+            return {"iid": 19, "web_url": "u19"}
+        raise gl.GroomError("HTTP 502")
+    monkeypatch.setattr(gl, "call", call)
+    spec = {"route": "ai-tests", "kind": "bug", "size": "S", "zone": "yellow", "areas": ["training"]}
+    with pytest.raises(gl.GroomError, match="tests issue #19 exists without its change issue; rerun the same create"):
+        gl.create_issues(spec, "T", "body", "", 7, "WORKSTREAMRE-9")
 
 
 @pytest.mark.parametrize("kind, size", [("bug", None), (None, "S")])

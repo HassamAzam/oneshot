@@ -132,14 +132,16 @@ def _finish_body(body: str, spec: dict, ticket: dict | None, docs: dict, jev: di
 
 
 def create(args: argparse.Namespace) -> dict:
-    ticket = None
+    ticket, resume = None, None
     if args.id:
         ticket = plane.resolve(args.id)
         if not ticket["eligible"]:
             return {"id": ticket["id"], "skipped": ticket["skip_reason"]}
-        already = gl.existing_issue(ticket["id"])
-        if already:
-            return {"id": ticket["id"], "skipped": f"already on GitLab: #{already} names this ticket (Plane back-link missing?)"}
+        already = gl.existing_issues(ticket["id"])
+        resume = gl.orphan_tests_issue(already)
+        if already and not resume:
+            named = ", ".join(f"#{issue['iid']}" for issue in already)
+            return {"id": ticket["id"], "skipped": f"already on GitLab: {named} names this ticket (Plane back-link missing?)"}
     mr = gl.get_mr(args.mr) if args.mr else None
     refs = gl.closing_refs(f"{mr['title']}\n{mr['description']}") if mr else []
     if refs:
@@ -149,6 +151,9 @@ def create(args: argparse.Namespace) -> dict:
     jev = jev_layers.decide(args.title if not ticket else ticket["name"], source_text)
     light = None if ticket else light_triage(args.title, body, [a.strip() for a in args.areas.split(",") if a.strip()])
     spec = _spec(args, ticket, jev["layers"], light)
+    if resume and spec["route"] != "ai-tests":
+        raise gl.GroomError(f"#{resume['iid']} is a tests issue left without its change issue, but this ticket now routes "
+                            f"{spec['route']} — delete #{resume['iid']} on GitLab and rerun")
     body, _, scope = body.partition(TESTS_SCOPE_MARK)
     docs = collect_documents.collect(ticket["uuid"] if ticket else None, args.from_issues, dry_run=args.dry_run)
     requested_by = ticket["requested_by"] if ticket else mr["author_name"] if mr else SELF_NAME
@@ -159,13 +164,15 @@ def create(args: argparse.Namespace) -> dict:
     unlabelled = gl.unlabelled(spec) + [f"unknown area {a}" for a in (light or {}).get("unknown_areas", [])]
     if args.dry_run:
         return {"dry_run": True, "route": spec["route"], "labels": labels, "layers": jev,
+                "resumes_tests_issue": resume["iid"] if resume else None,
                 "label_reasons": label_reasons(spec, every_label, jev),
                 "needs_user_yes": gl.needs_yes(every_label),
                 "tests_labels": tests_labels,
                 "documents": docs, "unlabelled": unlabelled, "body": body}
     approved = frozenset(l.strip() for l in (args.confirm_labels or "").split(",") if l.strip())
     assignee = mr["author_id"] if mr else (gl.user_id(args.assignee) if args.assignee else None)
-    made = gl.create_issues(spec, args.title, body, scope, assignee, ticket["id"] if ticket else None, approved)
+    made = gl.create_issues(spec, args.title, body, scope, assignee, ticket["id"] if ticket else None, approved,
+                            resume_tests=resume)
     log_jev_decision(made["issue"]["iid"], ticket["id"] if ticket else None,
                      ticket["name"] if ticket else args.title, source_text, jev, spec["route"], body)
     out = {"id": ticket["id"] if ticket else None, "route": spec["route"], "zone": spec.get("zone"),

@@ -179,19 +179,40 @@ def user_id(username: str) -> int:
 
 # ── Issues ───────────────────────────────────────────────────────
 
-def existing_issue(ticket_id: str) -> int | None:
-    """An erp issue that already names this Plane ticket — the second duplicate guard.
+def existing_issues(ticket_id: str) -> list[dict]:
+    """Every erp issue that already names this Plane ticket — the second duplicate guard.
 
     The Plane back-link is the first; this one still holds when the back-link
-    write failed, or a tests-first run died between its two issues.
+    write failed, or a tests-first run died between its two issues (orphan_tests_issue).
     """
     number = ticket_id.rsplit("-", 1)[-1]
     exact = re.compile(rf"(?m)^(WORKSTREAMRE|WS)-{number}\s*$")
+    found: dict[int, dict] = {}
     for term in (f"WORKSTREAMRE-{number}", f"WS-{number}"):
         query = urllib.parse.urlencode({"search": term, "in": "description", "scope": "all", "per_page": 20})
         for issue in call("GET", f"issues?{query}"):
-            if exact.search(issue.get("description") or ""):
-                return issue["iid"]
+            description = issue.get("description") or ""
+            if exact.search(description):
+                found[issue["iid"]] = {"iid": issue["iid"], "url": issue.get("web_url"),
+                                       "labels": issue.get("labels") or [], "description": description}
+    return list(found.values())
+
+
+def orphan_tests_issue(matches: list[dict]) -> dict | None:
+    """The tests issue a tests-first run left when its change-issue POST failed, or None.
+
+    create_issues POSTs the tests issue first, and it already names the Plane ticket. The other
+    order would be worse: a change issue with AI and no tests-first marker, which the sweep would
+    release with no tests. But with this order a failed second POST made every rerun stop as
+    "already on GitLab (Plane back-link missing?)", the change issue could never be created, and the
+    hint sent the PM the wrong way. Only a lone Characterization Tests issue still holding the
+    placeholder is an orphan; anything else is a real duplicate.
+    """
+    if len(matches) != 1:
+        return None
+    only = matches[0]
+    if label_map()["flow"]["characterization_tests"] in only["labels"] and CHANGE_ISSUE_PLACEHOLDER in only["description"]:
+        return only
     return None
 
 
@@ -201,6 +222,9 @@ def _new_issue(title: str, body: str, labels: list[str], milestone: dict, assign
         payload["assignee_ids"] = [assignee]
     issue = call("POST", "issues", payload)
     return {"iid": issue["iid"], "url": issue["web_url"], "labels": labels}
+
+
+CHANGE_ISSUE_PLACEHOLDER = "CHANGE_ISSUE_PLACEHOLDER"
 
 
 def _tests_body(change_title: str, areas: list[str], scope: str, ticket_id: str | None) -> str:
@@ -220,31 +244,42 @@ def _tests_body(change_title: str, areas: list[str], scope: str, ticket_id: str 
   from a person's branch that changes test files only. Anything else is held and posted to Slack.
 
 ## Change it unblocks
-CHANGE_ISSUE_PLACEHOLDER
+{CHANGE_ISSUE_PLACEHOLDER}
 """ + (f"\n## Plane Ticket\n{ticket_id}\n" if ticket_id else "")
 
 
 def create_issues(spec: dict, title: str, body: str, tests_scope: str, assignee: int | None,
-                  ticket_id: str | None = None, approved: frozenset = frozenset()) -> dict:
-    """Create the issue(s) for one route. Labels are checked before anything is written."""
+                  ticket_id: str | None = None, approved: frozenset = frozenset(), resume_tests: dict | None = None) -> dict:
+    """Create the issue(s) for one route. Labels are checked before anything is written.
+
+    resume_tests is an orphan tests issue (orphan_tests_issue): it is reused instead of a second one
+    being made, and only the change issue and the link are written.
+    """
     change_labels = compose_labels(spec)
     tests_labels = compose_labels(spec, for_tests_issue=True) if spec["route"] == "ai-tests" else []
     check_labels(change_labels + tests_labels, approved)
     milestone = active_milestone()
     out = {"milestone": milestone, "tests_issue": None}
     if tests_labels:
-        tests = _new_issue(f"Characterization tests: {title}", _tests_body(title, spec.get("areas") or [], tests_scope, ticket_id),
-                           tests_labels, milestone, assignee or GITLAB_ASSIGNEE)
+        tests = ({k: resume_tests[k] for k in ("iid", "url", "labels")} if resume_tests else
+                 _new_issue(f"Characterization tests: {title}", _tests_body(title, spec.get("areas") or [], tests_scope, ticket_id),
+                            tests_labels, milestone, assignee or GITLAB_ASSIGNEE))
         body = (f"## Tests first\nOneshot starts after #{tests['iid']} closes with a merged MR "
                 f"(the sweep then adds `Loop`).\n<!-- tests-first: #{tests['iid']} -->\n\n{body}")
         out["tests_issue"] = tests
     human_assignee = (assignee or GITLAB_ASSIGNEE) if spec["route"] == "human" else None
-    out["issue"] = _new_issue(title, body, change_labels, milestone, human_assignee)
+    try:
+        out["issue"] = _new_issue(title, body, change_labels, milestone, human_assignee)
+    except GroomError as exc:
+        if out["tests_issue"]:
+            raise GroomError(f"{exc} — tests issue #{out['tests_issue']['iid']} exists without its change issue; "
+                             f"rerun the same create to finish it") from exc
+        raise
     if out["tests_issue"]:
         tests = out["tests_issue"]
         desc = call("GET", f"issues/{tests['iid']}")["description"]
         call("PUT", f"issues/{tests['iid']}",
-             {"description": desc.replace("CHANGE_ISSUE_PLACEHOLDER", f"#{out['issue']['iid']}")})
+             {"description": desc.replace(CHANGE_ISSUE_PLACEHOLDER, f"#{out['issue']['iid']}")})
         call("POST", f"issues/{out['issue']['iid']}/links",
              {"target_project_id": ERP_PROJECT_ID, "target_issue_iid": tests["iid"]})
     return out
