@@ -223,11 +223,33 @@ test('a fix that landed after the base is reported as reachable', () => {
   }
 });
 
-test('a ticket whose fix never landed has no answer key to find', () => {
-  // The good case, and the one the existing measurements were run under.
+test('a ticket with no commits naming it has no answer key to find', () => {
   const { dir, base } = repoWithLandedFix(189);
   try {
     assert.deepEqual(answerKeyCommits(256, base, dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a source run\'s own unlanded branch is an answer key at its fork point', () => {
+  // The default path, with no --base: runForkPoint answers for a branch that
+  // never landed, and that branch still sits in the shared repo carrying the
+  // `(#77)` commits implement wrote. Reading "never landed" as "blind" is the
+  // mistake this pins.
+  const { dir, base } = repoWithLandedFix(189);
+  try {
+    git(['checkout', '-qb', 'oneshot/ticket-77-x', base], dir);
+    writeFileSync(join(dir, 'b.txt'), 'the run\'s own implementation\n');
+    git(['add', 'b.txt'], dir);
+    git(['commit', '-qm', 'fix: thing (#77)'], dir);
+    git(['checkout', '-q', 'dev'], dir);
+
+    const forkPoint = runForkPoint('oneshot/ticket-77-x', dir);
+    assert.equal(forkPoint, base);
+    const got = answerKeyCommits(77, forkPoint, dir);
+    assert.equal(got.length, 1);
+    assert.match(got[0] ?? '', /#77/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

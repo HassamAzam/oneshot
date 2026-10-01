@@ -541,8 +541,17 @@ export function runForkPoint(branch: string, cwd = WORK_REPO): string {
  * anyone noticing. This does not prevent that — it makes the run declare it,
  * so the artifact carries its own caveat instead of somebody's memory.
  *
- * Empty is the common and good case: a ticket whose fix never landed has no
- * answer key in the repo to find.
+ * Empty only when no commit naming #<iid> is reachable outside the base, which
+ * in practice means the source run never committed. A run that reached
+ * implement keeps its branch, and its commits carry `(#<iid>)`: those are an
+ * answer key even though they never landed, so the default path (no --base,
+ * base = runForkPoint) is flagged just as a landed fix is. Of 35 local runs
+ * with a research.json, 20 came back non-empty at their fork point and 18 of
+ * those were on branches that never landed.
+ *
+ * Empty is not proof the run was blind. This greps commit messages, so a fix
+ * whose messages never name the ticket — a squash merge titled after the
+ * change — is not found.
  */
 export function answerKeyCommits(iid: number, base: string, cwd = WORK_REPO): string[] {
   let candidates: string[];

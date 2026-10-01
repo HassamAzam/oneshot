@@ -193,8 +193,11 @@ console.log(`output    ${outDir}`);
 
 // A worktree shares the work repo's objects, so a pre-fix base is a blind
 // working tree in a repo that may still hold the fix. Say so rather than let
-// the number be read as blind later. --base is exactly the path that gets here
-// with a landed branch, because runForkPoint refuses and names it as the way out.
+// the number be read as blind later. Both paths need it: with --base (which
+// runForkPoint names as the way out for a landed branch) the answer key is the
+// landed fix; without it, the source run's own branch, which never landed but
+// still carries the `(#<iid>)` commits implement wrote. Gating this on
+// args.base would reopen the hole on the commoner path.
 const answerKey = answerKeyCommits(args.iid, base);
 if (answerKey.length) {
   console.log('');
@@ -217,9 +220,10 @@ if (args.from === 'plan') prior.research = readJson(args.research ?? join(args.s
 const meta: Record<string, unknown> = {
   iid: args.iid, label: args.label, from: args.from, oneshot: oneshotSha, base,
   skillsRoot: args.skillsRoot, sourceRun: journal.runId, research: args.research ?? null,
-  // Empty means the run WAS blind: no commit naming this ticket is reachable
-  // outside the base. Non-empty means the plan could have read the answer, so
-  // the artifact says so on its face.
+  // Empty means no commit naming #<iid> is reachable outside the base. That is
+  // not proof the run was blind: a fix whose messages never name the ticket
+  // (a squash merge titled after the change) is not found. Non-empty means the
+  // plan could have read the answer, so the artifact says so on its face.
   answerKeyCommits: answerKey, phases: {},
 };
 
