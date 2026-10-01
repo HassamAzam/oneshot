@@ -740,6 +740,11 @@ RUN="$ROOT/state/runs/0"
 edit_json_payload() {
     printf '{"tool_name":"Edit","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$1"
 }
+# bash_cwd_payload <cwd> <command> — a Bash call from a session whose shell
+# already stands in <cwd>. The SDK sends `cwd` on every hook input.
+bash_cwd_payload() {
+    printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":%s}}' "$1" "$(printf '%s' "$2" | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(s)))')"
+}
 
 expect_deny  "Write another phase's findings.json" \
                                        artifact-guard.cjs "$(write_payload "$RUN/findings.json")"
@@ -777,10 +782,31 @@ expect_deny  "cp over findings.json"   artifact-guard.cjs "$(bash_payload "cp /t
 expect_deny  "sed -i on verify.json"   artifact-guard.cjs "$(bash_payload "sed -i '' 's/fail/pass/' $RUN/verify.json")"
 expect_deny  "tee into findings.json"  artifact-guard.cjs "$(bash_payload "echo '{}' | tee $RUN/findings.json")"
 expect_deny  "rm the journal"          artifact-guard.cjs "$(bash_payload "rm $RUN/run.json")"
-expect_deny  "redirect after a legal command" \
+expect_deny  "absolute redirect after cd" \
                                        artifact-guard.cjs "$(bash_payload "cd $RUN && echo '{}' > $RUN/verify.json")"
 expect_deny  "relative path from the conductor cwd" \
                                        artifact-guard.cjs "$(bash_payload "echo '{}' > state/runs/0/findings.json")"
+expect_deny  "noclobber redirect (>|) over verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "echo '{}' >| $RUN/verify.json")"
+
+# Where the shell stands. The commonest shape in the event log is
+# `cd …/state/runs/<iid> && …` followed by a bare basename.
+expect_deny  "cd into the run dir, then a relative redirect" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && echo '{}' > verify.json")"
+expect_deny  "relative rm from a session already standing in the run dir" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$RUN" "rm findings.json")"
+expect_deny  "cd via a literal \$ONESHOT_HOME, then a relative rm" \
+                                       artifact-guard.cjs "$(bash_payload 'cd $ONESHOT_HOME/state/runs/0 && rm verify.json')"
+expect_deny  "redirect into a literal \$ONESHOT_HOME path" \
+                                       artifact-guard.cjs "$(bash_payload 'echo x > $ONESHOT_HOME/state/runs/0/run.json')"
+expect_deny  "cd and rm inside a subshell" \
+                                       artifact-guard.cjs "$(bash_payload "(cd $RUN && rm verify.json)")"
+expect_allow "cd into the run dir, then a read" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && cat verify.json > /tmp/v.json")"
+expect_allow "cd into the run dir, then a partial" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && echo '{}' > verify-partial.json")"
+expect_allow "cd into the run dir, then on into artifacts/" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && cd artifacts && echo '{}' > verify.json")"
 
 expect_allow "cat findings.json (reads are never refused)" \
                                        artifact-guard.cjs "$(bash_payload "cat $RUN/findings.json")"

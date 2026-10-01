@@ -38,9 +38,12 @@
  * the heredoc hole). This is not hypothetical here: the event log shows
  * `remediate` reading all four of `findings.json`, `implement.json`,
  * `verify.json` and `testcases.json` in one lap of run 182 — with `cat` and
- * `python3 -c "json.load(...)"`. The sessions already reach these files by
- * absolute path through Bash. Only the verb differs, and a `json.dump` in one
- * of those one-liners is invisible to a write-tool matcher.
+ * `python3 -c "json.load(...)"`. The sessions already reach these files through
+ * Bash, by absolute path and just as often by `cd`-ing into the run directory
+ * and naming the bare basename: 62 of the 168 logged Bash commands that name a
+ * run-dir artifact (2026-10-02) start `cd …/state/runs/<iid> &&`. Only the verb
+ * differs, and a `json.dump` in one of those one-liners is invisible to a
+ * write-tool matcher.
  *
  * The Bash arm is pattern matching, not a shell parser, and is therefore
  * best-effort in the same way secret-guard.cjs declares itself to be. What
@@ -137,17 +140,29 @@ function refuse(hit, how) {
  *
  * A single `|` is a separator too, exactly as in git-guard: the right-hand side
  * of a pipe is its own command, and `echo '{}' | tee <handoff>` is a write whose
- * argv[0] is `echo` until the pipe is split on.
+ * argv[0] is `echo` until the pipe is split on. The `|` of a `>|` redirect is
+ * not one — it is part of the operator, and splitting there strands the target.
+ *
+ * A subshell's `(` and `)` and a group's `{ ` are dropped from the ends of a
+ * segment, or `(cd <run> && rm verify.json)` reads as argv[0] `(cd` followed by
+ * a file called `verify.json)`, and neither half is recognised.
  */
 function segments(cmd) {
   return String(cmd || '')
-    .split(/&&|\|\||;|\n|\|/g)
-    .map((s) => s.trim())
+    .split(/&&|\|\||;|\n|(?<!>)\|/g)
+    .map((s) => s.trim().replace(/^(?:\(|\{\s)+\s*/, '').replace(/\s*\)+$/, ''))
     .filter(Boolean);
 }
 
 function tokens(seg) {
   return seg.replace(/["']/g, '').split(/\s+/).filter(Boolean);
+}
+
+/** Expand what the shell would at the head of a path: `~`, $HOME and $ONESHOT_HOME, braced or not. */
+function expandVars(p) {
+  return C.expandTilde(String(p)
+    .replace(/^\$(?:\{HOME\}|HOME(?![A-Za-z0-9_]))/, C.HOME)
+    .replace(/^\$(?:\{ONESHOT_HOME\}|ONESHOT_HOME(?![A-Za-z0-9_]))/, C.ONESHOT));
 }
 
 /**
@@ -159,69 +174,87 @@ function tokens(seg) {
 const DEST_LAST = new Set(['cp', 'mv', 'install', 'rsync']);
 const ANY_ARG = new Set(['rm', 'shred', 'truncate', 'tee', 'unlink']);
 
-/** Every path this command appears to WRITE. Reads are not collected at all. */
-function writeTargets(cmd) {
+/** argv[0] past any env assignments and `sudo`, and the arguments after it. */
+function command(seg) {
+  const t = tokens(seg);
+  let i = 0;
+  while (i < t.length && (/^[A-Z_][A-Z0-9_]*=/.test(t[i]) || t[i] === 'sudo' || t[i] === 'env')) i += 1;
+  const rest = t.slice(i + 1);
+  return {
+    argv0: path.basename(t[i] || ''),
+    rest,
+    args: rest.filter((a) => !a.startsWith('-')),
+  };
+}
+
+/** Where the shell stands after `cd`/`pushd`, given every directory it might have stood in. */
+function chdir(dirs, argv0, rest) {
+  const arg = rest.find((a) => a === '-' || !a.startsWith('-'));
+  if (arg === undefined) return argv0 === 'cd' ? [C.HOME] : dirs;
+  if (arg === '-') return dirs;
+  const d = expandVars(arg);
+  if (path.isAbsolute(d)) return [d];
+  return [...new Set(dirs.map((b) => path.resolve(b, d)))];
+}
+
+/** Every path this segment appears to WRITE. Reads are not collected at all. */
+function writeTargets(seg, { argv0, rest, args }) {
   const found = [];
-  const raw = String(cmd || '');
 
   // Shell redirection, the common case: `> f`, `>> f`, `2> f`, `>| f`.
   const redirect = /(?:^|[\s;&|])\d*>>?\|?\s*(["']?)([^\s"'|;&<>]+)\1/g;
-  for (let m = redirect.exec(raw); m; m = redirect.exec(raw)) found.push(m[2]);
+  for (let m = redirect.exec(seg); m; m = redirect.exec(seg)) found.push(m[2]);
 
   // Interpreter one-liners. `python3 -c "... json.dump(d, open(p,'w'))"` is the
   // shape the transcripts show these sessions reaching for, so the write MODE
   // is what is matched — an `open(p)` or `open(p,'r')` is a read and ignored.
   const pyOpen = /open\(\s*(["'])([^"']+)\1\s*,\s*(["'])[wax]/g;
-  for (let m = pyOpen.exec(raw); m; m = pyOpen.exec(raw)) found.push(m[2]);
+  for (let m = pyOpen.exec(seg); m; m = pyOpen.exec(seg)) found.push(m[2]);
   const pyWrite = /(?:write_text|write_bytes)\(|Path\(\s*(["'])([^"']+)\1\s*\)\s*\.\s*open\(\s*(["'])[wa]/g;
-  for (let m = pyWrite.exec(raw); m; m = pyWrite.exec(raw)) if (m[2]) found.push(m[2]);
+  for (let m = pyWrite.exec(seg); m; m = pyWrite.exec(seg)) if (m[2]) found.push(m[2]);
   const nodeWrite = /(?:writeFileSync|appendFileSync|createWriteStream|writeFile)\(\s*(["'`])([^"'`]+)\1/g;
-  for (let m = nodeWrite.exec(raw); m; m = nodeWrite.exec(raw)) found.push(m[2]);
+  for (let m = nodeWrite.exec(seg); m; m = nodeWrite.exec(seg)) found.push(m[2]);
 
-  for (const seg of segments(raw)) {
-    const t = tokens(seg);
-    if (!t.length) continue;
-    // `cmd` may be prefixed by env assignments or `sudo`.
-    let i = 0;
-    while (i < t.length && (/^[A-Z_][A-Z0-9_]*=/.test(t[i]) || t[i] === 'sudo' || t[i] === 'env')) i += 1;
-    const argv0 = path.basename(t[i] || '');
-    const args = t.slice(i + 1).filter((a) => !a.startsWith('-'));
-
-    // Braces on every branch, including the one-statement ones. Without them
-    // the `for` below swallows the following `else if`s as the body of its own
-    // inner `if`, and `rm`/`tee`/`cp` silently stop being checked while the
-    // rest of the guard still passes its tests.
-    if (argv0 === 'sed' && t.includes('-i')) {
-      found.push(...args);
-    } else if (argv0 === 'dd') {
-      for (const a of t) {
-        if (a.startsWith('of=')) found.push(a.slice(3));
-      }
-    } else if (ANY_ARG.has(argv0)) {
-      found.push(...args);
-    } else if (DEST_LAST.has(argv0) && args.length >= 2) {
-      found.push(args[args.length - 1]);
+  // Braces on every branch, including the one-statement ones. Without them
+  // the `for` below swallows the following `else if`s as the body of its own
+  // inner `if`, and `rm`/`tee`/`cp` silently stop being checked while the
+  // rest of the guard still passes its tests.
+  if (argv0 === 'sed' && rest.includes('-i')) {
+    found.push(...args);
+  } else if (argv0 === 'dd') {
+    for (const a of rest) {
+      if (a.startsWith('of=')) found.push(a.slice(3));
     }
+  } else if (ANY_ARG.has(argv0)) {
+    found.push(...args);
+  } else if (DEST_LAST.has(argv0) && args.length >= 2) {
+    found.push(args[args.length - 1]);
   }
   return found;
 }
 
 /**
- * Every directory a relative path in this command could have meant.
+ * Every path a target in this command could mean, given where the shell might
+ * be standing.
  *
- * A phase's cwd is the worktree or $ONESHOT_HOME depending on its `cwd` in
- * config/phases.json, and the guard does not get told which — so it resolves
- * against both rather than guessing. Resolving against a base the session was
- * not standing in can only ever produce a path that is not a handoff, so the
- * extra candidate costs nothing and the wrong guess would cost the whole check:
- * the observed `cat state/runs/182/findings.json` was relative, from a
- * conductor-cwd phase, and a worktree-relative reading of it lands nowhere.
+ * The hook input carries the session's `cwd`, and secret-guard already reads
+ * it. Ignoring it — and any `cd` earlier in the same command — is what let
+ * `cd <run> && rm findings.json` through, which is the commonest shape these
+ * sessions use on these files. The worktree and $ONESHOT_HOME stay in the
+ * starting set as well: resolving against a base the session was not standing
+ * in can only ever produce a path that is not a handoff, so the extra candidate
+ * costs nothing, and the observed `cat state/runs/182/findings.json` was
+ * relative, from a conductor-cwd phase.
  */
-function resolveFrom(p) {
-  const target = C.expandTilde(String(p).replace(/^\$HOME|^\$\{HOME\}/, C.HOME));
+function resolveFrom(p, dirs) {
+  const target = expandVars(p);
   if (path.isAbsolute(target)) return [target];
-  const bases = [process.env.ONESHOT_WORKTREE, C.ONESHOT].filter(Boolean);
-  return bases.map((b) => path.join(b, target));
+  return dirs.map((b) => path.join(b, target));
+}
+
+function startingDirs(data) {
+  const cwd = typeof data.cwd === 'string' ? data.cwd : '';
+  return [...new Set([cwd, process.env.ONESHOT_WORKTREE, C.ONESHOT].filter(Boolean))];
 }
 
 // ----------------------------------------------------------------- dispatch
@@ -242,14 +275,25 @@ try {
   }
 
   if (tool === 'Bash') {
-    const cmd = (data.tool_input || {}).command || '';
+    const cmd = String((data.tool_input || {}).command || '');
     // Cheap pre-filter: nothing to do unless a protected basename is mentioned
     // at all, which is the overwhelming majority of commands.
     if ([...names].some((n) => cmd.includes(n))) {
-      for (const raw of writeTargets(cmd)) {
-        for (const candidate of resolveFrom(raw)) {
-          const hit = protectedArtifact(candidate, names);
-          if (hit) refuse(hit, 'this command');
+      // Segments are walked in order so that a `cd` moves where every later
+      // relative path resolves, and `cd <run> && cd artifacts && …` ends up in
+      // artifacts/ rather than in both.
+      let dirs = startingDirs(data);
+      for (const seg of segments(cmd)) {
+        const c = command(seg);
+        if (c.argv0 === 'cd' || c.argv0 === 'pushd') {
+          dirs = chdir(dirs, c.argv0, c.rest);
+          continue;
+        }
+        for (const raw of writeTargets(seg, c)) {
+          for (const candidate of resolveFrom(raw, dirs)) {
+            const hit = protectedArtifact(candidate, names);
+            if (hit) refuse(hit, 'this command');
+          }
         }
       }
     }
