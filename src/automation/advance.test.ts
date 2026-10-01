@@ -24,6 +24,9 @@
  *   label edit, and the done comment still posts once `Loop` is gone (stepSheet,
  *   stepDoneNote, `--automation`).
  *
+ * - A lost journal numbers its fresh list from every note on the ticket, not
+ *   from issueNotes()'s newest hundred (highestVersionOnTicket).
+ *
  * Journals live under STATE/automation/<IID> like journal.test.ts's, with an
  * invented iid, and are removed afterwards together with the event rows this
  * file's runs log in the database. The readiness script runs with a scratch
@@ -87,7 +90,12 @@ const server = http.createServer((req, res) => {
         world.notes.push(n);
         return send(201, n);
       }
-      return send(200, [...world.notes].reverse());
+      // Paged like GitLab: per_page, page and sort (newest first unless asked).
+      const q = new URL(url, 'http://fixture').searchParams;
+      const perPage = Number(q.get('per_page') ?? 20);
+      const page = Number(q.get('page') ?? 1);
+      const ordered = q.get('sort') === 'asc' ? [...world.notes] : [...world.notes].reverse();
+      return send(200, ordered.slice((page - 1) * perPage, page * perPage));
     }
     if (url === BASE || url.startsWith(`${BASE}?`)) {
       if (method === 'PUT') {
@@ -114,9 +122,9 @@ process.env.ONESHOT_GITLAB_TOKEN = 'test-write-token';
 process.env.SLACK_BOT_TOKEN = '';
 process.env.DRY_RUN = '';
 
-const { advanceTicket, runAutomationOnce } = await import('./runner.js');
+const { advanceTicket, highestVersionOnTicket, runAutomationOnce } = await import('./runner.js');
 const J = await import('./journal.js');
-const { getIssue } = await import('../lib/gitlab.js');
+const { getIssue, issueNotes } = await import('../lib/gitlab.js');
 const { db } = await import('../lib/db.js');
 
 const scratch = scratchHome();
@@ -255,6 +263,24 @@ test('approved, but Loop taken off before the sheet step: silent stop, labels un
   assert.equal(o.did, `"${L}" is not on the ticket — stopped`);
   assert.deepEqual(world.writes, []);
   assert.equal(journalText(), before);
+});
+
+// ------------------------------------------------------------------ a lost journal
+
+test('the highest posted version is found behind 149 newer notes, where the newest-hundred window shows none', async () => {
+  reset([L, T]);
+  const note = (body: string): Note => ({
+    id: world.nextNote++, body, system: false, author: { username: 'desk' }, created_at: '2026-09-28T10:00:00Z',
+  });
+  world.notes = [note('**Automation test cases: v3**\n\n<!-- oneshot:automation:cases:v3:0123456789ab -->')];
+  for (let i = 0; i < 149; i++) world.notes.push(note(`comment ${i}`));
+
+  const windowed = await issueNotes(IID);
+  assert.equal(windowed.data?.some((n) => n.body.includes('oneshot:automation:cases:')), false,
+    'issueNotes alone would number the fresh list v1');
+  const r = await highestVersionOnTicket(IID);
+  assert.equal(r.ok, true);
+  assert.equal(r.data, 3, 'the fresh list is v4');
 });
 
 // ------------------------------------------------------------------ pause

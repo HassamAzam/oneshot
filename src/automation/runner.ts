@@ -49,7 +49,7 @@ import {
 } from '../lib/config.js';
 import { currentProjectKey } from '../lib/journalproject.js';
 import {
-  addIssueNote, editIssueLabels, getIssue, issueNotes, issueUrl, issuesWithLabel, readToken, uploadFile,
+  addIssueNote, allIssueNotes, editIssueLabels, getIssue, issueNotes, issueUrl, issuesWithLabel, readToken, uploadFile,
   type GitlabResult, type Issue, type IssueNote,
 } from '../lib/gitlab.js';
 import { logEvent } from '../lib/db.js';
@@ -751,6 +751,20 @@ function highestPostedVersion(notes: IssueNote[]): number {
   return max;
 }
 
+/**
+ * highestPostedVersion over EVERY note on the ticket. issueNotes() returns
+ * only the newest hundred, system notes included: a ticket that gathered a
+ * hundred notes after its last cases note (reopened, discussed, labelled
+ * again) showed no marker at all, read as base 0, and a lost journal's fresh
+ * list went out as a second "v1". On a ticket with fewer than a hundred notes
+ * this is the same single request.
+ */
+export async function highestVersionOnTicket(iid: number): Promise<GitlabResult<number>> {
+  const notes = await allIssueNotes(iid);
+  if (!notes.ok || !notes.data) return { ...notes, data: null };
+  return { ...notes, data: highestPostedVersion(notes.data) };
+}
+
 /** The sheet tab a module's cases will go to, from the module list the session was shown. */
 function tabFor(module: string, modules: Array<{ tab: string; module: string }>, prefix: string): { tab: string; isNew: boolean } {
   const key = normaliseModule(module);
@@ -842,9 +856,9 @@ async function stepAuthor(ctx: Ctx, mode: 'write' | 'revise'): Promise<StepResul
   let base = latest?.v ?? 0;
   let lostHistory = false;
   if (mode === 'write' && !latest) {
-    const notes = await issueNotes(iid);
-    if (!notes.ok || !notes.data) return stop(`hold — cannot read the ticket's notes (${notes.kind})`);
-    base = highestPostedVersion(notes.data);
+    const posted = await highestVersionOnTicket(iid);
+    if (!posted.ok || posted.data === null) return stop(`hold — cannot read the ticket's notes (${posted.kind})`);
+    base = posted.data;
     lostHistory = base > 0;
   }
 
