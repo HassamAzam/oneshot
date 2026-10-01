@@ -36,6 +36,10 @@ The zone map, label allow-list and Jev facts are **not** here. They live in the 
 (`.claude/zones.json`, `.claude/labels.json`, `.claude/erp-facts.json`) and are read from
 `origin/dev` only. To trial an unmerged draft, set `PM_LOOP_MAP_DIR` to a checkout's `.claude/`.
 
+The triage cron runs the skill in its own erp checkout (`TRIAGE_ROOT` in `triage_cron.sh`), which must be at or
+after 09fbbca (MR !11017): the skill calls `cli explain`, and the router there routes through `.claude/zones.json`
+alone. It does not read Oneshot's `config/risk-modules.json`, so the cron exports no `ONESHOT_HOME`.
+
 ## Setup
 
 1. **Credentials.** Scripts never hold secrets. Put them in `~/.config/pm-loop/secrets.env` (`chmod 600`):

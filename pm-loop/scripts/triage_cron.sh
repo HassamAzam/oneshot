@@ -15,8 +15,6 @@ LOG="$HOME/.claude/logs/triage.log"
 
 export PLANE_API_KEY="$(python3 "$HOME/.claude/scripts/pm_secrets.py" get PLANE_API_KEY)"
 export TRIAGE_SENTINEL_ISSUE_ID="bdb555f7-e4d5-4e10-92aa-0987a810f094"
-# The router reads Oneshot's shared risk list from here.
-export ONESHOT_HOME="$HOME/Documents/ai/claude/oneshot"
 # Read-only use: the misroute report looks up where groomed tickets ended up.
 export GITLAB_TOKEN="$(python3 "$HOME/.claude/scripts/pm_secrets.py" get GITLAB_TOKEN)"
 
