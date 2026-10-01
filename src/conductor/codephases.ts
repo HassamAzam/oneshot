@@ -1216,8 +1216,11 @@ async function recordSuccess(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<voi
   });
 
   // What the next run's recall reads. Labels are the one field no artifact
-  // keeps; a card without them still matches on files and module.
+  // keeps; a card without them still matches on files and module. A dry run
+  // merged nothing and records no sha, so it is skipped rather than logged as
+  // a failed record step on every dry merge.
   await step('memory', async () => {
+    if (rec.dryRun) return;
     const issue = await getIssue(ctx.iid);
     const line = writeMemory(ctx.iid, {
       labels: issue.ok ? issue.data?.labels : undefined,
