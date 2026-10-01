@@ -74,14 +74,8 @@ test('the mapping is config, so any label can carry any skill', () => {
   );
 });
 
-test('plan always gets the skill that is its method', () => {
-  // Was the planning-methodology + util-reuse-methodology pair. The discovery
-  // half of that method now runs in research, where the files are already open;
-  // change-scoping is what is left, and it is a different job — confirm what
-  // arrived in codePath, then search only what this approach introduces.
-  const prompt = systemPromptFor(cfg('plan'), ctx(ticket()));
-  assert.ok(names(prompt).includes('change-scoping'));
-});
+// `plan` declaring change-scoping unconditionally is asserted further down, by
+// 'plan declares change-scoping, and not the discovery pair it replaced'.
 
 // ------------------------------------------------ recall has a method now
 
@@ -390,6 +384,10 @@ test('the prior-art kinds are one set, in every place that names them', () => {
     // to four kinds leaves the test green because the schema still names six.
     ['research prompt', promptFor(cfg('research'), ctx(ticket()))],
     ['plan prompt', promptFor(cfg('plan'), ctx(ticket()))],
+    // implement reads `codePath` raw, so it is told what a prefix means rather
+    // than left to read one as an instruction. Derived from the constant today;
+    // this row is what notices if someone types the list out again.
+    ['implement prompt', promptFor(cfg('implement'), ctx(ticket()))],
     ['prior-art-survey skill', read('skills', 'prior-art-survey', 'SKILL.md')],
     ['change-scoping skill', read('skills', 'change-scoping', 'SKILL.md')],
   ];

@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
+import { PRIOR_ART_KINDS } from '../conductor/schemas.js';
 import {
   GITLAB_PROJECT_URL,
   type CaseResult, type DesignArtifact, type Finding, type Screenshot, type TestCase,
@@ -797,7 +798,7 @@ Work out what this ticket actually requires, and trace the code that implements 
 - While you are in those files, record what ALREADY EXISTS that this change could build on,
   into \`codePath\` alongside the trace, each such entry's \`role\` PREFIXED with its kind so
   the next phase can tell prior art from the trace. Go looking for FOUR kinds, not one:
-  \`reuse:\` the **callable** a change can import and call; \`mirror:\` the opposite-direction
+  \`callable:\` the **helper a change can import and call**; \`mirror:\` the opposite-direction
   sibling (start/end, grant/revoke, the read of the thing being written), found by searching
   the antonym of the ticket's verb; \`duplicate:\` the same logic already written twice, found
   by searching a distinctive LINE of it rather than its name; and \`fragment:\` arithmetic or
@@ -934,10 +935,9 @@ ${JSON.stringify(ctx.prior.research ?? {}, null, 2)}
 Produce an implementation plan an engineer could follow without re-deriving the research.
 
 - The prior art ARRIVES. Research recorded what already exists in \`codePath\`, each entry
-  prefixed with its kind (\`reuse:\`, \`mirror:\`, \`duplicate:\`, \`fragment:\`, \`constant:\`,
-  \`test-sibling:\`). Do not run that search again — CONFIRM it. A handed \`file:line\` is a
-  claim written before your approach existed, so open every location you lean on and read the
-  function around it. Each entry also carries the bar research judged it against — translate
+  prefixed with its kind (${PRIOR_ART_KINDS.map((k) => `\`${k}\``).join(', ')}). Do not run
+  that search again — CONFIRM it. A handed \`file:line\` is a claim written before your
+  approach existed, so open every location you lean on and read the function around it. Each entry also carries the bar research judged it against — translate
   it rather than inheriting it: "call it" → reuse, "extend it" → extend and recount the
   callers yourself, "leave it" → reject, "mirror it" → not a reuse verdict at all, it is the
   placement signal below. End on one of four verdicts: reuse, extend, collapse a duplicate
@@ -1276,7 +1276,10 @@ ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 Acceptance criteria:
 ${(r.acceptanceCriteria ?? []).map((a) => `  - ${a}`).join('\n') || '  (none recorded)'}
 
-Code path:
+Code path — the execution trace, then the prior art research SURVEYED while reading it. A
+role carrying a kind prefix (${PRIOR_ART_KINDS.map((k) => `\`${k}\``).join(', ')}) is a
+candidate research found, not a decision: some of them it judged better left alone, and the
+plan's \`reuse\` above is the list of verdicts that actually binds you.
 ${(r.codePath ?? []).map((c) => `  - ${c.file}:${c.line} — ${c.role}`).join('\n') || '  (none recorded)'}
 
 Blast radius: ${(r.blastRadius ?? []).join(', ') || '(none recorded)'}

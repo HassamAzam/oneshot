@@ -14,7 +14,7 @@ nobody wrote.
 ## The prior art arrives; confirming it is your job
 
 Research traced this ticket and recorded what it found in `codePath`, each entry
-prefixed with its kind — `reuse:`, `mirror:`, `duplicate:`, `fragment:`,
+prefixed with its kind — `callable:`, `mirror:`, `duplicate:`, `fragment:`,
 `constant:`, `test-sibling:`. That is the expensive half of the search, already
 paid for. Do not run it again.
 
@@ -62,7 +62,7 @@ things:
   name?", and the code you need is the code you could not name.
 - **Its mirror** — the opposite-direction sibling. Search the antonym of your
   verb.
-- **The second site already carrying this logic**, often with a `todo` attached
+- **The second site already carrying this logic**, often with a `TODO` attached
   naming its own fix. Search a distinctive *line* of the first site, not its
   name.
 - **The tests already covering this surface.** Find them by identifier, not by
@@ -123,6 +123,18 @@ exported columns, audit rows, anything filed with a third party. No test asserts
 them, nothing fails loudly, and the first person to notice is whoever received
 the wrong one. Never estimate this; count them by name.
 
+**A changed response shape has consumers this search cannot reach.** Adding a
+required field, renaming or removing one, re-typing one, or changing a status
+code breaks readers that do not live in this repo. Treat an API contract as
+additive by default; where the approach cannot be, say so in `approach` — which
+callers you found, and that the ones outside the repo are unenumerated.
+
+**Some surfaces earn more scrutiny than the size of their diff suggests**:
+permissions and authentication, pay and money, leave balances, logged time —
+anywhere a wrong value is a wrong entitlement rather than a wrong pixel. On
+those, count the consumers above even when the change looks local, and give
+`risks` the check that would catch a wrong value *before* it lands.
+
 ## Breadth is never the default
 
 Name the population your change alters: which records, which people, which
@@ -154,41 +166,38 @@ nothing on N+1, one touching no model owes nothing on migrations.
 
 | What you found | Where it goes |
 |---|---|
-| Code you will reuse, extend or collapse onto | `reuse`, with `file:function` or `file:line-line` |
-| A candidate you rejected | `reuse`, with the reason on the same line |
-| A consequence you accept | `risks`, with the mitigation **and the check** |
-| A choice somebody else must make | `openQuestions`, with the default you assume |
-| A real problem you are not fixing here | `outOfScope`, with **how you ruled it out** |
+| Code you will reuse, extend or collapse onto | `reuse` |
+| A candidate you rejected | `reuse` |
+| A consequence you accept | `risks` |
+| A choice somebody else must make | `openQuestions` |
+| A real problem you are not fixing here | `outOfScope` |
 | An item from research's `unknowns` | Resolved with `file:line`, or `openQuestions`, or `outOfScope` — never silently |
 | Something you could not determine | Say so — an unknown beats a confident guess |
 
-Four rules about that table decide whether the approver can act on this plan:
+**Each of those fields states its own contract in its schema** — what a rejected
+line still has to carry, what a risk owes beyond its mitigation, what an
+out-of-scope entry has to show for itself. Fill them from there.
 
-- **`reuse` is addressed to `implement`, not to the approver.** The approver's
-  view of a plan renders the approach, open questions, steps, acceptance
-  coverage, risks and out-of-scope — and **not `reuse`**. Anything a person must
-  be able to *decline* therefore cannot live there: route it to `approach`,
-  `openQuestions`, `outOfScope`, or a step's `what`. Not `risks` — a scope
-  choice filed as a risk is one they can only accept or reject whole.
-- **An `outOfScope` entry carries how you ruled it out**, with `file:line`. An
-  entry with no evidence behind it is one the approver can only accept or reject
-  whole, which is not a decision anybody can make well.
-- **Say which step can be dropped**, as an `openQuestions` entry. Open questions
-  render *above* the steps, under "answer these in a comment, or the stated
-  default is used" — so state the default plainly, and **the default is that all
-  steps ship**. `implement` reads `openQuestions` too, and without that line it
-  may drop a step on its own authority.
-- **`steps[].files` and `steps[].layer` are machinery, not prose.**
-  `planForecast` in `src/phases/prompts.ts` reads them to decide which coding
-  standards `implement` loads, and `declaredFiles` in
+What a schema cannot tell you is who reads the field, and three readers decide
+between them whether this plan is actionable:
+
+- **The comment the approver answers does not render `reuse`.** It renders the
+  approach, open questions, steps, acceptance coverage, risks and out-of-scope —
+  and nothing else. The full plan is attached beside it, `reuse` included, but an
+  attachment is reference and the comment is the decision. So anything a person
+  must be able to *decline* cannot live in `reuse`: route it to `approach`,
+  `openQuestions`, `outOfScope`, or a step's `what`. Nor to `risks`, where a
+  scope choice becomes something they can only accept or reject whole.
+- **`implement` reads `openQuestions` too, not just the approver.** So **say
+  which step can be dropped**, as a question — they render *above* the steps,
+  under "answer these in a comment, or the stated default is used", and **the
+  default is that all steps ship**. Without that line `implement` may drop a
+  step on its own authority.
+- **Code reads `steps[].files` and `steps[].layer`** — they are machinery, not
+  prose. `planForecast` in `src/phases/prompts.ts` reads them to decide which
+  coding standards `implement` loads, and `declaredFiles` in
   `src/conductor/reviewgate.ts` uses them to scope the review gate. **A file
   left off a step is a file nobody is scoped to.**
-
-**A risk names the check that would catch it.** Not "what breaks and the
-mitigation" — what breaks, the mitigation, *and the check that would catch it
-before this lands*: an assertion against a known-good value, a query count, a
-named test. **A risk that names no check is unease, not a finding**, and unease
-gives the approver nothing to weigh.
 
 ## Turn economy
 

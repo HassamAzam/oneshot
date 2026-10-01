@@ -179,27 +179,24 @@ the survey is what you pick up while producing it.
 
 ## Output
 
-Everything lands in `codePath`, alongside the trace:
+Everything lands in `codePath`, alongside the trace. That field's schema carries
+the `file` / `line` / `role` contract — including why `line` wants the
+definition and never the line a search matched — so fill them from there rather
+than from here.
 
-- `file` — repo-relative path.
-- `line` — the **definition's own line**, never the line a search matched. The
-  next phase opens what you cite; a match line drops it mid-function. **A
-  fragment has no definition of its own**, so cite the line of the function
-  CONTAINING it and give the inner span in the role — `line` is one integer and
-  cannot hold a range.
-- `role` — the kind prefix, then the signature, then the bar it clears. The six
-  prefixes are the four kinds you hunt — `reuse:` / `mirror:` / `duplicate:` /
-  `fragment:` — plus the two you pick up on the way: `constant:` for a value the
-  change must use, and `test-sibling:` for the test already covering the
-  surface. An existing import and a `TODO` in traced code are findings too;
-  file them under the kind they point at.
+The six `role` prefixes are the four kinds you hunt — `callable:` / `mirror:` /
+`duplicate:` / `fragment:` — plus the two you pick up on the way: `constant:`
+for a value the change must use, and `test-sibling:` for the test already
+covering the surface. An existing import and a `TODO` in traced code are
+findings too; file them under the kind they point at.
 
-Frontend strings — testids, display-string keys, labels — still go to
-`uiPath.vocabulary`, which is where every later phase looks for them.
+Two calls no schema can make for you, because each is about which field to
+choose rather than how to fill one:
 
-A noun you searched **both ways** and did not find goes in `unknowns`. That
-entry is worth a real amount: it stops the next phase repeating the search you
-already paid for, and it stops it inventing a near-match to fill the gap.
+- **Frontend strings go to `uiPath.vocabulary`, not to `codePath`** — testids,
+  display-string keys, labels. Every later phase looks for them there.
+- **A noun reaches `unknowns` only once you have searched it BOTH ways.** One
+  spelling is half a search, and half a search has not earned the entry.
 
 ## Do not
 

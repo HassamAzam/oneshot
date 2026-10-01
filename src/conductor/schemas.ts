@@ -19,16 +19,24 @@ export type JsonSchema = Record<string, unknown>;
  * The `role` prefixes research uses to mark a `codePath` entry as prior art
  * rather than a step in the trace.
  *
- * Exported because this vocabulary is authored in four places — this schema,
- * research's prompt, plan's prompt, and the two SKILL.md files — and the one
- * measured failure of that shape is a rule that diverges in one of them
- * invisibly. The first four are the kinds a survey goes LOOKING for; the last
- * two are findings it picks up on the way (a constant the change must use, and
- * the test already covering the surface). prompts.test.ts asserts every one of
- * those four artefacts names the whole set.
+ * Exported because the one measured failure of this shape is a rule that
+ * diverges in one copy invisibly. Everything that can interpolate the list does
+ * — this schema, plan's prompt, implement's prompt — leaving two hand-authored
+ * copies that cannot: research's prompt and the two SKILL.md files, where each
+ * kind carries prose explaining how to search for it. prompts.test.ts asserts
+ * every one of those artefacts names the whole set.
+ *
+ * The first four are the kinds a survey goes LOOKING for; the last two are
+ * findings it picks up on the way (a constant the change must use, and the test
+ * already covering the surface).
+ *
+ * `callable:` rather than `reuse:` because "reuse" is already a VERDICT at plan
+ * — so `reuse: foo() — leave it` was a legal role line whose prefix and bar
+ * contradicted each other, and `implement` reads these prefixes raw, with no
+ * key, where an imperative-sounding one is an instruction.
  */
 export const PRIOR_ART_KINDS = [
-  'reuse:', 'mirror:', 'duplicate:', 'fragment:', 'constant:', 'test-sibling:',
+  'callable:', 'mirror:', 'duplicate:', 'fragment:', 'constant:', 'test-sibling:',
 ] as const;
 
 const str = (description: string) => ({ type: 'string', description });
@@ -214,9 +222,9 @@ export const PLAN_SCHEMA = phaseSchema({
     'a fragment with no name. One of four verdicts per entry: reuse it, extend it, ' +
     'collapse a duplicate onto it, or rejected — and a rejection stays here with its ' +
     'reason on the same line, because a candidate silently dropped is indistinguishable ' +
-    'from one nobody found. Read by implement, not by the plan approver: a choice they ' +
-    "must be able to decline goes in approach, openQuestions, outOfScope or a step's " +
-    'what instead.',
+    'from one nobody found. Read by implement; the approval comment does NOT render it, ' +
+    "so a choice somebody must be able to decline goes in approach, openQuestions, " +
+    "outOfScope or a step's what instead.",
   ),
   steps: {
     type: 'array',
