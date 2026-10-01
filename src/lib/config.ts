@@ -165,7 +165,8 @@ export interface ProjectConfig {
   /**
    * The ERP delivery-zone map (src/conductor/zoneguard.ts). `file` is read from
    * the work repo's origin/<base>; the guard applies only to tickets carrying
-   * `guardLabel`; `yellowLabel` releases yellow areas; a ticket carrying
+   * `guardLabel`; `yellowLabel` (grooming's yellow classification, not a record
+   * that tests merged: see zoneVerdict) allows yellow areas; a ticket carrying
    * `testsLabel` is always stopped (a person writes those). Absent = no zone guard,
    * and no refusal either: that is how it ships until the map is on the base branch
    * (see _comment_zones in config/project.json for the line that switches it on).

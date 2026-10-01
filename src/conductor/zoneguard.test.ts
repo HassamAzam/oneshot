@@ -66,7 +66,7 @@ test('a green AI ticket reaching into shared code is stopped', () => {
   assert.deepEqual(v.violations.map((h) => h.file), ['frontend/src/common/utils/misc.js']);
 });
 
-test('yellow is allowed only once released by the yellow label', () => {
+test('yellow is allowed only on a ticket grooming labelled yellow', () => {
   assert.equal(zoneVerdict(['AI', 'Loop'], ['apps/teams/views.py'], read, ZONES).violations.length, 1);
   assert.equal(zoneVerdict(['AI', 'Loop', 'Zone: Yellow'], ['apps/teams/views.py'], read, ZONES).violations.length, 0);
 });
@@ -90,6 +90,21 @@ test('files are reported once each, with zone and area', () => {
   const reason = zoneBlockReason(v, ZONES);
   assert.match(reason, /apps\/payroll\/a\.py \(red: payroll\)/);
   assert.match(reason, /README\.md \(yellow\)/);
+});
+
+test('the stop reason offers only what a person can do from the ticket', () => {
+  // "Re-plan inside the zone" is gone: a resumed run skips the plan it was
+  // stopped for, so the same plan would be judged and stopped again.
+  const yellowOnly = zoneVerdict(['AI'], ['apps/teams/views.py'], read, ZONES);
+  assert.equal(zoneBlockReason(yellowOnly, ZONES), 'outside its zone: apps/teams/views.py (yellow: teams). '
+    + 'Hand it to the team, add "Zone: Yellow" if its characterization tests have merged, '
+    + 'or change .claude/zones.json by MR');
+
+  // The yellow label releases nothing red, so it is not offered once red is hit.
+  const withRed = zoneVerdict(['AI'], ['apps/teams/views.py', 'apps/payroll/a.py'], read, ZONES);
+  const reason = zoneBlockReason(withRed, ZONES);
+  assert.doesNotMatch(reason, /Re-plan|Zone: Yellow/);
+  assert.match(reason, /Hand it to the team, or change \.claude\/zones\.json by MR$/);
 });
 
 test('a characterization-test ticket is always refused, whatever else it carries', () => {

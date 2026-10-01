@@ -2,11 +2,15 @@
  * The delivery-zone guard: stop a run whose files leave the zone it was routed for.
  *
  * The ERP repo carries a zone map (`.claude/zones.json`, drawn and merged by a
- * person): green areas Oneshot may change in a tight loop, yellow areas only
- * once characterization tests have landed, red areas never. Triage routes by
- * what the ticket TEXT names; this guard checks what the run actually PLANS
- * and TOUCHES, because "implementation should stop if it discovers the map was
- * wrong" — a 'payroll' bug fixed in a shared util is exactly that case.
+ * person): green areas Oneshot may change in a tight loop, yellow areas only on
+ * a ticket grooming classified yellow, red areas never. Tests-first for yellow
+ * is enforced upstream, not here: pm-loop grooming files a person's
+ * Characterization Tests issue first, and its sweep adds Loop only once that
+ * tests-only MR has merged. This guard trusts that Loop and does not check it.
+ * Triage routes by what the ticket TEXT names; this guard checks what the run
+ * actually PLANS and TOUCHES, because "implementation should stop if it
+ * discovers the map was wrong" — a 'payroll' bug fixed in a shared util is
+ * exactly that case.
  *
  * It applies only to tickets carrying the routing label (`AI`), i.e. tickets
  * the Plane pipeline sent here by zone. A ticket a person labelled `Loop` by
@@ -255,9 +259,13 @@ export function zoneCheckDue(
 /**
  * Which of `files` this ticket may not touch.
  *
- * Green is always allowed. Yellow is allowed only on a ticket that carries the
- * yellow release label — grooming puts it on a change whose characterization
- * tests merged first. Red never is. Without the guard label nothing applies.
+ * Green is always allowed. Yellow is allowed only on a ticket carrying
+ * `yellowLabel` ("Zone: Yellow"). That label is grooming's zone classification,
+ * put on every yellow ticket when it is groomed, so it is not proof that the
+ * characterization tests merged: the release is the Loop label, which the
+ * pm-loop sweep adds only after a person's tests-only MR has. A person who adds
+ * Loop by hand to a yellow ticket waives that, and this guard cannot tell. Red
+ * is never allowed. Without the guard label nothing applies.
  * `files` null means branchFiles() could not read the diff, and a guard that
  * cannot see the files stops the run, the same as one that cannot read the map.
  */
@@ -279,7 +287,17 @@ export function zoneVerdict(
   return { applies, violations, unreadable: null };
 }
 
-/** The stop reason posted on the ticket: which files, which zone, and what a person can do. */
+/**
+ * The stop reason posted on the ticket: which files, which zone, and what a person can do.
+ *
+ * Only remedies that work from the ticket are offered. It used to open with
+ * "Re-plan inside the zone", and nothing on the ticket can make that happen: a
+ * resumed run skips `plan` because it already succeeded, and the stop comes
+ * before the plan gate whose feedback is the only ticket route back into it,
+ * so the same plan is judged and stopped again. The yellow label is offered
+ * only when every file outside the zone is yellow, since it releases nothing
+ * else.
+ */
 export function zoneBlockReason(verdict: ZoneVerdict, zones: ZonesConfig | null = liveZones()): string {
   if (verdict.unreadable) {
     return `${verdict.unreadable}, or remove ${zones?.guardLabel || 'AI'} to run under the review gates`;
@@ -287,5 +305,7 @@ export function zoneBlockReason(verdict: ZoneVerdict, zones: ZonesConfig | null 
   const shown = verdict.violations.slice(0, 8)
     .map((v) => `${v.file} (${v.zone}${v.areas.length ? `: ${v.areas.join(', ')}` : ''})`).join('; ');
   const more = verdict.violations.length > 8 ? ` +${verdict.violations.length - 8} more` : '';
-  return `outside its zone: ${shown}${more}. Re-plan inside the zone, hand it to the team, or change .claude/zones.json by MR`;
+  const yellow = zones?.yellowLabel && verdict.violations.every((v) => v.zone === 'yellow')
+    ? ` add "${zones.yellowLabel}" if its characterization tests have merged,` : '';
+  return `outside its zone: ${shown}${more}. Hand it to the team,${yellow} or change ${zones?.file || 'the zone map'} by MR`;
 }
