@@ -815,8 +815,9 @@ stored choice's key spelled in more than one place.
 
 Point 5's second account is yours to prove, because no browser case can: \`verify\` has one
 login. Read where the choice is read and written, and confirm each one keys it by the signed-in
-user's username, read at that moment. A username cached at module scope or once per page load is a \`major\` finding:
-ERP's logout does not reload the page, so the next person on the tab gets the last one's choice.
+user's username, read at that moment.
+A username cached at module scope or once per page load is a \`major\` finding: ERP's logout
+does not reload the page, so the next person on the tab gets the last one's choice.
 
 v2's own copies of v1's COMPONENTS are what the label asked for, so they are not a duplication
 finding — tell \`util-reuse-agent\` so when you dispatch it, and do not raise them from
