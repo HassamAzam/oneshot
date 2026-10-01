@@ -69,22 +69,10 @@ between phases).
 failure, a 15s timeout or non-JSON stdout resolves to `{}`, which the SDK reads as allow. That
 is right for guards whose subject matter the pipeline can survive being wrong about, and it
 keeps a broken guard from wedging a 90-minute phase. It is wrong for a guard standing between a
-session and something it must not do unchecked, so `hooks.ts` keeps a `FAIL_CLOSED` set and turns
-any failure of a script in it into a refusal instead — missing script, spawn error, timeout,
-non-JSON, and for these guards also empty stdout or JSON that carries no verdict. The refusal is
-in the shape the event understands (`failClosedPayload`): a `PreToolUse` **deny**, or
-`{decision:'block'}` on `UserPromptSubmit`, because a deny in the wrong event's shape is read as a
-hook error and lets the call through. Its one member today is `automation-ready` (below); its
-earlier member, `deploy-guard`, went with the deploy phase.
-
-The in-session copy of `automation-ready` is **best effort**. Every failure of the *script*
-fails closed, but the CLI can still fail the *callback* open: a reply that fails its hook schema,
-a callback that throws, or one that outlives its matcher timeout is logged as `Error in hook
-callback` and replaced by `{}`. `hooks.ts` closes each one — every reply is rebuilt from
-schema-valid parts (`userPromptSubmitSafe`), the callback never throws, and the timeouts nest
-(script 20s < `runGuard` kill 30s < SDK 45s) — and the hard gate is elsewhere: the conductor runs
-the same script through the same `runGuard` before it spends a session
-(`runAutomationReadyGuard`), which never passes through the CLI.
+confused agent and an irreversible action, so `hooks.ts` keeps a `FAIL_CLOSED` set and turns any
+failure of a script in it into a `PreToolUse` **deny** payload instead. That set is **empty**
+today — its only member was `deploy-guard` — and it is kept because the rule outlives the guard
+that needed it.
 
 ### PostToolUse
 
@@ -101,11 +89,32 @@ the same script through the same `runGuard` before it spends a session
 | `budget-gate` | Refuses the session if the phase's or the run's weighted-token ceiling is blown. **Per-phase ceilings now, not per-loop** — an `implement` that burned 3 laps is refused a 4th before the model starts. Four Opus phases per ticket makes this load-bearing. | **P0** |
 | `run-context` | Injects immutable run facts as `additionalContext`: run id, iid, leased branch, worktree path, port, lap number, outstanding findings. Uniform across all phases and present even if prompt assembly has a bug. | **P1 (M1)** |
 
-### UserPromptSubmit
+### Not a hook: `automation-ready`
 
-| Hook | Enforces | P |
-|---|---|---|
-| `automation-ready` | Registered for the on-demand `automation-testcases` phase **only**, so no Loop phase can be blocked by it. Blocks the prompt (`decision:'block'` alone — adding `continue:false` makes the CLI count a turn and hides the block) unless the ticket is ready for automation test cases: `Loop`, the entry label and master switch, is on it (reason `loop-missing`); `Ready For Automation` is on it (`rfa-missing`) and either `Ready For Deployment` was added before the latest trigger add or the ticket is closed (`rfd-order`); **and** a merge request linked to it is in the same project, merged, and not a branch promotion (source not a protected or `Adhoc-YYYY-MM-DD` branch) (`mr-not-merged`). Open leftover MRs are a warning. A missing `Loop` or `Ready For Automation` withdraws the request rather than leaving something to fix, so the conductor stops on `loop-missing`/`rfa-missing` without commenting and resumes when the label is back; a not-ready comment is posted only when both labels are on and `rfd-order` or `mr-not-merged` remains. **The only fail-closed guard**: a missing token, GitLab down or answering 401/500, too many label events, or a bug all block. Its JSON also carries `automationReadiness`, the machine verdict the conductor's pre-run reads. | **P0** |
+`hooks/automation-ready.cjs` lives here and speaks the guard contract, but `hooksFor()` registers
+it for **no** event. It is the Ready For Automation mode's readiness check, and its only caller
+is the conductor (`runAutomationReadyGuard` in `src/conductor/hooks.ts`), which runs it before
+it spends an automation session, before it posts each version for QA, and before it writes the
+sheet. A hook would be the wrong layer (§1): the `automation-testcases` session has no write
+scope, no GitLab server, no shell and no file reads, so there is no tool call for a hook to stand
+in front of, and every post, label edit and sheet write is conductor code.
+
+A ticket is ready when `Loop`, the entry label and master switch, is on it (reason
+`loop-missing`); `Ready For Automation` is on it (`rfa-missing`) and either `Ready For
+Deployment` was added before the latest trigger add or the ticket is closed (`rfd-order`);
+**and** a merge request linked to it is in the same project, merged, and not a branch promotion
+(source not a protected or `Adhoc-YYYY-MM-DD` branch) (`mr-not-merged`). Open leftover MRs are a
+warning. A missing `Loop` or `Ready For Automation` withdraws the request rather than leaving
+something to fix, so the conductor stops on `loop-missing`/`rfa-missing` without commenting and
+resumes when the label is back; a not-ready comment is posted only when both labels are on and
+`rfd-order` or `mr-not-merged` remains.
+
+It is not in `FAIL_CLOSED` and does not need to be. Every failure the script can catch — a
+missing token, GitLab down or answering 401/500, too many label events, a bug — answers
+`unknown` with the reason. What it cannot catch (not running, a timeout, empty or non-JSON
+output) resolves to `{}` like any guard, and the conductor reads `{}`, or anything short of a
+well-formed verdict for this ticket under `automationReadiness`, as `unknown` too. `unknown` is a
+hold: nothing is spent and nothing is posted.
 
 ### SessionEnd
 

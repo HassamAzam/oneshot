@@ -1,12 +1,13 @@
 /**
  * The readiness verdict the Ready For Automation mode acts on, as TypeScript.
  *
- * The verdict itself is made by hooks/automation-ready.cjs — a dependency-free
- * CJS guard, because the same file has to run both as the session's
- * UserPromptSubmit hook and as the conductor's pre-run, and one implementation
- * is the point (a second copy of "is this ticket ready" would drift). This
- * module only declares the shape that file prints under `automationReadiness`
- * and reads it back out of whatever runGuard resolved.
+ * The verdict itself is made by hooks/automation-ready.cjs — dependency-free
+ * CJS that the conductor runs through runGuard (runAutomationReadyGuard)
+ * before every session, before a version is posted and before the sheet
+ * write. One implementation is the point: a second copy of "is this ticket
+ * ready" would drift. This module only declares the shape that file prints
+ * under `automationReadiness` and reads it back out of whatever runGuard
+ * resolved.
  *
  * Pure: no I/O, no config.
  */
@@ -101,7 +102,7 @@ function payloadReason(out: Record<string, unknown>): string | null {
 /**
  * Read the hook's stdout object (what runGuard resolved) into a Readiness.
  * - `automationReadiness` present and well formed → returned as is.
- * - otherwise (a fail-closed payload from hooks.ts, `{}`, garbage) → verdict 'unknown',
+ * - otherwise (`{}` from a script that did not run, `{ reason }`, garbage) → verdict 'unknown',
  *   errorKind 'other', error = reason ?? 'the readiness hook gave no verdict'.
  * A verdict about a different ticket than `iid` is not a verdict about this one,
  * so it reads as unknown too.

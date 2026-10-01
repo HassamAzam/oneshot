@@ -1,10 +1,10 @@
 /**
  * The readiness rules, tested through the hook file itself.
  *
- * hooks/automation-ready.cjs is dependency-free CJS so the same file can run
- * as the session's UserPromptSubmit guard and as the conductor's pre-run; its
- * pure decision function is reached here with createRequire rather than
- * re-implemented, so the rules under test are the rules that run.
+ * hooks/automation-ready.cjs is dependency-free CJS that the conductor runs
+ * as its own process (runAutomationReadyGuard); its pure decision function is
+ * reached here with createRequire rather than re-implemented, so the rules
+ * under test are the rules that run.
  *
  * ONESHOT_PHASE is cleared before the require. The file must not exit, read
  * stdin or call GitLab when it is merely loaded — a hook that gated at top
@@ -345,9 +345,9 @@ test('classifyHttp: 401 and 403 are auth, 404 notfound, 429 and 5xx server', () 
   assert.equal(hook.classifyHttp(302), 'other');
 });
 
-test('readinessFromHookOutput reads a fail-closed payload without a verdict as unknown, with its reason', () => {
-  const why = 'The automation-ready.cjs guard could not run (it timed out), and it fails closed, so this session does not start. An operator has to fix the guard.';
-  const r = readinessFromHookOutput({ decision: 'block', reason: why }, 101);
+test('readinessFromHookOutput reads a payload without a verdict as unknown, with its reason', () => {
+  const why = 'the readiness check could not start (GITLAB_REPO_URL is not set)';
+  const r = readinessFromHookOutput({ reason: why }, 101);
   assert.equal(r.verdict, 'unknown');
   assert.equal(r.errorKind, 'other');
   assert.equal(r.error, why);
@@ -414,7 +414,7 @@ test('loop-missing comes first beside the other reasons, and is part of the fing
   assert.deepEqual(codes(neither), ['loop-missing', 'rfa-missing', 'mr-not-merged']);
 });
 
-test('the in-session guard blocks a ticket without Loop, and says why', () => {
+test('the script answers a ticket without Loop with a block that says why', () => {
   const r = decide({ issue: { state: 'closed', labels: [T, D] }, mrs: [FIX] });
   const out = hook.renderOutput(r);
   assert.equal(out.decision, 'block');

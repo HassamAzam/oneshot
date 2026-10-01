@@ -75,8 +75,9 @@ export interface PhaseInput {
 /**
  * The error text of a session that settled `success` without the structured
  * output its schema asked for. Exported so the automation runner's
- * blockedBeforeModel matches it exactly instead of copying it: a prompt the
- * UserPromptSubmit hook refused settles precisely this way.
+ * failureReason matches it exactly instead of copying it: a copied literal
+ * that drifted would turn "the session ended without returning a list" back
+ * into this raw text on the ticket's stuck note.
  */
 export const NO_STRUCTURED_OUTPUT = 'session produced no structured output despite a schema';
 

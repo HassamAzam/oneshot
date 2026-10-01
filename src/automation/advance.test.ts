@@ -13,6 +13,9 @@
  *   comment when `Loop` is back (gateOnReadiness).
  * - The writes that follow a session re-read the labels, so a `Loop` taken off
  *   while it ran stops the version comment and the stuck comment (switchedOff).
+ * - The version comment waits on the whole readiness check, not only the
+ *   labels: a ticket reopened while its list was being written gets the
+ *   not-ready comment instead of the list (stepPost).
  * - Finishing takes `Automation Test Case Review` AND `Loop` off in the one
  *   label edit, and the done comment still posts once `Loop` is gone (stepSheet,
  *   stepDoneNote, `--automation`).
@@ -284,6 +287,27 @@ test('Loop taken off while the session ran: the version comment and review label
   assert.equal(writesTo('/notes', 'POST'), 1, 'v1 is posted once');
   assert.match(String(world.writes.find((w) => w.url.endsWith('/notes'))?.body?.body), /oneshot:automation:cases:v1:/);
   assert.deepEqual(world.writes.filter((w) => w.method === 'PUT').map((w) => w.body), [{ add_labels: R }]);
+});
+
+test('a ticket reopened while its list was written gets the not-ready note, not the list; closed again, the list posts once', async () => {
+  reset([L, T], 'opened');                       // reopened: no RFD before the trigger, so rule A fails
+  unpostedVersionJournal();
+  const o = await advanceTicket(await readIssue(), opts);
+  assert.match(o.did, /^not ready \([0-9a-f]{12}: rfd-order\) — commented$/);
+  const posted = world.writes.filter((w) => w.method === 'POST').map((w) => String(w.body?.body));
+  assert.equal(posted.length, 1);
+  assert.match(posted[0]!, /oneshot:automation:not-ready:/);
+  assert.equal(posted.some((b) => /oneshot:automation:cases:/.test(b)), false, 'no list in front of QA');
+  assert.equal(world.writes.filter((w) => w.method === 'PUT').length, 0, 'no review label either');
+  const j = J.readAutoJournal(IID)!;
+  assert.equal(j.state, 'not-ready');
+  assert.equal(j.versions[0]?.postedAt, null, 'v1 is kept, unposted');
+
+  world.issue.state = 'closed';
+  world.issue.updated_at = '2026-09-28T13:00:00Z';
+  const back = await advanceTicket(await readIssue(), opts);
+  assert.equal(back.did, 'v1 waiting on QA');
+  assert.equal(world.writes.filter((w) => w.url.endsWith('/notes') && /oneshot:automation:cases:v1:/.test(String(w.body?.body))).length, 1);
 });
 
 test('the review label waits too when Loop comes off between the comment and the label', async () => {

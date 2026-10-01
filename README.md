@@ -414,14 +414,15 @@ nobody.
   closed and still carries `Ready For Automation`; and at least one MR in the same project that is
   not a branch promotion (`dev`/`stage`/`master`, `Adhoc-YYYY-MM-DD`) is merged. An open leftover
   MR is a warning, never a blocker. The scan only asks GitLab for tickets carrying both labels, and
-  the hook checks `Loop` itself too (reason `loop-missing`), for a label taken off between the scan
-  and the check or during the session. The conductor runs the hook itself before every session and
-  again before the sheet write, and it is also the session's `UserPromptSubmit` guard, which fails
-  closed. The writes that follow a session in the same pass (the version comment, the review
-  label, a stuck comment) re-read both labels first and wait while either is off; a no-change
-  comment, best effort anyway, is dropped instead. GitLab unreachable is a silent hold. Removing
-  `Loop` or `Ready For Automation` stops the mode for that ticket with no comment and keeps its
-  state; adding the label back resumes where it was.
+  the check reads `Loop` itself too (reason `loop-missing`), for a label taken off after the scan.
+  The conductor runs the check before every session, again before it posts each version, and again
+  before the sheet write; it is not a session hook, because the session can post nothing (see
+  [docs/HOOKS.md](docs/HOOKS.md)). Any failure to check is `unknown`, a hold, never `ready`. The
+  other writes that follow a session in the same pass (the review label, a stuck comment) re-read
+  both labels first and wait while either is off; a no-change comment, best effort anyway, is
+  dropped instead. GitLab unreachable is a silent hold. Removing `Loop` or `Ready For Automation`
+  stops the mode for that ticket with no comment and keeps its state; adding the label back
+  resumes where it was.
 - **The session only reads, and only its prompt.** Before it starts, the conductor reads the
   ticket, the comments people wrote on it and the diff of every merged fix MR over REST, and puts
   them in the prompt, fenced as untrusted data. The diff is bounded: lockfiles, minified,
@@ -721,18 +722,14 @@ The guards (`npm run hooks:verify` — offline assertions, no network, no sessio
   `--no-verify` is deliberately allowed — the husky pre-commit hook is broken locally.
 - **`budget-gate`** — refuses a phase whose per-phase, per-ticket, per-window or per-day weighted
   token ceiling is already spent.
-**Every guard fails open, except the one that must not.** A guard that crashes must not wedge a
-90-minute phase, so a spawn error, a timeout or non-JSON output from `pause-check`, `write-scope`,
-`git-guard` or `budget-gate` is logged loudly and treated as allow — they are policy on operations
-the pipeline is otherwise structured to survive. The exception is `automation-ready`, the
-Ready For Automation mode's `UserPromptSubmit` guard: a session that writes test cases for a
-ticket nobody has proven ready wastes the session and puts a wrong list in front of QA, so a
-missing script, a timeout, empty or non-JSON output, or an answer that is neither a block nor an
-explicit `ready` blocks the prompt. It is registered for the `automation-testcases` phase only,
-so it can never touch a Loop phase, and the conductor also runs the same script before every
-session, where no CLI can swallow its answer. `src/conductor/hooks.ts` keeps these in the
-`FAIL_CLOSED` set, because the asymmetry is the load-bearing idea: a guard standing in front of
-something that must not happen unchecked denies when it cannot run.
+**Every guard fails open, and the exception is kept for the next one that must not.** A guard
+that crashes must not wedge a 90-minute phase, so a spawn error, a timeout or non-JSON output
+from `pause-check`, `write-scope`, `git-guard` or `budget-gate` is logged loudly and treated as
+allow — they are policy on operations the pipeline is otherwise structured to survive. The one
+guard that failed CLOSED was `deploy-guard`, which stood between a confused phase and a live
+demo server; it went with the deploy phase. `src/conductor/hooks.ts` still keeps the
+`FAIL_CLOSED` set, empty, because the asymmetry is the load-bearing idea: a guard standing in
+front of an irreversible action must deny when it cannot run.
 
 **Guards are passed to the SDK in-process, not installed into `~/.claude/settings.json`.** They
 travel with the repo, so a fresh clone is protected with no install step, and your own

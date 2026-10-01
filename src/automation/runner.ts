@@ -12,8 +12,9 @@
  * The entry label is the master switch for both modes: `Loop` + the trigger is
  * this mode's ticket, `Loop` alone is the Loop pipeline's (which skips the
  * other kind, src/conductor/watcher.ts automationOwns), and no `Loop` is
- * nobody's. The scan, the readiness hook and a fresh read before each write
- * that follows a session (switchedOff) all require it. The finishing label
+ * nobody's. The scan, the readiness check (before each session, each version
+ * note and the sheet write) and a fresh read before the other writes that
+ * follow a session (switchedOff) all require it. The finishing label
  * edit takes `Loop` off with the review label — one label in, one label out —
  * and nothing else here writes the Loop's labels.
  *
@@ -40,7 +41,7 @@
  *    ticket does.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DEFAULT_MAX_TURNS, DRY_RUN, PAUSE, ROOT, automationConfig, googleServiceAccountFile, phaseByName,
@@ -59,7 +60,7 @@ import { alert } from '../lib/slack.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { runAutomationReadyGuard } from '../conductor/hooks.js';
 import {
-  CANCELLED_BY_CONDUCTOR, NO_STRUCTURED_OUTPUT, phasePaths, runPhase, type PhaseOutput,
+  CANCELLED_BY_CONDUCTOR, NO_STRUCTURED_OUTPUT, runPhase, type PhaseOutput,
 } from '../conductor/phase.js';
 import { isApprovedReply, repliesAfter, type GateReply } from '../conductor/reviewgate.js';
 import { schemaFor } from '../conductor/schemas.js';
@@ -380,22 +381,7 @@ export function doneLabelEdit(cfg: AutomationConfig, loop: string): { add: strin
 // ------------------------------------------------------------------ sessions
 
 /**
- * A session whose prompt never reached the model: the in-session hook blocked it.
- * !ok && !infra && error === NO_STRUCTURED_OUTPUT && turns <= 1 && weighted === 0 && data === null && sessionId !== ''.
- * (turns <= 1: with `continue:false` in a reply the CLI reports 1; the hook no longer sends it, but the check stays tolerant.)
- */
-export function blockedBeforeModel(out: PhaseOutput): boolean {
-  return !out.ok
-    && !out.infra
-    && out.error === NO_STRUCTURED_OUTPUT
-    && out.turns <= 1
-    && out.weighted === 0
-    && out.data === null
-    && out.sessionId !== '';
-}
-
-/**
- * Pure. §1.3: 'none' (cancelled, rate-limited) | 'account' | 'free' (blockedBeforeModel, infra && turns===0) | 'charge'.
+ * Pure. §1.3: 'none' (cancelled, rate-limited) | 'account' | 'free' (infra && turns===0) | 'charge'.
  *
  * For a session that did not produce a usable list. The zero-frame rule also
  * requires zero weighted tokens: `turns` comes only from the final result
@@ -406,30 +392,8 @@ export function sessionCharge(out: PhaseOutput): 'none' | 'account' | 'free' | '
   if (out.error === CANCELLED_BY_CONDUCTOR) return 'none';
   if (out.rateLimited) return 'none';
   if (out.accountAction) return 'account';
-  if (blockedBeforeModel(out)) return 'free';
   if (out.infra && out.turns === 0 && out.weighted === 0) return 'free';
   return 'charge';
-}
-
-/**
- * True when the session transcript has a `cli-stderr` line containing 'Error in hook callback' (the CLI swallowed a hook reply, §3.5).
- * Never throws: an unreadable transcript is not evidence of anything.
- */
-export function hookCallbackFailed(transcriptFile: string): boolean {
-  let text: string;
-  try {
-    text = readFileSync(transcriptFile, 'utf8');
-  } catch {
-    return false;
-  }
-  for (const line of text.split('\n')) {
-    if (!line.includes('cli-stderr')) continue;
-    try {
-      const f = JSON.parse(line) as { type?: string; text?: string };
-      if (f.type === 'cli-stderr' && typeof f.text === 'string' && f.text.includes('Error in hook callback')) return true;
-    } catch { /* a torn line */ }
-  }
-  return false;
 }
 
 // ------------------------------------------------------------------ process state
@@ -486,9 +450,13 @@ function describeMrs(ms: MrRef[]): string {
   return ms.length ? ms.map((m) => `!${m.iid}`).join(', ') : 'no merged MR';
 }
 
-/** The readiness hook, run by the conductor: the same file, the same runGuard, the same fail-closed wrapper. */
-async function checkReadiness(iid: number): Promise<Readiness> {
-  return readinessFromHookOutput(await runAutomationReadyGuard(iid), iid);
+/**
+ * The readiness script, run by the conductor through runGuard. Anything short
+ * of a well-formed verdict for this ticket reads as `unknown`, which every
+ * caller holds on.
+ */
+async function checkReadiness(ctx: Ctx): Promise<Readiness> {
+  return readinessFromHookOutput(await runAutomationReadyGuard(ctx.iid), ctx.iid);
 }
 
 /**
@@ -598,8 +566,9 @@ function withdrawnStop(iid: number, missing: string[]): string {
 /**
  * Both switch labels, read fresh, just before a write that can come long after
  * the scan read them: an authoring session runs for up to half an hour, and
- * the version note, the review label, the no-change note and the stuck note
- * follow it in the same pass, on the scan's copy of the labels. A `Loop` or
+ * the review label, the no-change note and the stuck note follow it in the
+ * same pass, on the scan's copy of the labels (the version note goes through
+ * the whole readiness check instead, in stepPost). A `Loop` or
  * trigger a person took off meanwhile stops them the way the readiness gate
  * stops everything else — silently, journal kept, so the write happens when
  * the label is back. null when both are on; otherwise what the step says. A
@@ -665,7 +634,7 @@ async function stepCheck(ctx: Ctx, reason: 'first' | 'changed' | 'cadence'): Pro
     writeAutoJournal(ctx.j);
   }
   const j = ctx.j;
-  const r = await checkReadiness(ctx.iid);
+  const r = await checkReadiness(ctx);
   const g = await gateOnReadiness(ctx, j, r, `check:${reason}`);
   if (!g.ready) return stop(g.did);
   // Leaving not-ready keeps everything earlier (§1.4).
@@ -815,7 +784,7 @@ async function noChange(ctx: Ctx, latest: VersionRecord, sessionNotes: string[])
   return stop(`no change to v${latest.v} — said so on the ticket`);
 }
 
-/** `author`: the pre-run, then ONE session, then validation and saving the version. */
+/** `author`: the readiness check, then ONE session, then validation and saving the version. */
 async function stepAuthor(ctx: Ctx, mode: 'write' | 'revise'): Promise<StepResult> {
   const j = ctx.j!;
   const { iid, cfg } = ctx;
@@ -845,8 +814,8 @@ async function stepAuthor(ctx: Ctx, mode: 'write' | 'revise'): Promise<StepResul
     previous = { version: latest.v, module: prev.module, cases: prev.cases };
   }
 
-  // The pre-run: the hard gate. Only `ready` spends a session.
-  const g = await gateOnReadiness(ctx, j, await checkReadiness(iid), `pre-${mode}`);
+  // The gate. Only `ready` spends a session.
+  const g = await gateOnReadiness(ctx, j, await checkReadiness(ctx), `pre-${mode}`);
   if (!g.ready) return stop(g.did);
 
   let base = latest?.v ?? 0;
@@ -910,20 +879,6 @@ async function stepAuthor(ctx: Ctx, mode: 'write' | 'revise'): Promise<StepResul
     blocked: out.blocked, error: out.error, infra: out.infra ?? false,
   }, { runId: j.runId, phase: AUTOMATION_PHASE });
 
-  // Backstop for §3.5: the CLI may have swallowed the in-session hook's reply
-  // and let the prompt through. Not-ready now means the output is discarded
-  // and nothing is charged; ready or unknown keeps it, because the pre-run
-  // proved the ticket ready moments before the session began.
-  const transcript = phasePaths(phaseCfg, iid, lap, { stateDir: automationDir(iid) }).transcript;
-  if (hookCallbackFailed(transcript)) {
-    log.warn(`${tag(iid)} the CLI reported a hook callback error in this session — re-checking readiness`);
-    const r = await checkReadiness(iid);
-    if (r.verdict === 'not-ready') {
-      const again = await gateOnReadiness(ctx, j, r, 'after-hook-error');
-      if (!again.ready) return stop(`${again.did} — the session's output was discarded`);
-    }
-  }
-
   if (!out.ok || !out.data) {
     if (out.blocked) return charge(ctx, `the session reported it was blocked: ${out.blocked}`);
     const c = sessionCharge(out);
@@ -937,19 +892,7 @@ async function stepAuthor(ctx: Ctx, mode: 'write' | 'revise'): Promise<StepResul
       }
       return stop('hold — the Claude account needs a one-time action; automation sessions are held for this process');
     }
-    if (c === 'free') {
-      if (blockedBeforeModel(out)) {
-        // The in-session hook refused the prompt. Re-check: not-ready takes the
-        // not-ready path; ready or unknown is a race with a label change.
-        const r = await checkReadiness(iid);
-        if (r.verdict === 'not-ready') {
-          const again = await gateOnReadiness(ctx, j, r, 'after-block');
-          if (!again.ready) return stop(again.did);
-        }
-        return freeRetry(ctx, 'the readiness hook refused the prompt, but the ticket reads as ready again');
-      }
-      return freeRetry(ctx, 'the session died before it started');
-    }
+    if (c === 'free') return freeRetry(ctx, 'the session died before it started');
     return charge(ctx, failureReason(out));
   }
 
@@ -1017,8 +960,13 @@ async function stepPost(ctx: Ctx, v: number): Promise<StepResult> {
     log.error(`${tag(iid)} cases-v${v}.json is missing — archive state/automation/${iid} to start this ticket over`);
     return stop(`hold — the saved v${v} list is missing`);
   }
-  const off = await switchedOff(ctx);
-  if (off) return stop(off);
+  // The full readiness check, not only the labels: the list was written up to
+  // half an hour after the last check, and a ticket that was ready only
+  // because it was closed may have been reopened meanwhile. A list for a change
+  // that no longer reads as shipped must not reach QA. A withdrawn `Loop` or
+  // trigger stops silently here too, as switchedOff would.
+  const g = await gateOnReadiness(ctx, j, await checkReadiness(ctx), `pre-post:v${v}`);
+  if (!g.ready) return stop(g.did);
   const notes = await issueNotes(iid);
   if (!notes.ok || !notes.data) return stop(`hold — cannot read the ticket's notes (${notes.kind})`);
 
@@ -1229,7 +1177,7 @@ async function stepSheet(ctx: Ctx): Promise<StepResult> {
   const ap = j.approval;
   if (!ap) return stop('hold — approved without an approval record');
 
-  const g = await gateOnReadiness(ctx, j, await checkReadiness(iid), 'approved');
+  const g = await gateOnReadiness(ctx, j, await checkReadiness(ctx), 'approved');
   if (!g.ready) return stop(g.did);
 
   if (!j.sheet) {

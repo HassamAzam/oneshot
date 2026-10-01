@@ -14,15 +14,13 @@
 import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { DRY_RUN, automationConfig, projectConfig } from '../lib/config.js';
 import { editIssueLabels, type Issue, type IssueNote } from '../lib/gitlab.js';
 import { CANCELLED_BY_CONDUCTOR, NO_STRUCTURED_OUTPUT, type PhaseOutput } from '../conductor/phase.js';
 import type { AutomationJournal, VersionRecord } from './journal.js';
 import {
-  AUTOMATION_DENY, automationScan, automationTick, blockedBeforeModel, doneLabelEdit, hookCallbackFailed, isNearApproval,
+  AUTOMATION_DENY, automationScan, automationTick, doneLabelEdit, isNearApproval,
   nextStep, outcomeLine, reviewVerdict, runAutomationOnce, scanFilter, sessionCharge, stuckReleased,
 } from './runner.js';
 import { automationDir, readAutoJournal } from './journal.js';
@@ -358,45 +356,17 @@ test("isNearApproval: 'Approved.', 'approved ✅' and 'Approve' yes; 'approved' 
 
 // ---------------------------------------------------------------- sessions
 
-test('blockedBeforeModel recognises a prompt the hook refused, and not a cancelled session, a zero-frame death or an error_during_execution result', () => {
-  const refused = out({ error: NO_STRUCTURED_OUTPUT, sessionId: 'sess-1', turns: 0 });
-  assert.equal(blockedBeforeModel(refused), true);
-  assert.equal(blockedBeforeModel({ ...refused, turns: 1 }), true, 'tolerates the one-turn shape');
-  assert.equal(blockedBeforeModel(out({ error: CANCELLED_BY_CONDUCTOR, infra: true })), false);
-  assert.equal(blockedBeforeModel(out({ error: 'Claude Code process exited with code 1', infra: true })), false);
-  assert.equal(blockedBeforeModel(out({ error: 'error_during_execution: boom', sessionId: 'sess-1' })), false);
-  assert.equal(blockedBeforeModel({ ...refused, weighted: 1200 }), false, 'spent tokens reached the model');
-  assert.equal(blockedBeforeModel({ ...refused, turns: 4 }), false);
-  assert.equal(blockedBeforeModel({ ...refused, sessionId: '' }), false);
-});
-
-test('sessionCharge: cancelled and rate-limited are none, an account notice is account, a hook block and a zero-frame death are free, a timeout after work is charge', () => {
+test('sessionCharge: cancelled and rate-limited are none, an account notice is account, a zero-frame death is free, a session that answered without a list is charged', () => {
   assert.equal(sessionCharge(out({ error: CANCELLED_BY_CONDUCTOR, infra: true })), 'none');
   assert.equal(sessionCharge(out({ error: 'rate_limit: resets 4pm', rateLimited: true, weighted: 900 })), 'none');
   assert.equal(sessionCharge(out({ error: 'exited', infra: true, accountAction: 'accept the new terms' })), 'account');
-  assert.equal(sessionCharge(out({ error: NO_STRUCTURED_OUTPUT, sessionId: 'sess-1' })), 'free');
+  // No hook can refuse this session's prompt, so a session that settled
+  // without a list reached the model, whatever its frame counts say.
+  assert.equal(sessionCharge(out({ error: NO_STRUCTURED_OUTPUT, sessionId: 'sess-1' })), 'charge');
   assert.equal(sessionCharge(out({ error: 'Claude Code process exited with code 1', infra: true })), 'free');
   assert.equal(sessionCharge(out({ error: 'timed out after 30m while still working', infra: true, weighted: 250_000 })), 'charge');
   assert.equal(sessionCharge(out({ error: 'error_max_turns: ', turns: 80, weighted: 900_000, sessionId: 'sess-1' })), 'charge');
   assert.equal(sessionCharge(out({ ok: false, blocked: 'no diff', data: {}, turns: 9, weighted: 90_000 })), 'charge');
-});
-
-test('hookCallbackFailed reads only the CLI stderr lines of the transcript', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'auto-transcript-'));
-  try {
-    const clean = join(dir, 'clean.jsonl');
-    writeFileSync(clean, [
-      JSON.stringify({ type: 'system', subtype: 'init' }),
-      JSON.stringify({ type: 'assistant', message: { content: [{ text: 'Error in hook callback is a phrase' }] } }),
-    ].join('\n'));
-    assert.equal(hookCallbackFailed(clean), false);
-    const swallowed = join(dir, 'swallowed.jsonl');
-    writeFileSync(swallowed, `${JSON.stringify({ type: 'cli-stderr', text: 'Error in hook callback hook_0: bad reply' })}\n`);
-    assert.equal(hookCallbackFailed(swallowed), true);
-    assert.equal(hookCallbackFailed(join(dir, 'missing.jsonl')), false);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 test('stuckReleased: only a QA approver\'s note newer than sinceNoteId; never with a null sinceNoteId; never in DRY_RUN', () => {

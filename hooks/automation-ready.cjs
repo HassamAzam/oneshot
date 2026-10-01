@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * UserPromptSubmit: refuse to start an automation-testcases session on a
- * ticket that is not ready for automation test cases.
+ * The Ready For Automation mode's readiness check: is this ticket ready for
+ * automation test cases? Run by the conductor, never by a session.
  *
  * A ticket is READY only when the Loop's entry label is on it and both rules
  * hold:
@@ -18,27 +18,29 @@
  *      that mentions the ticket is not the change that fixed it).
  * Open leftover MRs are a warning, never a blocker: they are not what shipped.
  *
- * THIS GUARD FAILS CLOSED, unlike every other hook in this directory. The
- * others stand between a session and a tool call the pipeline can survive
- * being wrong about; this one stands between a session and the whole of its
- * work, and a session that writes test cases for an unmerged change wastes the
- * session AND puts a wrong list in front of QA. So every failure here — a
- * missing token, GitLab down, a 500, a bug in this file — answers with a
- * block, never with silence. src/conductor/hooks.ts closes the gaps this file
- * cannot (it not running at all, printing nothing, printing garbage).
+ * NOT A HOOK, though it lives here and speaks the guard contract.
+ * src/conductor/hooks.ts registers it for no event: its only caller is
+ * runAutomationReadyGuard there, which the conductor runs through runGuard
+ * before it spends an automation session, before it posts a version for QA
+ * and before the sheet write.
+ * The session itself holds no tool a hook could stand in front of — every
+ * post, label edit and sheet write is conductor code — so the conductor's own
+ * check is the gate (docs/HOOKS.md). It lives in hooks/ for the dependency-free
+ * CJS, the shared _common.cjs and scripts/verify-hooks.sh's offline cases.
  *
- * ONE implementation, two callers. The conductor runs this same file through
- * the same runGuard before it spends a session (runAutomationReadyGuard), and
- * reads the machine verdict from the extra `automationReadiness` key. That
- * pre-run is the hard gate; the in-session copy is the second line.
+ * It never says `ready` without proof. Every failure it can catch — a missing
+ * token, GitLab down, a 500, too many label events, a bug in this file —
+ * answers `unknown` with the reason, never silence. What it cannot catch (not
+ * running at all, printing nothing or garbage) the conductor reads as
+ * `unknown` too (src/automation/readiness.ts readinessFromHookOutput), and the
+ * runner holds on `unknown`. So no FAIL_CLOSED entry is needed.
  *
- * Output (exactly one JSON object on stdout, exit 0):
+ * Output (exactly one JSON object on stdout, exit 0), in the hook payload
+ * shape runGuard expects, with the machine verdict the conductor reads under
+ * `automationReadiness`:
  *   ready      → hookSpecificOutput.additionalContext names the merged MRs
  *   not-ready  → { decision: 'block', reason }
  *   cannot say → { decision: 'block', reason }
- * A block is `decision:'block'` ALONE. Adding `continue:false` makes the CLI
- * keep the user message and report one turn, which hides the block from the
- * conductor's check for a prompt that never reached the model.
  *
  * Module shape: this file only defines and exports functions. Every gate,
  * stdin read, network call and exit lives in main(), which runs only when the
@@ -60,7 +62,7 @@ const PHASE = 'automation-testcases';
  * One deadline for every GitLab call this script makes. It sits under
  * runGuard's 30s kill (src/conductor/hooks.ts) so the script always answers
  * with a structured `unknown` rather than being killed into a generic
- * "timed out", and runGuard's kill sits under the SDK's 45s matcher timeout.
+ * "timed out".
  */
 const DEADLINE_MS = 20_000;
 /** Per request, so one stuck call cannot use the whole deadline by itself. */
@@ -151,11 +153,10 @@ function decideReadiness(f) {
   const reasons = [];
   const warnings = [];
 
-  // ---- The master switch. Checked by the hook itself rather than trusted to
-  // the scan: a label taken off between the scan and this check, or during the
-  // session (this is also its UserPromptSubmit guard), reaches here without
-  // one. The rules below are still judged, so the verdict names every fact at
-  // once.
+  // ---- The master switch. Checked here rather than trusted to the scan: a
+  // label taken off between the scan and this check, or during the review,
+  // reaches here without one. The rules below are still judged, so the verdict
+  // names every fact at once.
   if (!issueLabels.includes(labels.loop)) {
     reasons.push({
       code: 'loop-missing',
@@ -249,7 +250,7 @@ function decideReadiness(f) {
   };
 }
 
-/** The verdict for a check that could not be made. Always blocks. */
+/** The verdict for a check that could not be made. The conductor holds on it. */
 function unknownReadiness(iid, error, errorKind, now) {
   return {
     v: 1,
@@ -270,10 +271,11 @@ function unknownReadiness(iid, error, errorKind, now) {
 }
 
 /**
- * The hook's stdout for a verdict. Only `ready` lets the prompt through; its
- * context line doubles as the session's list of sources to read. Every other
- * verdict is `decision:'block'` with a string reason and nothing else the CLI
- * reads — no `continue`, no `stopReason` (see the header).
+ * The script's stdout for a verdict. The conductor reads only
+ * `automationReadiness`. Beside it sits the same verdict in the guard
+ * contract's words, which scripts/verify-hooks.sh asserts on: the merged MRs
+ * as additionalContext for `ready`, `decision:'block'` with a string reason
+ * for anything else, and no `continue` or `stopReason`.
  */
 function renderOutput(r) {
   if (r.verdict === 'ready') {
@@ -450,13 +452,13 @@ function finish(out) {
 }
 
 async function main() {
-  if (C.phase() !== PHASE) C.allow();   // defence in depth: hooks.ts registers this for PHASE only
+  if (C.phase() !== PHASE) C.allow();   // defence in depth: only runAutomationReadyGuard runs this, as PHASE
   C.readInput();                        // the payload is not needed, only drained
   let r;
   try {
     r = await check();
   } catch (err) {
-    // A bug in this file must block too: say so, and leave the stack in
+    // A bug in this file is `unknown` too: say so, and leave the stack in
     // hook-errors.log rather than on the ticket.
     C.logFailure('automation-ready', err);
     r = unknownReadiness(Number(process.env.ONESHOT_TICKET) || 0,
@@ -478,7 +480,8 @@ module.exports = {
 
 if (require.main === module) {
   main().catch((err) => {
-    // Last resort: even a failure while answering must answer with a block.
+    // Last resort: even a failure while answering must answer. No verdict
+    // rides on it, so the conductor reads it as `unknown` and holds.
     C.logFailure('automation-ready main', err);
     finish({ decision: 'block', reason: 'Cannot check readiness: the readiness hook failed while answering.' });
   });

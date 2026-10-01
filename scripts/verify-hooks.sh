@@ -730,10 +730,12 @@ rm -f "$FE"/components/demo/*.bak
 
 # ------------------------------------------------------------ automation-ready
 #
-# The one FAIL-CLOSED guard: every way it can fail to judge a ticket has to
-# block. It is the only guard that talks to GitLab, so it gets a fixture GitLab
-# on a free local port and never sees the real one. Label names come from the
-# real config/project.json, because ONESHOT_HOME is this checkout.
+# Not a registered hook: the readiness script the conductor runs before an
+# automation session (runAutomationReadyGuard). Every way it can fail to judge a
+# ticket has to answer `unknown` and block, never `ready`. It is the only
+# script here that talks to GitLab, so it gets a fixture GitLab on a free local
+# port and never sees the real one. Label names come from the real
+# config/project.json, because ONESHOT_HOME is this checkout.
 echo
 echo "automation-ready"
 
@@ -806,11 +808,9 @@ expect_ready() {
 }
 
 # ar_shape <label> <stdout> [text ...] — what every readiness answer must also be.
-# A block is decision:block ALONE: with `continue` or `stopReason` beside it the
-# CLI keeps the prompt and reports a turn, and the conductor can no longer tell
-# the block from a short session. The token is never printed or logged. Each
-# <text> must appear. Counts only a failure, so the section still reports one
-# line per case.
+# A block is decision:block with its reason and no `continue` or `stopReason`.
+# The token is never printed or logged. Each <text> must appear. Counts only a
+# failure, so the section still reports one line per case.
 ar_shape() {
     local label="$1" out="$2" bad="" want; shift 2
     printf '%s' "$out" | grep -q '"continue"' && bad="$bad a-continue-key"

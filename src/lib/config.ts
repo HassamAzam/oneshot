@@ -589,9 +589,9 @@ export function reviewersConfig(): ReviewersConfig {
  *
  * Checked field by field rather than cast, because every one of these is used
  * somewhere a wrong value is silent: an empty label name makes the scan find
- * nothing, a bad regex makes the hook fail closed on every ticket, and a
- * non-numeric cadence makes a not-ready ticket re-check every tick. Saying which
- * field is wrong at boot is cheaper than any of those. Not cached, so a test or
+ * nothing, a bad regex makes the readiness check hold every ticket as
+ * `unknown`, and a non-numeric cadence makes a not-ready ticket re-check every
+ * tick. Saying which field is wrong at boot is cheaper than any of those. Not cached, so a test or
  * a preflight always sees the file as it is. `cfg` is for tests; everything
  * else reads config/project.json.
  */
