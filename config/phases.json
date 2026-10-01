@@ -81,13 +81,15 @@
       "onFail": "abort",
       "skills": [
         "planning-methodology",
-        "util-reuse-methodology"
+        "util-reuse-methodology",
+        "django-scheduled-jobs"
       ],
       "labelSkills": {
         "Accessibility": "frontend-accessibility",
         "Beta": "beta-version-toggle"
       },
       "_why_skills": "`skills` is this phase's method, loaded for every ticket. `labelSkills` is the domain knowledge a particular ticket calls for, keyed by the label triage puts on it \u2014 reuse and approach are decided here, so an accessibility ticket needs that standard at plan time and not first at implement. One line adds the next pair; nothing in code changes.",
+      "_why_django_scheduled_jobs": "The only domain skill declared at plan, here because the mechanism it governs is chosen at plan time and is expensive to revisit later. ERP #8344 is the case: the plan proposed seeding `PeriodicTask`/`CrontabSchedule` rows in a data migration for a recurring reminder, citing `apps/costing/utils.py` as precedent \u2014 which is a per-entity one-off task, a different shape. Nothing the phase read said otherwise, so the wrong mechanism entered the plan and every later phase inherited it as a settled question. Scheduling is the rare case `implement` cannot recover: by then the migration is written, and `review` checks the diff against the plan rather than the plan against the repo. Deliberately NOT in `labelSkills`, which would be the tidier home \u2014 that needs triage to already know it is a scheduling ticket, and not knowing is the entire failure. 6KB against plan's existing 9KB, affordable only because the skill was split out of `django-management-commands`; the command-writing half stays at implement, reached through `django-backend-standards`.",
       "_why_beta": "Beta is the one label mapped on every phase from plan to mr, because it changes how the change SHIPS rather than what one phase knows: plan lays out v1, v2 and the switch, implement builds them, testcases writes the switch and v1-regression cases that verify then executes and nothing else does, review holds the diff against v1's files, ui-evidence shows both versions, and mr tells the MR reviewer what retiring v1 takes. Dropping it from one phase breaks the chain after that phase \u2014 a switch no case covers is a switch nobody verified. The instructions are gated on this same resolved list in src/phases/prompts.ts (betaRequested), so removing the line from a phase removes the skill and its prose there together.",
       "artifact": "plan.json"
     },
@@ -131,7 +133,10 @@
       "timeoutMin": 5,
       "onFail": "warn",
       "artifact": "mr-open.json",
-      "_why": "Opens the MR the moment `implement` has produced code, so every gate that follows has a readable diff. The test-case gate asks a person to approve scenarios at phase 4; before this existed the MR was not opened until phase 8, so that person was asked to approve test cases for a change they could not see. Code, not a session: pushing a branch and posting an MR is deterministic, and paying a model for it would add tokens, latency and a way to get it wrong. DRAFT, because nothing here has been reviewed, verified or evidenced yet -- `mr` takes the marker off once it has written the real description, which is also what stops `merge` meeting a draft it cannot merge. onFail is warn on purpose: an early MR is a convenience for the humans reading the gates, `mr` still opens one at phase 8 if this could not, and a run must not die because a courtesy push failed."
+      "targets": [
+        "erp"
+      ],
+      "_why": "Opens the MR the moment `implement` has produced code, so every gate that follows has a readable diff. The test-case gate asks a person to approve scenarios at phase 4; before this existed the MR was not opened until phase 8, so that person was asked to approve test cases for a change they could not see. Code, not a session: pushing a branch and posting an MR is deterministic, and paying a model for it would add tokens, latency and a way to get it wrong. DRAFT, because nothing here has been reviewed, verified or evidenced yet -- `mr` takes the marker off once it has written the real description, which is also what stops `merge` meeting a draft it cannot merge. onFail is warn on purpose: an early MR is a convenience for the humans reading the gates, `mr` still opens one at phase 8 if this could not, and a run must not die because a courtesy push failed. SCOPED to the erp target. The MR-before-the-gates ordering was asked for while moving to that project, and an ungated phase would have changed the pipeline for every conductor on every project the moment it pulled -- including leaving a draft MR behind on runs that abort between here and `mr`, which those runs did not do before. It runs only when GITLAB_REPO_URL names a project called erp; for any other project, or with the URL unset, this phase does not exist and the sequence is exactly what it was. ONESHOT_PROJECT no longer selects anything, so unsetting it does not switch this off."
     },
     {
       "name": "testcases",

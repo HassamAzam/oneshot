@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   codePhaseStatus, decideClaim, mergePollWait, nextIndex, salvagedReview, testcaseGateRoute,
-  uiEvidenceRefusal,
+  ticketComments, uiEvidenceRefusal,
 } from './runner.js';
+import type { IssueNote } from '../lib/gitlab.js';
 import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
 import type { RunJournal } from '../lib/artifacts.js';
 import type { JournalOwner } from '../lib/journalproject.js';
@@ -286,4 +287,57 @@ test('a partial whose findings is not an array salvages nothing instead of throw
   }
   // Non-object entries inside an array are dropped, not dereferenced.
   assert.equal(salvagedReview([null, 'x', finding('F-01', 'blocker')], null)?.findings.length, 1);
+});
+
+// ------------------------------------------------- the comments a phase reads
+
+/**
+ * ticketComments() is the filter chain fetchTicket() runs over a ticket's
+ * notes. It is asserted on directly because a replay hands it a cutoff, and
+ * the whole claim that a replay driver leaves live runs alone rests on what
+ * this returns when there is no cutoff to apply.
+ */
+const note = (body: string, created_at?: string, system = false): IssueNote =>
+  ({ id: 1, body, system, ...(created_at ? { created_at } : {}) });
+
+const RUN_STARTED = Date.parse('2026-09-15T12:00:00Z');
+
+test('with no cutoff every human comment survives, so a live run reads the ticket unchanged', () => {
+  const notes = [
+    note('the oldest requirement', '2026-09-14T09:00:00Z'),
+    note('an amendment', '2026-09-16T09:00:00Z'),
+    note('one GitLab never timestamped'),
+  ];
+
+  assert.deepEqual(ticketComments(notes), [
+    'the oldest requirement', 'an amendment', 'one GitLab never timestamped',
+  ]);
+});
+
+test('a cutoff keeps only the comments that predate it', () => {
+  const notes = [
+    note('written before the run started', '2026-09-15T09:00:00Z'),
+    note('the plan this run published', '2026-09-15T13:00:00Z'),
+    note('the reviewer feedback on that plan', '2026-09-16T09:00:00Z'),
+  ];
+
+  assert.deepEqual(ticketComments(notes, RUN_STARTED), ['written before the run started']);
+});
+
+test('a comment GitLab did not timestamp is dropped under a cutoff rather than guessed at', () => {
+  // Unprovable order is the one case a replay cannot be relaxed about: a note
+  // that may be the plan under test is worth less than the one it displaces.
+  assert.deepEqual(ticketComments([note('undated')], RUN_STARTED), []);
+});
+
+test('the cutoff is layered on the existing filters, not substituted for them', () => {
+  const notes = [
+    note('a label swap', '2026-09-14T09:00:00Z', true),
+    note('Oneshot claimed this ticket — run `r-1`', '2026-09-14T09:00:00Z'),
+    note('a claim by marker <!-- oneshot:claim -->', '2026-09-14T09:00:00Z'),
+    note('a real requirement', '2026-09-14T09:00:00Z'),
+  ];
+
+  assert.deepEqual(ticketComments(notes, RUN_STARTED), ['a real requirement']);
+  assert.deepEqual(ticketComments(notes), ['a real requirement']);
 });

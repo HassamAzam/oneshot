@@ -61,7 +61,7 @@ import {
   currentProjectKey, journalOwner, worktreeToResume, type JournalOwner,
 } from '../lib/journalproject.js';
 import {
-  archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
+  approvalCovers, archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
   phaseSucceeded, phaseSettled, readArtifact,
   readJournal, recordPhase, recordRemediation, reapScratch, updateJournal, writeArtifact,
   writeJournal,
@@ -73,7 +73,7 @@ import {
 } from '../lib/worktrees.js';
 import {
   addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
-  allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue,
+  allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue, type IssueNote,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
 import { checkQuota } from '../lib/quota.js';
@@ -97,6 +97,7 @@ import { schemaFor } from './schemas.js';
 import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, declaredFiles, designApprovalRequestBody,
+  rearmGate,
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
@@ -258,23 +259,41 @@ function cardState(j: RunJournal, running: string[] = []): CardState {
 
 // ------------------------------------------------------------------ the ticket
 
-async function fetchTicket(iid: number): Promise<Ticket | null> {
+/**
+ * The comments a phase is allowed to read, oldest first.
+ *
+ * Every human comment and unbounded: requirements are amended and documents
+ * attached anywhere in a thread, and a window drops them silently. GitLab's
+ * system notes (label swaps, assignments, "mentioned in") are not comments and
+ * would only crowd the prompt. This system's own notes are dropped too — by
+ * marker, and by the older 'Oneshot ' prefix — because feeding its plan and
+ * test cases back in as ticket requirements is how a phase ends up working on
+ * a summary of itself.
+ *
+ * `before` (epoch ms) additionally keeps only what was posted earlier than
+ * that instant. Nothing in a live run passes it: a run reads its ticket whole.
+ * It exists for scripts that re-run a finished phase, which have to see the
+ * ticket as it stood when that phase first ran — everything posted afterwards
+ * being the output under examination, or a reviewer's answer to it.
+ */
+export function ticketComments(notes: IssueNote[], before?: number): string[] {
+  return notes
+    .filter((n) => !n.system && n.body && !isMachineNote(n.body) && !n.body.startsWith('Oneshot '))
+    // An undated note cannot be shown to predate the cutoff, and the one it
+    // might be is the artifact being re-derived. Unprovable order is excluded
+    // rather than assumed.
+    .filter((n) => before === undefined || (!!n.created_at && Date.parse(n.created_at) < before))
+    .map((n) => n.body);
+}
+
+export async function fetchTicket(
+  iid: number, opts: { notesBefore?: number } = {},
+): Promise<Ticket | null> {
   const res = await getIssue(iid);
   if (!res.ok || !res.data) return null;
   const notes = await allIssueNotes(iid);
   if (!notes.ok) log.warn(`#${iid}: could not read the ticket's comments; phases see the description only`, { error: notes.error });
-  // Every human comment, oldest first and unbounded: requirements are amended
-  // and documents attached anywhere in a thread, and a window drops them
-  // silently. GitLab's system notes (label swaps, assignments, "mentioned in")
-  // are not comments and would only crowd the prompt. This system's own notes
-  // are dropped too — by marker, and by the older 'Oneshot ' prefix — because
-  // feeding its plan and test cases back in as ticket requirements is how a
-  // phase ends up working on a summary of itself.
-  const comments = notes.ok && notes.data
-    ? notes.data
-      .filter((n) => !n.system && n.body && !isMachineNote(n.body) && !n.body.startsWith('Oneshot '))
-      .map((n) => n.body)
-    : [];
+  const comments = notes.ok && notes.data ? ticketComments(notes.data, opts.notesBefore) : [];
   const docs = await collectTicketDocs(iid, [
     { where: 'description', body: res.data.description ?? '' },
     ...comments.map((body, i) => ({ where: `comment ${i + 1}`, body })),
@@ -1096,12 +1115,25 @@ export async function runTicket(
     // person — the same posture `bugReproduction` takes on 'inconclusive'.
     const design = prior.design ?? null;
     const designNeedsSignoff = design !== null && (design as { applicable?: unknown }).applicable !== false;
+    // `!approved` alone armed this gate exactly once. Anything that rewrote
+    // design.json after the sign-off -- a forced re-run, a resumed run
+    // re-executing the phase -- inherited the approval silently, and plan then
+    // built to a design no human had seen. approvalCovers() re-arms the gate on
+    // a proven mismatch; an approval stamped before digests existed carries no
+    // digest and still counts as covering, so in-flight runs are untouched.
+    const designApprovalStale = !approvalCovers(j.designApproval, design);
     if (phase.name === 'plan' && phaseSucceeded(iid, 'design')
-      && designGateApplies(ticket.labels) && designNeedsSignoff && !j.designApproval?.approved) {
+      && designGateApplies(ticket.labels) && designNeedsSignoff
+      && (!j.designApproval?.approved || designApprovalStale)) {
+      if (designApprovalStale) {
+        log.warn(`design.json changed since its approval on #${iid} — re-arming the design gate`);
+        j = rearmGate(iid, 'design') ?? j;
+      }
       const gate = await checkApprovalGate({
         iid,
         gate: 'design',
         requestBody: designApprovalRequestBody(design),
+        subject: design,
         attachments: designAttachments(iid, design),
         onApproved: async () => { await addIssueNote(iid, designApprovedRecordBody(design)); },
       });
@@ -1646,6 +1678,19 @@ export async function runTicket(
         const decision = notABugDecision(r.out.data);
         if (!decision.stop && decision.note) log.warn(`research: ${decision.note}`);
         const repro = reproductionOf(r.out.data);
+        // The verdict has to reach the database or it is unmeasurable: it lives
+        // in research.json on disk, so "how often does reproduction stop, and on
+        // what" is a question nobody can ask. `blocker` is the whole point of the
+        // row — skills/bug-reproduction/refs/why-it-did-not-reproduce.md retires
+        // an entry that no blocker ever matches, and that rule needs something to
+        // count.
+        if (repro) {
+          logEvent('reproduction', {
+            iid, kind: repro.kind, verdict: repro.verdict, blocker: repro.blocker,
+            steps: repro.steps.length,
+            shots: repro.evidence.filter((e) => e.endsWith('.png')).length,
+          }, { runId, phase: 'research' });
+        }
         if (repro?.verdict === 'reproduced') await declareReproduced(iid, repro);
       }
       if (r.cfg.name === 'implement' && activeRound(j.mrFeedback)?.status === 'fixing') {
