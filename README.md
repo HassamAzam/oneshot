@@ -735,7 +735,7 @@ then-current order of recall → research → plan → testcases:
 | M3 | `verify`, `ui-evidence` — dev server on a leased port, Playwright, screenshots | built, unproven |
 | M4 | `mr`, `merge` — MR, merge, promote, and the run's record on the ticket and the MR | built, unproven |
 | M5 | ~~`deploy`, `qa`, `demo`~~ — **removed**: the pipeline ends at the merge | withdrawn |
-| M6 | `recall` — memory index and recall | built, unproven; nothing writes new cards since `memorize` was removed |
+| M6 | `recall` — memory index and recall | built, unproven; merge writes the card and index line (src/lib/memory.ts), `npm run memory:backfill` for runs merged before that |
 | M7 | dashboard, replay, hardening hooks | not started |
 
 `runner.ts` stops with an explicit `BLOCKED: not built yet: phase '<name>'` rather than skipping
