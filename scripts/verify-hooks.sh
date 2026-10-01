@@ -808,6 +808,25 @@ expect_allow "cd into the run dir, then a partial" \
 expect_allow "cd into the run dir, then on into artifacts/" \
                                        artifact-guard.cjs "$(bash_payload "cd $RUN && cd artifacts && echo '{}' > verify.json")"
 
+# Taking a handoff away is as good as rewriting it: the merge gate reads a
+# missing findings.json as "no findings".
+expect_deny  "mv findings.json out of the run dir" \
+                                       artifact-guard.cjs "$(bash_payload "mv $RUN/findings.json /tmp/x")"
+expect_deny  "cp a file INTO the run dir under a handoff's name" \
+                                       artifact-guard.cjs "$(bash_payload "cp /tmp/verify.json $RUN/")"
+expect_deny  "rsync --remove-source-files from a handoff" \
+                                       artifact-guard.cjs "$(bash_payload "rsync --remove-source-files $RUN/findings.json /tmp/")"
+expect_deny  "rm -rf the whole run dir" \
+                                       artifact-guard.cjs "$(bash_payload "rm -rf $RUN")"
+expect_deny  "mv the whole run dir away" \
+                                       artifact-guard.cjs "$(bash_payload "mv $RUN /tmp/x")"
+expect_allow "rm -rf a scratch dir inside the run" \
+                                       artifact-guard.cjs "$(bash_payload "rm -rf $RUN/scratch")"
+expect_allow "mv within scratch/"      artifact-guard.cjs "$(bash_payload "mv $RUN/scratch/a $RUN/scratch/b")"
+expect_allow "mv a partial out"        artifact-guard.cjs "$(bash_payload "mv $RUN/verify-partial.json /tmp/x")"
+expect_allow "cp a handoff out (a read)" \
+                                       artifact-guard.cjs "$(bash_payload "cp $RUN/findings.json /tmp/copy.json")"
+
 expect_allow "cat findings.json (reads are never refused)" \
                                        artifact-guard.cjs "$(bash_payload "cat $RUN/findings.json")"
 expect_allow "python json.load of testcases.json" \

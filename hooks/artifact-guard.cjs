@@ -49,9 +49,10 @@
  * best-effort in the same way secret-guard.cjs declares itself to be. What
  * keeps that honest is the narrowness of the subject: it considers ONLY the
  * exact basenames of every declared artifact plus run.json, directly inside a
- * run directory, and reads are left completely alone. There is no legitimate
- * command that writes one of them, so the cost of the patterns it misses is a
- * gap, never a false positive.
+ * run directory — and, for a command that deletes or moves a whole directory,
+ * only a run directory or the runs root itself. Reads are left completely
+ * alone. There is no legitimate command that writes one of them, so the cost of
+ * the patterns it misses is a gap, never a false positive.
  *
  * The names are derived from config/phases.json rather than listed here, the
  * way frontend-test-guard derives Jest's collection rules from the app repo's
@@ -95,6 +96,15 @@ function protectedNames() {
 
 function runsRoot() { return path.join(C.STATE, 'runs'); }
 
+/** The path's components below the runs root ([] for the root), or null when outside it. */
+function belowRuns(p) {
+  if (!p) return null;
+  const root = C.realish(runsRoot());
+  const abs = C.realish(p);
+  if (!C.isInside(abs, root)) return null;
+  return abs === root ? [] : path.relative(root, abs).split(path.sep);
+}
+
 /**
  * Is this path a protected file sitting DIRECTLY in some run's directory?
  *
@@ -105,24 +115,45 @@ function runsRoot() { return path.join(C.STATE, 'runs'); }
  * same failure with somebody else's ticket attached.
  */
 function protectedArtifact(p, names) {
-  if (!p) return null;
-  const root = C.realish(runsRoot());
-  const abs = C.realish(p);
-  if (!C.isInside(abs, root) || abs === root) return null;
-  const parts = path.relative(root, abs).split(path.sep);
-  if (parts.length !== 2) return null;
+  const parts = belowRuns(p);
+  if (!parts || parts.length !== 2) return null;
   if (!names.has(parts[1])) return null;
   return { iid: parts[0], name: parts[1] };
 }
 
+/**
+ * Is this path a whole run directory, or the runs root?
+ *
+ * `rm -rf <run>` deletes the journal and every handoff at once while naming
+ * none of them, so the basename check above never sees it. Nothing deeper
+ * counts: `rm -rf <run>/scratch` is a session tidying its own space.
+ */
+function runDirectory(p) {
+  const parts = belowRuns(p);
+  if (!parts || parts.length > 1) return null;
+  return { iid: parts.length ? parts[0] : '*', name: null };
+}
+
 function refuse(hit, how) {
+  C.event('denied_artifact_write', { via: how, iid: hit.iid, name: hit.name, phase: C.phase() });
+  if (!hit.name) {
+    const where = hit.iid === '*' ? 'state/runs' : `state/runs/${hit.iid}`;
+    C.deny(
+      `Denied: ${how} would delete or move ${where}. That is where the run journal lives — `
+      + 'the plan and test-case approvals a human gave on the ticket, and the merge SHA — '
+      + 'together with every phase\'s handoff, which the conductor reads back to decide whether '
+      + 'this change merges. Nothing in a session removes it.\n'
+      + 'If what is in there is wrong, say so in your own output (`summary`, or `blocked` if it '
+      + 'stops you): the conductor acts on what you return. Your own scratch one level down '
+      + '(`scratch/`, `artifacts/`) is yours to delete.',
+    );
+  }
   const own = hit.name === JOURNAL
     ? 'That file is the run journal: it holds the plan and test-case approvals a '
       + 'human gave on the ticket, and the merge SHA. Nothing in a session writes it.'
     : `That file is the '${hit.name.replace(/\.json$/, '')}' phase's handoff. The conductor `
       + 'writes it from a phase\'s structured output, and reads it back to decide whether this '
       + 'change merges.';
-  C.event('denied_artifact_write', { via: how, iid: hit.iid, name: hit.name, phase: C.phase() });
   C.deny(
     `Denied: ${how} would write state/runs/${hit.iid}/${hit.name}. ${own}\n`
     + 'Reading it is fine — this guard only refuses writes. If what it holds is wrong, say so '
@@ -170,9 +201,18 @@ function expandVars(p) {
  *
  * `sed` is here only with `-i`; without it sed is a reader. `touch` is
  * deliberately absent — it moves an mtime, not a byte.
+ *
+ * `mv` takes its SOURCE away as surely as it replaces its destination, so every
+ * argument counts: with only the last one checked, `mv <run>/findings.json
+ * /tmp/x` deleted the blocker findings — the exact attack this guard names —
+ * while `rm` of the same file was refused.
  */
-const DEST_LAST = new Set(['cp', 'mv', 'install', 'rsync']);
-const ANY_ARG = new Set(['rm', 'shred', 'truncate', 'tee', 'unlink']);
+const DEST_LAST = new Set(['cp', 'install', 'rsync']);
+const ANY_ARG = new Set(['rm', 'shred', 'truncate', 'tee', 'unlink', 'mv']);
+/** Commands that, given a directory as the destination, write `<dest>/<basename of source>`. */
+const INTO_DIR = new Set(['cp', 'install', 'rsync', 'mv']);
+/** Commands that remove the directories they name, which runDirectory() checks. */
+const REMOVERS = new Set(['rm', 'rmdir', 'shred', 'unlink']);
 
 /** argv[0] past any env assignments and `sudo`, and the arguments after it. */
 function command(seg) {
@@ -227,10 +267,28 @@ function writeTargets(seg, { argv0, rest, args }) {
     }
   } else if (ANY_ARG.has(argv0)) {
     found.push(...args);
+  } else if (argv0 === 'rsync' && rest.includes('--remove-source-files')) {
+    found.push(...args);
   } else if (DEST_LAST.has(argv0) && args.length >= 2) {
     found.push(args[args.length - 1]);
   }
+
+  // `cp /tmp/verify.json <run>/` names no handoff — the destination is the run
+  // directory, and the file lands at <run>/verify.json. The depth check in
+  // protectedArtifact keeps this from flagging a copy to a plain file path.
+  if (INTO_DIR.has(argv0) && args.length >= 2) {
+    const dest = args[args.length - 1];
+    for (const src of args.slice(0, -1)) found.push(path.join(dest, path.basename(src)));
+  }
   return found;
+}
+
+/** The directories this segment deletes or takes away, for runDirectory(). */
+function removedPaths({ argv0, rest, args }) {
+  if (REMOVERS.has(argv0)) return args;
+  if (argv0 === 'mv') return args.slice(0, -1);
+  if (argv0 === 'rsync' && rest.includes('--remove-source-files')) return args.slice(0, -1);
+  return [];
 }
 
 /**
@@ -276,24 +334,33 @@ try {
 
   if (tool === 'Bash') {
     const cmd = String((data.tool_input || {}).command || '');
-    // Cheap pre-filter: nothing to do unless a protected basename is mentioned
-    // at all, which is the overwhelming majority of commands.
-    if ([...names].some((n) => cmd.includes(n))) {
-      // Segments are walked in order so that a `cd` moves where every later
-      // relative path resolves, and `cd <run> && cd artifacts && …` ends up in
-      // artifacts/ rather than in both.
-      let dirs = startingDirs(data);
-      for (const seg of segments(cmd)) {
-        const c = command(seg);
-        if (c.argv0 === 'cd' || c.argv0 === 'pushd') {
-          dirs = chdir(dirs, c.argv0, c.rest);
-          continue;
+    // Cheap pre-filter for the name checks: nothing to do unless a protected
+    // basename is mentioned at all, which is the overwhelming majority of
+    // commands. Deleting a whole run directory names none, so that check runs
+    // in front of it.
+    const mentionsName = [...names].some((n) => cmd.includes(n));
+    // Segments are walked in order so that a `cd` moves where every later
+    // relative path resolves, and `cd <run> && cd artifacts && …` ends up in
+    // artifacts/ rather than in both.
+    let dirs = startingDirs(data);
+    for (const seg of segments(cmd)) {
+      const c = command(seg);
+      if (c.argv0 === 'cd' || c.argv0 === 'pushd') {
+        dirs = chdir(dirs, c.argv0, c.rest);
+        continue;
+      }
+      for (const raw of removedPaths(c)) {
+        for (const candidate of resolveFrom(raw, dirs)) {
+          const hit = runDirectory(candidate);
+          if (hit) refuse(hit, 'this command');
         }
-        for (const raw of writeTargets(seg, c)) {
-          for (const candidate of resolveFrom(raw, dirs)) {
-            const hit = protectedArtifact(candidate, names);
-            if (hit) refuse(hit, 'this command');
-          }
+      }
+      if (!mentionsName) continue;
+
+      for (const raw of writeTargets(seg, c)) {
+        for (const candidate of resolveFrom(raw, dirs)) {
+          const hit = protectedArtifact(candidate, names);
+          if (hit) refuse(hit, 'this command');
         }
       }
     }
