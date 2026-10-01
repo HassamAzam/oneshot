@@ -16,7 +16,7 @@
  * worktree, so a branch cannot widen its own zone by editing the map.
  */
 import { execFileSync } from 'node:child_process';
-import { WORK_REPO, projectConfig, type ProjectConfig } from '../lib/config.js';
+import { WORK_REPO, projectConfig, type PhaseConfig, type ProjectConfig } from '../lib/config.js';
 
 /**
  * The `zones` block of config/project.json, or null when there is none.
@@ -191,18 +191,83 @@ export function loadZoneMap(
 }
 
 /**
+ * Every file the branch changes against the base, from git rather than from
+ * any phase's account of itself; null when git cannot say.
+ *
+ * The check before review used to read declaredFiles(): the plan's steps plus
+ * the `filesChanged` the implement session writes into implement.json. That
+ * artifact is rewritten every lap and lists only that lap's files, while the
+ * branch carries every lap; on erp#8783 the lap-3 report left out files the
+ * branch carried, two migrations among them. A branch re-attached from an
+ * earlier run on the same ticket also starts with commits no report of this
+ * run mentions. So the report may ADD files to what the guard judges, and this
+ * list is the floor it cannot hide one under.
+ *
+ * Three dots, so the diff starts at the merge-base and a base that moved on is
+ * not counted as the branch's work; the base is fetched first in case the
+ * branch merged a newer one. --no-renames, so a file moved out of a red area
+ * shows at the path it left: moving it is touching it. -z, so a path git would
+ * quote (a non-ASCII name) arrives as written and still matches its area. Run
+ * in WORK_REPO by branch name, not in the worktree, which a resumed run that
+ * dropped its worktree does not have yet.
+ */
+export function branchFiles(
+  branch: string, { repo = WORK_REPO, base = projectConfig().branches.base }: GitSource = {},
+): string[] | null {
+  if (!repo || !branch) return null;
+  fetchBase(repo, base);
+  try {
+    return execFileSync('git', ['-C', repo, 'diff', '--name-only', '--no-renames', '-z', `origin/${base}...${branch}`],
+      { encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] })
+      .split('\0').filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Which zone checkpoint the loop is standing on at `list[i]`, or null.
+ *
+ * 'plan' is implement's own index once plan has succeeded, and the runner
+ * checks it ahead of the plan gate, so nobody is asked to approve a plan that
+ * is about to be stopped.
+ *
+ * 'diff' is EVERY index after implement once implement has succeeded. It used
+ * to be "the loop is standing on review", and the loop does not always stand
+ * there. With no test-case gate pending (reviewAllRuns off, no Review label, no
+ * guarded path) the group builder runs review inside the testcases group and
+ * nextIndex() steps past both, so a clean first lap never checked implement's
+ * files at all. That is the tight loop the green areas exist for, and the
+ * 2026-10-02 review traced the PR's own erp#8772 case through it to a
+ * self-merged MR. Keyed on position, the check also lands on mr-open before it
+ * pushes the branch, after verify (which writes the worktree too) and before
+ * merge.
+ */
+export function zoneCheckDue(
+  list: ReadonlyArray<Pick<PhaseConfig, 'name'>>, i: number, succeeded: (phase: string) => boolean,
+): 'plan' | 'diff' | null {
+  const implement = list.findIndex((p) => p.name === 'implement');
+  if (implement === -1 || i < implement) return null;
+  if (i === implement) return succeeded('plan') ? 'plan' : null;
+  return succeeded('implement') ? 'diff' : null;
+}
+
+/**
  * Which of `files` this ticket may not touch.
  *
  * Green is always allowed. Yellow is allowed only on a ticket that carries the
  * yellow release label — grooming puts it on a change whose characterization
  * tests merged first. Red never is. Without the guard label nothing applies.
+ * `files` null means branchFiles() could not read the diff, and a guard that
+ * cannot see the files stops the run, the same as one that cannot read the map.
  */
 export function zoneVerdict(
-  labels: string[], files: string[], read: ZoneMapRead, zones: ZonesConfig | null = liveZones(),
+  labels: string[], files: string[] | null, read: ZoneMapRead, zones: ZonesConfig | null = liveZones(),
 ): ZoneVerdict {
   const applies = zoneGuardApplies(labels, zones);
   if (!applies) return { applies, violations: [], unreadable: null };
   if ('error' in read) return { applies, violations: [], unreadable: read.error };
+  if (!files) return { applies, violations: [], unreadable: "the branch's diff cannot be read — add Loop back to retry" };
   const { map } = read;
   const yellow = zones?.yellowLabel;
   const allowed = new Set(['green', ...(yellow && labels.includes(yellow) ? ['yellow'] : [])]);

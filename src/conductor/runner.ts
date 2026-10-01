@@ -103,7 +103,8 @@ import {
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
 import {
-  loadZoneMap, refusedTicket, zoneBlockReason, zoneGuardApplies, zoneVerdict, type ZoneVerdict,
+  branchFiles, loadZoneMap, refusedTicket, zoneBlockReason, zoneCheckDue, zoneGuardApplies, zoneVerdict,
+  type ZoneVerdict,
 } from './zoneguard.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { Ticket, TestCase } from '../phases/types.js';
@@ -1103,6 +1104,32 @@ export async function runTicket(
         `${list.filter((p) => isImplemented(p.name) || CODE_PHASES[p.name]).map((p) => p.name).join(' → ')}`);
     }
 
+    // The delivery-zone guard (src/conductor/zoneguard.ts), ahead of every code
+    // phase and every gate. At implement, over what the plan declares, before
+    // the plan gate asks anyone to approve it. On every pass after implement has
+    // succeeded, over what the branch really carries: this used to wait for the
+    // loop to land on `review`, which it skips whenever review runs inside the
+    // testcases group, and by then mr-open had pushed the branch anyway. Both
+    // read the branch from git, because a branch re-attached from an earlier
+    // run can carry commits the plan and this run's reports never mention.
+    if (zoneRead) {
+      const due = zoneCheckDue(list, i, (name) => phaseSucceeded(iid, name));
+      if (due) {
+        let zone: ZoneVerdict;
+        try {
+          const declared = declaredFiles(prior.plan ?? readArtifact(iid, 'plan.json'),
+            due === 'diff' ? prior.implement ?? readArtifact(iid, 'implement.json') : null);
+          const changed = branchFiles(branch);
+          zone = zoneVerdict(ticket.labels, changed && [...declared, ...changed], zoneRead);
+        } catch (err) {
+          // A throw here used to escape runTicket with no finish(): the ticket kept
+          // Loop, got no note, and threw again on every scan. A stop says why.
+          zone = { applies: true, violations: [], unreadable: `the zone guard failed (${(err as Error).message})` };
+        }
+        if (zone.unreadable || zone.violations.length) return stopForZone(zone);
+      }
+    }
+
     if (CODE_PHASES[phase.name]) {
       const control = await runCodePhase(phase, i);
       if (control.kind === 'stop') {
@@ -1176,25 +1203,6 @@ export async function runTicket(
       }
       // 'approved' (or 'design' somehow absent from the list) — fall through
       // into 'plan' below, which now reads design.json as its specification.
-    }
-
-    // The delivery-zone guard (src/conductor/zoneguard.ts): once the plan has
-    // declared its files, and again before review, when implement has reported
-    // the files it really changed. Checked ahead of the plan gate so nobody is
-    // asked to approve a plan that is about to be stopped.
-    const zoneCheckpoint = (phase.name === 'implement' && phaseSucceeded(iid, 'plan'))
-      || (phase.name === 'review' && phaseSucceeded(iid, 'implement'));
-    if (zoneCheckpoint && zoneRead) {
-      let zone: ZoneVerdict;
-      try {
-        zone = zoneVerdict(ticket.labels, declaredFiles(prior.plan ?? null,
-          phase.name === 'review' ? prior.implement ?? null : null), zoneRead);
-      } catch (err) {
-        // A throw here used to escape runTicket with no finish(): the ticket kept
-        // Loop, got no note, and threw again on every scan. A stop says why.
-        zone = { applies: true, violations: [], unreadable: `the zone guard failed (${(err as Error).message})` };
-      }
-      if (zone.unreadable || zone.violations.length) return stopForZone(zone);
     }
 
     // The Review label's plan-approval gate — opt-in, additive, and checked

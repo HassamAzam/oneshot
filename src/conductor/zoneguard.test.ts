@@ -5,9 +5,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
-  loadZoneMap, matches, refusedTicket, validateZoneMap, zoneBlockReason, zoneGuardApplies, zoneOf, zoneVerdict,
-  type ZoneMap, type ZoneMapRead, type ZonesConfig,
+  branchFiles, loadZoneMap, matches, refusedTicket, validateZoneMap, zoneBlockReason, zoneCheckDue, zoneGuardApplies,
+  zoneOf, zoneVerdict, type ZoneMap, type ZoneMapRead, type ZonesConfig,
 } from './zoneguard.js';
+import { declaredFiles } from './reviewgate.js';
+import type { PhaseConfig } from '../lib/config.js';
 
 /**
  * The `zones` block as it reads when the guard is switched on. Passed to every
@@ -211,6 +213,115 @@ test('a map on the base branch is read from there, and judged before it is trust
     git(dir, 'update-ref', 'refs/remotes/origin/dev', 'HEAD');
     assert.equal(errorOf(loadZoneMap('.claude/zones.json', { repo: dir, base: 'dev' })),
       'zone map .claude/zones.json on origin/dev is invalid: area "teams" has no paths — fix it by MR');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ------------------------------------------------- where the runner checks
+
+const VAR = 'GITLAB_REPO_URL';
+
+/**
+ * config/phases.json as phases() returns it for `target`, the list runTicket
+ * walks. Selected through GITLAB_REPO_URL and a fresh import, the way
+ * mr-open.test.ts does it, because mr-open exists only for the erp target and
+ * that phase is the first the diff check has to land on. The empty string,
+ * never `delete`: config.js runs dotenv at load and would fill a missing key.
+ */
+async function phaseList(target: string): Promise<PhaseConfig[]> {
+  const had = Object.prototype.hasOwnProperty.call(process.env, VAR);
+  const before = process.env[VAR];
+  process.env[VAR] = target ? `https://gitlab.example.com/acme/${target}` : '';
+  try {
+    const m = await import(`../lib/config.js?zones=${encodeURIComponent(target)}-${Date.now()}`);
+    return (m.phases as () => PhaseConfig[])();
+  } finally {
+    if (had) process.env[VAR] = before;
+    else delete process.env[VAR];
+  }
+}
+
+const dueAt = (list: PhaseConfig[], name: string, succeeded: string[]): string | null => {
+  const i = list.findIndex((p) => p.name === name);
+  assert.ok(i !== -1, `phase ${name} is missing`);
+  return zoneCheckDue(list, i, (phase) => succeeded.includes(phase));
+};
+
+test('the diff is checked at mr-open, before it pushes, and at every phase after implement', async () => {
+  const list = await phaseList('erp');
+  const done = ['recall', 'research', 'plan', 'implement'];
+  for (const name of ['mr-open', 'testcases', 'review', 'verify', 'ui-evidence', 'mr', 'merge']) {
+    assert.equal(dueAt(list, name, done), 'diff', `no zone check at ${name}`);
+  }
+});
+
+test('without mr-open the diff is checked where testcases and review run together', async () => {
+  // The hole: review batched into the testcases group never heads the loop, so
+  // a check keyed on standing at review never ran on a clean first lap.
+  const list = await phaseList('');
+  assert.ok(!list.some((p) => p.name === 'mr-open'));
+  const testcases = list.find((p) => p.name === 'testcases');
+  assert.equal(testcases?.group, list.find((p) => p.name === 'review')?.group, 'the two still share a group');
+  assert.equal(dueAt(list, 'testcases', ['plan', 'implement']), 'diff');
+});
+
+test('the plan is checked at implement, and nothing is checked before there is a plan to check', async () => {
+  const list = await phaseList('erp');
+  assert.equal(dueAt(list, 'implement', ['plan']), 'plan');
+  assert.equal(dueAt(list, 'implement', []), null);
+  assert.equal(dueAt(list, 'plan', ['research']), null);
+  assert.equal(dueAt(list, 'mr-open', ['plan']), null, 'no diff check until implement has succeeded');
+});
+
+/** A plan that keeps to green, and the newest lap's report, which does too. */
+const GREEN_PLAN = { steps: [{ files: ['apps/training/views.py'] }] };
+const LAP_2_REPORT = { filesChanged: ['apps/training/views.py'] };
+
+test('a red file committed on an earlier lap is caught though the newest report leaves it out', () => {
+  const dir = workRepo();
+  try {
+    git(dir, 'checkout', '-qb', 'oneshot/ticket-1');
+    commit(dir, { 'apps/payroll/utils.py': 'lap 1\n' }, 'lap 1');
+    commit(dir, { 'apps/training/views.py': 'lap 2\n' }, 'lap 2');
+
+    const declared = declaredFiles(GREEN_PLAN, LAP_2_REPORT);
+    assert.equal(zoneVerdict(['AI', 'Loop'], declared, read, ZONES).violations.length, 0,
+      'the self-report alone passes it — this is the miss');
+
+    const changed = branchFiles('oneshot/ticket-1', { repo: dir, base: 'dev' });
+    assert.deepEqual(changed, ['apps/payroll/utils.py', 'apps/training/views.py']);
+    const v = zoneVerdict(['AI', 'Loop'], [...declared, ...changed!], read, ZONES);
+    assert.deepEqual(v.violations.map((h) => `${h.file} ${h.zone}`), ['apps/payroll/utils.py red']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a file moved out of a red area counts at the path it left', () => {
+  const dir = workRepo();
+  try {
+    commit(dir, { 'apps/payroll/rates.py': 'rates\n' }, 'payroll');
+    git(dir, 'update-ref', 'refs/remotes/origin/dev', 'HEAD');
+    git(dir, 'checkout', '-qb', 'oneshot/ticket-2');
+    mkdirSync(join(dir, 'apps/training'), { recursive: true });
+    git(dir, 'mv', 'apps/payroll/rates.py', 'apps/training/rates.py');
+    git(dir, 'commit', '-qm', 'move');
+    assert.deepEqual(branchFiles('oneshot/ticket-2', { repo: dir, base: 'dev' }),
+      ['apps/payroll/rates.py', 'apps/training/rates.py']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a branch git cannot diff stops the run rather than passing it', () => {
+  const dir = workRepo();
+  try {
+    const changed = branchFiles('oneshot/no-such-branch', { repo: dir, base: 'dev' });
+    assert.equal(changed, null);
+    const v = zoneVerdict(['AI', 'Loop'], changed, read, ZONES);
+    assert.match(v.unreadable ?? '', /diff cannot be read/);
+    assert.match(zoneBlockReason(v, ZONES), /or remove AI to run under the review gates$/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
