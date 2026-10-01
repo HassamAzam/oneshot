@@ -45,7 +45,7 @@ What remains after structure is the real hook list.
 | `dryrun-guard` | **Not built.** `DRY_RUN` cuts the tool list instead, and only partly — see its row in §3. |
 | — | **7 new**, listed below |
 
-Net: 12 → 18 hooks, but the two most complex ones shrink or vanish, and every new one exists
+Net: 12 → 17 hooks, but the two most complex ones shrink or vanish, and every new one exists
 because v2 does something v1 never did (run a local server, drive a browser, hand artifacts
 between phases).
 
