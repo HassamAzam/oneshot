@@ -413,3 +413,18 @@ test('design is told the tokens are generated, where they are, and not to redo t
   assert.ok(!prompt.includes('../tokens.css'), 'a mockup in design/ importing ../tokens.css misses the file');
   assert.doesNotMatch(prompt, /Distil them into one/);
 });
+
+test('plan and implement are pointed at the tokens the design added, not told to avoid new ones', () => {
+  const design = {
+    applicable: true,
+    tokensFile: 'design/tokens.css',
+    screens: [{ id: 's1', name: 'Completed list', purpose: 'p', mockupHtml: 'design/s1.html', screenshot: 's1.png' }],
+    newPatterns: ['x'],
+  };
+  for (const phase of ['plan', 'implement']) {
+    const prompt = promptFor(cfg(phase), ctx(ticket({ iid: 424243 }), { design }));
+    assert.ok(prompt.includes(join(runDir(424243), 'artifacts', 'design', 'tokens.css')), phase);
+    assert.ok(prompt.includes(join(runDir(424243), 'artifacts', 'design', 'new-tokens.css')), phase);
+    assert.doesNotMatch(prompt, /rather than new ones/, phase);
+  }
+});

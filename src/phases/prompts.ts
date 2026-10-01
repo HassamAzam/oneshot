@@ -639,6 +639,11 @@ const ORACLE =
  * phase reading the one it is currently working on, and the exact values —
  * the hex, the spacing, the copy — are what "build it like the design" means,
  * so they have to be readable at source rather than summarised.
+ *
+ * Both token files are named. tokens.css is regenerated from the theme every
+ * design lap, so a token the design adds lives apart in new-tokens.css; naming
+ * only the first, with "rather than new ones", told plan and implement to avoid
+ * exactly the values the reviewer was shown as additions.
  */
 function approvedDesignBlock(ctx: PromptCtx): string {
   const d = artifact<DesignArtifact>(ctx, 'design');
@@ -657,9 +662,11 @@ ${approved
     ? 'A human approved these screens on the ticket before any of this was planned.'
     : 'These screens were designed for this ticket. (No approval covers this version of them yet.)'}
 Build to them: the same layout, the same states, the same copy, and the same values from
-\`${join(dir, d.tokensFile || join(DESIGN_DIR, TOKENS_FILE))}\` rather than new ones. Where the design and
-your own judgement disagree, the design won the argument already — if it is genuinely wrong, say so
-rather than quietly improving it, because the reviewer approved what they saw.
+\`${join(dir, d.tokensFile || join(DESIGN_DIR, TOKENS_FILE))}\` rather than values of your own —
+plus, if it exists, \`${join(dir, DESIGN_DIR, NEW_TOKENS_FILE)}\`: the tokens this design adds as new.
+Take their values from there and add them to the theme rather than choosing your own. Where
+the design and your own judgement disagree, the design won the argument already — if it is genuinely
+wrong, say so rather than quietly improving it, because the reviewer approved what they saw.
 
 ${screens}
 ${d.newPatterns?.length ? `\nApproved as NEW to the design system: ${d.newPatterns.join('; ')}.` : ''}
