@@ -33,10 +33,15 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, envOr } from '../lib/config.js';
+import { ROOT, ONESHOT_HOME, envOr, projectConfig } from '../lib/config.js';
+import { readToken } from '../lib/gitlab.js';
 import { log } from '../lib/log.js';
+import { AUTOMATION_PHASE } from '../automation/readiness.js';
 
 type HookOutput = Record<string, unknown>;
+
+/** The Ready For Automation mode's readiness script (hooks/automation-ready.cjs). Not a registered hook. */
+const AUTOMATION_READY = 'automation-ready.cjs';
 
 const NODE = envOr('ONESHOT_NODE', process.execPath);
 const HOOK_TIMEOUT_MS = 15_000;
@@ -51,10 +56,23 @@ const HOOK_TIMEOUT_MS = 15_000;
  * files most worth checking, and a guard that quietly stops running on big
  * inputs is worse than no guard, because the pass it reports is indistinguish-
  * able from a real one.
+ *
+ * automation-ready is the other, though it is no session's hook: the conductor
+ * runs it through runGuard before it spends an automation session. It gives
+ * up on GitLab at 20s and answers `unknown` with the reason (GitLab down, a
+ * 500, a slow linked-MR list). The default 15s kill would land first and turn
+ * every one of those into a bare "timed out", so it gets 30s: its own answer
+ * always arrives before the kill. hooks.test.ts pins the order.
  */
 const GUARD_TIMEOUT_MS = new Map<string, number>([
   ['py-lint.cjs', 60_000],
+  [AUTOMATION_READY, 30_000],
 ]);
+
+/** The kill timeout runGuard uses for `script`. Exported for the timeout-ordering test. */
+export function guardTimeoutMs(script: string): number {
+  return GUARD_TIMEOUT_MS.get(script) ?? HOOK_TIMEOUT_MS;
+}
 
 /** Guards that must DENY rather than allow when they cannot run. */
 const FAIL_CLOSED = new Set<string>();
@@ -107,7 +125,7 @@ function runGuard(script: string, input: unknown, env: Record<string, string>): 
     const killer = setTimeout(() => {
       child.kill('SIGKILL');
       done(guardFailure(script, 'it timed out'));
-    }, GUARD_TIMEOUT_MS.get(script) ?? HOOK_TIMEOUT_MS);
+    }, guardTimeoutMs(script));
 
     child.stdout.on('data', (d) => { stdout += String(d); });
     child.on('error', (err) => {
@@ -140,6 +158,12 @@ function runGuard(script: string, input: unknown, env: Record<string, string>): 
 /** Tool-name matchers, mirroring hooks/hooks.settings.json. */
 const WRITE_TOOLS = '^(Write|Edit|NotebookEdit)$';
 const BASH = '^Bash$';
+/**
+ * artifact-guard's subject is a set of filenames, not a tool, so it has to see
+ * both surfaces: write-scope covers the write tools and nothing covers Bash,
+ * which is exactly how a handoff would get rewritten.
+ */
+const WRITE_TOOLS_OR_BASH = '^(Write|Edit|NotebookEdit|Bash)$';
 const MR_TOOLS = '^mcp__gitlab__(create|update)_merge_request$';
 const READ_OR_BASH = '^(Read|NotebookRead|Grep|Bash)$';
 
@@ -158,6 +182,7 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
     PreToolUse: [
       { hooks: [guard('pause-check.cjs')], timeout: 15 },
       { matcher: WRITE_TOOLS, hooks: [guard('write-scope.cjs')], timeout: 15 },
+      { matcher: WRITE_TOOLS_OR_BASH, hooks: [guard('artifact-guard.cjs')], timeout: 15 },
       { matcher: WRITE_TOOLS, hooks: [guard('frontend-test-guard.cjs')], timeout: 15 },
       { matcher: BASH, hooks: [guard('git-guard.cjs')], timeout: 20 },
       { matcher: MR_TOOLS, hooks: [guard('mr-gate.cjs')], timeout: 15 },
@@ -181,4 +206,74 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
       { hooks: [guard('traps-brief.cjs')], timeout: 15 },
     ],
   };
+}
+
+/**
+ * Guard-only variables for automation-ready.cjs. Merged into the script's env, NEVER into
+ * a session's: a token in a session's environment is a token it can print. May throw (no
+ * GITLAB_REPO_URL); runAutomationReadyGuard catches.
+ *
+ * The token is the one call() reads with, handed over explicitly because the
+ * desk's credential may live outside .env (src/lib/token.ts) where the
+ * _common.cjs envFile() reader cannot see it. A desk with no token gets ''
+ * here, which the script turns into a `config` verdict rather than a crash.
+ */
+export function automationGuardEnv(): Record<string, string> {
+  const repo = projectConfig().gitlab;
+  let token = '';
+  try { token = readToken(); } catch { token = ''; }
+  return {
+    ONESHOT_HOME,
+    ONESHOT_AUTOMATION_API: repo.apiUrl,
+    ONESHOT_AUTOMATION_PROJECT: repo.project,
+    ONESHOT_AUTOMATION_TOKEN: token,
+  };
+}
+
+/**
+ * The Ready For Automation mode's readiness check: hooks/automation-ready.cjs,
+ * run through the same runGuard every guard uses, so one implementation of "is
+ * this ticket ready" serves every caller. The conductor asks before it spends
+ * a session, before it posts a version for QA, and before the sheet write.
+ *
+ * It is NOT a hook, and hooksFor() registers it for no event. The automation
+ * session holds no tool a hook could stand in front of — no write scope, no
+ * GitLab server, no shell, no file reads — and every post, label edit and sheet
+ * write is conductor code, so the gate belongs here, before the session and
+ * before each write, not inside it (docs/HOOKS.md §1: structure before hooks).
+ *
+ * Nor is it in FAIL_CLOSED, and it does not need to be. A script that cannot
+ * run, times out or prints garbage resolves to `{}` like any guard, and
+ * readinessFromHookOutput reads `{}` — or anything short of a well-formed
+ * verdict for this ticket — as `unknown`, which gateOnReadiness holds on.
+ *
+ * Never throws: a failure to build the env becomes `{ reason }`, which reads as
+ * `unknown` with that reason. `override` is merged LAST, because runGuard
+ * spreads process.env first and a test has no other way to redirect the child.
+ */
+export async function runAutomationReadyGuard(
+  iid: number, override: Record<string, string> = {},
+): Promise<HookOutput> {
+  try {
+    const env = {
+      ONESHOT_PHASE: AUTOMATION_PHASE,
+      ONESHOT_TICKET: String(iid),
+      ONESHOT_RUN_ID: 'automation-precheck',
+      ...automationGuardEnv(),
+      ...override,
+    };
+    // The payload a guard reads on stdin; the script only drains it.
+    const input = {
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'conductor-precheck',
+      transcript_path: '',
+      cwd: ROOT,
+      prompt: '',
+    };
+    return await runGuard(AUTOMATION_READY, input, env);
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    log.warn(`guard ${AUTOMATION_READY} could not start`, { why });
+    return { reason: `the readiness check could not start (${why})` };
+  }
 }

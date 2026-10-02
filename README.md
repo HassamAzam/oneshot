@@ -7,6 +7,14 @@ today [`arbisoft/erp`](https://gitlab.arbisoft.com/arbisoft/erp) — and drives 
 **`Merged`**: recall prior art, research, plan, implement, brainstorm test cases, review, verify
 in a real browser, screenshot the result, open the MR, and merge it.
 
+**`Loop` is the master switch.** Neither scan picks up a ticket without it. `Loop` alone runs the
+pipeline below. `Loop` **and** `Ready For Automation` send the ticket to the
+[Ready For Automation mode](#ready-for-automation-mode) instead, and the pipeline never works a
+ticket carrying `Ready For Automation`: its scan leaves it out and `--ticket` refuses it.
+`npm start -- --ticket <iid>` on a ticket without `Loop` is an operator's explicit override, as
+before — except on a ticket carrying `Ready For Automation`, which it refuses with or without
+`Loop`.
+
 **The pipeline ends at the merge.** Nothing is deployed, nothing is QA'd on a running build,
 and no demo is recorded — deploying is a person's job, and the ticket says so when it hands
 back.
@@ -66,6 +74,10 @@ Three things fall out of that:
    5  review       ∥  Opus 5    findings ──► back to 3 (max 3 laps)
    6  verify          Sonnet 5  dev server + Playwright, runs THE list
                                 fail ──► back to 3 (max 2 laps)
+                                pre-existing ──► base-check re-runs it on dev:
+                                  fails there too, outside the ticket's
+                                  scope ──► listed on the MR, no lap
+                                  otherwise, or the branch migrates ──► a fail
    7  ui-evidence  ∥  Sonnet 5  screenshots
    8  mr           ∥  Sonnet 5  MR + description
    9  merge           code      merge into dev — dev is final, nothing promotes on
@@ -259,9 +271,11 @@ not, so a Review-gated ticket driven that way needs someone to notice the Slack 
 the command by hand. `npm start -- --ticket <iid> --follow` closes that gap: it keeps the process
 alive and re-checks that SAME ticket — never anything else the board might also be claimable for —
 every three minutes (`FOLLOW_TICK_MS`) until the run reaches `done` (exit 0) or a genuine `blocked`
-(exit non-zero, reason printed). A `parked` run is re-checked on every one of those ticks and never
-gives up on its own: it keeps asking until the thread answers with `approved` or with feedback,
-which is what actually picks up a human's reply without a manual re-invoke. A transient failure to
+(exit non-zero, reason printed), or is refused for a reason only a person can clear — the ticket is
+assigned to someone else, or carries `Ready For Automation` (exit non-zero, reason printed). A
+`parked` run is re-checked on every one of those ticks and never gives up on its own: it keeps
+asking until the thread answers with `approved` or with feedback, which is what actually picks up
+a human's reply without a manual re-invoke. A transient failure to
 read the ticket from GitLab is retried the same way rather than ending the process.
 
 Three minutes rather than the watcher's `TICK_MS` minute, because a parked run re-enters the
@@ -358,6 +372,106 @@ on-demand `mr-feedback` phase, and the run takes one **review round**:
   after Oneshot answers, because its replies leave those threads open for a person to resolve.
 - `npm run mr-feedback:probe -- <mrIid> [ticketIid]` prints exactly which threads would be acted
   on right now. The feature is off under `DRY_RUN`.
+
+## Ready For Automation mode
+
+A second, independent mode in the same conductor. It writes **automation test cases** for tickets
+whose change has already shipped, gets them approved by QA on the ticket, and files the approved
+list in the team's Google Sheet. It is off unless a desk switches it on, and it never touches the
+Loop's runs, claims or ports. The one Loop label it writes is `Loop` itself, taken off when it
+finishes.
+
+A ticket is this mode's when it carries **both** `Loop` (the master switch) and
+`Ready For Automation`. `Loop` without `Ready For Automation` is the ordinary pipeline, exactly as
+before, and that pipeline never works a ticket carrying `Ready For Automation` — whether or not
+this mode is switched on at the desk. Its scan asks GitLab to leave those tickets out, so however
+long they wait on readiness or on QA they never crowd its one page of 50. The one exception is a
+`config/project.json` `automation` block that is not usable (boot names the field): this mode
+cannot run anywhere then, so there is no trigger to route on and the pipeline treats
+`Ready For Automation` tickets as it did before this mode existed, rather than leaving them to
+nobody.
+
+QA uses `Ready For Automation` in its own workflow, so the label can be on a ticket nobody meant
+for this mode. To have the pipeline fix such a ticket (a reopened bug still carrying it, say),
+remove `Ready For Automation` first; with `Loop` beside it, the ticket goes to test-case writing
+instead, and it reads as ready if an earlier fix merged. A Loop run that was parked or in flight
+when the label went on is no longer scanned either: its run and claim note stay as they were
+until someone removes the label or releases the run by hand.
+
+```
+ "Loop" + "Ready For Automation" (open or closed, any assignee, not "Automation Done")
+   │
+   ├─ readiness hook ── not ready ──▶ one comment per distinct reason ("No merged MR — !400 is
+   │                                  still open"), labels untouched; re-checked when the ticket
+   │                                  changes and at least every 30 minutes
+   ▼ ready
+ one session writes v1 ──▶ comment with the table + CSV, label "Automation Test Case Review"
+   │
+   ├─ a QA approver asks for changes ──▶ one session writes v2 with ONLY those changes, posted
+   │                                     as a comment with just the cases ──▶ back to review
+   ▼ a QA approver comments `approved`
+ sheet (module tab + tracker row, read back) ──▶ "Automation Test Case Review" and "Loop" off,
+                                                  "Automation Done" on, a done comment with both links
+```
+
+- **Switching it on.** `ONESHOT_AUTOMATION=1` in `.env`, on **one desk only**: the per-ticket lock
+  is a local file, so two desks would each spend a session on the same ticket. Boot runs a
+  preflight (config, the service-account key, the phase and its schema, the readiness script, the
+  QA list, this desk's GitLab read token, a sheet id that is not the placeholder, and one read of
+  the sheet); any problem turns the mode off for that process and leaves the Loop as it was.
+  `npm start -- --automation <iid>` runs one pass for one ticket and exits, with or without the
+  switch, and refuses to start on a preflight problem; on a ticket missing `Loop` or
+  `Ready For Automation` it says there is nothing to do.
+- **Ready means `Loop` is on the ticket and both rules hold** (`hooks/automation-ready.cjs`):
+  `Ready For Deployment` was added before the latest `Ready For Automation`, or the ticket is
+  closed and still carries `Ready For Automation`; and at least one MR in the same project that is
+  not a branch promotion (`dev`/`stage`/`master`, `Adhoc-YYYY-MM-DD`) is merged. An open leftover
+  MR is a warning, never a blocker. The scan only asks GitLab for tickets carrying both labels, and
+  the check reads `Loop` itself too (reason `loop-missing`), for a label taken off after the scan.
+  The conductor runs the check before every session, again before it posts each version, and again
+  before the sheet write; it is not a session hook, because the session can post nothing (see
+  [docs/HOOKS.md](docs/HOOKS.md)). Any failure to check is `unknown`, a hold, never `ready`. The
+  other writes that follow a session in the same pass (the review label, a stuck comment) re-read
+  both labels first and wait while either is off; a no-change comment, best effort anyway, is
+  dropped instead. GitLab unreachable is a silent hold. Removing `Loop` or `Ready For Automation`
+  stops the mode for that ticket with no comment and keeps its state; adding the label back
+  resumes where it was.
+- **The session only reads, and only its prompt.** Before it starts, the conductor reads the
+  ticket, the comments people wrote on it and the diff of every merged fix MR over REST, and puts
+  them in the prompt, fenced as untrusted data. The diff is bounded: lockfiles, minified,
+  generated and binary files are named but not shown, a migration shows only its head, and each
+  file and the whole change are capped, every cut marked `[truncated N lines]`. The session runs
+  at the conductor root with the `automation-testcases` skill and **without** the GitLab MCP
+  server; it has no file, shell or web tools either. The conductor posts, labels and writes the
+  sheet in code. Every string it returns is redacted before anything is
+  posted, and a list holding a private key is refused. Two failed attempts in a row post one
+  "could not be written" comment and stop; a QA approver's comment (e.g. "retry") starts it again.
+- **Who approves.** Only `config/reviewers.json` `qa`, only comments posted after the current
+  version's, and only the single word `approved`. A change request in the same round wins over
+  `approved`. "Approved." or "approved ✅" gets a short reply explaining the one-word rule instead
+  of a session. Comments that arrive while a revision is being written go into the next version.
+  The cases comment @mentions every approver, but GitLab never notifies a person of their own
+  comment — the desk token posts as its operator, so on a desk whose operator is a QA approver
+  only the other approvers are notified.
+- **The sheet** is `automation.sheet` in `config/project.json`, written with the service account
+  in `ONESHOT_GOOGLE_SA_FILE` (default `~/.claude/google-service-account.json`), which must be an
+  **Editor** on it. Its `spreadsheetId` ships as the placeholder `REPLACE_ME`, which the preflight
+  refuses by name, so the mode cannot be switched on until someone chooses the sheet. Pointing it
+  at the team's sheet takes two values: the id, and `trackerTab` set to the team's
+  `Test Cases Updates [{year}]`. The cases go to the module's existing tab (matched by name,
+  whatever its prefix), or a new orange `TestCases_<Module>` tab; the year's tracker gets a row in
+  the module's section with the ticket link, `Done`, the automation status and a deep link to the
+  block. Oneshot tags the rows it writes with developer metadata, so a retried write never
+  duplicates them and the team's own rows for the same ticket are never mistaken for its own.
+  Everything is read back before the labels move. A failure that will not clear by waiting
+  (permission, a merged range in the way, a read-back mismatch) is reported on the ticket once,
+  with what to do.
+- **`DRY_RUN`** runs the whole ticket in one pass in `state-dry/`: a real session is still spent,
+  comments and label changes are logged instead of made, QA's approval is assumed, and the sheet
+  is read but not written.
+- **State** lives in `state/automation/<iid>/` (journal, each version as posted, transcripts),
+  never in `state/runs`. A finished ticket is not redone by itself: to redo one, move its
+  `state/automation/<iid>` aside and delete its block and tracker row from the sheet.
 
 ## Mobilizing agents
 
@@ -702,11 +816,12 @@ problem, and letting it trip the breaker would make a wrong `GITLAB_TOKEN` look 
 | `src/conductor/` | watcher, queue, phase runner, the `merge` code phase, schemas, hook wiring, teardown |
 | `src/phases/` | one module per phase: prompt, schema, tool policy |
 | `src/lib/` | config + session env, SQLite, GitLab, worktrees, promotion mutex, quota, reachability, memory |
+| `src/automation/` | the Ready For Automation mode — readiness verdict, state machine, comments, Google Sheets writer |
 | `config/` | project + labels, per-phase model/tools/skills/groups, budgets, reviewers, Slack |
 | `hooks/` | guardrails — passed to the SDK in-process, never installed globally |
 | `scripts/` | hook verify, `doctor`, preflight, dependency probe, unblock, report |
 | `docs/` | [PLAN.md](docs/PLAN.md) · [HOOKS.md](docs/HOOKS.md) |
-| `state/` | gitignored — runs, artifacts, memory, SQLite |
+| `state/` | gitignored — runs, artifacts, memory, SQLite, and `automation/<iid>` for the Ready For Automation mode |
 
 ## Status
 
@@ -735,7 +850,7 @@ then-current order of recall → research → plan → testcases:
 | M3 | `verify`, `ui-evidence` — dev server on a leased port, Playwright, screenshots | built, unproven |
 | M4 | `mr`, `merge` — MR, merge, promote, and the run's record on the ticket and the MR | built, unproven |
 | M5 | ~~`deploy`, `qa`, `demo`~~ — **removed**: the pipeline ends at the merge | withdrawn |
-| M6 | `recall` — memory index and recall | built, unproven; nothing writes new cards since `memorize` was removed |
+| M6 | `recall` — memory index and recall | built, unproven; merge writes the card and index line (src/lib/memory.ts), `npm run memory:backfill` for runs merged before that |
 | M7 | dashboard, replay, hardening hooks | not started |
 
 `runner.ts` stops with an explicit `BLOCKED: not built yet: phase '<name>'` rather than skipping

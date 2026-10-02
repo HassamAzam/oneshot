@@ -73,15 +73,23 @@ there are more cards under `tickets/` than there are lines in `index.jsonl`. So:
 
 ## Read a card for its trap, not its summary
 
-Cards run to a familiar shape — what was asked, what changed, **the gotcha**,
-what to reuse, what NOT to reuse, and a code-path summary.
+Cards come in two shapes, and the trap sits under different headings in each:
 
-Weight them accordingly. "What changed" is the least valuable part: a later
-phase can read the diff, the MR and `git log` for itself. What it cannot
-re-derive at any price is what the last run *tried and abandoned* — the
-constraint that was rejected, the pattern that looked right and broke something
-two modules away, the workaround that was already on the base branch. The gotcha
-and the "what NOT to reuse" sections are the reason this phase exists.
+- **Written by `merge`** — every new card, and every card the backfill wrote:
+  What was asked, What changed, What broke along the way, Risks the plan named,
+  What to reuse, Code path. Read **What broke along the way** first: the
+  blocker/major review findings, the regressions verify caught and the cases
+  that failed. Read **Risks the plan named** second — it is what the plan
+  expected before the work, not what happened. These cards have no "what NOT
+  to reuse" section; do not look for one, and do not infer one.
+- **Written by the old `memorize` session** — the few older cards:
+  **THE GOTCHA** and **What NOT to reuse** are the trap; read those first.
+
+Under either shape, read "What changed" last. A later phase can read the diff,
+the MR and `git log` for itself. What it cannot re-derive at any price is what
+the last run *tried and abandoned* — the constraint that was rejected, the
+pattern that looked right and broke something two modules away, the workaround
+that was already on the base branch. That is the reason this phase exists.
 
 ## Write a brief that survives being pasted into three prompts
 

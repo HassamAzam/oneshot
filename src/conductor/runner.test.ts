@@ -1,12 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  codePhaseStatus, decideClaim, mergePollWait, nextIndex, salvagedReview, testcaseGateRoute,
-  ticketComments, uiEvidenceRefusal,
+  applyBaseCheck, baseCheckOutcome, codePhaseStatus, decideClaim, failedCases, mergePollWait,
+  nextIndex, refusalIsFinal, runTicket, salvagedReview, sharedDatabaseRefusal, statusForFailure,
+  testcaseGateRoute, ticketComments, uiEvidenceRefusal, verifyAfterBaseCheckDeath,
 } from './runner.js';
-import type { IssueNote } from '../lib/gitlab.js';
-import { MERGE_POLL_MS, type PhaseConfig } from '../lib/config.js';
-import type { RunJournal } from '../lib/artifacts.js';
+import type { PhaseOutput } from './phase.js';
+import type { Issue, IssueNote } from '../lib/gitlab.js';
+import { ticketScopeIds, type CaseResult } from '../phases/types.js';
+import { MERGE_POLL_MS, phaseByName, type PhaseConfig } from '../lib/config.js';
+import { readJournal, type RunJournal } from '../lib/artifacts.js';
+import { isClaimed } from '../lib/db.js';
 import type { JournalOwner } from '../lib/journalproject.js';
 
 function phase(name: string, n: number, group?: string): PhaseConfig {
@@ -289,6 +293,60 @@ test('a partial whose findings is not an array salvages nothing instead of throw
   assert.equal(salvagedReview([null, 'x', finding('F-01', 'blocker')], null)?.findings.length, 1);
 });
 
+// ------------------------------------------------ the automation mode's tickets
+
+test('runTicket refuses a Loop ticket carrying Ready For Automation before it claims, posts or spends anything', async () => {
+  const iid = 101;
+  const ticket = (over: Partial<Issue>): Issue => ({
+    iid, title: 'Profile preferences', description: null, labels: ['Loop', 'Ready For Automation'], assignees: [],
+    state: 'opened', web_url: `https://gitlab.example.com/acme/erp/-/issues/${iid}`, updated_at: '2026-09-28T10:00:00Z',
+    ...over,
+  });
+  const why = 'carries "Ready For Automation" — the automation mode owns it';
+  assert.equal(readJournal(iid), null, 'precondition: no run on disk for the fixture ticket');
+
+  const real = globalThis.fetch;
+  const was = process.env.ONESHOT_AUTOMATION;
+  const fetched: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    fetched.push(String(input));
+    throw new Error('offline');
+  }) as typeof fetch;
+  // The mode being off on this desk changes nothing: the Loop still leaves it alone.
+  delete process.env.ONESHOT_AUTOMATION;
+  try {
+    for (const t of [ticket({}), ticket({ state: 'closed', assignees: [{ username: 'someone.else' }] })]) {
+      const out = await runTicket(t, { conductor: 'test-conductor' });
+      assert.deepEqual(out, { runId: '', iid, status: 'refused', reason: why, final: true });
+      assert.equal(refusalIsFinal(out), true, '--follow stops on it instead of re-checking forever');
+    }
+    // Without Loop the automation mode will never take it either, so the
+    // reason must not send the operator to wait on that mode.
+    const orphan = await runTicket(ticket({ labels: ['Ready For Automation'] }), { conductor: 'test-conductor' });
+    assert.deepEqual(orphan, {
+      runId: '', iid, status: 'refused', final: true,
+      reason: 'carries "Ready For Automation", which keeps the pipeline off it — add "Loop" for automation test cases, '
+        + 'or remove "Ready For Automation" to run the pipeline',
+    });
+    assert.deepEqual(fetched, [], 'nothing was read from or written to GitLab');
+    assert.equal(readJournal(iid), null, 'no run journal was started');
+    assert.equal(isClaimed(iid), false, 'no claim row was taken');
+  } finally {
+    globalThis.fetch = real;
+    if (was !== undefined) process.env.ONESHOT_AUTOMATION = was;
+  }
+});
+
+test('--follow stops on a refusal only a person can clear, and keeps checking one that clears by waiting', () => {
+  const refused = (reason: string, final?: true) => ({ runId: '', iid: 101, status: 'refused' as const, reason, ...(final ? { final } : {}) });
+  assert.equal(refusalIsFinal(refused('carries "Ready For Automation" — the automation mode owns it', true)), true);
+  assert.equal(refusalIsFinal(refused('assigned to someone.else')), true);
+  assert.equal(refusalIsFinal(refused('another conductor holds run r-1')), false);
+  assert.equal(refusalIsFinal(refused('blocked 3 minutes ago — cooling down')), false);
+  assert.equal(refusalIsFinal({ runId: 'r-1', iid: 101, status: 'blocked', reason: 'assigned to x', final: true }), false,
+    'only a refusal is judged here; blocked has its own branch');
+});
+
 // ------------------------------------------------- the comments a phase reads
 
 /**
@@ -340,4 +398,266 @@ test('the cutoff is layered on the existing filters, not substituted for them', 
 
   assert.deepEqual(ticketComments(notes, RUN_STARTED), ['a real requirement']);
   assert.deepEqual(ticketComments(notes), ['a real requirement']);
+});
+
+// ------------------------------------------------ pre-existing verify failures
+
+const verified = (...results: Array<{ id: string; result: string; evidence?: string }>) => ({
+  results: results.map((r) => ({ evidence: 'e', screenshot: '', ...r })),
+});
+
+// Two runs failed a case that verify itself called a pre-existing backend bug;
+// the second failed it again on its next lap and blocked.
+test('a pre-existing failure alone does not fail verify, so the run does not cycle', () => {
+  const data = verified(
+    { id: 'TC-01', result: 'pass' },
+    { id: 'TC-15', result: 'pre-existing', evidence: 'fails on dev too: apps/x/views.py:40' },
+  );
+  assert.equal(failedCases('verify', data), null);
+});
+
+test('a real fail beside a pre-existing one still fails verify, and names only the real one', () => {
+  const why = failedCases('verify', verified(
+    { id: 'TC-02', result: 'fail' },
+    { id: 'TC-15', result: 'pre-existing', evidence: 'fails on dev too' },
+  ));
+  assert.match(why ?? '', /1 failing case\(s\) of 2: TC-02$/);
+});
+
+test('a pre-existing label with no evidence is counted as the fail it would hide', () => {
+  const why = failedCases('verify', verified({ id: 'TC-15', result: 'pre-existing', evidence: '  ' }));
+  assert.match(why ?? '', /TC-15/);
+});
+
+// ------------------------------------------------ base-check proves the label
+
+const res = (id: string, result: CaseResult['result'], evidence = 'fails on dev: views.py:40'): CaseResult =>
+  ({ id, result, evidence, screenshot: '' });
+
+test('a pre-existing case the base branch also fails, outside the ticket scope, keeps its label', () => {
+  const out = applyBaseCheck([res('TC-01', 'pass'), res('TC-15', 'pre-existing')], {
+    baseCommit: 'abcdef1234',
+    results: [{ id: 'TC-15', onBase: 'fails', inTicketScope: false, evidence: '500 on save' }],
+  }, 'dev');
+  assert.deepEqual(out.confirmed, ['TC-15']);
+  assert.equal(out.results[1]!.result, 'pre-existing');
+  assert.match(out.results[1]!.evidence, /confirmed on dev @ abcdef12: 500 on save/);
+  assert.equal(failedCases('verify', { results: out.results }), null);
+});
+
+test('a case that passes on the base goes back to fail — the change broke it', () => {
+  const out = applyBaseCheck([res('TC-15', 'pre-existing')],
+    { results: [{ id: 'TC-15', onBase: 'passes', evidence: 'saved fine' }] }, 'dev');
+  assert.deepEqual(out.rejected, ['TC-15']);
+  assert.equal(out.results[0]!.result, 'fail');
+  assert.match(out.results[0]!.evidence, /NOT confirmed — passes on dev/);
+  assert.match(failedCases('verify', { results: out.results }) ?? '', /TC-15/);
+});
+
+test('unproven is not proven: inconclusive, a missing entry, or no check at all are fails', () => {
+  const inconclusive = applyBaseCheck([res('TC-15', 'pre-existing')],
+    { results: [{ id: 'TC-15', onBase: 'inconclusive', evidence: 'E_NO_PORTS' }] }, 'dev');
+  assert.equal(inconclusive.results[0]!.result, 'fail');
+  const missing = applyBaseCheck([res('TC-15', 'pre-existing')], { results: [] }, 'dev');
+  assert.equal(missing.results[0]!.result, 'fail');
+  const none = applyBaseCheck([res('TC-15', 'pre-existing')], null, 'dev');
+  assert.equal(none.results[0]!.result, 'fail');
+  assert.match(none.results[0]!.evidence, /no base-branch check ran/);
+});
+
+test('a label with no evidence is not rescued by the base check, and says so', () => {
+  const out = applyBaseCheck([res('TC-15', 'pre-existing', '')],
+    { results: [{ id: 'TC-15', onBase: 'fails', inTicketScope: false, evidence: 'x' }] }, 'dev');
+  assert.equal(out.results[0]!.result, 'fail');
+  // The base WAS checked and failed; "could not be checked" would tell
+  // implement and the reviewer the opposite of what the check found.
+  assert.match(out.results[0]!.evidence, /fails on dev.*no evidence/);
+  assert.doesNotMatch(out.results[0]!.evidence, /could not be checked/);
+});
+
+test('results that are not pre-existing pass through untouched', () => {
+  const input = [res('TC-01', 'pass'), res('TC-02', 'fail'), res('TC-03', 'blocked')];
+  const out = applyBaseCheck(input, null, 'dev');
+  assert.deepEqual(out.results, input);
+  assert.deepEqual([out.confirmed, out.rejected], [[], []]);
+});
+
+// ------------------------------------- the ticket's own scope is never pre-existing
+
+/**
+ * "Fails on the base" is true by definition of the ticket's own bug, so the
+ * base check alone confirmed exactly the mislabel it exists to catch: an
+ * implement lap that fixed the wrong path left the reported bug standing,
+ * verify cited a base line the diff really does not touch, the base failed
+ * the same way, and the merge gate opened on a non-fix.
+ */
+const ownBug = (): CaseResult =>
+  res('TC-02', 'pre-existing', 'shows 0, expected 5; same on dev at apps/leaves/utils.py:88, untouched by the diff');
+
+test('a case the check finds in the ticket scope goes back to fail even though the base fails it', () => {
+  const out = applyBaseCheck([res('TC-01', 'pass'), ownBug()],
+    { results: [{ id: 'TC-02', onBase: 'fails', inTicketScope: true, evidence: 'shows 0 on dev' }] }, 'dev');
+  assert.deepEqual(out.rejected, ['TC-02']);
+  assert.equal(out.results[1]!.result, 'fail');
+  assert.match(out.results[1]!.evidence, /this ticket's own scope — failing on dev is what the change was meant to fix/);
+  assert.match(failedCases('verify', { results: out.results }) ?? '', /TC-02/,
+    'a refused label must cycle back to implement, not just be renamed');
+});
+
+test('a check that never judged scope confirms nothing', () => {
+  const out = applyBaseCheck([ownBug()],
+    { results: [{ id: 'TC-02', onBase: 'fails', evidence: 'shows 0 on dev' }] }, 'dev');
+  assert.equal(out.results[0]!.result, 'fail');
+  assert.match(out.results[0]!.evidence, /did not judge whether it is this ticket's scope/);
+});
+
+test('a happy-tagged case is refused the label whatever the base check says', () => {
+  const ownScope = ticketScopeIds([
+    { id: 'TC-01', pass: ['regression'] },
+    { id: 'TC-02', pass: ['happy', 'boundary'] },
+  ]);
+  const out = applyBaseCheck([res('TC-01', 'pass'), ownBug()],
+    { results: [{ id: 'TC-02', onBase: 'fails', inTicketScope: false, evidence: 'shows 0 on dev' }] },
+    'dev', { ownScope });
+  assert.deepEqual(out.confirmed, []);
+  assert.equal(out.results[1]!.result, 'fail');
+  assert.match(out.results[1]!.evidence, /tagged 'happy'/);
+});
+
+test('only the happy pass marks a case as the ticket scope, and a malformed case is skipped', () => {
+  const ids = ticketScopeIds([
+    { id: 'TC-01', pass: ['happy'] },
+    { id: 'TC-02', pass: ['regression', 'cross-module'] },
+    { id: 'TC-03' },
+    { id: 4, pass: ['happy'] },
+    { id: 'TC-05', pass: 'happy' },
+  ]);
+  assert.deepEqual([...ids], ['TC-01']);
+});
+
+// ------------------------------------- a base app on a migrated database proves nothing
+
+/**
+ * Every app shares one Postgres that verify has already migrated forward, and
+ * nothing unapplies a migration, so the base app runs base code on the
+ * branch's schema. A failure the change caused then reproduces on the base.
+ */
+test('a branch with migrations gets no base-check, and says why', () => {
+  const why = sharedDatabaseRefusal(['apps/leaves/migrations/0042_total.py'], 'dev');
+  assert.match(why ?? '', /migrates the shared database \(apps\/leaves\/migrations\/0042_total\.py\)/);
+  assert.match(why ?? '', /not independent of the change/);
+});
+
+test('a branch without migrations may be checked on the base', () => {
+  assert.equal(sharedDatabaseRefusal([], 'dev'), null);
+});
+
+test('a migration list git could not produce is not read as "none"', () => {
+  assert.match(sharedDatabaseRefusal(null, 'dev') ?? '', /could not list this branch's migrations/);
+});
+
+test('a long migration list is named in part, not dumped into every case', () => {
+  const files = ['a/migrations/1.py', 'a/migrations/2.py', 'a/migrations/3.py', 'a/migrations/4.py', 'a/migrations/5.py'];
+  assert.match(sharedDatabaseRefusal(files, 'dev') ?? '', /a\/migrations\/3\.py and 2 more\)/);
+});
+
+test('an evidenced label on a migrating branch goes back to fail with that reason, and cycles', () => {
+  const unavailable = sharedDatabaseRefusal(['apps/x/migrations/0002_amount_cents.py'], 'dev')!;
+  const out = applyBaseCheck([res('TC-01', 'pass'), res('TC-07', 'pre-existing')], null, 'dev', { unavailable });
+  assert.deepEqual(out.rejected, ['TC-07']);
+  assert.equal(out.results[1]!.result, 'fail');
+  assert.match(out.results[1]!.evidence, /NOT confirmed — this branch migrates the shared database/);
+  assert.match(failedCases('verify', { results: out.results }) ?? '', /TC-07/);
+});
+
+// ------------------------------------- a dead base check is infra, not a verdict
+
+const session = (over: Partial<PhaseOutput> = {}): PhaseOutput => ({
+  ok: false, data: null, blocked: null, summary: '', turns: 0, weighted: 0, sessionId: 's',
+  rateLimited: false, ...over,
+});
+
+test('a base check that answered is read as its artifact', () => {
+  const data = { baseCommit: 'abc', results: [{ id: 'TC-15', onBase: 'fails', inTicketScope: false, evidence: 'x' }] };
+  assert.deepEqual(baseCheckOutcome(session({ ok: true, data }), 0, false), { kind: 'answered', data });
+});
+
+test('a base check that timed out is re-attempted in place, and past the cap it is exhausted', () => {
+  const timedOut = session({ infra: true, error: 'timed out after 40m' });
+  assert.equal(baseCheckOutcome(timedOut, 0, false).kind, 'retry');
+  assert.equal(baseCheckOutcome(timedOut, 1, false).kind, 'retry');
+  const last = baseCheckOutcome(timedOut, 2, false);
+  assert.equal(last.kind, 'exhausted');
+  assert.match(last.kind === 'exhausted' ? last.why : '', /3 times in a row: timed out after 40m/);
+});
+
+test('a run that is stopping, a usage limit or an account gate is not re-attempted', () => {
+  assert.equal(baseCheckOutcome(session({ infra: true }), 0, true).kind, 'died');
+  assert.equal(baseCheckOutcome(session({ rateLimited: true }), 0, false).kind, 'died');
+  assert.equal(baseCheckOutcome(session({ infra: true, accountAction: 'accept the terms' }), 0, false).kind, 'died');
+});
+
+test('a base check under the brake is a death, even when the session answered or gave up', () => {
+  // pause-check.cjs denies tools rather than killing the session, so a paused
+  // check finishes: all-inconclusive, or blocked. Neither may refuse a label.
+  const inconclusive = { baseCommit: 'abc', results: [{ id: 'TC-15', onBase: 'inconclusive', inTicketScope: false, evidence: 'denied' }] };
+  assert.equal(baseCheckOutcome(session({ ok: true, data: inconclusive }), 0, true).kind, 'died');
+  const blocked = baseCheckOutcome(session({ blocked: 'paused' }), 0, true);
+  assert.equal(blocked.kind, 'died');
+  assert.match(blocked.kind === 'died' ? blocked.why : '', /stopped or paused during base-check \(paused\)/);
+  // ...and the death reaches verify as infra with no hard stop, so afterFailure's PAUSE check decides.
+  const verify = session({ ok: true, data: { results: [] } });
+  assert.equal(verifyAfterBaseCheckDeath(verify, { kind: 'died', why: 'paused', out: session({ blocked: 'paused' }) }), undefined);
+  assert.equal(statusForFailure(phaseByName('verify')!, verify.infra), 'infra');
+});
+
+test('a base check that finished without an answer is unavailable, which still fails closed', () => {
+  const blocked = baseCheckOutcome(session({ blocked: 'E_NO_PORTS' }), 0, false);
+  assert.equal(blocked.kind, 'unavailable');
+  assert.match(blocked.kind === 'unavailable' ? blocked.why : '', /E_NO_PORTS/);
+  const out = applyBaseCheck([res('TC-15', 'pre-existing')], null, 'dev',
+    { unavailable: blocked.kind === 'unavailable' ? blocked.why : '' });
+  assert.equal(out.results[0]!.result, 'fail');
+  assert.match(out.results[0]!.evidence, /E_NO_PORTS/);
+});
+
+test('a reason a check was refused before it ran reaches the evidence', () => {
+  const out = applyBaseCheck([res('TC-15', 'pre-existing')], null, 'dev',
+    { unavailable: 'no base-branch check ran (quota: parked until 14:00)' });
+  assert.match(out.results[0]!.evidence, /NOT confirmed — no base-branch check ran \(quota: parked until 14:00\)/);
+});
+
+test('a base check that died leaves verify recorded as infra, so no verify lap is spent', () => {
+  // verify's own session succeeded; scoring its record from its own clear
+  // infra flag recorded 'failed', which failedLapsOf counts as a lap.
+  const verify = session({ ok: true, data: { results: [] } });
+  const why = 'the run was stopped or paused during base-check (cancelled by the conductor)';
+  assert.equal(verifyAfterBaseCheckDeath(verify, { kind: 'died', why, out: session({ infra: true }) }), undefined);
+  assert.equal(verify.ok, false);
+  assert.equal(statusForFailure(phaseByName('verify')!, verify.infra), 'infra');
+  assert.equal(verify.error, why);
+});
+
+test('a base check stopped by an account gate or a usage limit carries it to verify', () => {
+  const gated = session({ ok: true });
+  verifyAfterBaseCheckDeath(gated, { kind: 'died', why: 'gate', out: session({ infra: true, accountAction: 'accept the terms' }) });
+  assert.equal(gated.accountAction, 'accept the terms');
+  const limited = session({ ok: true });
+  verifyAfterBaseCheckDeath(limited, { kind: 'died', why: 'limit', out: session({ rateLimited: true }) });
+  assert.equal(limited.rateLimited, true);
+});
+
+test('a base check that kept dying of infrastructure stops the run instead of buying a verify re-run', () => {
+  // Handed to afterFailure() as a plain infra death, it re-ran verify, and each
+  // verify re-run started base-check's in-place attempts over: 9 sessions.
+  const timedOut = session({ infra: true, error: 'timed out after 40m while still working' });
+  const last = baseCheckOutcome(timedOut, 2, false);
+  assert.ok(last.kind === 'exhausted');
+  const verify = session({ ok: true, data: { results: [] } });
+  const stop = verifyAfterBaseCheckDeath(verify, { ...last, out: timedOut });
+  assert.match(stop ?? '', /3 times in a row: timed out after 40m.*the run stops here.*No verify lap was spent/s);
+  // The record stays 'infra', so the stop costs no lap either.
+  assert.equal(statusForFailure(phaseByName('verify')!, verify.infra), 'infra');
+  assert.equal(verify.rateLimited, false);
+  assert.equal(verify.accountAction, undefined);
 });

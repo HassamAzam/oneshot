@@ -12,6 +12,11 @@
  * which is what makes `concurrency` mean anything. --watch-only reports what it
  * would claim without claiming it.
  *
+ * With ONESHOT_AUTOMATION=1 a tick also kicks the Ready For Automation pass
+ * (src/automation/runner.ts): single-flight, not awaited, and outside the
+ * Loop's bookkeeping entirely — no `running` entry, no port, no claim.
+ * `--automation <iid>` runs one pass of it for one ticket and exits.
+ *
  * Several of these may run at once, on purpose. A conductor registers in the
  * fleet at boot rather than refusing to start beside a sibling, and everything
  * that used to be guaranteed by there being exactly one process is now decided
@@ -27,7 +32,9 @@ import { join } from 'node:path';
 import {
   CONTEXT_REPO, DRY_RUN, FOLLOW_TICK_MS, GITLAB_USERNAME, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT,
   PROJECT_TARGET, TICK_MS, WORK_REPO, WT_ROOT,
-  auditAuth, envOr, pathSources, phases, portPool, projectConfig, repoIdentity, seedFrom, slackConfig,
+  auditAuth, automationConfig, automationEnabled, automationTriggerLabel, envOr, pathSources, phases, portPool,
+  projectConfig,
+  repoIdentity, seedFrom, slackConfig,
 } from './lib/config.js';
 import {
   checkoutFindings, findCheckout, identityFindings, relaxRepoChecks, repoCheckOverrideNotice, wtRootFinding, type Finding,
@@ -38,8 +45,10 @@ import { ensureClaudeDir } from './lib/claudedir.js';
 import { probe, netState } from './lib/reachability.js';
 import { windowUsage, dayUsage, quotaParked } from './lib/quota.js';
 import { budgetConfig } from './lib/config.js';
+import { iidFlag } from './lib/cliargs.js';
 import { describe, scan } from './conductor/watcher.js';
-import { runTicket, type RunOutcome } from './conductor/runner.js';
+import { refusalIsFinal, runTicket, type RunOutcome } from './conductor/runner.js';
+import { automationPreflight, automationTick, outcomeLine, runAutomationOnce } from './automation/runner.js';
 import {
   deregister, heartbeat, liveConductorIds, liveConductors, peersEverSeen, register,
 } from './lib/fleet.js';
@@ -107,6 +116,21 @@ const say = {
 const running = new Map<number, Promise<unknown>>();
 
 /**
+ * The Ready For Automation mode's switch for THIS process: ONESHOT_AUTOMATION
+ * set and its preflight clean. A failed preflight turns the mode off and
+ * leaves the Loop exactly as it was.
+ */
+let automationOn = false;
+
+/**
+ * The automation pass in flight, if any. Single-flight: a pass can hold a
+ * 30-minute authoring session, and a second pass started beside it would only
+ * queue behind the same per-ticket locks. It is not in `running` — it holds no
+ * dispatch slot, no port and no claim.
+ */
+let automationInFlight: Promise<void> | null = null;
+
+/**
  * One controller for the whole process. On the first signal it is aborted, the
  * runs stop at their next phase boundary and finish 'aborted' — which is a
  * RESUMABLE status, so the next boot picks each ticket up from its journal.
@@ -166,7 +190,22 @@ if (followArg && ticketArg === null) {
   process.exit(1);
 }
 
-const once = (process.argv.includes('--once') || ticketArg !== null) && !followArg;
+/**
+ * `--automation <iid>` — one pass of the Ready For Automation state machine for one ticket, then exit. Works without ONESHOT_AUTOMATION: it is an operator's explicit act.
+ * A malformed value is refused rather than read as no flag (iidFlag says why).
+ */
+const automationFlag = iidFlag(process.argv, '--automation');
+const automationArg = automationFlag.iid;
+if (automationFlag.given && automationArg === null) {
+  log.error('--automation needs a positive ticket iid, e.g. --automation 8420 (no leading #, no =)');
+  process.exit(1);
+}
+if (automationArg !== null && (ticketArg !== null || followArg)) {
+  log.error('--automation <iid> runs on its own: it cannot be combined with --ticket or --follow');
+  process.exit(1);
+}
+
+const once = (process.argv.includes('--once') || ticketArg !== null || automationArg !== null) && !followArg;
 
 /**
  * Set once `--follow`'s ticket reaches a state no further ticking would
@@ -200,7 +239,9 @@ let followExitCode = 0;
  *   conductor already understands the status. Not terminal.
  * - `refused` — this pass lost a race for ownership (another conductor holds
  *   the run, or a block's cooldown has not elapsed). Not a failure of the
- *   ticket itself. Not terminal.
+ *   ticket itself. Not terminal — unless `refusalIsFinal()` says only a person
+ *   can clear it (assigned to someone else, or carrying the automation mode's
+ *   trigger label): then terminal, exit 1.
  */
 function handleFollowOutcome(outcome: RunOutcome): void {
   // A shutdown signal already sets `stopping`, which ends the loop regardless
@@ -225,7 +266,7 @@ function handleFollowOutcome(outcome: RunOutcome): void {
       say.warn(`#${outcome.iid} aborted — ${outcome.reason ?? 'no reason given'} — ${wait}`);
       break;
     case 'refused':
-      if (outcome.reason?.includes('assigned to') || outcome.reason?.includes('GITLAB_USERNAME')) {
+      if (refusalIsFinal(outcome)) {
         say.error(`#${outcome.iid} refused — ${outcome.reason} — not retrying`);
         followSettled = true;
         followExitCode = 1;
@@ -262,6 +303,22 @@ async function banner(): Promise<void> {
   }
   if (solo) log.info('mode       --solo, a second conductor is refused');
   if (followArg) log.info(`mode       --follow #${ticketArg}, re-checked every ${FOLLOW_TICK_MS / 1000}s until done/blocked`);
+  if (automationArg !== null) {
+    log.info(`mode       --automation #${automationArg}`);
+  } else if (automationEnabled()) {
+    try {
+      const a = automationConfig();
+      log.info(`automation on — "${cfg.labels.entry}" + "${a.labels.trigger}" tickets → sheet ${a.sheet.spreadsheetId}`);
+    } catch {
+      log.info('automation on — but config/project.json has no usable automation block (preflight says why)');
+    }
+  }
+  if (cfg.automation !== undefined && automationTriggerLabel() === null) {
+    // Said on every desk, the mode on or off: the Loop's routing changes with it.
+    let why = 'config/project.json has no usable `automation` block';
+    try { automationConfig(); } catch (err) { why = (err as Error).message; }
+    log.warn(`routing    ${why} — so the Loop routes no ticket to the automation mode and works them all as before`);
+  }
   if (DRY_RUN) log.warn('DRY_RUN is on — every write will be refused, in its own state-dry home');
 }
 
@@ -457,6 +514,17 @@ function freeSlots(): { slots: number; mine: number; fleet: number; pool: number
   return { slots: Math.max(0, Math.min(mine, fleet)), mine, fleet, pool };
 }
 
+/** Single-flight and NOT awaited: a 20-minute authoring session must not stall the Loop's scan. No `running` entry, no port. */
+function kickAutomation(): void {
+  if (automationInFlight || stopping) return;
+  automationInFlight = automationTick({ conductor: me, signal: aborter.signal })
+    .catch((err) => {
+      say.error('automation tick threw', { error: (err as Error).message });
+      logEvent('automation_threw', { error: (err as Error).message });
+    })
+    .finally(() => { automationInFlight = null; });
+}
+
 async function tick(): Promise<void> {
   // The fleet's liveness and the promotion lease's renewal ride the same clock
   // as everything else here. A conductor that has stopped ticking has stopped
@@ -475,6 +543,13 @@ async function tick(): Promise<void> {
   }
   if (quotaParked()) {
     say.warn('parked after a subscription usage limit — not claiming');
+    return;
+  }
+
+  // After the pause and quota checks, so both stop this mode too.
+  if (automationArg !== null) {
+    const o = await runAutomationOnce(automationArg, { conductor: me, signal: aborter.signal });
+    say.phase(outcomeLine(o));
     return;
   }
 
@@ -497,6 +572,10 @@ async function tick(): Promise<void> {
     if (followArg) handleFollowOutcome(runOutcome);
     return;
   }
+
+  // Kicked, not awaited, before the Loop's own scan. --watch-only claims
+  // nothing, and this mode's first act on a ticket can be a comment.
+  if (automationOn && !watchOnly) kickAutomation();
 
   const result = await scan();
   await noteNetworkHold(result.held);
@@ -556,6 +635,12 @@ async function tick(): Promise<void> {
  * that reconcileForeignRuns() now has to bury on the way back up.
  */
 async function drain(): Promise<void> {
+  // The shutdown signal has already aborted any session this pass holds, so
+  // the wait is short, and a cancelled session is charged nothing.
+  if (automationInFlight) {
+    say.warn('waiting on the automation pass');
+    await automationInFlight;
+  }
   if (!running.size) return;
   const names = (): string => [...running.keys()].map((i) => `#${i}`).join(' ');
   say.warn(`waiting on ${running.size} run(s) to reach a phase boundary: ${names()}`);
@@ -632,12 +717,24 @@ async function main(): Promise<void> {
 
   await banner();
   if (!(await preflight())) process.exit(1);
+  // The Ready For Automation mode checks itself only when it is asked for. A
+  // problem refuses `--automation`, and turns the switch off for this process
+  // with the Loop left exactly as it was.
+  if (automationArg !== null || automationEnabled()) {
+    const problems = await automationPreflight();
+    for (const p of problems) (automationArg !== null ? log.error : log.warn)(`automation  ${p}`);
+    if (automationArg !== null && problems.length) process.exit(1);
+    automationOn = automationEnabled() && !problems.length;
+    if (automationEnabled() && problems.length) log.warn('automation  off for this process — the Loop is unaffected');
+  }
   ensureCollector();
   // Before the first ticket is even looked at: one warm app for this loop, in its own
   // worktree. It is the shared babel cache under the seed repo's node_modules that
   // this is really keeping hot — every worktree on the machine symlinks it, and a warm
   // one is the difference between a two-minute first build and a twenty-minute one.
-  if (!watchOnly && !DRY_RUN) warmLoopApp(me);
+  // Not for --automation: its one session runs at the conductor root and is
+  // handed the merged change in its prompt, so no app is ever needed.
+  if (!watchOnly && !DRY_RUN && automationArg === null) warmLoopApp(me);
 
   const b = budgetConfig();
   log.info(`quota      ${Math.round(windowUsage() / 1e6)}M / ${Math.round(b.window_tokens / 1e6)}M this window · ` +
@@ -646,10 +743,13 @@ async function main(): Promise<void> {
   log.banner(followArg
     ? `Following ticket #${ticketArg} every ${FOLLOW_TICK_MS / 1000}s until done or blocked. Ctrl-C to stop.`
     : once
-      ? (ticketArg !== null ? `Single run: ticket #${ticketArg}.` : 'Single pass, then exit.')
+      ? (automationArg !== null
+        ? `Single automation pass: ticket #${automationArg}.`
+        : ticketArg !== null ? `Single run: ticket #${ticketArg}.` : 'Single pass, then exit.')
       : `Watching every ${TICK_MS / 1000}s as ${me.slice(0, 6)}. Ctrl-C to stop.`);
   logEvent('conductor_start', {
     root: ROOT, watchOnly, conductor: me, solo, ticket: ticketArg, follow: followArg,
+    automation: automationArg ?? automationOn,
   });
 
   // First signal: stop claiming, tell the runs to wind up at their next phase

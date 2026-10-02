@@ -11,8 +11,8 @@
  * next phase expects a field.
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { appendFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import {
   BASE_ENV, DRY_RUN, ROOT, artifactDir, envOr, modelFor, projectConfig, projectSessionEnv, runDir,
   type PhaseConfig,
@@ -21,7 +21,7 @@ import { DEFAULT_MAX_TURNS, MEMORY } from '../lib/config.js';
 import { otelBaseEnv, otelSpawnEnv } from '../lib/otel.js';
 import { phaseEnv, type PhaseIdentity } from '../lib/ids.js';
 import { recordUsage, looksLikeUsageLimit, parkForQuota } from '../lib/quota.js';
-import { transcriptPath, writeArtifact } from '../lib/artifacts.js';
+import { artifactPath, transcriptPath, writeArtifact } from '../lib/artifacts.js';
 import { logEvent } from '../lib/db.js';
 import { log } from '../lib/log.js';
 import { accountActionRequired } from '../lib/accountgate.js';
@@ -49,7 +49,44 @@ export interface PhaseInput {
    * still running beside it.
    */
   signal?: AbortSignal;
+  /**
+   * Where this phase's transcript, artifact and 'run'/'artifacts' write scopes live. Default
+   * runDir(iid) — the Loop's journal. The automation mode passes state/automation/<iid> so it
+   * never creates or reads a Loop run directory.
+   *
+   * The Loop keys everything by iid under state/runs/<iid>, and a ticket can be
+   * in the Loop and in the Ready For Automation mode at once. Sharing that
+   * directory would put this mode's transcripts into the Loop's journal
+   * directory, where resume checks, the board collector and `unblock` all read.
+   */
+  stateDir?: string;
+  /** Extra tools denied on top of toolPolicy(cfg) — the automation phase's read-only set. */
+  disallowTools?: string[];
+  /**
+   * false starts the session without the GitLab MCP server. Default true: every
+   * Loop phase keeps it. The automation phase passes false because the
+   * conductor reads the ticket and the merged diff for it and puts them in the
+   * prompt, so a server that starts without registering its tools cannot leave
+   * that session with nothing to read.
+   */
+  gitlabMcp?: boolean;
 }
+
+/**
+ * The error text of a session that settled `success` without the structured
+ * output its schema asked for. Exported so the automation runner's
+ * failureReason matches it exactly instead of copying it: a copied literal
+ * that drifted would turn "the session ended without returning a list" back
+ * into this raw text on the ticket's stuck note.
+ */
+export const NO_STRUCTURED_OUTPUT = 'session produced no structured output despite a schema';
+
+/**
+ * The error text of a session the caller's signal withdrew. Exported for the
+ * same reason: the automation runner charges nothing for it, and a copied
+ * literal that drifted would quietly start charging every shutdown.
+ */
+export const CANCELLED_BY_CONDUCTOR = 'cancelled by the conductor';
 
 export interface PhaseOutput {
   ok: boolean;
@@ -114,6 +151,44 @@ function writeScopes(cfg: PhaseConfig, iid: number, worktree?: string): string[]
     else if (w === 'worktree' && worktree) scopes.push(worktree);
   }
   return scopes;
+}
+
+/**
+ * Every path a phase writes to, in one place.
+ *
+ * Without `stateDir` these are exactly the Loop's paths — writeScopes(),
+ * transcriptPath() and artifactPath() — so a Loop phase sees nothing new. With
+ * it, the 'run' and 'artifacts' scopes, the transcript and the artifact all
+ * move under that directory, and nothing under runs/<iid> is created (the
+ * Loop's transcriptPath() creates the run directory as a side effect, which is
+ * why it is not called on that branch). 'memory' and 'worktree' mean the same
+ * thing in both.
+ */
+export function phasePaths(
+  cfg: PhaseConfig, iid: number, lap: number, o: { worktree?: string; stateDir?: string },
+): { scopes: string[]; transcript: string; artifact: string } {
+  const artifactName = cfg.artifact ?? `${cfg.name}.json`;
+  if (!o.stateDir) {
+    return {
+      scopes: writeScopes(cfg, iid, o.worktree),
+      transcript: transcriptPath(iid, cfg.name, lap),
+      artifact: artifactPath(iid, artifactName),
+    };
+  }
+  const dir = o.stateDir;
+  const scopes: string[] = [];
+  for (const w of cfg.writes ?? []) {
+    if (w === 'run') scopes.push(dir);
+    else if (w === 'artifacts') scopes.push(join(dir, 'artifacts'));
+    else if (w === 'memory') scopes.push(MEMORY);
+    else if (w === 'worktree' && o.worktree) scopes.push(o.worktree);
+  }
+  mkdirSync(join(dir, 'transcripts'), { recursive: true });
+  return {
+    scopes,
+    transcript: join(dir, 'transcripts', `${cfg.name}-lap${lap}.jsonl`),
+    artifact: join(dir, artifactName),
+  };
 }
 
 /**
@@ -236,6 +311,11 @@ function mcpServers(): Record<string, unknown> {
   };
 }
 
+/** The MCP servers one session starts with: the GitLab server unless the caller opted out. */
+export function sessionMcpServers(o: Pick<PhaseInput, 'gitlabMcp'>): Record<string, unknown> {
+  return o.gitlabMcp === false ? {} : mcpServers();
+}
+
 /**
  * The managed app login, for the phases that can actually reach an app.
  *
@@ -269,8 +349,9 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   };
 
   const cwd = cfg.cwd === 'worktree' && input.worktree ? input.worktree : ROOT;
-  const scopes = writeScopes(cfg, iid, input.worktree);
-  const tee = transcriptPath(iid, cfg.name, lap);
+  const paths = phasePaths(cfg, iid, lap, { worktree: input.worktree, stateDir: input.stateDir });
+  const scopes = paths.scopes;
+  const tee = paths.transcript;
 
   const env: Record<string, string> = {
     ...BASE_ENV,
@@ -384,8 +465,10 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
         // `hooks` option below instead, so they travel with the repo.
         settingSources: ['project'],
         hooks: hooksFor(env) as never,
-        mcpServers: mcpServers() as never,
-        ...toolPolicy(cfg),
+        mcpServers: sessionMcpServers(input) as never,
+        // A caller's extra denials are added, never substituted: the policy's
+        // own list is the floor every phase keeps.
+        disallowedTools: [...new Set([...toolPolicy(cfg).disallowedTools, ...(input.disallowTools ?? [])])],
         permissionMode: 'bypassPermissions',
         // Required alongside bypassPermissions in SDK 0.1.77. The hook layer,
         // not the permission prompt, is the real gate here.
@@ -518,7 +601,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
             out.summary = msg.result.slice(0, 400);
             out.ok = true;
           } else {
-            out.error = 'session produced no structured output despite a schema';
+            out.error = NO_STRUCTURED_OUTPUT;
             limitSignals.push(msg.result ?? '');
           }
         } else {
@@ -555,7 +638,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     } else if (ac.signal.aborted) {
       // A cancellation the conductor asked for reports nothing about the
       // account, so its text is kept away from the usage-limit detector.
-      out.error = 'cancelled by the conductor';
+      out.error = CANCELLED_BY_CONDUCTOR;
       out.infra = true;
     } else {
       out.error = m;
@@ -630,7 +713,14 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     }
   }
 
-  if (out.data) writeArtifact(iid, cfg.artifact ?? `${cfg.name}.json`, out.data);
+  if (out.data) {
+    if (input.stateDir) {
+      mkdirSync(dirname(paths.artifact), { recursive: true });
+      writeFileSync(paths.artifact, `${JSON.stringify(out.data, null, 2)}\n`);
+    } else {
+      writeArtifact(iid, cfg.artifact ?? `${cfg.name}.json`, out.data);
+    }
+  }
 
   logEvent('phase_done', {
     phase: cfg.name, lap, ok: out.ok, turns: out.turns,

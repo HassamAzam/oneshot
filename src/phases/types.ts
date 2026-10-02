@@ -50,9 +50,66 @@ export interface TestCase {
 
 export interface CaseResult {
   id: string;
-  result: 'pass' | 'fail' | 'blocked' | 'skipped';
+  result: 'pass' | 'fail' | 'blocked' | 'skipped' | 'pre-existing';
   evidence: string;
   screenshot: string;
+}
+
+/**
+ * base-check.json: the on-demand check of verify's 'pre-existing' labels on the
+ * base branch. Here rather than beside applyBaseCheck in the runner because the
+ * MR note reads it too, and lib/ does not import from conductor/.
+ */
+export interface BaseCheck {
+  baseCommit?: string;
+  results?: Array<{
+    id?: string; onBase?: string; inTicketScope?: boolean; evidence?: string; screenshot?: string;
+  }>;
+}
+
+/**
+ * Whether a case result is a failure OF THIS CHANGE — the one question the
+ * verify cycle, implement's fix list and the merge gate all ask.
+ *
+ * 'pre-existing' is a failure verify traced to the base branch: the case fails
+ * the same way without this diff. Sending it back to implement cannot fix it
+ * and blocking the merge on it holds a correct change hostage, so it is
+ * reported to the MR reviewer instead. Two runs spent their verify laps on one
+ * case that verify itself traced to a pre-existing backend bug, and the second
+ * blocked on it.
+ *
+ * The label is the phase's own claim, and a check phase's claim is not
+ * evidence on its own: one that arrives with no evidence is counted as the
+ * failure it would otherwise be hiding.
+ */
+export function countsAsFailure(r: { result?: string; evidence?: string }): boolean {
+  if (r.result === 'fail') return true;
+  return r.result === 'pre-existing' && !String(r.evidence ?? '').trim();
+}
+
+/**
+ * The ids of the cases that exercise this ticket's own acceptance criteria:
+ * those tagged with the `happy` pass, which the testcases prompt defines as
+ * "every acceptance criterion, exercised the way the ticket describes it".
+ *
+ * Such a case can never be 'pre-existing'. On the base branch it fails by
+ * definition — the change it checks is not there yet, and on a bug ticket the
+ * bug is — so a base-branch re-run cannot tell the ticket's own unfixed bug
+ * from somebody else's: both "fail the same way". An implement lap that fixed
+ * the wrong code path left verify citing a base file:line the diff truly does
+ * not touch, and the base check then confirmed the ticket's own bug as not
+ * this change's. This is the floor that needs nobody's judgement. testcases
+ * (n:4) writes the tags after implement's first lap and before verify (n:6),
+ * and a cycle never re-runs it: nextIndex() and the remediation resume both
+ * skip testcases when they re-force a window. The one path that does re-run
+ * it, a revise at the test-case gate, fires before review and takes its
+ * feedback from a person. So the tags a verify lap is judged against were
+ * always written before that lap ran, and no verify outcome can move them.
+ */
+export function ticketScopeIds(cases: ReadonlyArray<{ id?: unknown; pass?: unknown }>): Set<string> {
+  return new Set(cases
+    .filter((c) => typeof c.id === 'string' && Array.isArray(c.pass) && c.pass.includes('happy'))
+    .map((c) => c.id as string));
 }
 
 export interface Finding {

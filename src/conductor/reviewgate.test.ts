@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planApprovalRequestBody, testcasesApprovalRequestBody, testcasesApprovedRecordBody } from './reviewgate.js';
+import {
+  planApprovalRequestBody, repliesAfter, testcasesApprovalRequestBody, testcasesApprovedRecordBody,
+} from './reviewgate.js';
 import { renderPlanMd } from '../lib/publish.js';
 
 const oldPlan = {
@@ -117,7 +119,7 @@ test('plan markdown keeps a multi-line note inside its own row', () => {
   });
   assert.equal(cells(md, 'first line').length, 4);
   assert.match(md, /\| first line<br>second line \|/);
-  assert.ok(md.includes('## Reuse before writing'), 'the sections after the table survive');
+  assert.ok(md.includes('## Prior art and verdicts'), 'the sections after the table survive');
 });
 
 test('plan markdown escapes HTML in table cells as well as in prose', () => {
@@ -189,4 +191,20 @@ test('the approved record uses the same table, so both comments read alike', () 
   const md = testcasesApprovedRecordBody([tcase()]);
   assert.ok(md.includes('| Case | Blast | Scenario | Expects |'));
   assert.ok(md.includes('**Approved test cases** (1)'));
+});
+
+test('repliesAfter drops system notes, machine notes and anything at or before the request, and carries created_at', () => {
+  const at = '2026-09-28T10:15:00Z';
+  const replies = repliesAfter([
+    { id: 300, body: 'before the request', author: { username: 'anosha.saeed' } },
+    { id: 310, body: 'the request itself', author: { username: 'arsal.tariq' } },
+    { id: 311, body: 'added ~12 label', system: true, author: { username: 'arsal.tariq' } },
+    { id: 312, body: 'Oneshot claimed this ticket <!-- oneshot:claim:r-x -->', author: { username: 'arsal.tariq' } },
+    { id: 313, body: 'approved', author: { username: 'anosha.saeed' }, created_at: at },
+    { id: 314, body: 'no author, no time' },
+  ], 310);
+  assert.deepEqual(replies, [
+    { id: 313, text: 'approved', user: 'anosha.saeed', at },
+    { id: 314, text: 'no author, no time', user: null, at: null },
+  ]);
 });
