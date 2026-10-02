@@ -1128,6 +1128,13 @@ function intersection(a, b) {
  * and `hidden` names which one and why. `areaPx` is then 0 by design, while `region`
  * keeps the patch the invisible element would cover: diagnostics, not a defect to quote.
  *
+ * Each side is its selector's FIRST match — settle() and visible() both go through
+ * `.first()` — so a selector that also matches a parked copy measures whichever comes
+ * first in the DOM. On the live Training modal `.MuiDialogContent-root` matched a hidden
+ * copy of the dialog left at y 1203..1497 and gave two readings that described nothing
+ * on screen. `hidden` or `outsideViewport` on a side that is plainly on screen is this:
+ * narrow the selector rather than believe the result.
+ *
  * One thing this does NOT handle: both boxes are viewport-relative and they are read one
  * after the other, so a page that scrolls between the two reads compares two different
  * coordinate frames. Measured: two elements 600px apart, truthfully `areaPx=0`, came back

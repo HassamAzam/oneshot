@@ -231,6 +231,12 @@ pytest is unaffected and is fine to run.
     not on screen — `visibility:hidden` and `opacity:0` both measure full size,
     so a popover that is hidden rather than unmounted would otherwise be
     reported as covering the field it no longer covers.
+  - **Each side measures its selector's FIRST match.** A selector that also
+    matches a parked copy measures whichever comes first in the DOM: on the live
+    Training modal, `.MuiDialogContent-root` matched a hidden copy of the dialog
+    left at y 1203..1497 and gave two readings that described nothing on screen.
+    `hidden` or `outsideViewport` on a side you can see in the screenshot is
+    this — narrow the locator until it matches the one on screen.
   - **Nothing here survives the page scrolling underneath it.** The two boxes are
     viewport-relative and read one after the other, so a scroll that lands
     between them compares two different frames: two elements 600px apart,
