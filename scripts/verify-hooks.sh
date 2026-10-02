@@ -1069,6 +1069,93 @@ expect_allow "grep -r for a finding id" \
 expect_allow "an ordinary build command" \
                                        artifact-guard.cjs "$(bash_payload 'npm test -- --watchAll=false')"
 
+echo
+echo "install-guard"
+# One deny AND one allow per check: a branch that silently does nothing shows up
+# as a FAIL here rather than as a guard that merely looks like it works.
+expect_deny  "npm ci"                  install-guard.cjs "$(bash_payload 'npm ci')"
+expect_deny  "npm install"             install-guard.cjs "$(bash_payload 'npm install')"
+expect_deny  "npm install <pkg>"       install-guard.cjs "$(bash_payload 'npm install --save-dev eslint')"
+expect_deny  "npm i alias"             install-guard.cjs "$(bash_payload 'npm i')"
+expect_deny  "npm add"                 install-guard.cjs "$(bash_payload 'npm add playwright')"
+expect_deny  "npm update"              install-guard.cjs "$(bash_payload 'npm update')"
+expect_deny  "npm rebuild"             install-guard.cjs "$(bash_payload 'npm rebuild node-sass')"
+expect_deny  "npm link"                install-guard.cjs "$(bash_payload 'npm link playwright')"
+expect_deny  "npm dedupe"              install-guard.cjs "$(bash_payload 'npm dedupe')"
+expect_deny  "yarn install"            install-guard.cjs "$(bash_payload 'yarn install --frozen-lockfile')"
+expect_deny  "yarn add"                install-guard.cjs "$(bash_payload 'yarn add react')"
+expect_deny  "pnpm install"            install-guard.cjs "$(bash_payload 'pnpm install')"
+# Bare `yarn` IS `yarn install`. Bare `npm`/`pnpm` only print help, so only yarn
+# is denied with no subcommand at all.
+expect_deny  "bare yarn"               install-guard.cjs "$(bash_payload 'yarn')"
+expect_deny  "bare yarn with flags"    install-guard.cjs "$(bash_payload 'yarn --silent')"
+# A value-taking flag must not hide the subcommand: the first non-flag token here
+# is the path, not `ci`. This is the hole a naive `t[1]` check leaves open, and it
+# is the one that reaches the seed checkout directly.
+expect_deny  "npm --prefix <seed> ci"  install-guard.cjs "$(bash_payload 'npm --prefix /Users/x/Workspace/workstreamai ci')"
+expect_deny  "yarn --cwd frontend install" \
+                                       install-guard.cjs "$(bash_payload 'yarn --cwd frontend install')"
+expect_deny  "npx (installs on resolve)" \
+                                       install-guard.cjs "$(bash_payload 'npx playwright install chromium')"
+expect_deny  "npm exec"                install-guard.cjs "$(bash_payload 'npm exec playwright --version')"
+expect_deny  "pnpm dlx"                install-guard.cjs "$(bash_payload 'pnpm dlx eslint .')"
+expect_deny  "pip install"             install-guard.cjs "$(bash_payload 'pip install requests')"
+expect_deny  "pip3 install -r"         install-guard.cjs "$(bash_payload 'pip3 install -r requirements.txt')"
+expect_deny  "pip uninstall"           install-guard.cjs "$(bash_payload 'pip uninstall -y django')"
+expect_deny  "python -m pip install"   install-guard.cjs "$(bash_payload 'python -m pip install requests')"
+expect_deny  "python3 -m pip install"  install-guard.cjs "$(bash_payload 'python3 -m pip install -U pytest')"
+expect_deny  "python3 -m venv"         install-guard.cjs "$(bash_payload 'python3 -m venv venv')"
+expect_deny  "virtualenv"              install-guard.cjs "$(bash_payload 'virtualenv venv')"
+expect_deny  "rm -rf node_modules"     install-guard.cjs "$(bash_payload 'rm -rf node_modules')"
+expect_deny  "rm -rf venv"             install-guard.cjs "$(bash_payload 'rm -rf venv/')"
+expect_deny  "chained after a legal command" \
+                                       install-guard.cjs "$(bash_payload 'cd frontend && npm ci')"
+expect_deny  "install hidden in a pipeline" \
+                                       install-guard.cjs "$(bash_payload 'cat package.json | head && npm install')"
+# An env assignment is neither a flag nor the program name. NODE_ENV in front is
+# a realistic shape here — the eslint gate teaches sessions to prefix it.
+expect_deny  "env-prefixed npm ci"     install-guard.cjs "$(bash_payload 'NODE_ENV=development npm ci')"
+expect_deny  "env(1)-prefixed install" install-guard.cjs "$(bash_payload 'env NODE_ENV=development npm install')"
+expect_deny  "sudo npm install -g"     install-guard.cjs "$(bash_payload 'sudo npm install -g yarn')"
+# A subshell leaves the trailing paren glued to the subcommand (`ci)`), and a
+# command substitution never splits into segments at all.
+expect_deny  "npm ci in a subshell"    install-guard.cjs "$(bash_payload '(cd frontend; npm ci)')"
+expect_deny  "npm ci in a brace group" install-guard.cjs "$(bash_payload '{ npm ci; }')"
+expect_deny  "npm ci via bash -c"      install-guard.cjs "$(bash_payload 'bash -c "npm ci"')"
+# A command substitution runs what is inside it, whatever stands in front.
+expect_deny  "install in \$( )"         install-guard.cjs "$(bash_payload 'echo $(npm install)')"
+expect_deny  "install in backticks"    install-guard.cjs "$(bash_payload 'echo `npm install`')"
+
+expect_allow "npm test"                install-guard.cjs "$(bash_payload 'npm test -- --watchAll=false')"
+expect_allow "npm start"               install-guard.cjs "$(bash_payload 'npm start')"
+expect_allow "npm run build"           install-guard.cjs "$(bash_payload 'npm run build')"
+expect_allow "npm run lint:fix"        install-guard.cjs "$(bash_payload 'npm run lint:fix')"
+expect_allow "npm ls"                  install-guard.cjs "$(bash_payload 'npm ls --depth=0 playwright')"
+expect_allow "npm --version"           install-guard.cjs "$(bash_payload 'npm --version')"
+# A script name may contain a denied verb; the allowed `run` stops the scan, so
+# the script name is never read as a subcommand.
+expect_allow "npm run install-check"   install-guard.cjs "$(bash_payload 'npm run install-check')"
+expect_allow "yarn test"               install-guard.cjs "$(bash_payload 'yarn test')"
+expect_allow "pip list"                install-guard.cjs "$(bash_payload 'pip list')"
+expect_allow "pip show"                install-guard.cjs "$(bash_payload 'pip3 show django')"
+expect_allow "python3 -m pytest"       install-guard.cjs "$(bash_payload 'python3 -m pytest apps/leaves')"
+expect_allow "python3 manage.py"       install-guard.cjs "$(bash_payload 'python3 manage.py migrate --plan')"
+# The sanctioned way to reach Playwright: resolved through node_modules/NODE_PATH.
+expect_allow "node -e require(playwright)" \
+                                       install-guard.cjs "$(bash_payload "node -e \"require('playwright')\"")"
+expect_allow "ordinary git"             install-guard.cjs "$(bash_payload 'git status --short')"
+# The rule being written about is not the rule being run.
+expect_allow "grep for the rule in docs" \
+                                       install-guard.cjs "$(bash_payload 'grep -rn "npm ci" docs/')"
+expect_allow "rm of an unrelated path"  install-guard.cjs "$(bash_payload 'rm -rf .verify-scratch')"
+# Stripping brackets inside tokens instead of splitting segments on them is what
+# keeps this an allow: `echo` is still the program.
+expect_allow "echoing the rule itself" \
+                                       install-guard.cjs "$(bash_payload 'echo "(npm ci) is denied here"')"
+expect_allow "a node -e with parens"   install-guard.cjs "$(bash_payload "node -e \"console.log(require.resolve('playwright'))\"")"
+expect_allow "bash running a repo script" \
+                                       install-guard.cjs "$(bash_payload 'bash scripts/verify-hooks.sh')"
+
 rm -rf "$ONESHOT_WORKTREE"
 
 echo

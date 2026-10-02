@@ -94,8 +94,9 @@ Login goes through the real form with `ONESHOT_TEST_LOGIN`. Record the account.
 
 - Follow the ticket's steps, in its own terms. Where it gives none, derive them
   from the description and the `uiPath` you traced, and say they were derived.
-- Drive it with Playwright, as `local-browser-verify` describes (require it through
-  the Oneshot install; never `npm install` into the worktree).
+- Drive it with Playwright, as `local-browser-verify` describes — require it through
+  the Oneshot install. An `npm install` into the worktree is denied by
+  `install-guard`, so a module that will not resolve is `blocked`, not a detour.
 - Wait for data, not skeletons. Retry a flaky step twice.
 - **Measure what the bug is about.** "Obscured", "misaligned", "wrong total",
   "not announced" all have a number or an attribute: an overlap, contrast
