@@ -119,7 +119,7 @@ test('plan markdown keeps a multi-line note inside its own row', () => {
   });
   assert.equal(cells(md, 'first line').length, 4);
   assert.match(md, /\| first line<br>second line \|/);
-  assert.ok(md.includes('## Reuse before writing'), 'the sections after the table survive');
+  assert.ok(md.includes('## Prior art and verdicts'), 'the sections after the table survive');
 });
 
 test('plan markdown escapes HTML in table cells as well as in prose', () => {

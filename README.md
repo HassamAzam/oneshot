@@ -74,6 +74,10 @@ Three things fall out of that:
    5  review       ∥  Opus 5    findings ──► back to 3 (max 3 laps)
    6  verify          Sonnet 5  dev server + Playwright, runs THE list
                                 fail ──► back to 3 (max 2 laps)
+                                pre-existing ──► base-check re-runs it on dev:
+                                  fails there too, outside the ticket's
+                                  scope ──► listed on the MR, no lap
+                                  otherwise, or the branch migrates ──► a fail
    7  ui-evidence  ∥  Sonnet 5  screenshots
    8  mr           ∥  Sonnet 5  MR + description
    9  merge           code      merge into dev — dev is final, nothing promotes on
@@ -846,7 +850,7 @@ then-current order of recall → research → plan → testcases:
 | M3 | `verify`, `ui-evidence` — dev server on a leased port, Playwright, screenshots | built, unproven |
 | M4 | `mr`, `merge` — MR, merge, promote, and the run's record on the ticket and the MR | built, unproven |
 | M5 | ~~`deploy`, `qa`, `demo`~~ — **removed**: the pipeline ends at the merge | withdrawn |
-| M6 | `recall` — memory index and recall | built, unproven; nothing writes new cards since `memorize` was removed |
+| M6 | `recall` — memory index and recall | built, unproven; merge writes the card and index line (src/lib/memory.ts), `npm run memory:backfill` for runs merged before that |
 | M7 | dashboard, replay, hardening hooks | not started |
 
 `runner.ts` stops with an explicit `BLOCKED: not built yet: phase '<name>'` rather than skipping

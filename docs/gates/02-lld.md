@@ -587,6 +587,12 @@ timeoutMin = min(150, 40 + 5.5 × n)
 
 ## 7. The skill call graph
 
+> *Superseded 2026-10-01 for phases 1 and 2 only.* The table below names the skills as designed
+> on 2026-09-01; several (`ticket-recall`, `ticket-research`, `test-case-writing`) were never
+> authored under those names. `research` now loads `prior-art-survey` and `plan` loads
+> `change-scoping`, which together replace the `planning-methodology` + `util-reuse-methodology`
+> pair against phase 2. `config/phases.json` is the live list.
+
 Resolution rule: `claudedir.ts` composes `.claude/skills/` with **context-repo-first** (`claudedir.ts:24-28`), context = `~/Documents/erp/.claude` (`config.ts:304`), topped up from `oneshot/skills/`. Sessions run `settingSources:['project']`, so a skill that is in neither tree does not exist for a phase. `graphify-knowledge-graph` is excluded by name (`claudedir.ts:61-67`).
 
 | n | phase | kind | tier | cwd | skills (source) | subagents | inputs | output (schema) | gate | changes under this design |

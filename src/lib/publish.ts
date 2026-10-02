@@ -31,6 +31,7 @@ import {
 } from './gitlab.js';
 import { log } from './log.js';
 import { mdText, tableCell } from './gitlabmd.js';
+import type { BaseCheck } from '../phases/types.js';
 
 /** GitLab rejects very large attachments; skip them with a note rather than failing. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -104,7 +105,7 @@ ${questions ? `\n## Open questions\n${questions}\n` : ''}
 |---|---|---|---|
 ${steps || '| — | — | (none recorded) | — |'}
 ${coverage ? `\n## Acceptance coverage\n| Criterion | Status | Covered by | Note |\n|---|---|---|---|\n${coverage}\n` : ''}
-## Reuse before writing
+## Prior art and verdicts
 ${(plan.reuse ?? []).map((r) => `- ${r}`).join('\n') || '- (none identified)'}
 
 ## Risks
@@ -150,6 +151,7 @@ interface CaseResult {
 function resultTable(results: CaseResult[]): string {
   const icon: Record<string, string> = {
     pass: ':white_check_mark:', fail: ':x:', blocked: ':warning:', skipped: ':heavy_minus_sign:',
+    'pre-existing': ':leftwards_arrow_with_hook:',
   };
   return ['| Case | Result | Evidence |', '|---|---|---|',
     ...results.map((r) => `| ${r.id} | ${icon[r.result] ?? ''} ${r.result} | ${
@@ -260,6 +262,28 @@ function screenshotsFrom(iid: number, results: CaseResult[], limit: number): Att
   return out;
 }
 
+/**
+ * The base-branch screenshot behind each confirmed 'pre-existing' case, shaped
+ * so screenshotsFrom() can attach it.
+ *
+ * base-check is required to save one (`base-<case-id>.png`) for every case it
+ * scores 'fails', and that image is the proof the MR note asks a reviewer to
+ * confirm. Without this the shot was captured and dropped: the note said
+ * "confirmed on <base>" and the evidence sat unpublished in artifacts/. Only a
+ * case still labelled after applyBaseCheck() counts, and only an entry the
+ * check scored 'fails', so a refused label never shows a base shot.
+ */
+export function baseShotsFor(results: CaseResult[], check: BaseCheck | null): CaseResult[] {
+  const shots: CaseResult[] = [];
+  for (const r of results) {
+    if (r.result !== 'pre-existing') continue;
+    const seen = (check?.results ?? []).find((c) => c.id === r.id && c.onBase === 'fails');
+    const shot = typeof seen?.screenshot === 'string' ? seen.screenshot.trim() : '';
+    if (shot) shots.push({ id: r.id, result: r.result, evidence: '', screenshot: shot });
+  }
+  return shots;
+}
+
 const SPECS: Spec[] = [
   {
     key: 'plan',
@@ -305,13 +329,25 @@ const SPECS: Spec[] = [
       const results = (data.results as CaseResult[]) ?? [];
       if (!results.length) return null;
       const regressions = (data.regressions as string[]) ?? [];
+      const preExisting = results.filter((r) => r.result === 'pre-existing');
+      const baseShots = baseShotsFor(results, readArtifact<BaseCheck>(ctx.iid, 'base-check.json'));
+      const baseShotOf = new Map(baseShots.map((s) => [s.id, s.screenshot]));
+      const baseNote = (id: string): string =>
+        baseShotOf.has(id) ? ` (base: ${mdText(baseShotOf.get(id) ?? '')})` : '';
       return {
         body: `**Local verification** — ${tally(results)}.\n\n${resultTable(results)}\n\n` +
           (regressions.length
             ? `**Regressions**\n${regressions.map((r) => `- ${r}`).join('\n')}\n\n`
             : '') +
+          (preExisting.length
+            ? '**Pre-existing failures — not caused by this change**\n'
+              + 'These fail on the base branch too, so they did not hold this MR. Please confirm '
+              + 'each one is genuinely not this diff, and raise a ticket for it.\n'
+              + `${preExisting.map((r) => `- ${r.id}: ${mdText(r.evidence ?? '').replace(/\s*\n\s*/g, ' ')}${baseNote(r.id)}`).join('\n')}\n\n`
+            : '') +
           `_Run ${ctx.runId} · executed in a real browser against the branch._`,
-        attachments: screenshotsFrom(ctx.iid, results, 10),
+        // Base shots first, with room of their own, so verify's ten never crowd out the proof.
+        attachments: screenshotsFrom(ctx.iid, [...baseShots, ...results], 10 + baseShots.length),
       };
     },
   },
