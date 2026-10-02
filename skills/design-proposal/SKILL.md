@@ -35,11 +35,28 @@ about the feature and feedback about your colour choices.
 
 In order:
 
-1. **Read the real tokens.** `frontend/src/jss/Theme.js` (`getColors`,
-   `getPalateColors`), `frontend/src/jss/style.js` (Lato/Montserrat),
-   `frontend/src/scss/_variables.scss`. Distil them into one `tokens.css` that
-   every mockup imports — a system-level change is then a one-file edit instead
-   of a find-and-replace across five files.
+1. **Use the tokens you were handed.** `design/tokens.css` is already in your
+   artifact directory, generated before this session started by a deterministic
+   read of `frontend/src/jss/Theme.js` (`getColors`), `frontend/src/jss/style.js`
+   (Lato/Montserrat) and `frontend/src/scss/_variables.scss`. Every mockup
+   imports it, so a system-level change is a one-file edit instead of a
+   find-and-replace across five files.
+
+   **Import it; never rewrite it.** It is regenerated at the start of every
+   round, so an edit to it is lost. A token the product does not have yet goes
+   in `design/new-tokens.css`, which is yours, and in `newPatterns`.
+
+   **Read its header before you draw.** It names the files it read and lists
+   every token it could NOT resolve. Those are the only ones you go to the
+   source for — going back for the rest re-derives, by hand and less reliably,
+   something that is already correct in front of you. If the file is absent
+   altogether the generator could not run: read the three files above and
+   distil them yourself, exactly as this step used to say.
+
+   **For a dark-mode screen, put `data-theme="dark"` on `<html>`.** The dark
+   values sit in that block, not in a media query, so a dark mockup without
+   the attribute renders the light palette — and re-deriving dark values by
+   hand is the drift this file exists to stop.
 2. **Capture the screens as they are today.** Bring the app up the way everything
    else does (`node $ONESHOT_HOME/scripts/app.cjs ensure`) and screenshot each
    screen this ticket touches. Those captures are the `before` on every screen,
@@ -53,7 +70,8 @@ did not capture it.
 
 ## 3. Draw the screens
 
-One self-contained `.html` per screen, importing `../tokens.css`. No CDN
+One self-contained `.html` per screen, in `design/` beside the tokens and
+importing `./tokens.css` (and `./new-tokens.css` if you made one). No CDN
 scripts, no external fonts, no remote images: inline everything.
 
 - **Real content, always.** Plausible names, dates, amounts and statuses for
