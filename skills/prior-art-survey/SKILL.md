@@ -79,25 +79,30 @@ This is the step that lapses, because it feels like bookkeeping while you are
 mid-trace. Make it a command rather than a memory:
 
 ```
-grep -nE '^[[:space:]]*(async )?(def|class) ' <file>                          # python
-grep -nE '^(export (default )?)?(async )?(function|const|let|class) ' <file>  # js/ts, top level only
+grep -nE '^([[:space:]]*(async )?(def|class) |[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=])' <file>  # python
+grep -nE '^(export default |(export )?(async )?(function|const|let|class) )' <file>             # js/ts, top level only
 ```
 
 These are Bash commands; the same patterns work unchanged as a Grep-tool
 pattern. Read the listing against the hit:
 
 - **A hit that is itself a listed entry is its own definition.**
-- **Python** — the enclosing definition of a hit at line N is the last listed
+- **Python** — the listing carries every `def` and `class` and each
+  module-level assignment, because a constant's assignment line IS its
+  definition. The enclosing definition of a hit at line N is the last listed
   entry before N that is indented LESS than line N. That skips a nested `def`
-  the hit sits after rather than inside. A hit at column 0 that is not a `def`
-  or `class` is a module-level statement: for a constant, that assignment line
-  IS its definition.
+  the hit sits after rather than inside, and sends a hit inside a multi-line
+  constant (`EXCLUDED = {` … `}`) to its assignment line rather than to the
+  function above it. A hit at column 0 that is not listed is a module-level
+  statement; cite it at its own line.
 - **JS/TS** — the list is top-level only, because a component body is full of
-  local `const`s that are not definitions, so the enclosing definition is
-  simply the last entry before N. The trade-off: a hit inside an inner handler
-  or a class-component method resolves to the component or class line. Read
-  down from there to the inner `const handleX =` or method the hit sits in, and
-  cite that rather than the component line.
+  local `const`s that are not definitions. It includes the anonymous
+  `export default (props) =>` component, which has no name to grep for. The
+  enclosing definition is simply the last entry before N. The trade-off: a hit
+  inside an inner handler or a class-component method resolves to the
+  component or class line. Read down from there to the inner
+  `const handleX =` or method the hit sits in, and cite that rather than the
+  component line.
 
 One command per **file**, not per hit — the cost is one call however many hits
 that file returned.

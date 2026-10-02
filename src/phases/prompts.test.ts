@@ -442,11 +442,14 @@ test('the research prompt still stands alone if the skill does not resolve', () 
   // habit. Both are -E with a POSIX class instead of `\s`: a template literal
   // eats a single backslash, and BSD grep, GNU grep and ripgrep read this form
   // the same way.
-  assert.ok(p.includes(`grep -nE '^[[:space:]]*(async )?(def|class) ' <file>`), 'the python variant');
+  assert.ok(
+    p.includes(`grep -nE '^([[:space:]]*(async )?(def|class) |[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=])' <file>`),
+    'the python variant',
+  );
   // Both variants, or a frontend ticket gets a Python-only command for the one
   // step this change calls load-bearing.
   assert.ok(
-    p.includes(`grep -nE '^(export (default )?)?(async )?(function|const|let|class) ' <file>`),
+    p.includes(`grep -nE '^(export default |(export )?(async )?(function|const|let|class) )' <file>`),
     'the js/ts variant',
   );
 });
@@ -464,12 +467,13 @@ const listed = (pattern: RegExp, file: string): number[] =>
 const indent = (l: string): number => l.length - l.trimStart().length;
 
 /** The python rule as the prompt states it: a listed hit is its own definition,
- *  otherwise the last listed entry before N indented LESS than line N. */
+ *  and so is an unlisted column-0 statement; otherwise the last listed entry
+ *  before N indented LESS than line N. */
 const enclosingPy = (pattern: RegExp, file: string, n: number): number | undefined => {
   const lines = file.split('\n');
   const defs = listed(pattern, file);
-  if (defs.includes(n)) return n;
   const at = indent(lines[n - 1] ?? '');
+  if (defs.includes(n) || at === 0) return n;
   return defs.filter((d) => d < n && indent(lines[d - 1] ?? '') < at).at(-1);
 };
 
@@ -484,9 +488,14 @@ const COMPONENT = [
   '  return isMaternity ? remaining : open;',
   '};',
   '',
-  'export default function E() {',
+  'export async function loadQuota() {',
   '  return LEAVE_TYPES.MATERNITY;',
   '}',
+  '',
+  'export default (props) => {',
+  '  const days = LEAVE_TYPES.MATERNITY;',
+  '  return <LeaveSummary person={props.person} days={days} />;',
+  '};',
 ].join('\n');
 
 const VIEW = [
@@ -501,6 +510,17 @@ const VIEW = [
   '        yield LeaveType.MATERNITY',
   '',
   'MATERNITY_DAYS = 90',
+  '',
+  '',
+  'def can_view_leave(user):',
+  '    return user.is_staff',
+  '',
+  '',
+  'EXCLUDED_LEAVE_TYPES = {',
+  '    LeaveType.MATERNITY,',
+  '}',
+  '',
+  'register_quota(LeaveType.MATERNITY, MATERNITY_DAYS)',
 ].join('\n');
 
 test('a hit resolves to the definition around it, not to a local or to the line it matched', () => {
@@ -508,7 +528,10 @@ test('a hit resolves to the definition around it, not to a local or to the line 
   // local `const` in a component body, and a hit on line 7 resolved to line 7
   // itself: the matched line the schema forbids citing. Its python pattern never
   // listed `async def`, and "the last entry at or before N" sent a hit in
-  // `get`'s body to the nested `_fmt` above it.
+  // `get`'s body to the nested `_fmt` above it. The second cut listed only defs
+  // and classes, so a hit inside a multi-line module constant resolved to the
+  // def above the constant, and its js/ts list skipped `export default (props)
+  // =>`, so a hit in that component resolved to whatever came before it.
   const sources = [
     ['research prompt', promptFor(cfg('research'), ctx(ticket()))],
     ['prior-art-survey skill', readFileSync(join(ROOT, 'skills', 'prior-art-survey', 'SKILL.md'), 'utf8')],
@@ -516,12 +539,15 @@ test('a hit resolves to the definition around it, not to a local or to the line 
   for (const [where, text] of sources) {
     const [py, js, ...rest] = definitionListings(text);
     assert.ok(py && js && rest.length === 0, `${where} ships exactly a python and a js/ts listing`);
-    assert.deepEqual(listed(js, COMPONENT), [4, 11], `${where}: js/ts lists top-level definitions only`);
+    assert.deepEqual(listed(js, COMPONENT), [4, 11, 15], `${where}: js/ts lists top-level definitions only`);
     assert.equal(listed(js, COMPONENT).filter((d) => d <= 7).at(-1), 4, `${where}: the hit in the body is the component's`);
-    assert.deepEqual(listed(py, VIEW), [1, 2, 3, 8], `${where}: python lists async def`);
+    assert.equal(listed(js, COMPONENT).filter((d) => d <= 16).at(-1), 15, `${where}: a hit in an anonymous default export is that export's`);
+    assert.deepEqual(listed(py, VIEW), [1, 2, 3, 8, 11, 14, 18], `${where}: python lists async def and module-level assignments`);
     assert.equal(enclosingPy(py, VIEW, 5), 2, `${where}: a hit after a nested def is the outer def's`);
     assert.equal(enclosingPy(py, VIEW, 9), 8, `${where}: a hit in an async def is that def's`);
-    assert.equal(enclosingPy(py, VIEW, 11), undefined, `${where}: a module-level constant has no enclosing def`);
+    assert.equal(enclosingPy(py, VIEW, 11), 11, `${where}: a one-line constant is its own definition`);
+    assert.equal(enclosingPy(py, VIEW, 19), 18, `${where}: a hit inside a multi-line constant is the constant's, not the def above it`);
+    assert.equal(enclosingPy(py, VIEW, 22), 22, `${where}: an unlisted column-0 statement is cited at its own line`);
   }
 });
 

@@ -832,14 +832,18 @@ Work out what this ticket actually requires, and trace the code that implements 
   found goes in \`unknowns\`, so the next phase neither repeats it nor invents a near-match.
 - Resolve every hit to its enclosing DEFINITION before you judge it, and cite the definition's
   own line — never a line inside a body that the search matched. One Bash grep per FILE, not
-  per hit: \`grep -nE '^[[:space:]]*(async )?(def|class) ' <file>\` for python, and
-  \`grep -nE '^(export (default )?)?(async )?(function|const|let|class) ' <file>\` for js/ts,
-  which lists top-level definitions only. A hit that is itself a listed entry is its own
-  definition. Otherwise, for python the enclosing definition of a hit at line N is the last
-  listed entry before N indented LESS than line N, and a python hit at column 0 that is not a
-  def or class is a module-level statement: for a constant, that assignment line IS its
-  definition. For js/ts it is the last entry before N; when that is a component or class and
-  the hit sits in an inner handler or method, read down to that \`const handleX =\` or method
+  per hit. For python,
+  \`grep -nE '^([[:space:]]*(async )?(def|class) |[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=])' <file>\`
+  lists every def and class plus each module-level assignment, because a constant's assignment
+  IS its definition. For js/ts,
+  \`grep -nE '^(export default |(export )?(async )?(function|const|let|class) )' <file>\` lists
+  top-level definitions only, an anonymous \`export default (props) =>\` component included. A
+  hit that is itself a listed entry is its own definition. Otherwise, for python the enclosing
+  definition of a hit at line N is the last listed entry before N indented LESS than line N,
+  so a hit inside a multi-line constant resolves to its assignment, not to the def above it;
+  a python hit at column 0 that is not listed is a module-level statement, cited at its own
+  line. For js/ts it is the last entry before N; when that is a component or class and the
+  hit sits in an inner handler or method, read down to that \`const handleX =\` or method
   line and cite it instead of the component's. Stop a noun after two definitions you have
   actually READ, and tighten any pattern returning more than ~30 hits rather than skimming
   it. An unresolved hit is a location, not evidence: never report one on its own, and never
