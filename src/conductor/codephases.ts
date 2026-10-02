@@ -41,6 +41,7 @@ import {
   type MergeRequest, type ProjectSettings,
 } from '../lib/gitlab.js';
 import type { CodePhaseCtx } from './runner.js';
+import { countsAsFailure } from '../phases/types.js';
 import { mergeHooksFor, mrFeedbackActive } from '../mrfeedback/wire.js';
 import type { MergeHooks } from '../mrfeedback/mergehooks.js';
 import type { MrFeedbackSignal } from '../mrfeedback/types.js';
@@ -855,10 +856,17 @@ export function qualityGate(ctx: CodePhaseCtx): string | null {
   const fromPrior = <T>(phase: string, file: string): T | null =>
     (ctx.prior[phase] as T | undefined) ?? readArtifact<T>(iid, file);
 
-  const verify = fromPrior<{ results?: Array<{ id?: string; result?: string }> }>(
-    'verify', 'verify.json');
+  const verify = fromPrior<{
+    results?: Array<{ id?: string; result?: string; evidence?: string }>;
+  }>('verify', 'verify.json');
   const results = verify?.results ?? [];
-  const failed = results.filter((r) => r.result === 'fail');
+  // 'pre-existing' is deliberately not a refusal: it fails on the base branch
+  // too, and the MR note lists it for the reviewer (lib/publish.ts). Memory
+  // and disk carry the same base-checked labels: the runner rewrites verify's
+  // out.data through applyBaseCheck(), overwrites the raw verify.json the
+  // phase wrote with that checked copy, and only then sets prior.verify, so an
+  // unconfirmed label is already 'fail' in both.
+  const failed = results.filter(countsAsFailure);
   if (failed.length) {
     const ids = failed.map((r) => r.id ?? '?').join(', ');
     const other = results.filter((r) => r.result === 'blocked' || r.result === 'skipped').length;
@@ -1100,6 +1108,7 @@ function verifyLine(verify: Record<string, unknown> | null): string {
   if (tally('fail')) parts.push(`${tally('fail')} failed`);
   if (tally('blocked')) parts.push(`${tally('blocked')} blocked`);
   if (tally('skipped')) parts.push(`${tally('skipped')} skipped`);
+  if (tally('pre-existing')) parts.push(`${tally('pre-existing')} pre-existing (not this change)`);
   const regressions = aField(verify, 'regressions').length;
   return `${parts.join(', ')}${regressions ? ` · ${regressions} regression(s)` : ''}`;
 }

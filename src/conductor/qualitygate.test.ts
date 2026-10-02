@@ -4,7 +4,8 @@ import { rmSync } from 'node:fs';
 import { qualityGate } from './codephases.js';
 import { writeArtifact } from '../lib/artifacts.js';
 import { runDir } from '../lib/config.js';
-import type { CodePhaseCtx } from './runner.js';
+import { applyBaseCheck, type CodePhaseCtx } from './runner.js';
+import type { CaseResult } from '../phases/types.js';
 
 /**
  * An iid no real ticket will take, so the files these tests write cannot
@@ -100,4 +101,52 @@ test('disk is the fallback when prior is empty — a run resumed in a fresh proc
   const gate = qualityGate(ctx({ review: CLEAN_REVIEW }));
   assert.ok(gate, 'a resumed run still refuses a merge its cases did not pass');
   assert.match(gate, /TC-1/);
+});
+
+// ------------------------------------- a 'pre-existing' case arriving in prior
+
+const caseResult = (id: string, result: CaseResult['result'], evidence = 'fails on dev: views.py:40'): CaseResult =>
+  ({ id, result, evidence, screenshot: '' });
+
+/**
+ * What the runner holds in prior.verify after a base check: verify's results
+ * rewritten by applyBaseCheck(), the same object it writes to verify.json.
+ */
+const baseChecked = (onBase: 'fails' | 'passes') => ({
+  results: applyBaseCheck([caseResult('TC-1', 'pass'), caseResult('TC-15', 'pre-existing')], {
+    baseCommit: 'abcdef1234',
+    results: [{ id: 'TC-15', onBase, inTicketScope: false, evidence: '500 on save' }],
+  }, 'dev').results,
+});
+
+test('a pre-existing case the base confirmed reaches the gate through prior and does not block', () => {
+  cleanup();
+  // Disk disagrees, so a gate that read the file instead would refuse: the
+  // verdict has to come from memory, label and all.
+  writeArtifact(IID, 'verify.json', { results: [caseResult('TC-15', 'fail')] });
+  assert.equal(qualityGate(ctx({ verify: baseChecked('fails'), review: CLEAN_REVIEW })), null);
+});
+
+test('a pre-existing label the base did not confirm reaches the gate through prior as a fail', () => {
+  cleanup();
+  const gate = qualityGate(ctx({ verify: baseChecked('passes'), review: CLEAN_REVIEW }));
+  assert.ok(gate, 'a case that passes on the base was broken by this change');
+  assert.match(gate, /1 failing case\(s\) of 2: TC-15/);
+});
+
+test('a pre-existing label with no evidence in prior refuses the merge', () => {
+  cleanup();
+  // The label is the phase's claim; without evidence it is the fail it hides,
+  // whichever source the gate read it from.
+  const verify = { results: [caseResult('TC-1', 'pass'), caseResult('TC-15', 'pre-existing', '  ')] };
+  const gate = qualityGate(ctx({ verify, review: CLEAN_REVIEW }));
+  assert.ok(gate, 'an unevidenced label must not open the merge');
+  assert.match(gate, /TC-15/);
+});
+
+test('a confirmed pre-existing case on disk does not block a resumed run either', () => {
+  cleanup();
+  writeArtifact(IID, 'verify.json', baseChecked('fails'));
+  writeArtifact(IID, 'findings.json', CLEAN_REVIEW);
+  assert.equal(qualityGate(ctx({})), null);
 });

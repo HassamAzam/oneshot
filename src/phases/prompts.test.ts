@@ -440,6 +440,76 @@ test('without mr-open in the pipeline the mr prompt makes no claim about it', ()
   assert.match(mrOpenNote(true), /`Draft:` prefix off the title/);
 });
 
+// ------------------------------------------------- base-check judges scope
+
+/**
+ * "Fails on the base" is true by definition of the ticket's own bug, so the
+ * base check has to judge scope as well, and it can only do that against the
+ * criteria the cases were written from. ticketHead() leaves them out.
+ * An iid in the reserved 990000+ band, so the verify.json it reads is never a
+ * real run's.
+ */
+const baseCheckPrompt = (): string => promptFor(cfg('base-check'), ctx(ticket({ iid: 990102 }), {
+  research: { acceptanceCriteria: ['Leave balance carries forward at year end'] },
+}));
+
+test('base-check is given the acceptance criteria to judge scope against', () => {
+  const p = baseCheckPrompt();
+  assert.match(p, /## Acceptance criteria/);
+  assert.match(p, /Leave balance carries forward at year end/);
+});
+
+test("base-check judges scope from the ticket, never from verify's evidence", () => {
+  const p = baseCheckPrompt();
+  assert.match(p, /`inTicketScope`/);
+  assert.match(p, /never from verify's evidence/);
+  assert.match(p, /When you cannot tell, it is true/);
+});
+
+test('verify is not told a wrong label always ends as a fail', () => {
+  // It did not: a case in the ticket's own scope fails on the base by
+  // definition, so the old deterrent described a closed hatch that was open.
+  const p = promptFor(cfg('verify'), ctx(ticket()));
+  assert.doesNotMatch(p, /A wrong label saves nothing/);
+  assert.match(p, /tagged `happy` covers this ticket's own\s+criteria/);
+});
+
+test('base-check never scores a failure on the branch\'s own rows as the base failing', () => {
+  // verify ran the change against the one shared Postgres first, so a row it
+  // left behind was written by the change.
+  const p = baseCheckPrompt();
+  assert.match(p, /never reuse a row verify created or\s+marked/);
+  assert.match(p, /a record verify, or this branch's code, created or modified during\s+this run/);
+});
+
+test("base-check scores a failure on its own fresh fixtures as the base's answer", () => {
+  // The prompt tells the session to create every record fresh, so an
+  // "inconclusive" rule covering any record created during the run would
+  // swallow every data-dependent case and no label could ever be confirmed.
+  const p = baseCheckPrompt();
+  assert.match(p, /anything you did not just create fresh for the case/);
+  assert.match(p, /A failure on a record you created fresh through the base app is the base's own\s+answer/);
+  assert.doesNotMatch(p, /a failure that turns on a record created or modified during this run/);
+});
+
+test('verify is told a migrating branch cannot carry a confirmed label', () => {
+  const p = promptFor(cfg('verify'), ctx(ticket()));
+  assert.match(p, /a failure on data this branch's migrations or code wrote/);
+  assert.match(p, /adds or changes a migration the label is\s+never confirmed/);
+});
+
+test('base-check takes its URL and commit from ensure, never from list or git -C', () => {
+  // `app.cjs list` prints no baseUrl, and git-guard refuses `git -C` on the base
+  // checkout because it sits outside the leased worktree; an empty baseCommit
+  // drops the sha from every "confirmed on" line.
+  const p = baseCheckPrompt();
+  assert.match(p, /app\.cjs ensure --ref/);
+  assert.match(p, /`app\.baseUrl`/);
+  assert.match(p, /record `app\.head`/);
+  assert.doesNotMatch(p, /use its `baseUrl`/);
+  assert.doesNotMatch(p, /git -C <that checkout>/);
+});
+
 // --------------------------------- the prior-art hunt moved from plan to research
 
 test('research is given the prior-art survey on every ticket, label or not', () => {
