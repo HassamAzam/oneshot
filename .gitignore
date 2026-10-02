@@ -1,5 +1,8 @@
 node_modules/
 state/
+# The replay rig's dry HOME, beside the state/ it shadows. It holds a symlink to
+# the real .env, so an untracked copy is one `git add -A` away from the index.
+state-dry/
 logs/
 .env
 .env.*

@@ -1,0 +1,48 @@
+{
+  "_about": "Hand labels for the recall eval, judged against the frozen memory snapshot in state/evals/memory (index.jsonl and tickets/ both hold #29, #32, #46, #53, #74, #123, #179, #193). No two runs in it share a file, so no case has a `must` yet: every overlap is module-level or weaker, which the skill treats as real but optional. must = has to be cited; ok = may be cited; anything else cited fails. `memory` is that snapshot's iids: the eval skips the gold check when its snapshot holds anything else. `project` is the GitLab project each case's ticket is in: an iid means nothing without it, and a case from a project other than GITLAB_REPO_URL's is read from its live run's recall transcript or refused, never fetched by number. Re-label, and update `memory`, after `npm run eval -- recall --refresh-memory`.",
+  "memory": [29, 32, 46, 53, 74, 123, 179, 193],
+  "cases": {
+    "247": {
+      "project": "https://gitlab.arbisoft.com/arbisoft/workstreamai",
+      "must": [],
+      "ok": [],
+      "why": "Deel salary field. #29 is a Core chat-platform fix; 'both touch a model' is not overlap on any rung. The live run cited #29, a false positive this case exists to catch."
+    },
+    "28": {
+      "project": "https://gitlab.arbisoft.com/arbisoft/workstreamai",
+      "must": [],
+      "ok": [29],
+      "why": "Profile Basic Info save bug next to #29's Profile Basic Info chat-platform fix. Plausibly the same serializer path, but nothing on the ticket proves a shared file, so citing is allowed and not required."
+    },
+    "53": {
+      "project": "https://gitlab.arbisoft.com/arbisoft/workstreamai",
+      "must": [],
+      "ok": [46],
+      "why": "Android Project Logs a11y. #46 is the same module (Project Logs) but touched project_logs_v2 board components, while #53 fixed announcements in ThemedApp.js/index.js: module rung only, no shared file. Also a self case: #53's own card is in memory and must not be cited."
+    },
+    "193": {
+      "project": "https://gitlab.arbisoft.com/arbisoft/workstreamai",
+      "must": [],
+      "ok": [179],
+      "why": "Landing-page colour contrast. #179 shares only the catch-all 'Web' module, no file. #32 is the trap: also a contrast fix, but on the Training time picker, so only title tokens match and citing it fails. Also a self case: #193's own card is in memory."
+    },
+    "74": {
+      "project": "https://gitlab.arbisoft.com/arbisoft/workstreamai",
+      "must": [],
+      "ok": [32],
+      "why": "Training filter button accessible name. #32 is the same module (Training) and names the same Publish Training page, but fixed the shared KeyboardTimePicker, not training/utils: module rung only. Also a self case."
+    },
+    "123": {
+      "project": "https://gitlab.arbisoft.com/arbisoft/workstreamai",
+      "must": [],
+      "ok": [29],
+      "why": "Expense attachment display names. Shares the apps/core/api/v1/views/ directory and apps/core/tests/ with #29 (shared.py vs chat_platform.py), which is the weak end of the file rung, and nothing else. Also a self case."
+    },
+    "8772": {
+      "project": "https://gitlab.arbisoft.com/arbisoft/erp",
+      "must": [],
+      "ok": [],
+      "why": "Payroll People Report amount formatting (convertToNumberWithCommas in common/utils/misc.js, odoo_payroll utils). No run in memory touches payroll, odoo or misc.js, and none share a module. The live run correctly returned empty; this case holds that line."
+    }
+  }
+}

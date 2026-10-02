@@ -102,6 +102,10 @@ import {
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
+import {
+  branchFiles, loadZoneMap, refusedTicket, zoneBlockReason, zoneCheckDue, zoneGuardApplies, zoneVerdict,
+  type ZoneVerdict,
+} from './zoneguard.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import {
   countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type Ticket, type TestCase,
@@ -1200,6 +1204,11 @@ export async function runTicket(
     for (const name of phasesOwedByRound(j.mrFeedback, j.phases, window)) forced.add(name);
   }
 
+  // The delivery-zone map, read once per run and only for a ticket the guard
+  // holds to it (src/conductor/zoneguard.ts). Null for every other ticket, and
+  // for every ticket while config/project.json carries no `zones` block.
+  const zoneRead = zoneGuardApplies(ticket.labels) ? loadZoneMap() : null;
+
   const researchIdx = list.findIndex((p) => p.name === 'research');
   let i = 0;
   while (i < list.length) {
@@ -1210,6 +1219,20 @@ export async function runTicket(
     if (opts.signal?.aborted) {
       return finish(j, 'aborted', 'the conductor asked this run to stop');
     }
+
+    // A characterization-test ticket is a person's work (src/conductor/zoneguard.ts):
+    // stopped before any phase, code or session, can touch it.
+    const refused = refusedTicket(ticket.labels);
+    if (refused) {
+      log.warn('refused ticket', { iid, reason: refused });
+      logEvent('zone_refused', { iid }, { runId: j.runId });
+      return finish(j, 'blocked', refused);
+    }
+
+    // A map the guard cannot judge by stops the run here, before any session.
+    // Read first at implement, it cost recall, research and plan to learn that
+    // the map was never there.
+    if (zoneRead && 'error' in zoneRead) return stopForZone(zoneVerdict(ticket.labels, [], zoneRead));
 
     // On-demand phases are stepped over before anything else looks at them:
     // they are invoked by name when something needs them, so an unimplemented
@@ -1269,6 +1292,32 @@ export async function runTicket(
       return finish(j, 'blocked',
         `not built yet: phase '${phase.name}'. Implemented so far: ` +
         `${list.filter((p) => isImplemented(p.name) || CODE_PHASES[p.name]).map((p) => p.name).join(' → ')}`);
+    }
+
+    // The delivery-zone guard (src/conductor/zoneguard.ts), ahead of every code
+    // phase and every gate. At implement, over what the plan declares, before
+    // the plan gate asks anyone to approve it. On every pass after implement has
+    // succeeded, over what the branch really carries: this used to wait for the
+    // loop to land on `review`, which it skips whenever review runs inside the
+    // testcases group, and by then mr-open had pushed the branch anyway. Both
+    // read the branch from git, because a branch re-attached from an earlier
+    // run can carry commits the plan and this run's reports never mention.
+    if (zoneRead) {
+      const due = zoneCheckDue(list, i, (name) => phaseSucceeded(iid, name));
+      if (due) {
+        let zone: ZoneVerdict;
+        try {
+          const declared = declaredFiles(prior.plan ?? readArtifact(iid, 'plan.json'),
+            due === 'diff' ? prior.implement ?? readArtifact(iid, 'implement.json') : null);
+          const changed = branchFiles(branch, { repo: worktree });
+          zone = zoneVerdict(ticket.labels, changed && [...declared, ...changed], zoneRead);
+        } catch (err) {
+          // A throw here used to escape runTicket with no finish(): the ticket kept
+          // Loop, got no note, and threw again on every scan. A stop says why.
+          zone = { applies: true, violations: [], unreadable: `the zone guard failed (${(err as Error).message})` };
+        }
+        if (zone.unreadable || zone.violations.length) return stopForZone(zone);
+      }
     }
 
     if (CODE_PHASES[phase.name]) {
@@ -1976,6 +2025,20 @@ export async function runTicket(
   return finish(j, 'done');
 
   // ------------------------------------------------------------- run helpers
+
+  /**
+   * Stop the run on a zone verdict that did not pass. One place, so the map
+   * check at the top of the run and the checkpoints log, count and word a stop
+   * the same way.
+   */
+  function stopForZone(zone: ZoneVerdict): Promise<RunOutcome> {
+    log.warn('zone guard stopped the run', { iid, violations: zone.violations, unreadable: zone.unreadable });
+    logEvent('zone_guard_stop', {
+      iid, files: zone.violations.length, unreadable: zone.unreadable !== null,
+      zones: [...new Set(zone.violations.map((v) => v.zone))],
+    }, { runId: j.runId });
+    return finish(j, 'blocked', zoneBlockReason(zone));
+  }
 
   /**
    * phaseSettled, not phaseSucceeded: 'skipped' is a settled decision.

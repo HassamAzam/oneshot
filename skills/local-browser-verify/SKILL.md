@@ -154,6 +154,168 @@ pytest is unaffected and is fine to run.
   wrong column. Never sum a percentage or utilization column as if it were cost:
   a "drill-down total" that comes out near 200 is a utilization column adding to
   ~100% per head, not money — check the header before you compare it to a cell.
+- **Measure a visual bug after the interaction, not on the tick of it.** "Obscured",
+  "overlapping", "covers the field below" and "still open after selecting" are
+  claims about geometry, and geometry has a number. Drive the interaction, let
+  the overlay come to rest, then measure:
+
+  ```js
+  const h = require('<oneshot>/skills/local-browser-verify/scripts/harness.cjs');
+  await h.overlap(session, '.react-datepicker-popper', '[name="training.end_date"]');
+  // → { intersects: true, areaPx: 10352, region: { width: 242, height: 43 }, ... }
+  ```
+
+  The number is the area the two boxes share, and it is symmetric: a popper
+  painted under the field and one painted over it return the same `areaPx`.
+  When the ticket is about which one is on top, check that separately with
+  `document.elementsFromPoint()` at the centre of `region`.
+
+  Six ways this reads the wrong verdict, all of them paid for already:
+
+  - **`areaPx` is an area, not a distance.** It is about
+    `region.width * region.height`: each side of `region` is rounded on its own
+    and `areaPx` from the unrounded product, so 10352 beside 242 × 43 (10406) is
+    right — the band was 42.8px. Reported as "covered by 10352px" it reads as a
+    length, and a length that large is impossible on a 900px-tall screen — so a
+    reader reasonably assumes the measurement is broken and dismisses a real
+    defect. Quote `region`, or the height it implies: 10352 over a 242px-wide
+    popover is a 43px band, i.e. one input row. Say "px²" or "the whole Title
+    row", never "10352 pixels".
+
+  - **`boundingBox()` does not wait for the geometry to settle.** It returns the
+    box as it is when asked. A popper re-anchors — it measures its reference,
+    picks a placement, and flips it when that one does not fit — so consecutive
+    reads during that negotiation gave y = 100, 220, 340, 460, 580, 700 with no
+    transition involved at all. `overlap` settles both boxes first, and names in
+    `unsettled` any side still moving when its `timeout` ran out. That side's box
+    is a position it was passing through, so the result is a snapshot, not a
+    measurement, whichever way it reads: re-measure with a longer `timeout`, and
+    if it still will not hold still, record the case `blocked` and quote the `a`
+    and `b` boxes each read returned, never the `areaPx`. On a hand-rolled check,
+    poll until the box stops moving. A fixed `sleep` is not a settle. Do not lean
+    on animation timing for this: a 0.2-0.3s CSS fade is frequently over before
+    the first round-trip returns, so a naive read looks correct on a fast machine
+    and wrong on a slow one.
+  - **`intersects: null` is not "no overlap", and not a verdict on its own.** It
+    means one side did not resolve a box, or resolved and then detached before
+    it could be inspected, and `missing` says which. Which side decides what it
+    means:
+    - **Something that should be on screen** — the field you measure against,
+      or the overlay before you dismiss it. That is the zero-matches question
+      above, so run that procedure: dump the container and retry under other
+      names. Re-measure under a corrected locator and judge the case on that
+      reading, with the correction noted; an element proven absent under every
+      name is a `fail`. Only a case you cannot express against this app at all
+      is `blocked`, and to make `runCase` file it that way you have to throw a
+      `HarnessError` — it files a plain `Error` as `fail`, which is a defect
+      claim against a branch that may have nothing wrong with it:
+
+      ```js
+      throw new h.HarnessError('E_SELECTOR_EMPTY', `locator: ${res.missing} did not resolve`);
+      ```
+
+      `runCase` returns that message as `reason`, which is not a field of the
+      case result. Copy it into the case's `evidence` — it already starts with
+      `locator:` — followed by the dump's one line per selector tried.
+    - **The overlay after a dismissal.** The one place null is the answer you
+      want, and only behind a positive control: a popover absence-assertion
+      passes identically whether dismissal works or the popover never opened
+      at all, so prove the thing you expect to be there IS there before
+      concluding the thing you expect to be gone is gone. The calendar bullet
+      below shows the control.
+  - **An element off-screen cannot overlap anything.** CSS `zoom` and a short
+    viewport have put a real element at `top=1194px` in a 900px window, and a
+    popper scrolled above the viewport sits at a negative `y`. `outsideViewport`
+    is true when either box lies wholly past any edge; check it before believing
+    a zero. `hidden` is the same guard for an element that kept its box but is
+    not on screen — `visibility:hidden` and `opacity:0` both measure full size,
+    so a popover that is hidden rather than unmounted would otherwise be
+    reported as covering the field it no longer covers.
+  - **Each side measures its selector's FIRST match.** A selector that also
+    matches a parked copy measures whichever comes first in the DOM: on the live
+    Training modal, `.MuiDialogContent-root` matched a hidden copy of the dialog
+    left at y 1203..1497 and gave two readings that described nothing on screen.
+    `hidden` or `outsideViewport` on a side you can see in the screenshot is
+    this — narrow the locator until it matches the one on screen.
+  - **Nothing here survives the page scrolling underneath it.** The two boxes are
+    viewport-relative and read one after the other, so a scroll that lands
+    between them compares two different frames: two elements 600px apart,
+    truthfully `areaPx=0`, measured `areaPx=20000`. Let the scroll finish before
+    you measure.
+
+  Screenshot after the settle, not before — a shot timed one tick early omits the
+  defect, and then the disproof and the proof look identical in `artifacts/`.
+
+- **"The calendar covers the fields around it" is two different defects. Say
+  which one you measured.** `.react-datepicker-popper` already carries
+  `z-index: 99999` in `custom.css`, so a pixel count on its own does not name a
+  bug, and whether a popover covering a field while it is open is a defect at
+  all is the case's call, not this skill's. Two things produce that screenshot
+  and they have nothing in common:
+
+  - **It is still mounted after the selection.** The popper is still on screen
+    once a date is chosen and the form has settled. Record that, and do not name
+    a cause you did not observe: the focus race that reading react-datepicker's
+    `sendFocusBackToInput` suggests does not hold up — `focus()` dispatches
+    synchronously while its `preventFocus` guard is still set — and a re-open
+    did not reproduce on the live Training modal in three runs.
+  - **Where it opened.** A tall calendar (`showYearDropdown` +
+    `scrollableYearDropdown`) asked for `popperPlacement="top-start"` lands on a
+    neighbouring field while it is open: on the field above when it fits and
+    never flips (10352 px² over Training Title, on the live Training modal), or
+    on the field below when a modal has no room above and Popper flips it down.
+    Placement, not dismissal.
+
+  They are distinguishable, but only with a control. With the calendar open and
+  before choosing a date, measure the popper against the field; then select a
+  date, let the form settle, and measure again:
+
+  ```js
+  const popper = '.react-datepicker-popper';
+  const field = '[name="training.end_date"]';
+  const before = await h.overlap(session, popper, field);
+  // select a date, let the form settle
+  const after = await h.overlap(session, popper, field);
+  ```
+
+  `before` must come back with `missing` empty, `hidden` empty and
+  `outsideViewport` false — any number, 0 included. That proves both selectors
+  resolve to something a user can see on this screen. Resolving is not enough on
+  its own: a popover kept mounted while hidden (MUI `keepMounted`, a fade-in that
+  never ran) reads `hidden: [popper]` before and after alike, and the `hidden`
+  reading below would then certify a dismissal of a calendar that never opened.
+  If `before` fails, nothing `after` says can be read yet — stop:
+
+  - `missing` names a side — run the zero-matches procedure.
+  - `hidden` names the popper — the calendar never visibly opened, so there is
+    nothing to dismiss. Check the step that opens it first (a click swallowed by
+    a layout shift looks exactly like this); a calendar that will not open is
+    the case's own question, and never a dismissal `pass`.
+  - `hidden` names the field, or `outsideViewport` is true with the field's box
+    (`b`) past the edge — you are measuring against something that is not on
+    screen, usually a parked copy that matched first (see the first-match bullet
+    above). Narrow the locator and re-measure.
+  - `outsideViewport` is true with the popper's box (`a`) past the edge — it
+    opened where the user cannot see it. That is placement, the case's own
+    question; there is nothing on screen to dismiss.
+
+  Then:
+
+  - `after.intersects === null` and `after.missing` is exactly `[popper]` — the
+    popper unmounted: it closed and stayed closed. Dismissal is a `pass`, and
+    anything in the screenshot was placement while it was open (a defect only
+    if the case says so).
+  - `after.intersects === false` with the popper in `hidden` — it went from
+    visible, which the control proved, to hidden rather than unmounted. Closed,
+    for this purpose.
+  - `after.missing` names the field — the field stopped resolving between the
+    two reads. That is a locator question, not a dismissal verdict: back to the
+    zero-matches procedure.
+  - Any other number — the popper is still on screen after the selection.
+
+  Record which of the two you saw, in those words: a verdict that says only
+  "calendar overlaps end date by 9342px²" sends the fix at the z-index, which is
+  already correct, and the real defect survives the MR.
 
 ## Record one result per case
 

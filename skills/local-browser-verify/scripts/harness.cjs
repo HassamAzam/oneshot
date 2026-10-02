@@ -65,6 +65,7 @@ const CODES = [
   'E_WEBPACK_DEAD', 'E_BUNDLE_UNREACHABLE',
   'E_NO_CREDENTIALS', 'E_LOGIN_FAILED', 'E_LOGIN_2FA', 'E_TRIAL_EXPIRED',
   'E_MODULE_UNKNOWN', 'E_MODULE_TIMEOUT', 'E_NOT_UP', 'E_PLAYWRIGHT_MISSING',
+  'E_SELECTOR_EMPTY',
 ];
 
 class HarnessError extends Error {
@@ -944,6 +945,245 @@ async function shot(session, name) {
 }
 
 /**
+ * Wait until an element's geometry stops moving, then return its box.
+ *
+ * `boundingBox()` does not wait for geometry to settle — it returns whatever the box is
+ * at the moment it is asked. Measured against a 1.5s transition, 11 of 12 polls came
+ * back mid-flight; against a popper re-anchoring every 80ms, consecutive reads gave
+ * y = 100, 220, 340, 460, 580, 700. Either way the caller gets a position the element
+ * was passing through, not the one it came to rest at.
+ *
+ * Re-anchoring is the case that matters. A popper (react-datepicker and MUI both sit on
+ * @popperjs/core) measures its reference, computes a placement, and flips it when the
+ * first choice does not fit — so the box moves in discrete jumps for as long as that
+ * negotiation runs, with no transition involved. A pure CSS fade of 0.2-0.3s is often
+ * over before the first round-trip returns, so animation alone is the weaker argument.
+ *
+ * Stability, not a fixed sleep: poll until two consecutive samples agree to within a
+ * pixel and stay that way for `quiet`. A blind `sleep` is either too short on a cold
+ * machine or wasted budget on a warm one.
+ *
+ * Returns `{ box, settled }`. `box` is null when the element never resolves a box —
+ * absent, detached, or `display:none`. Null means "not measurable", never "measured as
+ * zero".
+ *
+ * `settled` is false when the budget ran out while the box was still moving. `box` is
+ * then only the last sample, a position the element was passing through. Returning that
+ * bare made it indistinguishable from a settled box: a popper flipping between y=150 and
+ * y=300 every 100ms, covering the field only at 150, came back from overlap() as a clean
+ * `intersects:false` — the mid-flight read this function exists to prevent, delivered
+ * silently. A timeout is deliberately NOT turned into a null box: null routes to
+ * `missing`, which is a question about the selector, and this selector resolved fine.
+ *
+ * Each probe carries its own timeout. `boundingBox()` with no argument inherits
+ * Playwright's 30s actionability default, so on a selector that matches nothing the first
+ * call outlives this function's whole budget: measured at 30052ms against a 1200ms
+ * timeout, and 60106ms for an `overlap()` where both sides were absent. The missing-
+ * selector path is the common one — "zero matches is a question" means a phase retries
+ * corrected locators routinely — so the per-probe cap is what keeps the documented
+ * `timeout` honest.
+ */
+async function settle(session, selector, opts = {}) {
+  const timeout = Number(opts.timeout || 5000);
+  const quiet = Number(opts.quiet || 250);
+  const loc = session.page.locator(selector).first();
+  const started = Date.now();
+  let last = null;
+  let stableSince = null;
+  while (Date.now() - started < timeout) {
+    const left = timeout - (Date.now() - started);
+    const probe = Math.max(50, Math.min(500, left));
+    const box = await loc.boundingBox({ timeout: probe }).catch(() => null);
+    const steady = box && last
+      && Math.abs(box.x - last.x) < 1 && Math.abs(box.y - last.y) < 1
+      && Math.abs(box.width - last.width) < 1 && Math.abs(box.height - last.height) < 1;
+    if (steady) {
+      if (stableSince === null) stableSince = Date.now();
+      if (Date.now() - stableSince >= quiet) return { box, settled: true };
+    } else {
+      stableSince = null;
+    }
+    last = box;
+    await sleep(50);
+  }
+  return { box: last, settled: false };
+}
+
+/**
+ * Is the element something a user can actually see?
+ *
+ * A box is not visibility. `visibility:hidden` and `opacity:0` both keep their geometry,
+ * so a dismissed popover that is merely hidden rather than unmounted still measures
+ * 200x120 in the same place as the field under it — reported here as a 6000 px² overlap on
+ * a screen where nothing is wrong. That is the ticket-244 failure mode reversed, and it
+ * is the more dangerous direction: a false defect costs a week, a missed one costs a
+ * retest. react-datepicker unmounts on close so it is safe, but MUI Popper with
+ * `keepMounted` and any CSS fade dismissal are not.
+ *
+ * Playwright's own `isVisible()` does not cover this: it treats `opacity:0` as visible.
+ * Opacity also compounds down the tree, so a faded ancestor hides a fully opaque child —
+ * hence the walk to the root rather than reading the one element. `display:none` walks
+ * for the same reason.
+ *
+ * `visibility` does NOT walk. It is inherited and a child can override it, so the
+ * element's own computed value already accounts for a hidden ancestor, and a child set
+ * back to `visibility:visible` under a hidden wrapper is painted and hit-testable.
+ * Walking the ancestors reported exactly that child, on screen and over the field, as
+ * `hidden` with `intersects:false` — a missed defect.
+ *
+ * `visible: null` means the element could not be inspected at all — it detached between
+ * settle() finding its box and this read, or the page navigated. That is "could not
+ * measure", and overlap() files it under `missing`; filing it under `hidden` reported a
+ * popper that vanished mid-measure as a clean `intersects:false`.
+ *
+ * The probe's timeout is evaluate's THIRD argument. The second is the page function's
+ * argument, and passed there `{ timeout }` was handed to the page function and ignored:
+ * the wait for a detached element ran under Playwright's 30s default, and an overlap()
+ * whose popper was removed 550ms in took 30677ms against a 1200ms budget.
+ */
+async function visible(session, selector, opts = {}) {
+  const loc = session.page.locator(selector).first();
+  const cap = Math.min(2000, Number(opts.timeout || 5000));
+  return loc.evaluate((el) => {
+    const own = getComputedStyle(el).visibility;
+    if (own !== 'visible') return { visible: false, why: `visibility:${own}` };
+    let effective = 1;
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      const cs = getComputedStyle(node);
+      if (cs.display === 'none') return { visible: false, why: 'display:none' };
+      effective *= Number(cs.opacity);
+    }
+    if (effective < 0.05) return { visible: false, why: `opacity:${effective.toFixed(2)}` };
+    return { visible: true, why: null };
+  }, undefined, { timeout: cap }).catch(() => ({ visible: null, why: 'unmeasurable' }));
+}
+
+function intersection(a, b) {
+  const width = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+  const height = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+  if (width <= 0 || height <= 0) return { width: 0, height: 0, areaPx: 0 };
+  return {
+    width: Math.round(width),
+    height: Math.round(height),
+    areaPx: Math.round(width * height),
+  };
+}
+
+/**
+ * Do `a` and `b` share screen area, and how much? Answered as an area, in square pixels.
+ *
+ * The answer is symmetric and says nothing about which of the two paints on top: a
+ * popper under the field and one over it return the same `areaPx`. Asked as "does `a`
+ * cover `b`?", a field painting over a portalled popper would be reported as the popper
+ * covering the field, the defect inverted. Check stacking separately
+ * (`document.elementsFromPoint` at the centre of `region`) when that is the question.
+ *
+ * `areaPx` is the size of the shared patch, NOT a distance. It is about
+ * `region.width * region.height`: each side of `region` is rounded on its own and
+ * `areaPx` from the unrounded product, so 10352 sits beside a 242 x 43 region (10406)
+ * because the band was 42.78px. It is named `areaPx` rather than `px` because "10352px"
+ * reads as a length, and a length that large is impossible on a 900px-tall screen, so
+ * the number invites the reader to dismiss a real defect as a broken measurement. Divide
+ * by `region.width` to recover the height a human would describe: 10352 over a
+ * 242px-wide popover is a 43px band, i.e. one input row. Quote `region` when a reviewer
+ * needs to picture it.
+ *
+ * "Obscured", "overlapping" and "covers the field below" are the one bug class this
+ * harness could state a rule about but never measure: a screenshot proves it only to a
+ * human who happens to notice two things in the same place, and an absence-assertion
+ * over a popover passes identically whether dismissal works or is entirely broken.
+ *
+ * Both boxes are settled first, so the result describes where the overlay came to rest
+ * rather than where it started — unless `unsettled` names a side. That side was still
+ * moving when its budget ran out, so its box is a snapshot, and the result is not a
+ * measurement of anything: re-measure with a longer `timeout`.
+ *
+ * `intersects: null` is NOT "no overlap" — it means one of the two could not be
+ * measured (it never resolved a box, or it resolved and then detached before it could
+ * be inspected), and `missing` names which. Which side is missing decides what it means.
+ * A selector for something that should be there is a question about the selector:
+ * reading it as "nothing on top of the field" is how a working screen gets filed as a
+ * product bug, and reading it as "the popper closed" certifies a re-open absent when it
+ * was the FIELD selector that matched nothing. An overlay gone after a dismissal —
+ * missing, or moved into `hidden` — is a dismissal only behind an earlier read that found
+ * both sides resolved, visible and on screen. A control that checked only `missing`
+ * certified the dismissal of a kept-mounted popover that never opened, because it reads
+ * `hidden: [popper]` before and after alike. SKILL.md's calendar bullet is the procedure.
+ *
+ * `outsideViewport` catches the other direction. CSS `zoom` and a short viewport have
+ * already put a real element at `top=1194px` in a 900px window, where it cannot overlap
+ * anything because it is not on screen at all — a green result that means nothing. It is
+ * true when either box lies wholly past ANY edge: boxes are viewport-relative, so one
+ * scrolled above or left of the viewport has a negative y or x, and checking only the
+ * bottom and right edges read a popper above the screen as a believable zero.
+ *
+ * `hidden` is the same guard for elements that kept their box but are not on screen. If
+ * either side is invisible there is nothing for a user to see, so `intersects` is false
+ * and `hidden` names which one and why. `areaPx` is then 0 by design, while `region`
+ * keeps the patch the invisible element would cover: diagnostics, not a defect to quote.
+ *
+ * Each side is its selector's FIRST match — settle() and visible() both go through
+ * `.first()` — so a selector that also matches a parked copy measures whichever comes
+ * first in the DOM. On the live Training modal `.MuiDialogContent-root` matched a hidden
+ * copy of the dialog left at y 1203..1497 and gave two readings that described nothing
+ * on screen. `hidden` or `outsideViewport` on a side that is plainly on screen is this:
+ * narrow the selector rather than believe the result.
+ *
+ * One thing this does NOT handle: both boxes are viewport-relative and they are read one
+ * after the other, so a page that scrolls between the two reads compares two different
+ * coordinate frames. Measured: two elements 600px apart, truthfully `areaPx=0`, came back
+ * as `areaPx=20000` with a 400px scroll landing in the gap. Settle the page before
+ * measuring — do not call this while something is still scrolling a field into view.
+ */
+async function overlap(session, a, b, opts = {}) {
+  const settledA = await settle(session, a, opts);
+  const settledB = await settle(session, b, opts);
+  const boxA = settledA.box;
+  const boxB = settledB.box;
+  const unsettled = [[a, settledA], [b, settledB]]
+    .filter(([, s]) => s.box && !s.settled)
+    .map(([sel]) => sel);
+  const viewport = session.page.viewportSize() || null;
+  const missing = [];
+  if (!boxA) missing.push(a);
+  if (!boxB) missing.push(b);
+  if (missing.length) {
+    return { intersects: null, areaPx: null, missing, unsettled, a: boxA, b: boxB, viewport };
+  }
+  const seen = await Promise.all([visible(session, a, opts), visible(session, b, opts)]);
+  const unmeasured = [a, b].filter((_, i) => seen[i].visible === null);
+  if (unmeasured.length) {
+    return {
+      intersects: null, areaPx: null, missing: unmeasured, unsettled, a: boxA, b: boxB, viewport,
+    };
+  }
+  const hidden = [a, b]
+    .map((sel, i) => (seen[i].visible === false ? { selector: sel, why: seen[i].why } : null))
+    .filter(Boolean);
+  const hit = intersection(boxA, boxB);
+  const offscreen = (box) => box.y >= viewport.height || box.x >= viewport.width
+    || box.y + box.height <= 0 || box.x + box.width <= 0;
+  const outsideViewport = viewport ? [boxA, boxB].some(offscreen) : false;
+  if (hidden.length) {
+    return {
+      intersects: false, areaPx: 0, region: hit, hidden, unsettled, a: boxA, b: boxB, viewport,
+      outsideViewport,
+    };
+  }
+  return {
+    intersects: hit.areaPx > 0,
+    areaPx: hit.areaPx,
+    region: hit,
+    hidden,
+    unsettled,
+    a: boxA,
+    b: boxB,
+    viewport,
+    outsideViewport,
+  };
+}
+
+/**
  * Run one case. NEVER throws.
  *
  * A 20-case list has to be one tool call that cannot abort halfway. An environment fault
@@ -1001,7 +1241,8 @@ async function smoke(keys) {
 /* ------------------------------------------------------------------ cli */
 
 const API = {
-  up, down, status, open, login, goto, shot, runCase, smoke, registry, HarnessError,
+  up, down, status, open, login, goto, shot, settle, overlap, runCase, smoke, registry,
+  HarnessError,
   /**
    * Internals, exported for scripts/app.cjs and nothing else.
    *

@@ -162,6 +162,16 @@ export interface ProjectConfig {
   highScrutinyPaths: string[];
   preserveLabels: string[];
   branches: { base: string; protected: string[]; prefix: string; pattern: string };
+  /**
+   * The ERP delivery-zone map (src/conductor/zoneguard.ts). `file` is read from
+   * the work repo's origin/<base>; the guard applies only to tickets carrying
+   * `guardLabel`; `yellowLabel` (grooming's yellow classification, not a record
+   * that tests merged: see zoneVerdict) allows yellow areas; a ticket carrying
+   * `testsLabel` is always stopped (a person writes those). Absent = no zone guard,
+   * and no refusal either: that is how it ships until the map is on the base branch
+   * (see _comment_zones in config/project.json for the line that switches it on).
+   */
+  zones?: { file: string; guardLabel: string; yellowLabel: string; testsLabel?: string };
   promotions: Array<{ from: string; to: string; auto: boolean }>;
   concurrency: number;
 }
@@ -345,7 +355,8 @@ export function projectConfig(): ProjectConfig {
     // A getter rather than a value, so that a machine without GITLAB_REPO_URL
     // can still read labels and branches: only asking WHICH project throws.
     Object.defineProperty(c, 'gitlab', { get: gitlabRepo, enumerable: false, configurable: true });
-    // Shared with the Plane triage router, so the gates and the routing can never disagree.
+    // Review gating only. The Plane triage router used to read this file too; it
+    // now routes by the ERP repo's own .claude/zones.json (see _comment_high_scrutiny).
     const risk = loadJson<{ modules: Array<{ paths?: string[] }> }>('risk-modules.json');
     c.highScrutinyPaths = [...new Set([...(c.highScrutinyPaths ?? []), ...risk.modules.flatMap((m) => m.paths ?? [])])];
     _project = c;

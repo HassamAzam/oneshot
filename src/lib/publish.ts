@@ -105,7 +105,7 @@ ${questions ? `\n## Open questions\n${questions}\n` : ''}
 |---|---|---|---|
 ${steps || '| — | — | (none recorded) | — |'}
 ${coverage ? `\n## Acceptance coverage\n| Criterion | Status | Covered by | Note |\n|---|---|---|---|\n${coverage}\n` : ''}
-## Reuse before writing
+## Prior art and verdicts
 ${(plan.reuse ?? []).map((r) => `- ${r}`).join('\n') || '- (none identified)'}
 
 ## Risks
