@@ -66,7 +66,7 @@ Three things fall out of that:
  issue labelled `Loop`
    0  recall          Haiku     prior art from past runs
    1  research        Opus 5    trace the code path, state blast radius
- 1.5  design      ⟨D⟩ Opus 5    mockups, before/after screens
+ 1.5  design      ⟨D⟩ Opus 5    mockups, before/after, prototype + silent walkthrough
                                 ── parks until a dev approves on the ticket ──
    2  plan            Opus 5    phased plan
    3  implement       Opus 5    commits on oneshot/ticket-<iid>-<slug>
@@ -292,9 +292,10 @@ rather than adding a guard around one.
 Put `Design` on a ticket alongside `Loop` and a `design` phase runs between `research` and
 `plan`. It reads the tokens out of the real frontend, captures the screens this ticket touches
 as they are **today**, draws each one as a self-contained mockup against those tokens, and — when
-the change spans more than one screen or adds a step — draws each state of the flow as its own
-screen. The conductor posts all of that to the ticket as one
-comment, and the run **parks**.
+the change spans more than one screen or adds a step — builds a clickable prototype and records a
+**silent, annotated** walkthrough of it. `hooks/design-flow-guard.cjs` refuses the phase's answer
+until both are on disk, so a flow change cannot reach the ticket as stills alone. The conductor
+posts all of that to the ticket as one comment, and the run **parks**.
 
 ```
  … research ──▶ design ──▶[ D  a dev approves the design ]──▶ plan ──▶ implement …
