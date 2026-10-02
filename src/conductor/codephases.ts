@@ -30,12 +30,13 @@ import {
   artifactsDirFor, readArtifact, readJournal, updateJournal, writeArtifact, type RunJournal,
 } from '../lib/artifacts.js';
 import { logEvent, updateRun } from '../lib/db.js';
+import { writeMemory } from '../lib/memory.js';
 import { log } from '../lib/log.js';
 import { alert, thread } from '../lib/slack.js';
 import { releasePort } from '../lib/worktrees.js';
 import {
   acceptMergeRequest, addIssueNote, addMergeRequestNote, compareRefs, createMergeRequest,
-  failedJobs, findMergeRequests, getBranch, getMergeRequest, issueNotes, mergeRefusal,
+  failedJobs, findMergeRequests, getBranch, getIssue, getMergeRequest, issueNotes, mergeRefusal,
   mergeRequestUrl, mrDiscussions, projectSettings, rebaseMergeRequest, swapLabel, updateMergeRequest,
   type MergeRequest, type ProjectSettings,
 } from '../lib/gitlab.js';
@@ -838,9 +839,24 @@ async function resolveMrIid(ctx: CodePhaseCtx, journal: RunJournal): Promise<num
  *
  * This is the same shape the deploy phase already uses: the conductor re-derives
  * the fact itself and overrules the phase rather than believing its verdict.
+ *
+ * IT TAKES `prior` BECAUSE THE FILES ARE WRITEABLE BY THE PHASES IT DISTRUSTS.
+ * `prior[phase]` is the structured output the SDK validated and the conductor
+ * held in memory (runner.ts sets it from `out.data`); the files in the run
+ * directory are a copy that every session after `review` can rewrite, because
+ * `writes: ['run']` covers the whole directory. Re-deriving a fact from a copy
+ * the suspect can edit is not re-deriving it, so the in-memory value wins and
+ * disk is the fallback for the one case it cannot cover: a run resumed in a
+ * fresh process, where `prior` was itself rebuilt from these files. That
+ * residue is what hooks/artifact-guard.cjs stands in front of.
  */
-function qualityGate(iid: number): string | null {
-  const verify = readArtifact<{ results?: Array<{ id?: string; result?: string }> }>(iid, 'verify.json');
+export function qualityGate(ctx: CodePhaseCtx): string | null {
+  const iid = ctx.iid;
+  const fromPrior = <T>(phase: string, file: string): T | null =>
+    (ctx.prior[phase] as T | undefined) ?? readArtifact<T>(iid, file);
+
+  const verify = fromPrior<{ results?: Array<{ id?: string; result?: string }> }>(
+    'verify', 'verify.json');
   const results = verify?.results ?? [];
   const failed = results.filter((r) => r.result === 'fail');
   if (failed.length) {
@@ -851,9 +867,9 @@ function qualityGate(iid: number): string | null {
       + 'Refusing to merge a change its own test cases do not pass.';
   }
 
-  const review = readArtifact<{
+  const review = fromPrior<{
     verdict?: string; findings?: Array<{ id?: string; severity?: string }>;
-  }>(iid, 'findings.json');
+  }>('review', 'findings.json');
   const unaddressed = (review?.findings ?? [])
     .filter((f) => f.severity === 'blocker' || f.severity === 'major');
   if (review?.verdict === 'changes-requested' || unaddressed.length) {
@@ -913,7 +929,7 @@ export async function mergePhase(
   rec.mrNotePosted = carried?.mrNotePosted === true;
   rec.promotion = carried?.promotion ?? null;
 
-  const gate = qualityGate(ctx.iid);
+  const gate = qualityGate(ctx);
   if (gate !== null) return failMerge(ctx, rec, gate);
 
   const mrIid = await resolveMrIid(ctx, journal);
@@ -1212,6 +1228,21 @@ async function recordSuccess(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<voi
       mrIid: rec.mrIid ?? null,
       mergedSha: journal.mergedSha ?? rec.mergedSha ?? null,
     }, { runId: ctx.runId });
+  });
+
+  // What the next run's recall reads. Labels are the one field no artifact
+  // keeps; a card without them still matches on files and module. A dry run
+  // merged nothing and records no sha, so it is skipped rather than logged as
+  // a failed record step on every dry merge.
+  await step('memory', async () => {
+    if (rec.dryRun) return;
+    const issue = await getIssue(ctx.iid);
+    const line = writeMemory(ctx.iid, {
+      labels: issue.ok ? issue.data?.labels : undefined,
+      mergedSha: journal.mergedSha ?? rec.mergedSha,
+      mrUrl: rec.mrUrl,
+    });
+    if (!line) throw new Error('no journal or merged sha to record');
   });
 }
 

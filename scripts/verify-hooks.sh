@@ -728,6 +728,171 @@ expect_block "Write that adds an inline style" \
 
 rm -f "$FE"/components/demo/*.bak
 
+# ---------------------------------------------------------------- artifact-guard
+#
+# RUN=<the run directory the test env already scopes writes to>. The deny cases
+# are a handoff and the journal; the allow cases are the three *-partial.json
+# backstops a prompt actually asks for, and anything one level deeper — a
+# session's own scratch is none of this guard's business.
+echo
+echo "artifact-guard"
+RUN="$ROOT/state/runs/0"
+edit_json_payload() {
+    printf '{"tool_name":"Edit","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$1"
+}
+# bash_cwd_payload <cwd> <command> — a Bash call from a session whose shell
+# already stands in <cwd>. The SDK sends `cwd` on every hook input.
+bash_cwd_payload() {
+    printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":%s}}' "$1" "$(printf '%s' "$2" | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(s)))')"
+}
+
+expect_deny  "Write another phase's findings.json" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/findings.json")"
+expect_deny  "Write verify.json (the merge gate reads it)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/verify.json")"
+expect_deny  "Write run.json (the journal, holds human approvals)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/run.json")"
+expect_deny  "Edit findings.json"      artifact-guard.cjs "$(edit_json_payload "$RUN/findings.json")"
+expect_deny  "Write merge.json (name defaulted from the phase, not declared)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/merge.json")"
+expect_deny  "Write ANOTHER run's artifact" \
+                                       artifact-guard.cjs "$(write_payload "$ROOT/state/runs/999/findings.json")"
+
+expect_allow "Write review-partial.json (the sanctioned backstop)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/review-partial.json")"
+expect_allow "Write verify-partial.json" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/verify-partial.json")"
+expect_allow "Write testcases-partial.json" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/testcases-partial.json")"
+expect_allow "Write artifacts/verify.json (a subdirectory, not a handoff)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/artifacts/verify.json")"
+expect_allow "Write scratch/plan.json" artifact-guard.cjs "$(write_payload "$RUN/scratch/plan.json")"
+expect_allow "Write a worktree file"   artifact-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/apps/x/views.py")"
+
+# APFS is case-insensitive: Findings.json IS findings.json there, and so is a
+# path whose directories are spelled in capitals.
+expect_deny  "Write Findings.json (another spelling of the same file)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/Findings.json")"
+if [ -d "$ROOT/state" ] && [ -d "$ROOT/STATE" ]; then
+    expect_deny  "Write through STATE/ on a case-insensitive volume" \
+                                       artifact-guard.cjs "$(write_payload "$ROOT/STATE/runs/0/findings.json")"
+else
+    skip "Write through STATE/ on a case-insensitive volume" "case-sensitive volume, or no state/ yet"
+fi
+
+# The Bash surface. write-scope.cjs never sees these, which is the whole reason
+# this guard watches both.
+expect_deny  "redirect over verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "echo '{}' > $RUN/verify.json")"
+expect_deny  "append to the journal"   artifact-guard.cjs "$(bash_payload "echo x >> $RUN/run.json")"
+expect_deny  "python json.dump into findings.json" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import json;json.dump({}, open('$RUN/findings.json','w'))\"")"
+expect_deny  "node writeFileSync into verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "node -e \"require('fs').writeFileSync('$RUN/verify.json','{}')\"")"
+expect_deny  "cp over findings.json"   artifact-guard.cjs "$(bash_payload "cp /tmp/x.json $RUN/findings.json")"
+expect_deny  "sed -i on verify.json"   artifact-guard.cjs "$(bash_payload "sed -i '' 's/fail/pass/' $RUN/verify.json")"
+expect_deny  "tee into findings.json"  artifact-guard.cjs "$(bash_payload "echo '{}' | tee $RUN/findings.json")"
+expect_deny  "rm the journal"          artifact-guard.cjs "$(bash_payload "rm $RUN/run.json")"
+expect_deny  "absolute redirect after cd" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && echo '{}' > $RUN/verify.json")"
+expect_deny  "relative path from the conductor cwd" \
+                                       artifact-guard.cjs "$(bash_payload "echo '{}' > state/runs/0/findings.json")"
+expect_deny  "noclobber redirect (>|) over verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "echo '{}' >| $RUN/verify.json")"
+
+# Where the shell stands. The commonest shape in the event log is
+# `cd …/state/runs/<iid> && …` followed by a bare basename.
+expect_deny  "cd into the run dir, then a relative redirect" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && echo '{}' > verify.json")"
+expect_deny  "relative rm from a session already standing in the run dir" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$RUN" "rm findings.json")"
+expect_deny  "cd via a literal \$ONESHOT_HOME, then a relative rm" \
+                                       artifact-guard.cjs "$(bash_payload 'cd $ONESHOT_HOME/state/runs/0 && rm verify.json')"
+expect_deny  "redirect into a literal \$ONESHOT_HOME path" \
+                                       artifact-guard.cjs "$(bash_payload 'echo x > $ONESHOT_HOME/state/runs/0/run.json')"
+expect_deny  "cd and rm inside a subshell" \
+                                       artifact-guard.cjs "$(bash_payload "(cd $RUN && rm verify.json)")"
+expect_allow "cd into the run dir, then a read" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && cat verify.json > /tmp/v.json")"
+expect_allow "cd into the run dir, then a partial" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && echo '{}' > verify-partial.json")"
+expect_allow "cd into the run dir, then on into artifacts/" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && cd artifacts && echo '{}' > verify.json")"
+
+# Taking a handoff away is as good as rewriting it: the merge gate reads a
+# missing findings.json as "no findings".
+expect_deny  "mv findings.json out of the run dir" \
+                                       artifact-guard.cjs "$(bash_payload "mv $RUN/findings.json /tmp/x")"
+expect_deny  "cp a file INTO the run dir under a handoff's name" \
+                                       artifact-guard.cjs "$(bash_payload "cp /tmp/verify.json $RUN/")"
+expect_deny  "rsync --remove-source-files from a handoff" \
+                                       artifact-guard.cjs "$(bash_payload "rsync --remove-source-files $RUN/findings.json /tmp/")"
+expect_deny  "rm -rf the whole run dir" \
+                                       artifact-guard.cjs "$(bash_payload "rm -rf $RUN")"
+expect_deny  "mv the whole run dir away" \
+                                       artifact-guard.cjs "$(bash_payload "mv $RUN /tmp/x")"
+expect_allow "rm -rf a scratch dir inside the run" \
+                                       artifact-guard.cjs "$(bash_payload "rm -rf $RUN/scratch")"
+expect_allow "mv within scratch/"      artifact-guard.cjs "$(bash_payload "mv $RUN/scratch/a $RUN/scratch/b")"
+expect_allow "mv a partial out"        artifact-guard.cjs "$(bash_payload "mv $RUN/verify-partial.json /tmp/x")"
+expect_allow "cp a handoff out (a read)" \
+                                       artifact-guard.cjs "$(bash_payload "cp $RUN/findings.json /tmp/copy.json")"
+
+# The other spellings of a write.
+expect_deny  "pathlib write_text"      artifact-guard.cjs "$(bash_payload "python3 -c \"from pathlib import Path; Path('$RUN/findings.json').write_text('{}')\"")"
+expect_deny  "os.remove"               artifact-guard.cjs "$(bash_payload "python3 -c \"import os; os.remove('$RUN/findings.json')\"")"
+expect_deny  "os.rename onto verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import os; os.rename('/tmp/f', '$RUN/verify.json')\"")"
+expect_deny  "shutil.copy onto verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import shutil; shutil.copy('/tmp/f', '$RUN/verify.json')\"")"
+expect_deny  "open(..., 'r+')"         artifact-guard.cjs "$(bash_payload "python3 -c \"f=open('$RUN/findings.json','r+'); f.truncate(0)\"")"
+expect_deny  "Path(...).open('r+')"    artifact-guard.cjs "$(bash_payload "python3 -c \"from pathlib import Path; Path('$RUN/verify.json').open('r+')\"")"
+# A heredoc can put the path on the line after the call. Segments split on
+# newlines, so only the pass over the whole command sees the two together.
+expect_deny  "python heredoc: open( and its path on separate lines" \
+                                       artifact-guard.cjs "$(bash_payload "python3 - <<'EOF'"$'\n'"with open("$'\n'"    '$RUN/verify.json', 'w') as f:"$'\n'"    f.write('{}')"$'\n'"EOF")"
+expect_deny  "node heredoc: writeFileSync( and its path on separate lines" \
+                                       artifact-guard.cjs "$(bash_payload "node - <<'EOF'"$'\n'"require('fs').writeFileSync("$'\n'"  '$RUN/verify.json',"$'\n'"  '{}')"$'\n'"EOF")"
+expect_allow "python heredoc: a read whose path is on the next line" \
+                                       artifact-guard.cjs "$(bash_payload "python3 - <<'EOF'"$'\n'"import json"$'\n'"with open("$'\n'"    '$RUN/verify.json') as f:"$'\n'"    print(json.load(f))"$'\n'"EOF")"
+# That pass takes absolute paths only. A relative one means wherever the shell
+# stood at that point, and here that is artifacts/, not the run directory.
+expect_allow "cd on into artifacts/, then a relative python write" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$RUN" "cd artifacts && python3 -c \"open('verify.json','w')\"")"
+expect_deny  "sed -i.bak"              artifact-guard.cjs "$(bash_payload "sed -i.bak 's/fail/pass/' $RUN/verify.json")"
+expect_deny  "sed --in-place"          artifact-guard.cjs "$(bash_payload "sed --in-place 's/fail/pass/' $RUN/verify.json")"
+expect_deny  "find -name findings.json -delete" \
+                                       artifact-guard.cjs "$(bash_payload "find $RUN -name findings.json -delete")"
+expect_deny  "find over every run's verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "find $ROOT/state -name verify.json -delete")"
+expect_deny  "find . -delete from a session standing in the run dir" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$RUN" "find . -name findings.json -delete")"
+expect_deny  "find . -delete from a conductor phase standing in \$ONESHOT_HOME" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$ROOT" "find . -name verify.json -delete")"
+expect_deny  "cd above state/runs, then find . -delete" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$ONESHOT_WORKTREE" "cd $ROOT/state && find . -name verify.json -delete")"
+# `.` is above state/runs only when the shell really stands there. Resolved
+# against the $ONESHOT_HOME fallback as well, every worktree `find .` was.
+expect_allow "find -name <handoff> -delete inside the worktree" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$ONESHOT_WORKTREE" "find . -name verify.json -delete")"
+expect_deny  "rm FINDINGS.JSON"        artifact-guard.cjs "$(bash_payload "rm $RUN/FINDINGS.JSON")"
+expect_allow "shutil.copy a handoff out (a read)" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import shutil; shutil.copy('$RUN/findings.json', '/tmp/f.json')\"")"
+expect_allow "sed -n over verify.json" artifact-guard.cjs "$(bash_payload "sed -n '/fail/p' $RUN/verify.json")"
+expect_allow "find findings.json without deleting" \
+                                       artifact-guard.cjs "$(bash_payload "find $RUN -name findings.json")"
+
+expect_allow "cat findings.json (reads are never refused)" \
+                                       artifact-guard.cjs "$(bash_payload "cat $RUN/findings.json")"
+expect_allow "python json.load of testcases.json" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import json;d=json.load(open('$RUN/testcases.json'))\"")"
+expect_allow "jq over verify.json"     artifact-guard.cjs "$(bash_payload "jq '.results' $RUN/verify.json")"
+expect_allow "redirect into a partial" artifact-guard.cjs "$(bash_payload "echo '{}' > $RUN/verify-partial.json")"
+expect_allow "grep -r for a finding id" \
+                                       artifact-guard.cjs "$(bash_payload "grep -rn F-1 $RUN/findings.json")"
+expect_allow "an ordinary build command" \
+                                       artifact-guard.cjs "$(bash_payload 'npm test -- --watchAll=false')"
+
 rm -rf "$ONESHOT_WORKTREE"
 
 echo

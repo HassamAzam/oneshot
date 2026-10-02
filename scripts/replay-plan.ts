@@ -134,7 +134,7 @@ const { transcriptPath } = await import('../src/lib/artifacts.js');
 const { fetchTicket } = await import('../src/conductor/runner.js');
 const { runPhase } = await import('../src/conductor/phase.js');
 const { promptFor, systemPromptFor } = await import('../src/phases/prompts.js');
-const { replayWorktree, removeReplayWorktree, runForkPoint } = await import('../src/lib/worktrees.js');
+const { answerKeyCommits, replayWorktree, removeReplayWorktree, runForkPoint } = await import('../src/lib/worktrees.js');
 type RunJournal = import('../src/lib/artifacts.js').RunJournal;
 type Ticket = import('../src/phases/types.js').Ticket;
 
@@ -191,6 +191,39 @@ console.log(`oneshot   ${oneshotSha}   skills ${args.skillsRoot}`);
 console.log(`worktree  ${worktree}`);
 console.log(`output    ${outDir}`);
 
+// A worktree shares the work repo's objects, so a pre-fix base is a blind
+// working tree in a repo that may still hold the fix. Say so rather than let
+// the number be read as blind later. Both paths need it: with --base (which
+// runForkPoint names as the way out for a landed branch) the answer key is the
+// landed fix; without it, the source run's own branch, which never landed but
+// still carries the `(#<iid>)` commits implement wrote. Gating this on
+// args.base would reopen the hole on the commoner path.
+//
+// null is "not checked", never "blind": answerKeyCommits throws when git
+// cannot walk the work repo, and [] there would put the reassuring reading in
+// meta.json for a check that never ran. Caught here rather than left to throw
+// because this runs after replayWorktree and outside the try/finally that
+// removes it.
+let answerKey: string[] | null;
+try {
+  answerKey = answerKeyCommits(args.iid, base);
+} catch (err) {
+  answerKey = null;
+  const stderr = String((err as { stderr?: unknown }).stderr ?? '').trim();
+  console.log('');
+  console.log(`NOT CHECKED  could not list commits naming #${args.iid}: ${(stderr || (err as Error).message).split('\n')[0]}`);
+  console.log('             recorded as answerKeyCommits: null in meta.json — unknown, not blind.');
+  console.log('');
+}
+if (answerKey?.length) {
+  console.log('');
+  console.log(`NOT BLIND  ${answerKey.length} commit(s) reference #${args.iid} and are not in the base;`);
+  console.log('           a phase that greps the history can read the fix it is meant to plan.');
+  for (const c of answerKey) console.log(`           ${c}`);
+  console.log('           recorded as answerKeyCommits in meta.json — see issue #155.');
+  console.log('');
+}
+
 const freshJournal: RunJournal = {
   runId, iid: args.iid, title: ticket.title, url: journal.url, createdAt: Date.now(),
   status: 'running', phases: [],
@@ -202,7 +235,13 @@ if (args.from === 'plan') prior.research = readJson(args.research ?? join(args.s
 
 const meta: Record<string, unknown> = {
   iid: args.iid, label: args.label, from: args.from, oneshot: oneshotSha, base,
-  skillsRoot: args.skillsRoot, sourceRun: journal.runId, research: args.research ?? null, phases: {},
+  skillsRoot: args.skillsRoot, sourceRun: journal.runId, research: args.research ?? null,
+  // Empty means no commit naming #<iid> is reachable outside the base. That is
+  // not proof the run was blind: a fix whose messages never name the ticket
+  // (a squash merge titled after the change) is not found. Non-empty means the
+  // plan could have read the answer, so the artifact says so on its face. null
+  // means the check could not run, and the measurement's blindness is unknown.
+  answerKeyCommits: answerKey, phases: {},
 };
 
 let exitCode = 0;

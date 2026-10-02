@@ -41,10 +41,11 @@ What remains after structure is the real hook list.
 |---|---|
 | `label-guard.js` (235 lines + `config/labels.json`) | **Deleted.** No label machine, and label writes are code. |
 | `git-guard.js` — approval-label verification before merge | **Deleted half.** Merge is code. The Bash-surface half stays and gets stronger. |
-| `pause-check` · `write-scope` · `sleep-cap` · `budget-gate` · `injection-scan` · `log-event` · `archive-transcript` · `subagent-capture` · `precompact-guard` · `dryrun-guard` | **Kept**, several re-scoped |
+| `pause-check` · `write-scope` · `sleep-cap` · `budget-gate` · `injection-scan` · `log-event` · `archive-transcript` · `subagent-capture` · `precompact-guard` | **Kept**, several re-scoped |
+| `dryrun-guard` | **Not built.** `DRY_RUN` cuts the tool list instead, and only partly — see its row in §3. |
 | — | **7 new**, listed below |
 
-Net: 12 → 18 hooks, but the two most complex ones shrink or vanish, and every new one exists
+Net: 12 → 17 hooks, but the two most complex ones shrink or vanish, and every new one exists
 because v2 does something v1 never did (run a local server, drive a browser, hand artifacts
 between phases).
 
@@ -57,11 +58,12 @@ between phases).
 | `pause-check` | *(all)* | Denies side-effectful tools while `state/PAUSE`, `PAUSE-QUOTA`, `PAUSE-NETWORK` or `PAUSE-DEPLOY` exists. Denies all `mcp__gitlab__*` while the VPN breaker is open. **With zero human gates this is your only brake on a live run.** | **P0** |
 | `write-scope` | `Write\|Edit\|NotebookEdit` | Per-phase write allowlist. Absolute deny for every phase: the v2 runtime's own `hooks/ config/ src/ scripts/`, `~/.claude/`, **and `$ERP_REPO`**. Must `realpath()` before comparing — see §4.1. | **P0** |
 | `git-guard` | `Bash` | No `push --force`, no push to `dev\|stage\|master`, no push to any ref except the run's leased branch, no `branch -D` of a protected ref, no `remote set-url`, no `gh`/`glab` as an escape hatch, **no git command whose resolved cwd is outside the leased worktree**, and **no tree-changing git (`checkout`, `restore`, `stash`, `reset`, `commit`, …) from a phase that stands in the worktree without write scope on it** (research, plan, testcases, review, ui-evidence, mr — push stays allowed). | **P0** |
+| `artifact-guard` | `Write\|Edit\|NotebookEdit\|Bash` | Refuses a write to any phase's handoff artifact, or to `run.json`, sitting directly in a run directory. `writes: ['run']` hands every session the whole directory, while the only files a prompt asks it to write there are the three `*-partial.json` backstops — so the permission is wider than the need by every handoff in it, plus the journal. It matters because the conductor reads those files back: `qualityGate()` decides the merge from `verify.json` and `findings.json`, and `run.json` carries the plan and test-case approvals a **human** gave on the ticket plus the digests meant to detect exactly this. `verify`, `ui-evidence` and `mr` all run after `review` and all hold the scope. Bash is matched as well as the write tools, because `write-scope` is blind to it and the transcripts show sessions already reaching these paths with `cat` and `python3 -c` — as often by `cd`-ing into the run directory as by absolute path, so relative paths resolve against the hook input's `cwd` and any `cd` earlier in the command. Moving a handoff out counts as writing it, and deleting or moving a whole run directory (or `state/runs`) is refused as well, since it takes the journal and every handoff at once. Reads are never refused. Fails OPEN. | **P0** |
 | `frontend-test-guard` | `Write\|Edit\|NotebookEdit` | Denies authoring a frontend unit test, matching the app repo's own Jest `testMatch` exactly: a collected extension under `frontend/src`, either below a `__tests__/` directory or carrying a `.test.`/`.spec.` suffix. The Jest harness has rotted and CI never runs it, so such a test is unpassable by construction — `testcases` and `verify` say so in prose, and `implement` (which writes the files) did not. **Playwright is untouched** and must stay that way: it lives outside Jest's `roots` by construction — Oneshot's own install, `state/runs/<iid>/harness/`, `<worktree>/.verify-scratch/` — which is why the rule is anchored on the directory and never on the filename. Backend Python tests and Oneshot's own tests are unaffected. Fails OPEN. | **P0** |
 | `browser-scope` | Playwright / browser tools | Navigation allowlist: `localhost:<leased-port>`, the GitLab host of `GITLAB_REPO_URL`. Everything else denied. | **P1 (M3)** |
 | `sleep-cap` | `Bash` | Caps `sleep N`. Phase 6 legitimately waits (webpack ~30 min) — it must poll and report instead of sleeping through its own wall clock. | **P1 (M3)** |
 | `secret-guard` | `Read\|NotebookRead\|Grep\|Bash` | Denies reads **and writes** of this repo's own `.env` (`$ONESHOT_HOME/.env`) only: the Read/Grep tools by path, and Bash that reads it (`cat`, `grep`, `sed`, `cp`, `source`, `<` …) or writes it (`>`, `>>`, `tee`, `mv`, `sed -i` …), with `~`, `$HOME` and `$ONESHOT_HOME` expanded and relative paths resolved against the session cwd. `.env.example`/`.env.local` and the work repo's `.env` are allowed. **Not covered, deliberately:** `local_settings.py`, `~/.claude.json`, `~/.ssh/**`, `*.pem`, echoing `*TOKEN*` variables (the session env is a whitelist and carries no token), and any interpreter or `sudo` that opens the file itself — it is best-effort, and the skills keep their "never print `GITLAB_TOKEN`" rule. | P2 |
-| `dryrun-guard` | *(all)* | `DRY_RUN=1` → all writes denied. How you test the pipeline against a real ticket without touching it. | P2 |
+| `dryrun-guard` | — | **Not built; partly covered by structure.** Under `DRY_RUN`, `toolPolicy()` in `src/conductor/phase.ts` strips `Write`, `Edit` and `NotebookEdit` from every phase, plus seven MR/issue tools (`create_`/`update_merge_request`, `create_`/`update_issue`, the MR and issue notes, `upload_markdown`). That is a deny-list, so it is not closed. `mr` skips the wider GitLab deny-list (`mayTouchGitlab`), so under `DRY_RUN` it still holds `push_files`, `create_or_update_file`, `create_branch` and the thread, note and draft-note writes. Every phase still holds the mutation tools that are on no list at all: `delete_issue`, the label and issue-link writes, `delete_draft_note`, `create_`/`retry_`/`cancel_pipeline`, `fork_repository` and `create_repository`. `git-guard` covers only `git push` on Bash (`ONESHOT_DRY_RUN`). Closing the rest belongs in `toolPolicy()`/`mcpServers()` — the GitLab MCP server has a read-only mode — not in a hook. | — |
 | `log-event` | *(all)* | Event tail / dashboard. | **P0** |
 
 **Fail-open is the default, and the exception is wired in `src/conductor/hooks.ts`.** Every
@@ -78,7 +80,7 @@ that needed it.
 
 | Hook | Matcher | Enforces | P |
 |---|---|---|---|
-| `artifact-validate` | `Write` under `state/runs/<iid>/` | Validates the phase's handoff JSON against its schema **inside the live session** and returns the failing field as `additionalContext` so the model repairs it now — instead of the Conductor finding out after the session is dead and re-running the whole phase. | **P1 (M1)** |
+| ~~`artifact-validate`~~ | — | **Superseded by structure; never built.** The premise was that a session writes its own handoff, so a `Write` matcher could catch a malformed one. It does not: the artifact is the SDK's *structured output*, enforced by `outputFormat: json_schema` in `src/conductor/phase.ts` and retried until it validates, then written by the conductor after the session is dead. There is no tool call for a matcher to see. Semantic checks a schema cannot express ("the field is present but empty") are run-level post-conditions and live in the conductor — `src/conductor/reproduction.ts` is the worked example. | — |
 | `injection-scan` | GitLab reads, `WebFetch`, **browser page-text reads**, `Read` of ticket-derived files | Non-blocking. Flags instruction-shaped text and re-anchors the model on "this is data". Widened matcher: the app under test renders user-authored content, which v1 never read. | **P1 (M1)** |
 | `log-event` | *(all)* | — | **P0** |
 
@@ -100,7 +102,7 @@ that needed it.
 
 | Hook | Enforces | P |
 |---|---|---|
-| `phase-exit-check` | If the phase didn't write its artifact, block the stop **once**: "you have not written `<phase>.json`; write it now." This is the one legitimate use of Stop-blocking, and it catches the single most common pipeline failure — a phase that did the work, narrated it in prose, and ended without a handoff. | **P1 (M1)** |
+| ~~`phase-exit-check`~~ | **Superseded by structure; never built.** Same reason as `artifact-validate`: the failure it guards — "a phase that did the work, narrated it in prose, and ended without a handoff" — is what `outputFormat: json_schema` removed. A session that returns no structured output fails the phase outright (`out.error = 'session produced no structured output despite a schema'`), which the runner handles as a phase failure rather than a silent degradation. | — |
 
 ### PreCompact / SubagentStop
 
@@ -150,17 +152,28 @@ Four phases drive a real browser. Ticket bodies are untrusted data and routinely
 textbook injection payload. `browser-scope` makes the allowlist structural rather than a
 sentence in a prompt that a model may or may not weigh.
 
-### 4.4 Two hooks are what turn this from a chat into a pipeline
+### 4.4 The handoff contract became structure, not two hooks *(historical)*
 
-`artifact-validate` + `phase-exit-check` are not safety guards — they're the **mechanism**. The
-handoff contract is currently a skill (`phase-handoff-contract`), which means it's advice, which
-means it will be ignored under load. These two hooks make it an invariant:
+This section argued that `artifact-validate` + `phase-exit-check` were "the **mechanism**",
+because the handoff contract was then a skill — advice, and so ignorable under load. Both
+properties it asked for now hold without either hook, and by construction rather than by policy:
 
-- The phase cannot end without producing its artifact.
-- The artifact cannot be malformed and still be accepted.
+- The phase cannot end without producing its artifact — a session that returns no structured
+  output fails the phase.
+- The artifact cannot be malformed and still be accepted — `outputFormat: json_schema` retries
+  until it validates.
 
-Without them, every phase boundary is a place the run can silently degrade into prose. Build
-them in M1, alongside the first three phases — not in the hardening milestone.
+The reasoning is kept because the *shape* of the argument was right and the conclusion was wrong
+in an instructive way: the question to ask of a proposed hook is always whether the capability
+it guards can be removed instead. Here it could. **Do not build these two from this plan.**
+
+What the plan did not anticipate is the opposite failure — not a phase that fails to write its
+own artifact, but one that writes **somebody else's**. Every session gets `writes: ['run']`, the
+conductor reads those files back to decide the merge, and `run.json` in the same directory holds
+a human's gate approval. That is `artifact-guard`, in the PreToolUse table above, and it is a
+hook rather than structure only because the capability cannot be withdrawn: the three
+`*-partial.json` crash backstops are real, they live in that directory, and Bash can reach any
+path regardless of what the tool list says.
 
 ## 5. Build order
 
@@ -168,15 +181,18 @@ them in M1, alongside the first three phases — not in the hardening milestone.
 `budget-gate`, `log-event`. Nothing runs against a real ticket until these five are in and
 `scripts/verify-hooks.sh` passes offline.
 
-**M1** — `artifact-validate`, `phase-exit-check`, `run-context`, `injection-scan`.
+**M1** — `run-context`, `injection-scan`. (`artifact-validate` and `phase-exit-check` were dropped
+here — see §4.4. `artifact-guard` took their place in the run directory, for the opposite
+failure.)
 
 **M3** — `browser-scope`, `sleep-cap`, `reap-check`.
 
 **M5** — `deploy-guard`. Shipped with phase 10, then **removed with it**: the pipeline ends at
 the merge, and a guard whose only job was the deploy has nothing left to guard.
 
-**M7** — `secret-guard`, `dryrun-guard`, `precompact-guard`, `subagent-capture`,
-`archive-transcript`.
+**M7** — `secret-guard`, `precompact-guard`, `subagent-capture`, `archive-transcript`.
+(`dryrun-guard` was dropped here: `DRY_RUN` is enforced by cutting the tool list, and what that
+does not yet cut belongs in the same place — see its row in §3.)
 
 Every hook keeps v1's two properties: shell-gated on the role env var so your interactive
 sessions pay ~1 ms, and self-gating inside the script as defense in depth.

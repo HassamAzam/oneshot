@@ -98,8 +98,12 @@ Login goes through the real form with `ONESHOT_TEST_LOGIN`. Record the account.
   the Oneshot install; never `npm install` into the worktree).
 - Wait for data, not skeletons. Retry a flaky step twice.
 - **Measure what the bug is about.** "Obscured", "misaligned", "wrong total",
-  "not announced" all have a number or an attribute: overlap in px, contrast
+  "not announced" all have a number or an attribute: an overlap, contrast
   ratio, a cell value, an aria attribute. Record the number, not "looks fine".
+  Measure an overlap with `overlap()` from `local-browser-verify`'s harness;
+  its "Measure a visual bug after the interaction" bullet says how to read the
+  result. Quote the `region` it returns ("a 43px band, the whole Title row"),
+  never `areaPx` as "N px": it is an area, in px².
 - Screenshot the moment the bug should appear into the run artifacts dir
   (`state/runs/<iid>/artifacts/`), named `repro-<n>.png`, and list the bare
   filenames in `evidence`. This applies to **both** verdicts: for `reproduced` the
