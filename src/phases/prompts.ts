@@ -950,8 +950,9 @@ is "that's a nice generic dashboard". So, in order:
    it, because it is regenerated every round and your edits to it would be lost. Read its header
    first: it lists every token it could NOT resolve, and those are the only ones you read the
    source for. A token the product does not have yet goes in \`${DESIGN_DIR}/${NEW_TOKENS_FILE}\`
-   and in \`newPatterns\`. Only if the file is absent do you read the three files above and
-   distil them yourself. Report \`tokensFile\` as \`${DESIGN_DIR}/${TOKENS_FILE}\`.
+   and in \`newPatterns\`. For a dark-mode screen put \`data-theme="dark"\` on \`<html>\`: the dark
+   values are in that block, not a media query. Only if the file is absent do you read the three
+   files above and distil them yourself. Report \`tokensFile\` as \`${DESIGN_DIR}/${TOKENS_FILE}\`.
 2. Open the running app and screenshot the screens this ticket touches AS THEY ARE TODAY. That
    capture is the \`before\` on each screen, and it is also where you read the real shell — nav,
    header, density, spacing — which every mockup then reproduces.

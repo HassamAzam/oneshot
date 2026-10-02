@@ -52,6 +52,11 @@ In order:
    something that is already correct in front of you. If the file is absent
    altogether the generator could not run: read the three files above and
    distil them yourself, exactly as this step used to say.
+
+   **For a dark-mode screen, put `data-theme="dark"` on `<html>`.** The dark
+   values sit in that block, not in a media query, so a dark mockup without
+   the attribute renders the light palette — and re-deriving dark values by
+   hand is the drift this file exists to stop.
 2. **Capture the screens as they are today.** Bring the app up the way everything
    else does (`node $ONESHOT_HOME/scripts/app.cjs ensure`) and screenshot each
    screen this ticket touches. Those captures are the `before` on every screen,

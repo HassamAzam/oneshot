@@ -2170,9 +2170,9 @@ export async function runTicket(
     // tokens.css names anything the extractor could not resolve.
     if (p.name === 'design' && wt) {
       const tokens = writeDesignTokens(iid, wt);
-      log[tokens ? 'ok' : 'warn'](tokens
-        ? `design     tokens.css generated for #${iid}`
-        : `design     could not generate tokens.css for #${iid} — the phase reads the theme itself`);
+      if (!tokens) log.warn(`design     could not generate tokens.css for #${iid} — the phase reads the theme itself`);
+      else if (tokens.sources.length === 0) log.warn(`design     tokens.css for #${iid} read no theme file — the worktree has none of them, so it is empty`);
+      else log.ok(`design     tokens.css generated for #${iid} from ${tokens.sources.length} theme file(s)`);
     }
 
     // The ledger row is opened before the phase and closed after it, so an

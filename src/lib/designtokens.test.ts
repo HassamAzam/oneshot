@@ -15,10 +15,11 @@
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { extractDesignTokens, type TokenExtraction } from './designtokens.js';
+import { artifactDir, runDir } from './config.js';
+import { extractDesignTokens, writeDesignTokens, type TokenExtraction } from './designtokens.js';
 
 interface Fixture {
   theme?: string;
@@ -496,4 +497,144 @@ test('valid css that only looks like sass is still emitted as written', (t) => {
   assert.deepEqual(scss, valid);
   assert.deepEqual(unresolved.filter((name) => name.startsWith('scss.')), []);
   assert.match(css, /--scss-font: 12px\/1\.5 sans-serif;/);
+});
+
+// ------------------------------------------- scope, literal ends, key names
+
+test('a const indented inside a function never overrides the module-level binding', (t) => {
+  const theme = `const primary = '#111111';
+function overrides() {
+  const primary = '#ff0000';
+  return primary;
+}
+export const getColors = (isDark) => ({
+  primary,
+  accent: isDark ? primary : '#222222',
+});
+`;
+  const { light, dark, unresolved } = extractDesignTokens(frontend(t, { theme }));
+  assert.equal(light.primary, '#111111');
+  assert.equal(dark.accent, '#111111');
+  assert.deepEqual(unresolved.filter((u) => /primary|accent/.test(u)), []);
+});
+
+test('a string literal ends at its first closing quote, so a concatenation or a second const is never one value', (t) => {
+  const theme = `const a = 'x'; const b = 'y';
+const joined = '#ab' + 'cdef';
+const escaped = 'it\\'s #fff';
+export const getColors = (isDark) => ({
+  fromA: a,
+  joined,
+  inline: '#12' + '3456',
+  escaped,
+});
+`;
+  const { light, css, unresolved } = extractDesignTokens(frontend(t, { theme }));
+  for (const key of ['fromA', 'joined', 'inline']) {
+    assert.equal(light[key], undefined, key);
+    assert.ok(unresolved.includes(`light.${key}`), key);
+  }
+  assert.equal(light.escaped, "it's #fff", 'an escaped quote is not the closing one');
+  assert.doesNotMatch(css, /const b|' \+ '/);
+});
+
+test('a key that is not a css name lands in unresolved, and a quoted kebab key still emits', (t) => {
+  const theme = `export const getColors = (isDark) => ({
+  [dyn]: '#fff',
+  'has space': '#000',
+  'kebab-key': '#123456',
+});
+`;
+  const style = "export const fontLato = 'Lato';\nexport const font$Odd = 'Odd';\n";
+  const { light, fonts, css, unresolved } = extractDesignTokens(frontend(t, { theme, style }));
+  assert.equal(light['kebab-key'], '#123456');
+  for (const key of ['[dyn]', 'has space']) {
+    assert.equal(light[key], undefined, key);
+    assert.ok(unresolved.includes(`light.${key}`) && unresolved.includes(`dark.${key}`), key);
+  }
+  assert.equal(fonts.lato, 'Lato');
+  assert.ok(unresolved.includes('font.font$Odd'));
+  assert.doesNotMatch(css, /--color-\[dyn\]|--color-has space|--font-\$/);
+});
+
+test('a block-scoped sass variable never overrides the global one', (t) => {
+  const scss = `$brand: #111111;
+.card {
+  $brand: #ff0000;
+  color: $brand;
+}
+@media (min-width: 600px) { $gap: 99px; }
+$after: #{$brand}-x;
+$next: #fafafa;
+`;
+  const { scss: tokens, unresolved } = extractDesignTokens(frontend(t, { scss }));
+  assert.equal(tokens.brand, '#111111');
+  assert.equal(tokens.gap, undefined, 'a variable only declared inside a block is local, not a token');
+  assert.ok(!unresolved.includes('scss.gap'), 'and it is not a swallowed declaration either');
+  assert.equal(tokens.next, '#fafafa', 'interpolation braces do not open a block');
+  assert.ok(unresolved.includes('scss.after'));
+});
+
+test('a variable a block assigns with !global is named in unresolved, never emitted at its depth-0 value', (t) => {
+  const scss = `$brand: #111111;
+@mixin rebrand { $brand: #222222 !global; }
+@mixin only-here { $accent: #00ff00 !global; }
+$plain: #333333;
+`;
+  const { scss: tokens, unresolved } = extractDesignTokens(frontend(t, { scss }));
+  assert.equal(tokens.brand, undefined);
+  assert.ok(unresolved.includes('scss.brand'));
+  assert.ok(unresolved.includes('scss.accent'));
+  assert.equal(tokens.plain, '#333333');
+});
+
+test('the header tells a dark mockup to set data-theme', (t) => {
+  const { css } = extractDesignTokens(frontend(t, { theme: THEME }));
+  assert.match(css, /Dark mode: put data-theme="dark" on <html>/);
+});
+
+// ------------------------------------------------------------ the writer
+
+/** A worktree whose frontend/ holds the given theme files, in the reserved 990000+ iid band. */
+function worktree(t: TestContext, iid: number, files: Fixture): string {
+  const wt = mkdtempSync(join(tmpdir(), 'oneshot-tokens-wt-'));
+  t.after(() => {
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(runDir(iid), { recursive: true, force: true });
+  });
+  const root = frontend(t, files);
+  mkdirSync(wt, { recursive: true });
+  for (const rel of ['src/jss/Theme.js', 'src/jss/style.js', 'src/scss/_variables.scss']) {
+    if (!existsSync(join(root, rel))) continue;
+    mkdirSync(join(wt, 'frontend', rel, '..'), { recursive: true });
+    writeFileSync(join(wt, 'frontend', rel), readFileSync(join(root, rel)));
+  }
+  return wt;
+}
+
+test('writeDesignTokens writes the extraction into design/ of the run and says what it read', (t) => {
+  const iid = 990371;
+  const wt = worktree(t, iid, { theme: THEME, scss: '$brand: #111;\n' });
+  const out = writeDesignTokens(iid, wt);
+  assert.ok(out);
+  assert.equal(out.path, join(artifactDir(iid), 'design', 'tokens.css'));
+  assert.equal(readFileSync(out.path, 'utf8'), extractDesignTokens(join(wt, 'frontend')).css);
+  assert.deepEqual(out.sources, ['src/jss/Theme.js', 'src/scss/_variables.scss']);
+});
+
+test('a worktree with no theme files reports no sources, so the conductor can warn', (t) => {
+  const iid = 990372;
+  const wt = worktree(t, iid, {});
+  assert.deepEqual(writeDesignTokens(iid, wt)?.sources, []);
+});
+
+test('a failed write removes the previous lap\'s file instead of leaving it to be read as current', (t) => {
+  if (process.getuid?.() === 0) return t.skip('root writes through a read-only file');
+  const iid = 990373;
+  const wt = worktree(t, iid, { theme: THEME });
+  const first = writeDesignTokens(iid, wt);
+  assert.ok(first && existsSync(first.path));
+  chmodSync(first.path, 0o444);
+  assert.equal(writeDesignTokens(iid, wt), null);
+  assert.equal(existsSync(first.path), false);
 });

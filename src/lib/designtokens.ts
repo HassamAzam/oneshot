@@ -35,18 +35,20 @@
  * WHAT COUNTS AS UNRESOLVED: an identifier with no top-level `const` binding
  * (or one more than a single hop away), a ternary on anything other than the
  * dark-mode parameter, a nested ternary, an entry that is not a plain
- * `key: value`, an empty string literal — an empty value is not a colour, and
- * `--color-x: ;` is not valid CSS — a template literal that interpolates, a
- * `font…` const that is a string expression rather than a literal, a Sass
- * value that needs Sass to evaluate it, and a source file that is not there
- * at all.
+ * `key: value`, a key that is not a CSS name, an empty string literal — an
+ * empty value is not a colour, and `--color-x: ;` is not valid CSS — a
+ * template literal that interpolates, a `font…` const that is a string
+ * expression rather than a literal, a Sass value that needs Sass to evaluate
+ * it, a Sass variable a block assigns with `!global`, and a source file that is
+ * not there at all. "Top-level" is column 0 for a const and brace depth 0 for
+ * a Sass variable; anything deeper is local to its block and is not a token.
  *
  * Nothing here throws on bad input. It runs against arbitrary worktrees, and a
  * frontend that looks nothing like this one must come back empty and honest
  * rather than take the run down.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { artifactDir } from './config.js';
 
 const THEME_FILE = 'src/jss/Theme.js';
@@ -64,6 +66,13 @@ const OPENERS = new Set(['(', '[', '{']);
 const CLOSERS = new Set([')', ']', '}']);
 
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+/**
+ * What can follow `--color-` and stay one custom property. A computed key
+ * (`[dyn]`), a quoted one with a space, or a JS name with a `$` would emit a
+ * declaration the browser drops without a word.
+ */
+const CSS_NAME = /^[A-Za-z0-9_-]+$/;
 
 export interface TokenExtraction {
   /** The tokens.css text, header comment included. */
@@ -201,11 +210,21 @@ function matchingBrace(source: string, open: number): number {
  * is not a literal: `` `0 0 4px ${grey}` `` opens and closes on a backtick like
  * any string, and copying it out emitted `--color-x: 0 0 4px ${grey};`, a
  * declaration no browser can read, under a header claiming nothing was missing.
+ *
+ * The literal must END where its first unescaped closing quote is. Matching
+ * only the first and last characters took `'#ab' + 'cdef'` as the text
+ * `#ab' + 'cdef`, and two consts on one line, `'x'; const b = 'y'`, as one.
  */
 function unquote(expression: string): string | null {
   const text = expression.trim();
   const first = text[0];
-  if (text.length < 2 || !first || !QUOTES.has(first) || text[text.length - 1] !== first) return null;
+  if (text.length < 2 || !first || !QUOTES.has(first)) return null;
+  let close = -1;
+  for (let i = 1; i < text.length; i += 1) {
+    if (text[i] === '\\') i += 1;
+    else if (text[i] === first) { close = i; break; }
+  }
+  if (close !== text.length - 1) return null;
   if (first === '`' && text.includes('${')) return null;
   return text.slice(1, -1).replace(/\\(.)/g, '$1');
 }
@@ -214,6 +233,10 @@ function unquote(expression: string): string | null {
  * Top-level `const NAME = '…';` and `const NAME = OTHER;` across a whole file.
  * The aliases are what makes one hop of indirection resolvable: the palette
  * writes `whiteTextColor`, and `const whiteTextColor = '#fff'` is the answer.
+ *
+ * Top-level means column 0. An indented `const` is inside a function or a
+ * block, and the map is last-wins, so `function x() { const primary = '#f00' }`
+ * after a module-level `primary` would hand the palette the local value.
  */
 interface Bindings {
   literals: Map<string, string>;
@@ -226,7 +249,7 @@ function collectBindings(source: string): Bindings {
   const literals = new Map<string, string>();
   const aliases = new Map<string, string>();
   const strings = new Set<string>();
-  const declaration = /^[ \t]*(?:export[ \t]+)?const[ \t]+([A-Za-z_$][A-Za-z0-9_$]*)[ \t]*=[ \t]*([^\n]*?);[ \t]*$/gm;
+  const declaration = /^(?:export[ \t]+)?const[ \t]+([A-Za-z_$][A-Za-z0-9_$]*)[ \t]*=[ \t]*([^\n]*?);[ \t]*$/gm;
   for (const match of source.matchAll(declaration)) {
     const name = match[1] as string;
     const value = (match[2] as string).trim();
@@ -326,6 +349,58 @@ function parsePaletteEntry(entry: string, darkParam: string, bindings: Bindings)
   };
 }
 
+const blank = (text: string): string => text.replace(/[^\n]/g, ' ');
+
+/**
+ * The Sass source with every `{ … }` body blanked to spaces, offsets and
+ * newlines kept. A `$name:` inside a rule, mixin or `@if` is local to that
+ * block — `.x { $brand: #f00; }` leaves the global `$brand` alone — so only
+ * depth 0 holds the file's variables. `#{…}` is interpolation, not a block,
+ * and is kept as written.
+ */
+function topLevelSass(source: string): string {
+  let out = '';
+  let depth = 0;
+  let quote = '';
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i] as string;
+    const keep = (text: string): string => (depth === 0 ? text : blank(text));
+    if (quote) {
+      const escaped = char === '\\' ? source.slice(i, i + 2) : char;
+      out += keep(escaped);
+      i += escaped.length - 1;
+      if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '#' && source[i + 1] === '{') {
+      const end = matchingBrace(source, i + 1);
+      if (end !== -1) {
+        out += keep(source.slice(i, end + 1));
+        i = end;
+        continue;
+      }
+    }
+    if (QUOTES.has(char)) quote = char;
+    if (char === '{') depth += 1;
+    out += char === '{' || char === '}' ? ' ' : keep(char);
+    if (char === '}') depth = Math.max(0, depth - 1);
+  }
+  return out;
+}
+
+/**
+ * Variables a block assigns with `!global`. Whether that block ever runs — a
+ * mixin body, an `@if` branch — is Sass's to decide, so the depth-0 value may
+ * not be the one the app renders. Named in `unresolved` rather than guessed.
+ */
+function nestedGlobals(source: string, topLevel: string): Set<string> {
+  const names = new Set<string>();
+  for (const match of source.matchAll(/\$([A-Za-z0-9_-]+)[ \t]*:[^;{}]*!global/g)) {
+    if (topLevel[match.index as number] !== '$') names.add(match[1] as string);
+  }
+  return names;
+}
+
 /**
  * `$name: value;`, with or without the space, value taken whole so that
  * `rgb(72, 176, 121)` survives. A repeated name overwrites, which is what Sass
@@ -422,14 +497,19 @@ const FONT_CONST = /^font/i;
 function parseFonts(source: string): { fonts: Record<string, string>; unresolved: string[] } {
   const { literals, aliases, strings } = collectBindings(source);
   const fonts: Record<string, string> = {};
+  const unnamed: string[] = [];
   for (const [name, value] of literals) {
     if (!FONT_CONST.test(name)) continue;
+    if (!CSS_NAME.test(name)) {
+      unnamed.push(name);
+      continue;
+    }
     const stripped = name.slice(4);
     const short = stripped ? stripped.charAt(0).toLowerCase() + stripped.slice(1) : '';
     const key = short && fonts[short] === undefined ? short : name;
     fonts[key] = value;
   }
-  const unresolved = [...aliases.keys(), ...strings]
+  const unresolved = [...aliases.keys(), ...strings, ...unnamed]
     .filter((name) => FONT_CONST.test(name))
     .map((name) => `font.${name}`);
   return { fonts, unresolved };
@@ -455,6 +535,9 @@ function header(extraction: Omit<TokenExtraction, 'css'>, missing: string[]): st
     ' * Every value below is the value the running app uses. Tokens the extractor',
     ' * could not resolve are NOT omitted quietly — they are listed under UNRESOLVED',
     ' * so a mockup built on this file knows exactly what it is missing.',
+    ' *',
+    ' * Dark mode: put data-theme="dark" on <html>. The dark values live in that',
+    ' * block, not a media query, so a dark screen without it renders light.',
     ' *',
     ` * Tokens: ${counts}`,
     ' *',
@@ -497,9 +580,10 @@ export function extractDesignTokens(frontendRoot: string): TokenExtraction {
     const entries = parsePalette(stripComments(theme));
     if (entries.length === 0) unresolved.push(`file:${THEME_FILE} (no getColors palette found)`);
     for (const entry of entries) {
-      if (entry.light) light[entry.key] = entry.light;
+      const named = CSS_NAME.test(entry.key);
+      if (named && entry.light) light[entry.key] = entry.light;
       else unresolved.push(`light.${entry.key}`);
-      if (entry.dark) dark[entry.key] = entry.dark;
+      if (named && entry.dark) dark[entry.key] = entry.dark;
       else unresolved.push(`dark.${entry.key}`);
     }
   }
@@ -527,13 +611,16 @@ export function extractDesignTokens(frontendRoot: string): TokenExtraction {
   } else {
     sources.push(SCSS_FILE);
     const stripped = stripComments(scssSource, true);
-    const raw = parseScss(stripped);
+    const topLevel = topLevelSass(stripped);
+    const raw = parseScss(topLevel);
+    const globals = nestedGlobals(stripped, topLevel);
     for (const [key, value] of Object.entries(raw)) {
-      const css = scssValue(value, raw);
+      const css = globals.has(key) ? null : scssValue(value, raw);
       if (css === null) unresolved.push(`scss.${key}`);
       else scss[key] = css;
     }
-    unresolved.push(...scssSwallowed(stripped, raw).map((name) => `scss.${name}`));
+    unresolved.push(...[...scssSwallowed(topLevel, raw), ...[...globals].filter((name) => !Object.hasOwn(raw, name))]
+      .map((name) => `scss.${name}`));
   }
 
   const extraction = { light, dark, fonts, scss, unresolved, sources };
@@ -580,15 +667,22 @@ export function extractDesignTokens(frontendRoot: string): TokenExtraction {
  * instruction to read the theme files stands as the fallback, and the CSS
  * header names every key this could not resolve so the phase knows when it has
  * to fall back.
+ *
+ * A failed write removes the file rather than leaving the last lap's. The
+ * prompt's contract is "absent means distil it yourself", and a stale or
+ * half-written file would still be read as current. Returns the files it read
+ * as well as where it wrote, so a checkout with no theme files at all can be
+ * told apart from one that produced a palette.
  */
-export function writeDesignTokens(iid: number, worktree: string): string | null {
+export function writeDesignTokens(iid: number, worktree: string): { path: string; sources: string[] } | null {
+  const path = join(artifactDir(iid), DESIGN_DIR, TOKENS_FILE);
   try {
-    const out = join(artifactDir(iid), DESIGN_DIR);
-    mkdirSync(out, { recursive: true });
-    const path = join(out, TOKENS_FILE);
-    writeFileSync(path, extractDesignTokens(join(worktree, 'frontend')).css, 'utf8');
-    return path;
+    mkdirSync(dirname(path), { recursive: true });
+    const { css, sources } = extractDesignTokens(join(worktree, 'frontend'));
+    writeFileSync(path, css, 'utf8');
+    return { path, sources };
   } catch {
+    try { rmSync(path, { force: true }); } catch { /* nothing more to undo */ }
     return null;
   }
 }
