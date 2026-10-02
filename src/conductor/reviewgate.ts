@@ -1067,6 +1067,9 @@ function designOf(design: Record<string, unknown> | null): DesignArtifact {
     flowChange: d.flowChange === true,
     tokensFile: typeof d.tokensFile === 'string' ? d.tokensFile : '',
     screens: Array.isArray(d.screens) ? d.screens : [],
+    prototype: d.prototype && typeof d.prototype === 'object'
+      ? { entry: String(d.prototype.entry ?? ''), video: String(d.prototype.video ?? '') }
+      : null,
     decisions: Array.isArray(d.decisions) ? d.decisions.map(String) : [],
     newPatterns: Array.isArray(d.newPatterns) ? d.newPatterns.map(String) : [],
     openQuestions: Array.isArray(d.openQuestions) ? d.openQuestions : [],
@@ -1080,7 +1083,7 @@ function designOf(design: Record<string, unknown> | null): DesignArtifact {
  * Order is the argument, exactly as it is in the ui-evidence pack: for each
  * screen the current state first and the proposal second, so a reviewer
  * scrolling the comment reads before→after per screen rather than a block of
- * one followed by a block of the other. Ordering follows the screens,
+ * one followed by a block of the other. The walkthrough follows the screens,
  * and the clickable file last — it is the thing you open if the pictures left
  * you with a question.
  *
@@ -1119,6 +1122,10 @@ export function designAttachments(iid: number, design: Record<string, unknown> |
     push(s.before);
     push(s.screenshot);
   }
+  if (d.prototype) {
+    push(d.prototype.video);
+    push(d.prototype.entry);
+  }
   return out;
 }
 
@@ -1133,7 +1140,8 @@ export function designAttachments(iid: number, design: Record<string, unknown> |
  * phase reports its own success and nothing checks the artifact against disk.
  *
  * So the per-file tolerance stays where it is and the check moves up a level.
- * A design claiming screens must have rendered them. Returns null when there is
+ * A design claiming screens must have rendered them, and a design claiming a
+ * flow change must have built and recorded it. Returns null when there is
  * nothing to refuse: `applicable: false`, or no screens, is a complete answer.
  */
 export function designDeliverableRefusal(
@@ -1145,11 +1153,27 @@ export function designDeliverableRefusal(
   const missing = d.screens
     .filter((sc) => !sc.screenshot || !existsSync(join(dir, sc.screenshot)))
     .map((sc) => sc.id || sc.name || '(unnamed)');
-  if (missing.length === 0) return null;
+  if (missing.length === 0) return flowDeliverableRefusal(d, dir);
   const all = missing.length === d.screens.length;
   return `design reported ${d.screens.length} screen(s) and ${all ? 'none' : `${missing.length}`}`
     + ` of their renders are on disk: ${missing.join(', ')}.`
     + ' A design gate armed on screens nobody can see asks a reviewer to approve nothing.';
+}
+
+/**
+ * A flow is approved by clicking through it and watching it, not by reading
+ * stills in order. hooks/design-flow-guard.cjs refuses the session's answer
+ * until the prototype and the walkthrough are good; this is what still holds
+ * when that guard released at its refusal cap, or failed open.
+ */
+function flowDeliverableRefusal(d: DesignArtifact, dir: string): string | null {
+  if (!d.flowChange) return null;
+  const missing = ([['clickable prototype', d.prototype?.entry], ['walkthrough video', d.prototype?.video]] as const)
+    .filter(([, rel]) => !rel || !existsSync(join(dir, rel)))
+    .map(([what]) => what);
+  if (missing.length === 0) return null;
+  return `design reported a flow change, and its ${missing.join(' and ')} ${missing.length > 1 ? 'are' : 'is'}`
+    + ' not on disk. A gate armed on stills alone asks a reviewer to approve a journey they cannot walk.';
 }
 
 /**
@@ -1183,9 +1207,10 @@ function renderDesignForTicket(design: Record<string, unknown> | null): string {
       : ''}`
     + `${questions ? `**Open questions** — answer in a comment, or the recommendation is used\n${questions}\n\n` : ''}`
     + (d.flowChange
-      ? 'The flow spans more than one screen, so the mockups below are its states in order. '
-        + 'A clickable prototype and a recorded walkthrough follow in a later change.\n'
-      : 'Single screen, no flow change.\n');
+      ? 'The flow changes, so a silent walkthrough is attached below the screens, and the clickable '
+        + 'prototype with it — download it and open it in a browser to click through the whole '
+        + 'journey yourself.\n'
+      : 'Single screen, no flow change, so there is no prototype to click through.\n');
 }
 
 /** Posted as a ticket comment when the design gate first arms, or re-arms after feedback. */

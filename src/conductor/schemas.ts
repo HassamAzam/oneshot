@@ -455,7 +455,7 @@ export const DESIGN_SCHEMA = phaseSchema({
     type: 'boolean',
     description:
       'True when the change spans more than one screen, or adds a step to an existing journey. ' +
-      'Recorded so a later change can decide whether a multi-screen flow needs a prototype; it does not ask you to build one.',
+      'True means you also build the clickable prototype and record the walkthrough, and report both in `prototype`.',
   },
   tokensFile: str('Artifact-relative path of the tokens.css distilled from the real frontend.'),
   screens: {
@@ -481,6 +481,21 @@ export const DESIGN_SCHEMA = phaseSchema({
       required: ['id', 'name', 'purpose', 'states', 'mockupHtml', 'screenshot', 'before', 'note'],
     },
   },
+  prototype: {
+    type: ['object', 'null'],
+    additionalProperties: false,
+    description:
+      'Set when flowChange is true, null otherwise. Both files must be on disk in the artifact ' +
+      'directory before you answer — the answer is refused until they are.',
+    properties: {
+      entry: str(
+        'Artifact-relative path of the clickable prototype: ONE self-contained .html that works ' +
+        'when downloaded alone — tokens and images inlined, no link to any sibling file.',
+      ),
+      video: str('Artifact-relative path of the silent annotated walkthrough of that prototype (.webm)'),
+    },
+    required: ['entry', 'video'],
+  },
   decisions: strArr(
     'The choices you made on the reviewer\'s behalf that they would want to know about. ' +
     'Not a changelog — the two or three that would start an argument if they disagreed.',
@@ -503,7 +518,7 @@ export const DESIGN_SCHEMA = phaseSchema({
       required: ['q', 'recommendation'],
     },
   },
-}, ['applicable', 'rationale', 'flowChange', 'tokensFile', 'screens', 'decisions', 'newPatterns', 'openQuestions']);
+}, ['applicable', 'rationale', 'flowChange', 'tokensFile', 'screens', 'prototype', 'decisions', 'newPatterns', 'openQuestions']);
 
 export const UI_EVIDENCE_SCHEMA = phaseSchema({
   screenshots: {

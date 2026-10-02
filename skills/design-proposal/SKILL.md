@@ -1,6 +1,6 @@
 ---
 name: design-proposal
-description: Draw what a ticket's UI should look like, before anyone plans or builds it, and hand a human something they can approve — mockups grounded in the real product's tokens, before/after captures, and for a flow change each state of that journey drawn as its own screen. Use when asked to "design this before we build it", "what should this look like", "mock this up for sign-off", or when Oneshot's design phase runs on a ticket labelled Design. Draws only; never implements, never edits application code.
+description: Draw what a ticket's UI should look like, before anyone plans or builds it, and hand a human something they can approve — mockups grounded in the real product's tokens, before/after captures, and for a flow change a clickable prototype plus a silent annotated walkthrough video. Use when asked to "design this before we build it", "what should this look like", "mock this up for sign-off", or when Oneshot's design phase runs on a ticket labelled Design. Draws only; never implements, never edits application code.
 ---
 
 # Design Proposal
@@ -71,15 +71,44 @@ scripts, no external fonts, no remote images: inline everything.
   you find — a flaw you could have caught yourself spends the reviewer's
   attention on your typo instead of on your design.
 
-## 4. A flow change is drawn as states, not prototyped
+## 4. A flow change gets a prototype and a walkthrough
 
-When the change spans more than one screen or adds a step to an existing journey, set
-`flowChange` and draw each state of that flow as its own screen, in order, so the reviewer
-can read the journey off the mockups.
+`flowChange` is true when the change spans more than one screen, or adds a step
+to an existing journey. Draw each state of that flow as its own screen, in
+order — and then, additionally:
 
-Do **not** build a clickable prototype and do **not** record a walkthrough. Both follow in
-their own change, once real runs have measured what this phase actually costs — they are
-the most expensive and most breakable part of an estimated budget.
+**The clickable prototype** — one self-contained `.html`, hash routing, vanilla
+JS. The reviewer downloads it from the ticket on its own, so it cannot lean on
+anything beside it: paste `tokens.css` into a `<style>`, make every image a
+`data:` URI, and never load or iframe a sibling mockup. Buttons navigate. Forms
+accept typing and carry values forward, so the confirmation screen shows what
+was actually typed. Submit → pending → done plays out. Include one unhappy
+branch. Seed it with data so it is demonstrable with no setup. Drive the whole
+happy path yourself before you call it done; a prototype that dead-ends on
+click two burns the reviewer's session.
+
+**A silent annotated walkthrough** — Playwright `recordVideo`, `.webm`, which
+GitLab renders inline in a comment. Under 60 seconds, one flow. The file is
+only written when the browser context closes, so close it before you read
+`page.video().path()`.
+
+- **No audio track, ever.** Not narration, not TTS, not music. The annotations
+  are the narration.
+- Annotate by injecting a small absolutely-positioned overlay before each click:
+  an arrow and a short caption naming what is about to happen. Hold it ~1.5s,
+  then click, then remove it.
+
+Report both in `prototype`. **This is enforced, not requested:**
+`hooks/design-flow-guard.cjs` refuses your final answer while `flowChange` is
+true and either file is missing, the prototype loads a file it will not have
+once downloaded, or the video is not a real recording. After three refusals it
+lets the answer through and the conductor fails the phase instead — so a
+missing walkthrough costs a whole design round, never just a line in review.
+
+Annotating is right here and forbidden in `ui-evidence`, and the difference is
+worth holding on to. This video argues for a design, so labelling it helps. That
+phase's screenshots are evidence that a case really ran, so drawing on them
+would be painting the result onto the page.
 
 ## 5. Give the reviewer the decisions, not a changelog
 
@@ -103,7 +132,7 @@ turns into a loop.
 ## Output
 
 `applicable`, `rationale`, `flowChange`, `tokensFile`, `screens[]`,
-`decisions[]`, `newPatterns[]`, `openQuestions[]`. Every file path
+`prototype`, `decisions[]`, `newPatterns[]`, `openQuestions[]`. Every file path
 is **artifact-relative and a bare filename where the schema says so** — a path
 in a filename field breaks the gate that attaches it.
 

@@ -25,6 +25,7 @@ const design = {
   flowChange: true,
   tokensFile: 'design/tokens.css',
   screens: [screen],
+  prototype: { entry: 'design/flow.html', video: 'design/flow.webm' },
   decisions: ['Bulk approve is one confirm, not per row'],
   newPatterns: ['A compact status chip the product does not have'],
   openQuestions: [{ q: 'Can a lead approve their own?', recommendation: 'No' }],
@@ -67,14 +68,13 @@ test('the product owner may sign off a design, and not a plan', () => {
   assert.doesNotMatch(approverLine('plan'), /muhammad\.nouman/);
 });
 
-test('a flow change says the mockups are its states, and a single screen says so', () => {
-  // The prototype and the recorded walkthrough follow in a later change, so a
-  // flow change must not promise a reviewer something that is not attached.
+test('a flow change offers the walkthrough and the prototype, and a single screen does not', () => {
   const flow = designApprovalRequestBody(design);
-  assert.match(flow, /states in order/);
-  assert.match(flow, /follow in a later change/);
-  assert.doesNotMatch(flow, /download it and open it/);
-  assert.match(designApprovalRequestBody({ ...design, flowChange: false }), /Single screen, no flow change/);
+  assert.match(flow, /silent walkthrough is attached/);
+  assert.match(flow, /clickable\s+prototype/);
+  assert.doesNotMatch(flow, /follow in a later change/);
+  const flat = designApprovalRequestBody({ ...design, flowChange: false, prototype: null });
+  assert.match(flat, /no flow change, so there is no prototype/);
 });
 
 test('an empty or absent design does not throw and renders nothing invented', () => {
@@ -140,6 +140,22 @@ test('attachments read before-then-after per screen, and keep colliding names ap
   }
 });
 
+test('a flow change attaches the walkthrough after the screens, then the clickable file', () => {
+  const dir = artifactDir(TMP_IID);
+  try {
+    mkdirSync(join(dir, 'design'), { recursive: true });
+    [screen.before, screen.screenshot, design.prototype.video, design.prototype.entry]
+      .forEach((rel) => writeFileSync(join(dir, rel), 'x'));
+    const got = designAttachments(TMP_IID, design);
+    assert.deepEqual(got.map((a) => a.name), [
+      'approvals-inbox--before.png', 'approvals-inbox.png', 'flow.webm', 'flow.html',
+    ]);
+    assert.deepEqual(got.map((a) => a.mime), ['image/png', 'image/png', 'video/webm', 'text/html']);
+  } finally {
+    rmSync(join(dir, '..'), { recursive: true, force: true });
+  }
+});
+
 test('a screen with no "before" contributes only its proposal', () => {
   const dir = artifactDir(TMP_IID);
   try {
@@ -176,8 +192,37 @@ test('a design whose renders ARE on disk passes', () => {
   const dir = artifactDir(TMP_IID);
   try {
     mkdirSync(join(dir, 'design'), { recursive: true });
-    writeFileSync(join(dir, screen.screenshot), 'x');
+    [screen.screenshot, design.prototype.entry, design.prototype.video]
+      .forEach((rel) => writeFileSync(join(dir, rel), 'x'));
     assert.equal(designDeliverableRefusal(TMP_IID, design), null);
+    assert.equal(designDeliverableRefusal(TMP_IID, { ...design, flowChange: false, prototype: null }), null);
+  } finally {
+    rmSync(join(dir, '..'), { recursive: true, force: true });
+  }
+});
+
+// What 8774 shipped: a flow change drawn as five stills, no prototype and no
+// walkthrough, and a gate that armed on them anyway.
+test('a flow change with every render but no prototype is refused, naming both files', () => {
+  const dir = artifactDir(TMP_IID);
+  try {
+    mkdirSync(join(dir, 'design'), { recursive: true });
+    writeFileSync(join(dir, screen.screenshot), 'x');
+    const refusal = designDeliverableRefusal(TMP_IID, { ...design, prototype: null });
+    assert.match(refusal ?? '', /flow change, and its clickable prototype and walkthrough video are not on disk/);
+  } finally {
+    rmSync(join(dir, '..'), { recursive: true, force: true });
+  }
+});
+
+test('a flow change missing only its walkthrough is refused for the walkthrough alone', () => {
+  const dir = artifactDir(TMP_IID);
+  try {
+    mkdirSync(join(dir, 'design'), { recursive: true });
+    [screen.screenshot, design.prototype.entry].forEach((rel) => writeFileSync(join(dir, rel), 'x'));
+    const refusal = designDeliverableRefusal(TMP_IID, design);
+    assert.match(refusal ?? '', /its walkthrough video is not on disk/);
+    assert.doesNotMatch(refusal ?? '', /clickable prototype/);
   } finally {
     rmSync(join(dir, '..'), { recursive: true, force: true });
   }
