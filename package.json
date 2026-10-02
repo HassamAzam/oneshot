@@ -18,6 +18,8 @@
     "mr-feedback:probe": "tsx scripts/mr-feedback-probe.ts",
     "report": "tsx scripts/report.ts",
     "replay": "tsx scripts/replay-plan.ts",
+    "eval": "DRY_RUN=1 tsx scripts/eval-phase.ts",
+    "memory:backfill": "tsx scripts/backfill-memory.ts",
     "hooks:verify": "bash scripts/verify-hooks.sh",
     "verify": "npm run deps:verify && npm run hooks:verify && npm run doctor",
     "check": "tsc --noEmit && for f in hooks/*.cjs; do node --check \"$f\" || exit 1; done && echo 'check clean'",
