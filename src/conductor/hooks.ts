@@ -185,6 +185,7 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
       { matcher: WRITE_TOOLS_OR_BASH, hooks: [guard('artifact-guard.cjs')], timeout: 15 },
       { matcher: WRITE_TOOLS, hooks: [guard('frontend-test-guard.cjs')], timeout: 15 },
       { matcher: BASH, hooks: [guard('git-guard.cjs')], timeout: 20 },
+      { matcher: BASH, hooks: [guard('install-guard.cjs')], timeout: 15 },
       { matcher: MR_TOOLS, hooks: [guard('mr-gate.cjs')], timeout: 15 },
       { matcher: READ_OR_BASH, hooks: [guard('secret-guard.cjs')], timeout: 15 },
       // log-event stays last so a denied call is still recorded.

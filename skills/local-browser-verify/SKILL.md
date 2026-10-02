@@ -55,9 +55,12 @@ What the harness knows, and why each fact cost a run to learn:
   listener's working directory. Confirming HTTP 200 is not confirming it is *your*
   build — a phase that drove a stranger's server recorded every value against the
   wrong code while reading green.
-- **Never `npm ci`, never rebuild the venv.** `node_modules`, `venv` and
-  `staticfiles` are symlinks into a working repo. Reinstalling rewrites that repo's
-  dependencies for every other worktree on this machine.
+- **An install is refused, not discouraged.** `node_modules`, `venv` and
+  `staticfiles` are symlinks into a working repo, so reinstalling rewrites that
+  repo's dependencies for every other worktree on this machine. `install-guard`
+  denies `npm ci`/`install`, `npx`, a venv rebuild and `rm -rf node_modules`
+  outright. What is left to you is the reading: a module that will not resolve is
+  an environment fault worth `blocked`, not a problem to work around.
 - **`staticfiles/` must be seeded or Django 500s on every page.** local_settings.py
   ships DEBUG=False with ManifestStaticFilesStorage, so `{% static %}` raises
   `Missing staticfiles manifest entry` until collectstatic has run — including on
@@ -114,8 +117,9 @@ pytest is unaffected and is fine to run.
 
 - Playwright is **not** in the worktree's symlinked `node_modules`. The harness
   resolves it from the Oneshot repo's install for you; if you write your own
-  script, `require` it through that path. Never `npm install` it into a worktree —
-  that rewrites the shared `node_modules` for every other worktree on the machine.
+  script, `require` it through that path or through `NODE_PATH`. Installing it
+  into a worktree is denied by `install-guard`, so resolving it correctly is the
+  only route there is.
 - Prefer real data. Intercept `**/api/v1/**` only for a state real data cannot
   produce, and say in the evidence that the state was mocked.
 - Retry a flaky step twice with a bounded timeout. Playwright flake is the
