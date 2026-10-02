@@ -1112,9 +1112,11 @@ function intersection(a, b) {
  * A selector for something that should be there is a question about the selector:
  * reading it as "nothing on top of the field" is how a working screen gets filed as a
  * product bug, and reading it as "the popper closed" certifies a re-open absent when it
- * was the FIELD selector that matched nothing. An overlay missing after a dismissal, with
- * an earlier read that resolved both, is the overlay being gone. SKILL.md's calendar
- * bullet is the procedure.
+ * was the FIELD selector that matched nothing. An overlay gone after a dismissal —
+ * missing, or moved into `hidden` — is a dismissal only behind an earlier read that found
+ * both sides resolved, visible and on screen. A control that checked only `missing`
+ * certified the dismissal of a kept-mounted popover that never opened, because it reads
+ * `hidden: [popper]` before and after alike. SKILL.md's calendar bullet is the procedure.
  *
  * `outsideViewport` catches the other direction. CSS `zoom` and a short viewport have
  * already put a real element at `top=1194px` in a 900px window, where it cannot overlap

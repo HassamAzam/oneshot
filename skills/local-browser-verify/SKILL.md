@@ -278,16 +278,36 @@ pytest is unaffected and is fine to run.
   const after = await h.overlap(session, popper, field);
   ```
 
-  `before` must come back with `missing` empty — any number, 0 included. That
-  proves both selectors resolve on this screen. If it does not, stop and run the
-  zero-matches procedure: nothing `after` says can be read yet. Then:
+  `before` must come back with `missing` empty, `hidden` empty and
+  `outsideViewport` false — any number, 0 included. That proves both selectors
+  resolve to something a user can see on this screen. Resolving is not enough on
+  its own: a popover kept mounted while hidden (MUI `keepMounted`, a fade-in that
+  never ran) reads `hidden: [popper]` before and after alike, and the `hidden`
+  reading below would then certify a dismissal of a calendar that never opened.
+  If `before` fails, nothing `after` says can be read yet — stop:
+
+  - `missing` names a side — run the zero-matches procedure.
+  - `hidden` names the popper — the calendar never visibly opened, so there is
+    nothing to dismiss. Check the step that opens it first (a click swallowed by
+    a layout shift looks exactly like this); a calendar that will not open is
+    the case's own question, and never a dismissal `pass`.
+  - `hidden` names the field, or `outsideViewport` is true with the field's box
+    (`b`) past the edge — you are measuring against something that is not on
+    screen, usually a parked copy that matched first (see the first-match bullet
+    above). Narrow the locator and re-measure.
+  - `outsideViewport` is true with the popper's box (`a`) past the edge — it
+    opened where the user cannot see it. That is placement, the case's own
+    question; there is nothing on screen to dismiss.
+
+  Then:
 
   - `after.intersects === null` and `after.missing` is exactly `[popper]` — the
     popper unmounted: it closed and stayed closed. Dismissal is a `pass`, and
     anything in the screenshot was placement while it was open (a defect only
     if the case says so).
-  - `after.intersects === false` with the popper in `hidden` — it was hidden
-    rather than unmounted. Closed, for this purpose.
+  - `after.intersects === false` with the popper in `hidden` — it went from
+    visible, which the control proved, to hidden rather than unmounted. Closed,
+    for this purpose.
   - `after.missing` names the field — the field stopped resolving between the
     two reads. That is a locator question, not a dismissal verdict: back to the
     zero-matches procedure.
