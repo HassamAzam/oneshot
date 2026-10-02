@@ -1,7 +1,7 @@
 import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mrOpenNote, promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
+import { labelledLayers, mrOpenNote, promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
 import { gateSubjectDigest } from '../lib/artifacts.js';
 import { ROOT, phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -389,6 +389,44 @@ test('a passing verify contributes no failure block', () => {
     assert.doesNotMatch(p, /## Verify failed these cases/);
     assert.match(p, /## Review findings to fix/);
   });
+});
+
+// ------------------------------------------------- layer labels at implement
+
+/** The agents implement's prompt tells the session to delegate to. */
+const delegatedTo = (prompt: string): string =>
+  /Delegate implementation work to (.*?) for changes/.exec(prompt)?.[1] ?? '';
+
+const FRONTEND_PLAN = { steps: [{ files: ['frontend/src/components/training/List.js'], layer: 'frontend' }] };
+const NO_LAYER_PLAN = { steps: [{ files: ['README.md'], layer: 'docs' }] };
+
+test('layer labels from grooming are read case-insensitively', () => {
+  assert.deepEqual(labelledLayers({ labels: ['backend', 'AI'] }), { backend: true, frontend: false });
+  assert.deepEqual(labelledLayers({ labels: ['Frontend', 'Backend'] }), { backend: true, frontend: true });
+  assert.deepEqual(labelledLayers({ labels: ['Bug'] }), { backend: false, frontend: false });
+});
+
+test('a layer label adds its agent to what the plan forecasts, never takes one away', () => {
+  const p = promptFor(cfg('implement'), ctx(ticket({ labels: ['Loop', 'Backend'] }), { plan: FRONTEND_PLAN }));
+  assert.equal(delegatedTo(p), '`backend-agent` and `frontend-agent`');
+});
+
+test('with no plan, a layer label decides which agent is listed, and says so', () => {
+  const p = promptFor(cfg('implement'), ctx(ticket({ labels: ['Loop', 'Backend'] })));
+  assert.equal(delegatedTo(p), '`backend-agent`');
+  assert.match(p, /The ticket's layer labels do not call for frontend work/);
+  assert.doesNotMatch(p, /Neither the plan/, 'there is no plan to cite');
+});
+
+test('a plan that names no layer leaves the labels to decide, as no plan does', () => {
+  const p = promptFor(cfg('implement'), ctx(ticket({ labels: ['Loop', 'Backend'] }), { plan: NO_LAYER_PLAN }));
+  assert.equal(delegatedTo(p), '`backend-agent`');
+  assert.match(p, /The ticket's layer labels do not call for frontend work/);
+});
+
+test('with neither a plan forecast nor a layer label, both agents are listed', () => {
+  const p = promptFor(cfg('implement'), ctx(ticket({ labels: ['Loop'] }), { plan: NO_LAYER_PLAN }));
+  assert.equal(delegatedTo(p), '`backend-agent` and `frontend-agent`');
 });
 
 // ------------------------------------------------------------ mr-open's draft
