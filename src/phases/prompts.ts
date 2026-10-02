@@ -1710,10 +1710,15 @@ verify just ran, so the rows verify left behind were written by the CHANGE: crea
 a case needs fresh, through the base app or its shell, and never reuse a row verify created or
 marked.
 
-Two failures are 'inconclusive', not 'fails', however closely they match: an error that names a
-table or column, and a failure that turns on a record created or modified during this run. In
-both the base is reading this branch's schema or data, and a failure on it proves nothing about
-the base.
+Two failures are 'inconclusive', not 'fails', however closely they match:
+  - an error that names a table or column. The schema is not the base's own: another worktree's
+    branch has migrated the shared database, or a migration got past the conductor's check;
+  - a failure that turns on a record verify, or this branch's code, created or modified during
+    this run — anything you did not just create fresh for the case. That row was written by the
+    change.
+In both the base is reading somebody else's schema or data, and a failure on it proves nothing
+about the base. A failure on a record you created fresh through the base app is the base's own
+answer: score it as the rules below say.
 
 ## How to score each case
 

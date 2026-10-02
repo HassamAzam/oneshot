@@ -443,7 +443,17 @@ test('base-check never scores a failure on the branch\'s own rows as the base fa
   // left behind was written by the change.
   const p = baseCheckPrompt();
   assert.match(p, /never reuse a row verify created or\s+marked/);
-  assert.match(p, /created or modified during this run/);
+  assert.match(p, /a record verify, or this branch's code, created or modified during\s+this run/);
+});
+
+test("base-check scores a failure on its own fresh fixtures as the base's answer", () => {
+  // The prompt tells the session to create every record fresh, so an
+  // "inconclusive" rule covering any record created during the run would
+  // swallow every data-dependent case and no label could ever be confirmed.
+  const p = baseCheckPrompt();
+  assert.match(p, /anything you did not just create fresh for the case/);
+  assert.match(p, /A failure on a record you created fresh through the base app is the base's own\s+answer/);
+  assert.doesNotMatch(p, /a failure that turns on a record created or modified during this run/);
 });
 
 test('verify is told a migrating branch cannot carry a confirmed label', () => {
