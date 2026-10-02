@@ -76,7 +76,7 @@ import {
   allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue, type IssueNote,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
-import { checkQuota } from '../lib/quota.js';
+import { checkQuota, quotaParked } from '../lib/quota.js';
 import { checkTestLogin } from '../lib/testlogin.js';
 import {
   claimOwnership, claimTicket, getRun, logEvent, phaseEnd, phaseStart, updateRun,
@@ -374,7 +374,11 @@ type Control =
   | { kind: 'cycle'; jumpTo: number; windowEnd: number }
   | {
     kind: 'stop'; status: 'blocked' | 'aborted' | 'parked'; reason: string;
-    /** The block is a verdict for a person, not an environment fault — do not spend a remediation on it. */
+    /**
+     * No remediate session can clear this block: it needs a person (a verdict,
+     * a config fix, an account notice) or it lifts on its own (a usage limit).
+     * Do not spend a remediation establishing that.
+     */
     noRemediation?: boolean;
   };
 
@@ -430,6 +434,39 @@ export function mergePollWait(o: {
   if (typeof o.lastCheckAt !== 'number') return null;
   const dueIn = o.lastCheckAt + MERGE_POLL_MS - o.now;
   return dueIn > 0 ? dueIn : null;
+}
+
+/**
+ * Whether the machine is frozen against a remediate session — null when it is
+ * not — and if so, what the blocked note says about it ('' when the freeze
+ * explains itself). Checked before any guard about the run's own history,
+ * because none of these is a judgement about the block.
+ *
+ * A dry run changes nothing anywhere, and a human pause is a freeze; neither is
+ * the moment to start editing the machine's configuration.
+ *
+ * A quota park is the account's own freeze. The remediate session would hit
+ * the same subscription limit on its first turn, park again and record
+ * `fixed: false` — spending one of MAX_REMEDIATIONS, and, because the
+ * exact-block guard ignores `fixed`, later refusing a real remediation of the
+ * same block as one that "already fixed something". The usage-limit stop is
+ * marked `noRemediation`, but other stops reach remediation while the park is
+ * in force: a group member's ordinary failure out-claims its sibling's
+ * rate-limited stop in claim(); a code phase runs without passing checkQuota()
+ * and can block during another run's park; and merge's feedbackRound() turns
+ * its own quota refusal into an ordinary blocked stop. attemptRemediation()
+ * calls runPhase() directly, past that gate, so the park is read here — the one
+ * place every one of those paths goes through.
+ */
+export function remediationFreeze(o: {
+  dryRun: boolean; paused: boolean; quotaParked: boolean;
+}): string | null {
+  if (o.dryRun || o.paused) return '';
+  if (o.quotaParked) {
+    return 'Self-remediation was not attempted: the account is parked after a subscription ' +
+      'usage limit, and a remediate session would hit the same limit on its first turn.';
+  }
+  return null;
 }
 
 /** A finding as review-partial.json carries it — only `severity` is read here. */
@@ -1637,6 +1674,10 @@ export async function runTicket(
           kind: 'stop',
           status: 'blocked',
           reason: 'subscription usage limit — parked until the window resets',
+          // The limit is the account's, and the remediate session would hit it
+          // on its first turn. Offering it the stop only records a second,
+          // misleading remediation against a block that clears on its own.
+          noRemediation: true,
         }, r.cfg.name);
         continue;
       }
@@ -2176,16 +2217,22 @@ export async function runTicket(
    *
    * Returns the phase to resume from, or null when it could not help — and null
    * is the ordinary answer. The guards below all exist to make sure the run
-   * reaches a person eventually: not while paused, not while dry, not more than
-   * MAX_REMEDIATIONS times, and never twice for the same block, because a cause
-   * that survives being fixed was not the cause.
+   * reaches a person eventually: not while paused, not while dry, not while the
+   * account is quota-parked, not more than MAX_REMEDIATIONS times, and never
+   * twice for the same block, because a cause that survives being fixed was not
+   * the cause.
    */
   async function attemptRemediation(blockedPhase: string, reason: string): Promise<string | null> {
     remediationNote = '';
 
-    // A dry run changes nothing anywhere, and a pause is a freeze: neither is
-    // the moment to start editing the machine's configuration.
-    if (DRY_RUN || existsSync(PAUSE)) return null;
+    // A dry run, a pause or a quota park: see remediationFreeze().
+    const frozen = remediationFreeze({
+      dryRun: DRY_RUN, paused: existsSync(PAUSE), quotaParked: quotaParked(),
+    });
+    if (frozen !== null) {
+      remediationNote = frozen;
+      return null;
+    }
 
     const cfgR = list.find((p) => p.name === 'remediate');
     if (!cfgR || !isImplemented(cfgR.name) || !schemaFor(cfgR.name)) return null;

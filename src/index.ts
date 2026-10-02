@@ -457,6 +457,17 @@ function freeSlots(): { slots: number; mine: number; fleet: number; pool: number
   return { slots: Math.max(0, Math.min(mine, fleet)), mine, fleet, pool };
 }
 
+/**
+ * How often a conductor beats on its own while it awaits something outside
+ * tick(), which is otherwise the only place heartbeat() and renewPromotion()
+ * run: an awaited --ticket run, and the shutdown drain. It must stay well
+ * inside both limits the beat holds off — CONDUCTOR_TTL_MS, past which the
+ * fleet reads the owner as dead and resumes its run, and the promotion
+ * LEASE_TTL_MS, past which a waiting peer may break the lease. Both are 5 min.
+ * It also sets how often the drain logs its "still finishing" line.
+ */
+const OUT_OF_TICK_BEAT_MS = 15_000;
+
 async function tick(): Promise<void> {
   // The fleet's liveness and the promotion lease's renewal ride the same clock
   // as everything else here. A conductor that has stopped ticking has stopped
@@ -493,7 +504,23 @@ async function tick(): Promise<void> {
     // exit, so returning to a loop that is about to break would exit mid-phase.
     // --follow keeps the same one-ticket guarantee — it re-runs THIS call on
     // the normal tick cadence, never scan()'s board-wide claim.
-    const runOutcome = await runTicket(res.data, { conductor: me, signal: aborter.signal });
+    //
+    // Awaiting also means tick() — the only other heartbeat — does not run again
+    // until the ticket finishes. Without a beat of its own this conductor reads
+    // as dead to the fleet CONDUCTOR_TTL_MS into the first phase, and a board
+    // conductor running beside it resumes the same 'running' journal: every
+    // session from then on runs twice, in the same worktree, on the same quota.
+    const beat = setInterval(() => {
+      heartbeat();
+      renewPromotion(me);
+    }, OUT_OF_TICK_BEAT_MS);
+    beat.unref();
+    let runOutcome: Awaited<ReturnType<typeof runTicket>>;
+    try {
+      runOutcome = await runTicket(res.data, { conductor: me, signal: aborter.signal });
+    } finally {
+      clearInterval(beat);
+    }
     if (followArg) handleFollowOutcome(runOutcome);
     return;
   }
@@ -567,7 +594,7 @@ async function drain(): Promise<void> {
     heartbeat();
     renewPromotion(me);
     say.info(`still finishing ${running.size} run(s): ${names()}`);
-  }, 15_000);
+  }, OUT_OF_TICK_BEAT_MS);
   progress.unref();
 
   await Promise.allSettled([...running.values()]);
