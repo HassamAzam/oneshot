@@ -527,18 +527,33 @@ test('a base check that answered is read as its artifact', () => {
   assert.deepEqual(baseCheckOutcome(session({ ok: true, data }), 0, false), { kind: 'answered', data });
 });
 
-test('a base check that timed out is re-attempted in place before it counts as a death', () => {
+test('a base check that timed out is re-attempted in place, and past the cap it is exhausted', () => {
   const timedOut = session({ infra: true, error: 'timed out after 40m' });
   assert.equal(baseCheckOutcome(timedOut, 0, false).kind, 'retry');
+  assert.equal(baseCheckOutcome(timedOut, 1, false).kind, 'retry');
   const last = baseCheckOutcome(timedOut, 2, false);
-  assert.equal(last.kind, 'died');
-  assert.match(last.kind === 'died' ? last.why : '', /timed out after 40m/);
+  assert.equal(last.kind, 'exhausted');
+  assert.match(last.kind === 'exhausted' ? last.why : '', /3 times in a row: timed out after 40m/);
 });
 
 test('a run that is stopping, a usage limit or an account gate is not re-attempted', () => {
   assert.equal(baseCheckOutcome(session({ infra: true }), 0, true).kind, 'died');
   assert.equal(baseCheckOutcome(session({ rateLimited: true }), 0, false).kind, 'died');
   assert.equal(baseCheckOutcome(session({ infra: true, accountAction: 'accept the terms' }), 0, false).kind, 'died');
+});
+
+test('a base check under the brake is a death, even when the session answered or gave up', () => {
+  // pause-check.cjs denies tools rather than killing the session, so a paused
+  // check finishes: all-inconclusive, or blocked. Neither may refuse a label.
+  const inconclusive = { baseCommit: 'abc', results: [{ id: 'TC-15', onBase: 'inconclusive', inTicketScope: false, evidence: 'denied' }] };
+  assert.equal(baseCheckOutcome(session({ ok: true, data: inconclusive }), 0, true).kind, 'died');
+  const blocked = baseCheckOutcome(session({ blocked: 'paused' }), 0, true);
+  assert.equal(blocked.kind, 'died');
+  assert.match(blocked.kind === 'died' ? blocked.why : '', /stopped or paused during base-check \(paused\)/);
+  // ...and the death reaches verify as infra with no hard stop, so afterFailure's PAUSE check decides.
+  const verify = session({ ok: true, data: { results: [] } });
+  assert.equal(verifyAfterBaseCheckDeath(verify, { kind: 'died', why: 'paused', out: session({ blocked: 'paused' }) }), undefined);
+  assert.equal(statusForFailure(phaseByName('verify')!, verify.infra), 'infra');
 });
 
 test('a base check that finished without an answer is unavailable, which still fails closed', () => {
@@ -561,17 +576,33 @@ test('a base check that died leaves verify recorded as infra, so no verify lap i
   // verify's own session succeeded; scoring its record from its own clear
   // infra flag recorded 'failed', which failedLapsOf counts as a lap.
   const verify = session({ ok: true, data: { results: [] } });
-  verifyAfterBaseCheckDeath(verify, session({ infra: true }), 'the base-check session died: timed out');
+  const why = 'the run was stopped or paused during base-check (cancelled by the conductor)';
+  assert.equal(verifyAfterBaseCheckDeath(verify, { kind: 'died', why, out: session({ infra: true }) }), undefined);
   assert.equal(verify.ok, false);
   assert.equal(statusForFailure(phaseByName('verify')!, verify.infra), 'infra');
-  assert.equal(verify.error, 'the base-check session died: timed out');
+  assert.equal(verify.error, why);
 });
 
 test('a base check stopped by an account gate or a usage limit carries it to verify', () => {
   const gated = session({ ok: true });
-  verifyAfterBaseCheckDeath(gated, session({ infra: true, accountAction: 'accept the terms' }), 'gate');
+  verifyAfterBaseCheckDeath(gated, { kind: 'died', why: 'gate', out: session({ infra: true, accountAction: 'accept the terms' }) });
   assert.equal(gated.accountAction, 'accept the terms');
   const limited = session({ ok: true });
-  verifyAfterBaseCheckDeath(limited, session({ rateLimited: true }), 'limit');
+  verifyAfterBaseCheckDeath(limited, { kind: 'died', why: 'limit', out: session({ rateLimited: true }) });
   assert.equal(limited.rateLimited, true);
+});
+
+test('a base check that kept dying of infrastructure stops the run instead of buying a verify re-run', () => {
+  // Handed to afterFailure() as a plain infra death, it re-ran verify, and each
+  // verify re-run started base-check's in-place attempts over: 9 sessions.
+  const timedOut = session({ infra: true, error: 'timed out after 40m while still working' });
+  const last = baseCheckOutcome(timedOut, 2, false);
+  assert.ok(last.kind === 'exhausted');
+  const verify = session({ ok: true, data: { results: [] } });
+  const stop = verifyAfterBaseCheckDeath(verify, { ...last, out: timedOut });
+  assert.match(stop ?? '', /3 times in a row: timed out after 40m.*the run stops here.*No verify lap was spent/s);
+  // The record stays 'infra', so the stop costs no lap either.
+  assert.equal(statusForFailure(phaseByName('verify')!, verify.infra), 'infra');
+  assert.equal(verify.rateLimited, false);
+  assert.equal(verify.accountAction, undefined);
 });

@@ -76,7 +76,7 @@ import {
   allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue, type IssueNote,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
-import { checkQuota } from '../lib/quota.js';
+import { checkQuota, quotaParked } from '../lib/quota.js';
 import { checkTestLogin } from '../lib/testlogin.js';
 import {
   claimOwnership, claimTicket, getRun, logEvent, phaseEnd, phaseStart, updateRun,
@@ -569,15 +569,29 @@ export function applyBaseCheck(
 /**
  * What one base-check session's outcome means for the labels it was proving.
  *
- * 'died' is a timeout, a cancel, a pause, a usage limit or an account gate:
- * the machinery, not a verdict. It used to fold into "not confirmed", which
- * scored verify 'failed' — verify's own session had succeeded, so its infra
- * flag was clear — spent a verify lap, and sent implement to fix a case nobody
- * had checked on the base. Two such deaths are exactly the laps-burned-then-
- * blocked shape this phase exists to prevent. An infra death is re-attempted
- * in place first (`retry`) up to MAX_INFRA_ATTEMPTS, but never a usage limit
- * or an account gate, which every re-attempt hits again, and never once the
- * run is stopping (`stopping`: aborted or paused).
+ * A death is the machinery, not a verdict. It used to fold into "not
+ * confirmed", which scored verify 'failed' — verify's own session had
+ * succeeded, so its infra flag was clear — spent a verify lap, and sent
+ * implement to fix a case nobody had checked on the base. Two such deaths are
+ * exactly the laps-burned-then-blocked shape this phase exists to prevent. So:
+ *
+ * - `stopping` (aborted, state/PAUSE, or a usage-limit park) makes it 'died'
+ *   whatever the session returned, ahead of every other branch. A pause does
+ *   not kill a session: pause-check.cjs denies its side-effectful tools and
+ *   tells it to stop and write a summary, so a paused check comes back
+ *   blocked or all-'inconclusive'. Read as 'unavailable' or 'answered', that
+ *   refused every label, failedCases() fired, and verify was recorded
+ *   'failed' before afterFailure() ever looked at PAUSE — a lap spent on a
+ *   check the brake had stopped.
+ * - A usage limit or an account gate is 'died' at once: every re-attempt
+ *   would hit it again.
+ * - Only a plain infra death (a timeout, a stall, a killed spawn) is
+ *   re-attempted in place (`retry`), up to MAX_INFRA_ATTEMPTS. Past that it
+ *   is 'exhausted', which stops the run rather than handing verify an infra
+ *   death: afterFailure() would re-run verify, and each verify re-run calls
+ *   base-check afresh with its own attempts, so the two caps multiplied —
+ *   nine base-check sessions and two extra verify sessions before the run
+ *   blocked.
  *
  * 'unavailable' is a session that finished without an answer it would stand
  * behind (blocked, or no artifact): a fail-closed "not confirmed", as before.
@@ -589,32 +603,50 @@ export function baseCheckOutcome(
   | { kind: 'answered'; data: BaseCheck }
   | { kind: 'retry' }
   | { kind: 'unavailable'; why: string }
-  | { kind: 'died'; why: string } {
+  | { kind: 'died'; why: string }
+  | { kind: 'exhausted'; why: string } {
+  if (stopping) {
+    const said = out.accountAction ?? out.error ?? out.blocked;
+    return { kind: 'died', why: `the run was stopped or paused during base-check${said ? ` (${said})` : ''}` };
+  }
   if (out.ok && out.data) return { kind: 'answered', data: out.data as BaseCheck };
   const dead = Boolean(out.infra || out.rateLimited || out.accountAction);
   if (!dead) {
     return { kind: 'unavailable', why: `the base-check session gave no answer: ${out.blocked ?? out.error ?? 'no result'}` };
   }
-  if (!out.rateLimited && !out.accountAction && !stopping && attempt < MAX_INFRA_ATTEMPTS) {
-    return { kind: 'retry' };
+  if (out.rateLimited || out.accountAction) {
+    return { kind: 'died', why: `the base-check session died: ${out.accountAction ?? out.error ?? 'no error text'}` };
   }
-  return { kind: 'died', why: `the base-check session died: ${out.accountAction ?? out.error ?? 'no error text'}` };
+  if (attempt < MAX_INFRA_ATTEMPTS) return { kind: 'retry' };
+  return {
+    kind: 'exhausted',
+    why: `the base-check session died of infrastructure ${attempt + 1} times in a row: ${out.error ?? 'no error text'}`,
+  };
 }
 
 /**
- * Hand a base-check death to verify, so the existing infra paths decide it:
- * the record is 'infra' and costs no lap, an account gate stops the run, a
- * usage limit parks it, an abort or a pause ends it and the resume re-runs
- * verify, and a plain death takes afterFailure()'s capped re-attempt.
+ * Hand a base-check death to verify, and say whether it stops the run.
+ *
+ * verify's output is marked infra either way, so its record is 'infra' and
+ * costs no lap. For 'died' the existing paths then decide: an account gate
+ * stops the run, a usage limit parks it, and an abort or a pause ends it and
+ * the resume re-runs verify. For 'exhausted' the returned hard stop blocks the
+ * run instead of afterFailure()'s re-attempt, because a verify re-run starts
+ * base-check's in-place attempts over (see baseCheckOutcome).
  */
 export function verifyAfterBaseCheckDeath(
-  verify: PhaseOutput, died: Pick<PhaseOutput, 'rateLimited' | 'accountAction'>, why: string,
-): void {
+  verify: PhaseOutput,
+  death: { kind: 'died' | 'exhausted'; why: string; out: Pick<PhaseOutput, 'rateLimited' | 'accountAction'> },
+): string | undefined {
   verify.ok = false;
   verify.infra = true;
-  verify.rateLimited ||= died.rateLimited;
-  verify.accountAction ??= died.accountAction;
-  verify.error = why;
+  verify.rateLimited ||= death.out.rateLimited;
+  verify.accountAction ??= death.out.accountAction;
+  verify.error = death.why;
+  if (death.kind !== 'exhausted') return undefined;
+  return `${death.why}. Re-running verify would start base-check's re-attempts over, so the run ` +
+    "stops here instead: check base-check's maxTurns and timeoutMin in config/phases.json (still " +
+    'an estimate) and whether the base app comes up, then unblock it. No verify lap was spent.';
 }
 
 /** Every migration file, at any depth of the work repo. */
@@ -1646,7 +1678,7 @@ export async function runTicket(
           );
           let check: BaseCheck | null = null;
           let unavailable: string | undefined;
-          let died: { why: string; out: PhaseOutput } | undefined;
+          let died: Parameters<typeof verifyAfterBaseCheckDeath>[1] | undefined;
           if (checkable) {
             // Decided here, from git, rather than left to the session: a base
             // app on a database this branch migrated is not a second opinion.
@@ -1656,7 +1688,7 @@ export async function runTicket(
               const ran = await runBaseCheck();
               if (ran.kind === 'answered') check = ran.data;
               else unavailable = ran.why;
-              if (ran.kind === 'died') died = ran;
+              if (ran.kind === 'died' || ran.kind === 'exhausted') died = ran;
             }
           }
           // Written fail-closed even when the check died, so no reader of
@@ -1665,8 +1697,13 @@ export async function runTicket(
           r.out.data = { ...r.out.data, results: applied.results };
           writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
           if (died) {
-            verifyAfterBaseCheckDeath(r.out, died.out, died.why);
-            log.warn(`verify recorded as infra — ${died.why}; no lap spent`);
+            const stop = verifyAfterBaseCheckDeath(r.out, died);
+            if (stop) {
+              r.hardStop = stop;
+              log.error(`verify stopped — ${stop}`);
+            } else {
+              log.warn(`verify recorded as infra — ${died.why}; no lap spent`);
+            }
           } else {
             if (applied.confirmed.length) {
               log.ok(`base-check confirmed pre-existing on ${cfg.branches.base}: ${applied.confirmed.join(', ')}`);
@@ -2357,32 +2394,46 @@ export async function runTicket(
    * place, and say what came of it.
    *
    * 'unavailable' is every way it can fail to answer that is not a death — the
-   * phase switched off, no lease, no quota, a session that finished without an
-   * answer — and applyBaseCheck() reads it as "not confirmed", so none of them
-   * can wave a failure through. Each is logged with its reason, and the reason
-   * lands in the refused case's evidence. A refusal before the session starts
-   * writes no journal record, because no session ran; one that ran is recorded
-   * in the journal and ledger like any phase.
+   * phase switched off, no lease, a token ceiling, a session that finished
+   * without an answer — and applyBaseCheck() reads it as "not confirmed", so
+   * none of them can wave a failure through. Each is logged with its reason,
+   * and the reason lands in the refused case's evidence. A refusal before the
+   * session starts writes no journal record, because no session ran; one that
+   * ran is recorded in the journal and ledger like any phase.
    *
-   * 'died' is the machinery rather than a verdict (see baseCheckOutcome). It is
-   * re-attempted here first, on a LOCAL counter: base-check's own records are
-   * not what infraAttemptsOf() reads for verify.
+   * 'died' and 'exhausted' are the machinery rather than a verdict (see
+   * baseCheckOutcome). Only a plain infra death is re-attempted here, on a
+   * LOCAL counter: base-check's own records are not what infraAttemptsOf()
+   * reads for verify. That counter starts at 0 on every call, which is why
+   * running out of it is 'exhausted' and stops the run — handed to verify as
+   * an infra death, it bought a verify re-run and a fresh counter.
+   *
+   * The brake is checked before each attempt as well as after it: a session
+   * started under state/PAUSE only has its tools denied, and a usage-limit
+   * park would otherwise be refused by checkQuota() as 'unavailable', which
+   * spends the verify lap this exists to save.
    */
   async function runBaseCheck(): Promise<
     | { kind: 'answered'; data: BaseCheck }
     | { kind: 'unavailable'; why: string }
-    | { kind: 'died'; why: string; out: PhaseOutput }
+    | { kind: 'died' | 'exhausted'; why: string; out: Pick<PhaseOutput, 'rateLimited' | 'accountAction'> }
   > {
     const refused = (why: string): { kind: 'unavailable'; why: string } => {
       log.warn(`base-check not run — ${why}`);
       return { kind: 'unavailable', why: `no base-branch check ran (${why})` };
     };
+    // Every brake pause-check.cjs enforces, so what it denies is never read as an answer.
+    const stopping = (): boolean => Boolean(opts.signal?.aborted) || existsSync(PAUSE) || quotaParked();
     const cfgB = list.find((q) => q.name === 'base-check');
     if (!cfgB || !isImplemented(cfgB.name)) return refused('the base-check phase is not configured');
     const leaseError = ensureLeases(cfgB);
     if (leaseError) return refused(leaseError);
 
     for (let attempt = 0; ; attempt++) {
+      if (stopping()) {
+        log.warn('base-check not run — the run is stopped or paused');
+        return { kind: 'died', why: 'the run was stopped or paused before base-check ran', out: { rateLimited: false } };
+      }
       const lap = lapsOf(iid, cfgB.name);
       const quota = checkQuota(runId, cfgB.name, lap);
       if (!quota.allowed) return refused(`quota: ${quota.reason}`);
@@ -2400,10 +2451,13 @@ export async function runTicket(
         worktree, port, branch,
         signal: opts.signal,
       });
-      // 'infra' ahead of the onFail policy: statusForFailure() answers 'warned'
-      // for a warn phase before it looks at infra, and phaseSucceeded() and the
-      // card both count 'warned' as done.
-      const status = out.ok ? 'ok' : out.infra ? 'infra' : statusForFailure(cfgB);
+      const outcome = baseCheckOutcome(out, attempt, stopping());
+      // 'infra' for every death, ahead of the onFail policy: statusForFailure()
+      // answers 'warned' for a warn phase before it looks at infra, and
+      // phaseSucceeded() and the card both count 'warned' as done. A session
+      // that finished under the brake is a death too, whatever it answered.
+      const dead = outcome.kind === 'retry' || outcome.kind === 'died' || outcome.kind === 'exhausted';
+      const status = dead ? 'infra' : out.ok ? 'ok' : statusForFailure(cfgB);
       phaseEnd(rowId, status, {
         turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
         detail: out.error ?? out.blocked ?? undefined,
@@ -2415,14 +2469,13 @@ export async function runTicket(
       });
       j = readJournal(iid) ?? j;
 
-      const outcome = baseCheckOutcome(out, attempt, Boolean(opts.signal?.aborted) || existsSync(PAUSE));
       if (outcome.kind === 'retry') {
         log.warn('base-check died of infrastructure — re-attempting in place', {
           attempt: attempt + 1, of: MAX_INFRA_ATTEMPTS, why: (out.error ?? '').slice(0, 120),
         });
         continue;
       }
-      if (outcome.kind === 'died') return { ...outcome, out };
+      if (outcome.kind === 'died' || outcome.kind === 'exhausted') return { ...outcome, out };
       if (outcome.kind === 'unavailable') log.warn(`base-check gave no answer — ${outcome.why}`);
       return outcome;
     }
