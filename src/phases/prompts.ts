@@ -665,6 +665,175 @@ ${d.newPatterns?.length ? `\nApproved as NEW to the design system: ${d.newPatter
 `;
 }
 
+const BETA_SKILL = 'beta-version-toggle';
+
+/**
+ * The label that asks for a beta, read back out of the phase's own
+ * `labelSkills` so the heading a session is shown names the label that
+ * actually gated it.
+ */
+function betaLabel(phase: string): string {
+  const pairs = Object.entries(phaseByName(phase)?.labelSkills ?? {});
+  return pairs.find(([, skill]) => skill === BETA_SKILL)?.[0] ?? 'Beta';
+}
+
+/**
+ * Whether this phase builds the ticket as a beta: a new version beside the
+ * old one, with a switch back.
+ *
+ * The same resolved list that loads the skill decides the prose, exactly as
+ * reproductionRequested() does for research, so the method and the
+ * instruction cannot disagree — and taking the label out of one phase's
+ * `labelSkills` takes both halves out of that phase with no edit here.
+ */
+function betaRequested(ctx: PromptCtx, phase: string): boolean {
+  const cfg = phaseByName(phase);
+  return !!cfg && skillsFor(cfg, ctx).includes(BETA_SKILL);
+}
+
+/**
+ * What every phase holds a beta ticket to. The HOW is the skill's.
+ *
+ * Written against ERP's own precedent rather than an ideal: Project Logs v2 is
+ * a sibling directory behind one route wrapper at the same URLs, it extended
+ * seven v1 files backward-compatibly, and v1 never imports it. What it does
+ * NOT have is any way for a user to choose — its version comes from a server
+ * allowlist — so the switch is the one part this label adds, and point 5 is
+ * phrased as behaviour a case can check rather than as a storage mechanism.
+ */
+const betaContract = (): string => `The change ships as a NEW version of the feature (v2) built BESIDE the one users have today
+(v1), not as an edit to it, and the end user gets a switch to go back to v1 and forward again.
+The layout is the one ERP used for Project Logs v2 — a sibling \`<module>_v2/\` directory and one
+route wrapper that picks the version at the same URL — and the method is the
+\`${BETA_SKILL}\` skill. Project Logs picks its version from a server allowlist the user never
+sees; the switch is what this label adds. Every phase holds the work to the same points:
+
+  1. v1 behaves exactly as it does on \`origin/${baseBranch()}\` today. Its directory stays where
+     it is, and a v1 file is touched only for an extension v2 cannot do without, kept backward
+     compatible — an optional parameter with a default, a null guard — so every v1 call site
+     does what it did.
+  2. v2 lives in its own \`<module>_v2/\` directory beside v1's, and on the backend in
+     \`api/v2/\` beside \`api/v1/\` for any endpoint v2 needs to behave differently. v2 may reuse
+     v1's data layer; v1 imports nothing from v2.
+  3. ONE switch point — a route wrapper like \`LogsVersionRoute.js\`, on every route of the
+     feature — renders v1 or v2 at the SAME URL. Nothing else knows there are two versions:
+     no v2 URLs, no second sidebar entry.
+  4. The switch is rendered by that wrapper, so it sits in the same place in both versions,
+     says which one the user is on, and flips in place: same URL, no page reload. It is the
+     wrapper's, not a screen's, so it sits outside any approved design: the screens are built
+     to the design, the switch goes above them, and it is never a departure from the design.
+  5. The choice is the user's own — a second account on the same browser does not inherit
+     it — and it survives a reload, and a logout and login.
+  6. A user who never touched the switch gets v2; the switch is the way back.
+
+The ticket's acceptance criteria are met in v2. v1 is held to what it does today.`;
+
+/**
+ * Each phase's own part in a beta. A phase that loads the skill with no entry
+ * here would get the contract and no job — prompts.test.ts refuses that.
+ */
+const BETA_DUTIES: Record<string, () => string> = {
+  plan: () => `Plan the split before the feature. \`approach\` names v1's directory, the \`<module>_v2/\` files
+to create, the routes the switch point wraps, any v1 file v2 cannot do without extending (and
+how that stays backward compatible), whether any endpoint needs an \`api/v2/\` twin, and where
+the choice is kept. The switch point and the switch get their own steps: they are what makes
+this a beta, and a plan that folds them into "build v2" is how they get forgotten.
+\`acceptanceCoverage\` places each criterion in v2. If there is nothing to switch back to — the
+ticket creates a screen that does not exist today — say so in \`openQuestions\` with the default
+"ship it without a switch" rather than inventing a v1.
+The reuse hunt still runs, but v1's COMPONENTS are not prior art for v2 to extend: v2's copy of
+a component is the requirement, not a duplicate to reuse or collapse — the same carve-out
+\`implement\` and \`review\` are given. Collapsing a duplicate that already sits in v1's
+directory is out of scope too: under point 1 it is an edit to v1. What v2 reuses from v1 is its
+data layer — actions, selectors, utils, API helpers — imported from where it lives.`,
+
+  implement: () => `Load \`${BETA_SKILL}\` before you write anything: its layout is what \`review\` checks the
+diff against. Build v2 beside v1 as the plan lays it out, and commit the switch point and the
+switch as their own step. The duplication is the requirement, not slop. \`ponytail\` never
+simplifies away anything explicitly requested, and the label is that request: its "does this
+need to exist" does not fold v2's copy of a component back into v1's, because the point is to
+keep v1 runnable exactly as it is. What v2 reuses is v1's data layer — actions, selectors,
+utils, API helpers — imported from where it lives, never copied. Name every v1 file you had to
+touch in \`summary\`, with why, and why it stays backward compatible; if v2 needs a v1 helper to
+behave differently, give v2 its own.`,
+
+  testcases: () => `The list covers both versions and the switch, not only the new behaviour:
+  - each acceptance criterion, in v2;
+  - the switch, from v2 to v1 and back again, staying on the same URL (\`state\`);
+  - v1's main flow after switching, expecting what \`origin/${baseBranch()}\` does today
+    (\`regression\`) — the case that proves v1 was left alone;
+  - the choice surviving a reload, and a logout and login (\`state\`);
+  - a user who never touched the switch landing on v2 (\`boundary\`). Its first step removes the
+    stored choice, naming its localStorage key exactly as the diff spells it, because the harness
+    carries browser storage from one case to the next: that restores the precondition, it does
+    not reach a version.
+A second account not inheriting the choice is point 5 too, but it is not a case here: \`verify\`
+has one login, so the case would end \`blocked\`, which no gate refuses. \`review\` checks it in
+the code instead.
+The points above are part of this ticket's oracle, alongside its acceptance criteria: a switch
+case's \`expected\` comes from them, never from the diff. Steps reach a version by clicking the
+switch, the way a user does — never by writing the stored choice directly, which would leave
+the switch itself untested.`,
+
+  review: () => `Check that the split held, from the diff rather than from the plan's intent: run
+\`git diff --stat origin/${baseBranch()}...HEAD\` and read every file it lists under v1's
+directory. Each must be an extension v2 cannot do without, kept backward compatible — an
+optional parameter with a default, a null guard — with every v1 call site doing what it did.
+Anything else there — a changed behaviour, a rename, a move — is a \`major\` finding: it is
+exactly what the label exists to prevent. So is v1 importing from \`<module>_v2/\`, a route of
+the feature the switch point does not wrap, a v2 URL or sidebar entry of its own, and the
+stored choice's key spelled in more than one place.
+
+Point 5's second account is yours to prove, because no browser case can: \`verify\` has one
+login. Read where the choice is read and written, and confirm each one keys it by the signed-in
+user's username, read at that moment.
+A username cached at module scope or once per page load is a \`major\` finding: ERP's logout
+does not reload the page, so the next person on the tab gets the last one's choice.
+
+v2's own copies of v1's COMPONENTS are what the label asked for, so they are not a duplication
+finding — tell \`util-reuse-agent\` so when you dispatch it, and do not raise them from
+\`ponytail-review\`. A copied HELPER (a util, a constant, an API call) is a finding as usual.
+Put the points above into \`spec-conformance-agent\`'s \`ticket_context\` too: the split and the
+switch are in scope because of the label, and the description will not say so.`,
+
+  verify: () => `Reach every version THROUGH THE SWITCH, clicking it the way a user does. Never set the stored
+choice directly — a browser storage write, a database row, a query parameter: a case that skips
+the switch has not tested it. Log out through the app's own logout, never by clearing browser
+storage, which wipes the very choice a case is measuring. The one write you may make is SETUP
+for the never-touched case: the harness saves the browser's storage when it logs in and loads it
+into every later case, phase and lap, so a choice an earlier case (or \`ui-evidence\`) made is
+still there. Remove that one key — not the rest of storage, which holds the login — then load
+the feature's URL, and say so in that case's \`evidence\`. That restores the precondition; it
+does not reach a version. v1's regression cases pass only when v1 behaves as it does on
+\`origin/${baseBranch()}\`, whatever v2 now does.`,
+
+  'ui-evidence': () => `Your 'before' is already running: v1, reached through the switch on YOUR instance. That is the
+one exception to the rule above that a 'before' comes from a second instance: v1 IS the base
+branch's behaviour, kept runnable on purpose. Shoot v1 and then v2 of each changed screen at the
+same viewport, data and path, with captions that say which is which, plus one shot of the switch
+itself in each state. A base-branch 'before' from a second instance is optional here — take it
+only if the cheapness check above allows — and when you do, compare the page BELOW the switch:
+the switch is new in both versions, so its absence from the base-branch shot is expected and is
+not a difference. Any other difference between the two is v1 having changed, and it goes in
+\`summary\` as well as in the caption.`,
+
+  mr: () => `The description says this ships as a beta: where v1 and v2 live, the switch point and the
+routes it wraps, where the choice is kept and that it does not follow a user to another browser,
+what a user gets by default, the v1 files v2 had to extend and why, and what retiring v1 later
+takes — the routes to point straight at v2 and the files to delete. That last line is what
+makes the beta removable by someone who never read this ticket.`,
+};
+
+function betaBlock(ctx: PromptCtx, phase: string): string {
+  if (!betaRequested(ctx, phase)) return '';
+  return `\n## This ticket carries **${betaLabel(phase)}** — v2 beside v1, with a switch back
+${betaContract()}
+
+### Your part, as \`${phase}\`
+${BETA_DUTIES[phase]?.() ?? ''}
+`;
+}
+
 /** How a phase names a screenshot the schema will only carry as a bare filename. */
 function artifactsBlock(ctx: PromptCtx): string {
   return `Everything you capture goes in ${artifactDir(ctx.ticket.iid)} (create it if it is not
@@ -893,7 +1062,7 @@ and one without it parks the run.
 Do not modify any application code. The only files you create are under the artifact directory.`,
 
   plan: (ctx) => `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
-${reviewGateFeedbackBlock(ctx.journal.planApproval?.feedback, 'Reviewer feedback on an earlier plan')}${approvedDesignBlock(ctx)}
+${reviewGateFeedbackBlock(ctx.journal.planApproval?.feedback, 'Reviewer feedback on an earlier plan')}${approvedDesignBlock(ctx)}${betaBlock(ctx, 'plan')}
 ## Research (phase 1)
 ${JSON.stringify(ctx.prior.research ?? {}, null, 2)}
 
@@ -931,7 +1100,7 @@ ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 
 ## What implement (phase 3) actually built
 ${JSON.stringify(ctx.prior.implement ?? {}, null, 2)}
-${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'QA feedback on an earlier version of this list')}
+${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'QA feedback on an earlier version of this list')}${betaBlock(ctx, 'testcases')}
 Write the test cases for this ticket.
 
 If there is QA feedback above, you are REVISING a list that already exists, not writing a new
@@ -1192,7 +1361,7 @@ ${cases.map((c) => `  - ${c.id} [${c.blast}] ${c.scenario}\n      expects: ${c.e
     return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 ${lapBlock}
 ${implementFeedbackBlock(ctx.journal.mrFeedback)}
-${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'Test-case gate reviewer feedback')}${approvedDesignBlock(ctx)}
+${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'Test-case gate reviewer feedback')}${approvedDesignBlock(ctx)}${betaBlock(ctx, 'implement')}
 ## Plan (phase 2) — this is your specification
 ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 
@@ -1365,7 +1534,7 @@ closed from an earlier review: ${(i.addressedFindings ?? []).join(', ') || '(non
 ## The test cases this code has to pass (phase 4)
 Read these as a specification, not as something to run — \`verify\` and \`qa\` execute them.
 ${caseList(cases, { steps: false })}
-
+${betaBlock(ctx, 'review')}
 Review the change on \`${ctx.branch ?? 'the ticket branch'}\` as if it were an MR you must
 approve or send back.
 
@@ -1458,7 +1627,7 @@ forward as a failure. Re-run it honestly.
 ${lapBlock}
 ## Acceptance criteria (phase 1)
 ${criteria(ctx)}
-
+${betaBlock(ctx, 'verify')}
 ## Your app instance
 Worktree: ${ctx.worktree ?? '(none leased)'}
 Port:     ${ctx.port ?? '(none leased)'}   (also in $ONESHOT_PORT)
@@ -1644,7 +1813,10 @@ For each screen below, navigate to it in the running app, capture it at the SAME
 mockup was drawn at, and fill one \`designConformance\` row: the approved render, your capture,
 and every way they differ. An empty \`differences\` IS the claim that it matches, so list the
 small departures too — a spacing change, a reworded label, a missing empty state. Deciding for
-the reviewer which ones were fine is the one thing this row must not do.
+the reviewer which ones were fine is the one thing this row must not do.${betaRequested(ctx, 'ui-evidence') ? `
+This ticket is a beta: pair each approved screen against v2, reached through the switch, and
+compare the page BELOW the switch. The switch belongs to the route wrapper, not the screen
+(point 4 of the beta block below), so leave it out of \`differences\`.` : ''}
 
 Also put both files in \`screenshots\`, approved first and built immediately after, captioned so
 the pair reads in order. The ordering is what makes them comparable at a glance.
@@ -1711,7 +1883,9 @@ pack is what verify's shots do not show:
     $ONESHOT_HOME/scripts/app.cjs ensure --ref ${baseBranch()}\`, shoot the 'before' at the
     \`baseUrl\` it prints, and the 'after' on \`$ONESHOT_PORT\`. Caption the omission only if
     that instance will not come up cheaply; never pass an unchanged region of this branch off as
-    a before.
+    a before.${betaRequested(ctx, 'ui-evidence') ? `
+    This ticket is a beta, the one exception: its block below makes v1, reached through the
+    switch on this instance, the 'before'.` : ''}
   - the states a passing test never reaches: empty, loading, error, and the permission-denied
     view if the change touches a gated screen.
   - one shot per high-blast case that PASSED${highPassed.length ? ` (${highPassed.map((x) => x.id).join(', ')})` : ''}, so the pack shows the feature
@@ -1739,7 +1913,7 @@ The base-branch value comes from the base branch, read without touching this che
 \`git show origin/${baseBranch()}:<path>\` for the template or component, stated as "from source" in
 \`how\`. If you cannot establish it, write "not measured" and why — never infer it.
 
-${conformance}
+${conformance}${betaBlock(ctx, 'ui-evidence')}
 ## Never alter what you are capturing
 
 - Do not inject anything into the page before a screenshot: no overlay, banner, label, style or
@@ -1829,7 +2003,7 @@ not read this ticket.
 Do NOT put the acceptance criteria or the test-case list in the MR description. Those live on
 the TICKET, and \`document\` puts them there. An MR that restates the AC turns the ticket into a
 stale copy of itself — which is why the criteria are not in this prompt at all.
-
+${betaBlock(ctx, 'mr')}
 The MR is created through the GitLab MCP tools; there is no token in this session, so there is
 no curl fallback. If those tools are genuinely absent from your toolset, set \`blocked\` saying
 exactly that and nothing else — it is a configuration fault, and \`$ONESHOT_DRY_RUN\` being set

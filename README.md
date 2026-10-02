@@ -82,6 +82,11 @@ Three things fall out of that:
       different from ⟨R⟩: the UI is drawn and agreed before it is planned.
       A ticket without the label never runs it and never sees the pause.
       See "Designing before building".
+
+  ⟨B⟩ the optional `Beta` label adds no phase and no pause: plan through mr
+      build and check a v2 BESIDE v1, which keeps working as it does today,
+      with a switch the end user flips to go back. See "Beta: a new version
+      beside the old one".
 ```
 
 **Merge is the last phase.** A merged change is where this pipeline's warrant runs out: the
@@ -325,6 +330,41 @@ they have to take on trust.
 audit record lands there. Slack gets the same write-only heads-up every other gate sends, because
 the dev who has to look is not the person watching the run's thread — but nothing is ever read
 back out of it, so a Slack that is down costs a notification and never a verdict.
+
+## Beta: a new version beside the old one
+
+`Design` decides what a change looks like. `Beta` decides how it ships. Put it on a ticket
+alongside `Loop` and the change is built as a **new version of the feature (v2) beside the one
+users have today (v1)**, not as an edit to it, with a switch that lets the end user go back to v1
+and forward again. On a ticket carrying both, the approved design covers the screens and the
+switch sits above them, outside it — so it is never counted as a departure from the design.
+
+**The layout is Project Logs v2's; the switch is new.** Project Logs v2 is a sibling
+`project_logs_v2/` directory beside `project_logs/`, one route wrapper (`LogsVersionRoute.js`) that
+renders either version at the same URL, and an `api/v2/` folder only where an endpoint had to
+differ. It has no switch — its version comes from a server allowlist the user never sees — so the
+switch, and the per-user choice behind it, is the part this label adds. `skills/beta-version-toggle`
+carries both, with every path cited on `origin/dev`.
+
+**It adds no phase and no pause.** Like `Bug` at research and `Accessibility` at plan, it is a
+`labelSkills` entry in `config/phases.json` — one per phase that plans, builds, checks or shows the
+work — and each of those phases is handed the same contract and its own part in it:
+
+| phase | its part |
+|---|---|
+| `plan` | names v1's directory, the `<module>_v2/` files, the routes the switch wraps, any v1 file v2 must extend, and where the choice is kept; the switch gets its own steps |
+| `implement` | builds v2 beside v1, then the switch point and the switch as their own commit; extends a v1 file only backward-compatibly, and names each one |
+| `testcases` | the criteria in v2, the switch both ways, v1's main flow as a regression case, the choice across a reload and a re-login, and the never-touched case landing on v2 |
+| `review` | reads every v1 file the diff touches — anything but a backward-compatible extension is a `major` finding, and so is v1 importing v2 — and checks in the code that the choice is keyed by the signed-in user, since `verify` has one login and cannot try a second account |
+| `verify` | reaches each version by clicking the switch, never by writing the stored choice, and logs out through the app; it removes the stored choice only as setup for the never-touched case |
+| `ui-evidence` | v1 (through the switch) and v2 of each changed screen, and the switch in both states; against a base-branch shot, only the page below the switch is compared |
+| `mr` | says where v1 and v2 live, where the choice is kept, and what retiring v1 later takes |
+
+**The label decides both halves.** `src/phases/prompts.ts` renders the Beta block only when the
+phase's resolved skill list contains `beta-version-toggle` — the same computation that loads the
+skill — so taking `Beta` out of one phase's `labelSkills` takes the method and the instruction out
+of that phase together. The label has to exist on the project for anyone to apply it; it exists on
+`arbisoft/erp`. Built and unit-tested; no Beta ticket has run through the pipeline yet.
 
 ## MR review feedback
 
