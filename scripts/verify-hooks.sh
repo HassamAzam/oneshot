@@ -1069,6 +1069,153 @@ expect_allow "grep -r for a finding id" \
 expect_allow "an ordinary build command" \
                                        artifact-guard.cjs "$(bash_payload 'npm test -- --watchAll=false')"
 
+echo
+echo "eslint-guard"
+EFE="$ONESHOT_WORKTREE/frontend/src/eslintcases"
+EBIN="$ONESHOT_WORKTREE/node_modules/.bin"
+mkdir -p "$EFE" "$EBIN"
+printf '{}\n' > "$ONESHOT_WORKTREE/.eslintrc"
+
+# eslint is a shim reading its body from stdin: each case needs an exact answer
+# — a chosen exit code, a chosen message list — not a real linter's opinion.
+eshim() { { printf '#!/bin/sh\n'; cat; } > "$EBIN/eslint"; chmod +x "$EBIN/eslint"; }
+
+cat > "$EFE/Widget.js" <<'JSEOF'
+const unusedTotal = 42;
+
+const sum = (first, second) => first + second;
+
+export default sum;
+JSEOF
+printf 'const x = 1;\n' > "$ONESHOT_WORKTREE/webpack.config.js"
+printf 'print("hi")\n' > "$EFE/notes.py"
+
+# THE TRAP, asserted the only way that cannot pass vacuously: the shim answers
+# with the babel fatal when NODE_ENV is absent and with a real finding when it is
+# present. A hook that forgot to set NODE_ENV gets the fatal, treats it as a
+# toolchain fault, fails open — and this case FAILS.
+eshim <<'SH'
+if [ -z "$NODE_ENV" ]; then
+  echo '[{"messages":[{"fatal":true,"severity":2,"message":"Parsing error: [BABEL] Using `babel-preset-react-app` requires that you specify `NODE_ENV` or `BABEL_ENV` environment variables. Instead, received: undefined."}]}]'
+  exit 1
+fi
+echo '[{"messages":[{"severity":2,"line":1,"column":7,"ruleId":"no-unused-vars","message":"unusedTotal is assigned a value but never used."}]}]'
+exit 1
+SH
+expect_block "the parser is given NODE_ENV"   eslint-guard.cjs "$(js_payload "$EFE/Widget.js")"
+# Same shim: the path gate and the write-result gate must stop it running at all.
+expect_clean "outside frontend/"              eslint-guard.cjs "$(js_payload "$ONESHOT_WORKTREE/webpack.config.js")"
+expect_clean "not a .js/.jsx file"            eslint-guard.cjs "$(js_payload "$EFE/notes.py")"
+expect_clean "outside the worktree"           eslint-guard.cjs "$(js_payload "/tmp/oneshot-verify-outside.js")"
+expect_clean "a failed write is not linted"   eslint-guard.cjs "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"tool_response":{"success":false}}' "$EFE/Widget.js")"
+# Only the lines the write added are judged. The error is on line 1; this Edit
+# touched line 5.
+expect_clean "an Edit away from the finding"  eslint-guard.cjs "$(edit_payload "$EFE/Widget.js" 'export default sum;' 'export default sum;')"
+expect_block "an Edit on the finding's line"  eslint-guard.cjs "$(edit_payload "$EFE/Widget.js" 'const unusedTotal = 42;' 'const unusedTotal = 42;')"
+
+# A fatal that is the toolchain's fault is logged, never reported as a finding in
+# the file — otherwise every frontend write in the pipeline is blocked forever.
+eshim <<'SH'
+echo '[{"messages":[{"fatal":true,"severity":2,"message":"Parsing error: [BABEL] Using `babel-preset-react-app` requires that you specify `NODE_ENV`"}]}]'
+exit 1
+SH
+expect_clean "a toolchain fatal fails open"   eslint-guard.cjs "$(js_payload "$EFE/Widget.js")"
+
+# Any OTHER fatal is the session's own syntax, and is reported whatever lines it
+# touched — a file that no longer parses has no line numbers worth scoping by.
+eshim <<'SH'
+echo '[{"messages":[{"fatal":true,"severity":2,"line":3,"message":"Parsing error: Unexpected token (3:7)"}]}]'
+exit 1
+SH
+expect_block "a real parse error is reported" eslint-guard.cjs "$(edit_payload "$EFE/Widget.js" 'export default sum;' 'export default sum;')"
+
+# Warnings are the repo's deliberate choice (sonarjs/*, no-debugger, …) and must
+# not block.
+eshim <<'SH'
+echo '[{"messages":[{"severity":1,"line":1,"ruleId":"sonarjs/prefer-immediate-return","message":"Immediately return this expression."}]}]'
+exit 1
+SH
+expect_clean "warnings do not block"          eslint-guard.cjs "$(js_payload "$EFE/Widget.js")"
+
+eshim <<'SH'
+echo '[{"messages":[],"errorCount":0,"warningCount":0}]'
+exit 0
+SH
+expect_clean "a clean file"                   eslint-guard.cjs "$(js_payload "$EFE/Widget.js")"
+
+# exit 2 is eslint's own usage/config failure — measured for real when the linted
+# tree has no package.json, which crashes import/order. It says nothing about the
+# file, so it fails open.
+eshim <<'SH'
+echo 'Oops! Something went wrong!'
+exit 2
+SH
+expect_clean "eslint's own crash fails open"  eslint-guard.cjs "$(js_payload "$EFE/Widget.js")"
+
+eshim <<'SH'
+echo 'not json at all'
+exit 1
+SH
+expect_clean "non-JSON output fails open"     eslint-guard.cjs "$(js_payload "$EFE/Widget.js")"
+
+# A guard that cannot run must say so in the log and allow, never block.
+eshim <<'SH'
+echo '[{"messages":[{"severity":2,"line":1,"ruleId":"no-unused-vars","message":"unusedTotal is unused."}]}]'
+exit 1
+SH
+mv "$ONESHOT_WORKTREE/.eslintrc" "$ONESHOT_WORKTREE/.eslintrc.away"
+expect_clean "no eslint config fails open"    eslint-guard.cjs "$(js_payload "$EFE/Widget.js")"
+mv "$ONESHOT_WORKTREE/.eslintrc.away" "$ONESHOT_WORKTREE/.eslintrc"
+mv "$EBIN/eslint" "$EBIN/eslint.away"
+expect_clean "no eslint binary fails open"    eslint-guard.cjs "$(js_payload "$EFE/Widget.js")"
+mv "$EBIN/eslint.away" "$EBIN/eslint"
+
+# The real thing, end to end: eslint v7 from the seed checkout every worktree's
+# node_modules symlinks to, the app's own .eslintrc, and the `babel` key in
+# package.json that is what actually demands NODE_ENV. Skipped where that
+# checkout is not installed, because a pass without it would mean nothing.
+ESEED="${ONESHOT_SEED_FROM:-$HOME/Documents/erp}"
+ESEED="${ESEED/#\~/$HOME}"
+if [ -x "$ESEED/node_modules/.bin/eslint" ] && [ -f "$ESEED/.eslintrc" ]; then
+    RWT="/tmp/oneshot-verify-eslint-real"
+    rm -rf "$RWT"; mkdir -p "$RWT/frontend/src"
+    ln -s "$ESEED/node_modules" "$RWT/node_modules"
+    cp "$ESEED/.eslintrc" "$RWT/.eslintrc"
+    cat > "$RWT/package.json" <<'PKGEOF'
+{
+  "name": "eslint-guard-fixture",
+  "version": "0.0.0",
+  "babel": { "presets": ["@babel/preset-env", "@babel/preset-react", "react-app"] }
+}
+PKGEOF
+    cat > "$RWT/frontend/src/Clean.js" <<'JSEOF'
+const sum = (first, second) => first + second;
+
+export default sum;
+JSEOF
+    cat > "$RWT/frontend/src/Dirty.js" <<'JSEOF'
+const unusedTotal = 42;
+
+const sum = (first, second) => first + second;
+
+export default sum;
+JSEOF
+    ESAVED="$ONESHOT_WORKTREE"
+    export ONESHOT_WORKTREE="$RWT"
+    # Measured: this same file is a single fatal parse error without NODE_ENV and
+    # 0 errors / 0 warnings with it. Both halves matter.
+    expect_clean "real eslint, clean file (0 errors with NODE_ENV)" \
+                                              eslint-guard.cjs "$(js_payload "$RWT/frontend/src/Clean.js")"
+    expect_block "real eslint, unused var"    eslint-guard.cjs "$(js_payload "$RWT/frontend/src/Dirty.js")"
+    export ONESHOT_WORKTREE="$ESAVED"
+    rm -rf "$RWT"
+else
+    skip "real eslint, clean file (0 errors with NODE_ENV)" \
+         "no installed checkout at $ESEED — set ONESHOT_SEED_FROM; doctor passes it from .env"
+    skip "real eslint, unused var" \
+         "no installed checkout at $ESEED — set ONESHOT_SEED_FROM; doctor passes it from .env"
+fi
+
 rm -rf "$ONESHOT_WORKTREE"
 
 echo

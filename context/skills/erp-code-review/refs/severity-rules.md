@@ -69,4 +69,4 @@ Shared by all ERP code review agents (`backend-reviewer-agent`, `frontend-review
 - Do NOT suggest adding `try/except` / `try/catch` unless there is a real error-handling gap (per `.pr_agent.toml` item 14).
 - Do NOT restate `.claude/rules/` content — link to the file and show the fix.
 - Do NOT invent rules not in `.claude/rules/`. Call new-rule ideas out as a discussion point, not a finding.
-- Do NOT flag style rules that ESLint / Prettier / Stylelint / pylint / ruff / flake8 already catch — trust CI.
+- Do NOT flag style rules that ESLint / Prettier / Stylelint / pylint / ruff / flake8 already catch — trust the linters. Be precise about who runs what: CI's `run_lint` job is **pylint only**. Frontend ESLint errors are enforced by the `eslint-guard` hook, on the lines each write added, inside an Oneshot run — so a finding it would have blocked is not worth repeating. Neither covers untouched legacy lines or a change made outside the pipeline, so an ESLint-shaped problem on a line the diff did not add is still worth raising once.
