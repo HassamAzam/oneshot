@@ -179,7 +179,12 @@ notification and never a verdict.
 ```
 
 1. **Plan approval** — after phase 2 (`plan`), before phase 3 (`implement`). Oneshot posts the
-   plan itself as a ticket comment, pings the **dev** group in Slack, and the run **parks**.
+   plan itself as a ticket comment, pings the **dev** group in Slack, and the run **parks**. The
+   comment opens with a diagram of the runtime path the plan touches — each component, endpoint,
+   helper, model and migration marked new, modified, removed or unchanged — and lists its files
+   as Frontend / Backend / Config tables, with the step-by-step prose folded underneath. Code
+   draws both from structured `flow` and `fileChanges` fields (`src/lib/planflow.ts`,
+   `src/lib/planfiles.ts`); the model never writes the Mermaid.
 2. **Test-case approval** — after phase 4 (`testcases`), before phase 5 (`review`). The list of
    cases this run intends to verify is posted the same way and pinged to **QA**, and the run
    **parks**. It sits here, and not after `verify`, because this is the last point at which

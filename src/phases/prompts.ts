@@ -26,6 +26,7 @@ import {
 } from '../lib/config.js';
 import { join } from 'node:path';
 import { approvalCovers, readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
+import { planFilePaths } from '../lib/planfiles.js';
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import {
@@ -146,14 +147,21 @@ interface PlanForecast {
  * field the planner fills from a model change it can see, while `steps[].files`
  * is a list of files it INTENDS to touch. Both are read here, and either one
  * alone is enough to keep a skill.
+ *
+ * The intended files are read through `planFilePaths`, so `fileChanges` counts
+ * as well as the steps — the same list the guarded-path gate reads. With the
+ * steps alone, a migration named only in the file table, under
+ * `migrations: false`, sent implement out without django-migration-standards
+ * while the gate was already counting that file.
  */
 function planForecast(ctx: PromptCtx): PlanForecast {
   const p = artifact<{
     migrations: boolean;
     steps: Array<{ files: string[]; layer: string }>;
+    fileChanges: unknown;
   }>(ctx, 'plan');
   const steps = p.steps ?? [];
-  const files = steps.flatMap((s) => s.files ?? []);
+  const files = planFilePaths(p);
   const layers = layersOf(files);
   return {
     migration: p.migrations === true || steps.some((s) => s.layer === 'migration')
@@ -918,6 +926,51 @@ Produce an implementation plan an engineer could follow without re-deriving the 
 - \`feedbackResponse\` answers the LATEST feedback round point by point. \`where\` must name the part
   of THIS plan that now carries the point — the approver sees the plan, not your reasoning. Send
   \`[]\` when there is no feedback block above; this is a first plan and there is nothing to answer.
+
+## The overview the approver reads first
+
+\`flow\` and \`fileChanges\` are drawn by code at the top of the plan comment — a diagram and a set
+of file tables the approver reads BEFORE your steps. Both restate what the steps do; neither may
+carry work the steps do not.
+
+- \`fileChanges\` has one entry per file in \`steps[].files\`, each exactly once and spelled the
+  same. \`action\` is \`create\` for a file that does not exist yet — check, do not assume —
+  \`modify\` for one that does, \`delete\` for one this plan removes. \`area\` is \`frontend\`,
+  \`backend\` (server code, migrations and their tests) or \`config\`: settings, environment
+  variables, feature flags, dependency manifests, CI or deploy files — anything someone has to
+  set rather than something the app does. \`what\` is at most ~12 words naming the symbol:
+  "Add \`get_maternity_cycle_summary()\`", "New \`MaternityQuotaBar\` component", "Remove the
+  unused \`LeaveTypesWithHalfDayDisabled\`". No why and no line numbers; the steps carry both.
+- \`flow\` is the real runtime path, not an architecture sketch — "User → Frontend → Backend →
+  DB" is a wrong answer. Start from research's \`codePath\`, which is already the trace in
+  execution order, and follow the request: the entry point a person or scheduler triggers (the
+  component with the button, a management command, a beat task) → the components it renders →
+  the call it makes to the server → the view → the helpers, serializers and managers it reaches
+  → the models it reads or writes → any external service. Add a side path only when this plan
+  touches it: a task it enqueues, a template it renders, a websocket it pushes to.
+- One node per code unit a developer would open — a component, a view, a function, a model, a
+  migration, a template — labelled with its exact identifier (\`LeaveSummaryView\`,
+  \`get_person_leave_info()\`, \`LeaveLimit\`, \`0020_add_employee_maternity_leave_limit\`). Not a
+  file path, not a sentence. One file can hold several nodes.
+- Every new, modified or removed unit that runs at runtime gets a node with that \`change\`.
+  Leave out tests, style modules, fixtures, \`max_migration.txt\`, index re-exports and docs —
+  \`fileChanges\` already lists them.
+- \`unchanged\` nodes only where they earn their place: the entry point and the hops from it to
+  the first changed node, a node on the path between two changed nodes, and a model a changed
+  node reads or writes. Never a sibling for completeness.
+- A model is \`modified\` only when its fields, constraints or Meta change: list each change in
+  \`detail\` as \`+ name: FieldType\`, \`- name\` or \`~ name: old → new\`, and a \`new\` model lists
+  its fields the same way. A data-only migration is its own \`new\` migration node with a
+  \`seeds\`/\`backfills\` edge to the \`unchanged\` model, and its \`detail\` names the rows.
+- Edges go from caller to callee, reader to what it reads or writes, listener to what it
+  listens to — never back along a response, so the diagram has no loops. Label an edge only
+  when the label says what the arrow cannot: the HTTP method and path
+  (\`GET leaves/leave_summary/get/\`), a condition (\`if Maternity\`), a data verb
+  (\`reads count\`, \`seeds row\`, \`enqueues\`). Plain renders and calls stay unlabelled.
+- Most plans need 4-14 nodes; 18 is a hard cap. GitLab will not draw a diagram over 2,000
+  characters, so keep \`label\` to the identifier and each \`detail\` line under ~45 characters —
+  the renderer sheds detail to fit, and what it sheds is gone from the one picture the approver
+  reads first.
 
 Do not write or modify any code.`,
 

@@ -153,6 +153,37 @@ test('implement drops a plan-gated skill the plan rules out', () => {
   assert.ok(!got.includes('script-writing-standards'));
 });
 
+/**
+ * The plan names files in `steps[].files` and again in `fileChanges`. The
+ * forecast read only the steps, so a migration listed only in the table, under
+ * `migrations: false`, sent implement out without the migration skill — while
+ * the guarded-path gate, reading both, already counted that same file.
+ */
+const tableOnlyPlan = {
+  migrations: false,
+  steps: [{ files: ['common/models.py'], layer: 'backend' }],
+  fileChanges: [
+    { path: 'common/models.py', action: 'modify', area: 'backend', what: 'x' },
+    { path: 'common/migrations/0020_x.py', action: 'create', area: 'backend', what: 'x' },
+    { path: 'frontend/src/A.js', action: 'modify', area: 'frontend', what: 'x' },
+  ],
+};
+
+test('implement keeps the migration skill for a migration named only in the file table', () => {
+  const got = names(systemPromptFor(cfg('implement'), ctx(ticket(), { plan: tableOnlyPlan })));
+  assert.ok(got.includes('django-migration-standards'));
+});
+
+test('implement is pointed at frontend-agent for a frontend file named only in the file table', () => {
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: tableOnlyPlan }));
+  assert.match(p, /Delegate implementation work to `backend-agent` and `frontend-agent`/);
+  const stepsOnly = promptFor(cfg('implement'), ctx(ticket(), {
+    plan: { ...tableOnlyPlan, fileChanges: tableOnlyPlan.fileChanges.slice(0, 1) },
+  }));
+  assert.match(stepsOnly, /Delegate implementation work to `backend-agent` for/,
+    'without the table row the forecast is backend only, so the case above is the row\'s doing');
+});
+
 // ------------------------------------------- ui-evidence only claims a real approval
 
 const DESIGN = {

@@ -77,6 +77,8 @@ import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/sl
 import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
 import { codeSpan, mdText, tableCell } from '../lib/gitlabmd.js';
+import { fileChangesSection, planFilePaths } from '../lib/planfiles.js';
+import { flowSection } from '../lib/planflow.js';
 import type { DesignArtifact, TestCase } from '../phases/types.js';
 import { parseEdgeCases } from './edgecases.js';
 import { MAX_UPLOAD_BYTES, mimeFor } from '../lib/publish.js';
@@ -141,15 +143,22 @@ export function highScrutinyHits(files: string[]): string[] {
   return [...hit].sort();
 }
 
-/** Every file this run has said it will touch, or has touched. */
+/**
+ * Every file this run has said it will touch, or has touched.
+ *
+ * The plan names files in two places — `steps[].files` and `fileChanges` — and
+ * both count. They are meant to agree, but this list decides whether the
+ * guarded-path gate arms, and a file the planner put only in the table is
+ * still a file it said it would change. The paths are read raw, through
+ * `planFilePaths`, not as the table's validated rows: whether the gate arms
+ * must not depend on whether a row was fit to draw.
+ */
 export function declaredFiles(
   plan: Record<string, unknown> | null, implemented: Record<string, unknown> | null,
 ): string[] {
-  const steps = Array.isArray(plan?.steps) ? (plan.steps as Array<{ files?: unknown }>) : [];
-  const planned = steps.flatMap((s) => (Array.isArray(s.files) ? s.files.map(String) : []));
   const changed = Array.isArray(implemented?.filesChanged)
     ? (implemented.filesChanged as unknown[]).map(String) : [];
-  return [...planned, ...changed];
+  return [...planFilePaths(plan), ...changed];
 }
 
 export interface GateTrigger {
@@ -861,10 +870,27 @@ function renderPlanForTicket(plan: Record<string, unknown> | null): string {
       `${f.note ? `: ${mdText(f.note)}` : ''}`)
     .join('\n');
   const approach = planStr(plan, 'approach');
+  // The picture goes before the prose: it is the ten-second answer to "what
+  // does this build", and the approach paragraph reads better once the reader
+  // has seen the shape it explains.
+  const flow = flowSection(plan.flow);
+  // The file tables sit where the steps used to start, and when they exist the
+  // steps fold away beneath them. The tables are what an approver scans; #8765's
+  // steps were 10.6 KB of prose a reviewer paged through to find its 19 files.
+  // A plan without the tables (written before they existed) keeps its steps
+  // open, because they are then the only place its files are listed.
+  const files = fileChangesSection(plan);
+  const stepsBlock = files
+    ? '<details>\n<summary><b>Implementation steps</b> '
+      + `(${planSteps(plan).length}) — the detail behind the tables above</summary>\n\n`
+      + `${steps || '(none recorded)'}\n\n</details>\n\n`
+    : `**Steps**\n${steps || '(none recorded)'}\n\n`;
   return `${answered ? `**Your feedback, point by point**\n${answered}\n\n` : ''}` +
+    `${flow ? `**Flow** — the runtime path this plan touches\n\n${flow}\n\n` : ''}` +
     `**Approach**\n${approach ? mdText(approach) : '(not recorded)'}\n\n` +
     `${questions ? `**Open questions** — answer these in a comment, or the stated default is used\n${questions}\n\n` : ''}` +
-    `**Steps**\n${steps || '(none recorded)'}\n\n` +
+    `${files ? `**What changes** — ${files}\n\n` : ''}` +
+    stepsBlock +
     `${coverage ? `**Acceptance coverage**\n${coverage}\n\n` : ''}` +
     `**Risks**\n${risks || '(none identified)'}` +
     `${outOfScope ? `\n\n**Out of scope**\n${outOfScope}` : ''}` +

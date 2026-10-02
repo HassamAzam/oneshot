@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planApprovalRequestBody, testcasesApprovalRequestBody, testcasesApprovedRecordBody } from './reviewgate.js';
-import { renderPlanMd } from '../lib/publish.js';
+import {
+  declaredFiles, planApprovalRequestBody, testcasesApprovalRequestBody, testcasesApprovedRecordBody,
+} from './reviewgate.js';
+import { planNoteBody, renderPlanMd } from '../lib/publish.js';
 
 const oldPlan = {
   approach: 'Darken the bar colour',
@@ -143,6 +145,107 @@ test('a feedback entry missing its response renders instead of throwing', () => 
 test('non-string coverage fields render instead of throwing', () => {
   const odd = { ...newPlan, acceptanceCoverage: [{ criterion: 'Contrast', coveredBy: 2, note: 3 }] };
   assert.match(planApprovalRequestBody(odd, 'why'), /- • Contrast — 2 _\(3\)_/);
+});
+
+/** A plan carrying the overview fields: one changed view on the path from a page to a model. */
+const overviewPlan = {
+  ...newPlan,
+  steps: [
+    { n: 1, what: 'Add the key', files: ['apps/leaves/views.py'], layer: 'backend' },
+    { n: 2, what: 'Show the row', files: ['frontend/src/leaves/Row.js'], layer: 'frontend' },
+  ],
+  fileChanges: [
+    { path: 'apps/leaves/views.py', action: 'modify', area: 'backend', what: 'Add `maternity_cycle` to the payload' },
+    { path: 'frontend/src/leaves/Row.js', action: 'create', area: 'frontend', what: 'New maternity row' },
+  ],
+  flow: {
+    nodes: [
+      { id: 'row', label: 'MaternityRow', kind: 'component', change: 'new', detail: [] },
+      { id: 'view', label: 'LeaveSummaryView', kind: 'endpoint', change: 'modified', detail: ['+ maternity_cycle key'] },
+      { id: 'limit', label: 'LeaveLimit', kind: 'model', change: 'unchanged', detail: [] },
+    ],
+    edges: [
+      { from: 'row', to: 'view', label: 'GET leave_summary/get/' },
+      { from: 'view', to: 'limit', label: 'reads count' },
+    ],
+  },
+};
+
+test('gate comment draws the flow first, then the prose, then the file tables over the folded steps', () => {
+  const body = planApprovalRequestBody(overviewPlan, 'why');
+  const flow = body.indexOf('**Flow** — the runtime path this plan touches\n\n```mermaid\n');
+  const approach = body.indexOf('**Approach**');
+  const questions = body.indexOf('**Open questions**');
+  const files = body.indexOf('**What changes** — 2 files · 🆕 1 new · ✏️ 1 modified');
+  const steps = body.indexOf('<details>\n<summary><b>Implementation steps</b> (2)');
+  assert.ok(flow > 0, 'the diagram is drawn');
+  assert.ok(flow < approach && approach < questions && questions < files && files < steps, body);
+  assert.match(body, /\n\n1\. \*\*\[backend\]\*\* Add the key — `apps\/leaves\/views\.py`\n2\. /, 'the steps are all still there');
+  assert.match(body, /\n\n<\/details>\n\n\*\*Acceptance coverage\*\*/, 'the fold closes before the next section');
+  assert.doesNotMatch(body, /\*\*Steps\*\*/);
+});
+
+test('gate comment keeps the steps open and draws nothing extra for a plan without the overview fields', () => {
+  for (const plan of [oldPlan, newPlan]) {
+    const body = planApprovalRequestBody(plan, 'why');
+    assert.match(body, /\*\*Steps\*\*\n1\. /);
+    assert.doesNotMatch(body, /```mermaid|<details>|What changes/);
+  }
+});
+
+test('a flow the renderer cannot draw leaves the rest of the gate comment intact', () => {
+  const broken = { ...overviewPlan, flow: { nodes: [{ id: 'x', label: 'X', kind: 'viewset', change: 'new' }], edges: 'no' } };
+  const body = planApprovalRequestBody(broken, 'why');
+  assert.doesNotMatch(body, /```mermaid/);
+  assert.match(body, /\*\*What changes\*\* — 2 files/);
+});
+
+test('plan markdown gains Flow and What changes sections and keeps its full steps table', () => {
+  const md = renderPlanMd(1, 't', overviewPlan);
+  const flow = md.indexOf('## Flow — the runtime path this plan touches\n```mermaid\n');
+  const approach = md.indexOf('## Approach');
+  const files = md.indexOf('## What changes\n2 files · 🆕 1 new · ✏️ 1 modified');
+  const steps = md.indexOf('## Steps\n| # | Layer | Change | Files |');
+  assert.ok(flow > 0 && flow < approach && approach < files && files < steps, md);
+  assert.doesNotMatch(renderPlanMd(1, 't', newPlan), /## Flow|## What changes/);
+});
+
+test('the plan note carries the diagram and the file tables inline, where GitLab draws them', () => {
+  const note = planNoteBody(overviewPlan);
+  assert.deepEqual(note.warnings, []);
+  assert.match(note.body, /^\*\*Plan\*\* — how Oneshot intends to implement this\.\n\n> Darken the bar colour\n\n\*\*Flow\*\*/);
+  assert.match(note.body, /```mermaid\n[\s\S]+\n```\n\n<sub>/);
+  assert.match(note.body, /\*\*What changes\*\* — 2 files[\s\S]+\n\n2 step\(s\)\. Full plan attached/);
+  const old = planNoteBody(oldPlan);
+  assert.equal(old.body, '**Plan** — how Oneshot intends to implement this.\n\n> Darken the bar colour\n\n'
+    + '1 step(s). Full plan attached; implementation follows it unless a step proves wrong.');
+});
+
+test('the plan note hands back what the renderers dropped, so the publisher can log it', () => {
+  const note = planNoteBody({
+    ...overviewPlan,
+    fileChanges: [...overviewPlan.fileChanges, { path: 'x.py', action: 'rename', area: 'backend', what: '' }],
+    flow: { ...overviewPlan.flow, edges: [...overviewPlan.flow.edges, { from: 'row', to: 'ghost', label: '' }] },
+  });
+  assert.equal(note.warnings.length, 2);
+  assert.match(note.warnings.join('\n'), /ghost/);
+  assert.match(note.warnings.join('\n'), /rename/);
+});
+
+test('a file named only in fileChanges still counts toward the guarded-path gate', () => {
+  const plan = {
+    steps: [{ n: 1, what: 'x', files: ['apps/leaves/views.py'], layer: 'backend' }],
+    fileChanges: [{ path: 'apps/payroll/utils.py', action: 'modify', area: 'backend', what: 'x' }],
+  };
+  assert.deepEqual(declaredFiles(plan, { filesChanged: ['apps/leaves/tests.py'] }),
+    ['apps/leaves/views.py', 'apps/payroll/utils.py', 'apps/leaves/tests.py']);
+  assert.deepEqual(declaredFiles(null, null), []);
+  // A row the table cannot draw (area off the enum) is still a file the planner
+  // named: the gate reads the raw path, not the renderer's validated rows.
+  assert.deepEqual(declaredFiles({
+    steps: [],
+    fileChanges: [{ path: 'apps/payroll/views.py', action: 'modify', area: 'Backend', what: 'x' }],
+  }, null), ['apps/payroll/views.py']);
 });
 
 const tcase = (over: Record<string, unknown> = {}) => ({

@@ -12,6 +12,8 @@
  * the next phase reads a field that will not be there next time.
  */
 import { ADDRESSED_FEEDBACK_PROP, MR_FEEDBACK_PROPS } from '../mrfeedback/schema.js';
+import { FILE_ACTIONS, FILE_AREAS } from '../lib/planfiles.js';
+import { FLOW_CHANGES, FLOW_KINDS } from '../lib/planflow.js';
 import { BLOCKERS } from './reproduction.js';
 
 export type JsonSchema = Record<string, unknown>;
@@ -184,6 +186,29 @@ export const RESEARCH_SCHEMA = phaseSchema({
   },
 }, ['understanding', 'acceptanceCriteria', 'codePath', 'blastRadius', 'uiPath', 'unknowns', 'module', 'reproduction']);
 
+/**
+ * What each `flow` node kind means. The kind is the one fact the planner
+ * states about a node's nature, and it decides both the node's layer box and
+ * its shape in the diagram (src/lib/planflow.ts).
+ *
+ * The lengths in `flow` and `fileChanges` are written as guidance, not as
+ * `maxLength`/`maxItems`: the SDK enforces a schema by retrying the phase, and
+ * a label one character over would buy a whole re-plan for a cosmetic field.
+ * The renderers cut to length instead.
+ */
+const FLOW_KIND_DOC =
+  'component: a React component or page the user sees. ' +
+  'frontend-logic: frontend code with no markup — redux action/reducer/selector, hook, util, API ' +
+  'helper, constant. ' +
+  'endpoint: a URL route and the view/viewset method behind it. ' +
+  'backend-logic: a backend function or class the request reaches — util, serializer, manager, ' +
+  'permission, signal receiver, model method, setting. ' +
+  'task: work outside the request — Celery task, management command, beat schedule. ' +
+  'template: a server-rendered template — PDF, email, HTML page. ' +
+  'model: a database table (Django model). ' +
+  'migration: a migration file, schema or data. ' +
+  'external: outside this codebase — third-party API, websocket channel, mail/SMS provider, S3.';
+
 export const PLAN_SCHEMA = phaseSchema({
   approach: str('The chosen approach and, in one line, why over the alternative.'),
   reuse: strArr('Existing helpers/components to extend instead of writing new ones.'),
@@ -246,7 +271,102 @@ export const PLAN_SCHEMA = phaseSchema({
       required: ['point', 'response', 'where', 'note'],
     },
   },
-}, ['approach', 'reuse', 'steps', 'migrations', 'risks', 'openQuestions', 'outOfScope', 'acceptanceCoverage', 'feedbackResponse']);
+  fileChanges: {
+    type: 'array',
+    description:
+      'Every file in steps[].files, exactly once. Code draws these as the Frontend / Backend / ' +
+      'Config tables the approver reads instead of the steps.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        path: str('Repo-relative path, spelled exactly as in steps[].files.'),
+        action: {
+          type: 'string',
+          enum: [...FILE_ACTIONS],
+          description: 'create: the file does not exist yet. modify: it exists and this plan edits it. ' +
+            'delete: this plan removes it.',
+        },
+        area: {
+          type: 'string',
+          enum: [...FILE_AREAS],
+          description: 'frontend: UI code with its tests and styles. backend: server code, migrations and ' +
+            'their tests. config: settings, environment variables, feature flags, dependency manifests, ' +
+            'CI or deploy files — what someone has to set, not what the app does.',
+        },
+        what: str(
+          'What changes in this file, at most ~12 words, naming the symbol: "Add ' +
+          'get_maternity_cycle_summary()", "New MaternityQuotaBar component". No why, no line numbers — ' +
+          'the steps carry both.',
+        ),
+      },
+      required: ['path', 'action', 'area', 'what'],
+    },
+  },
+  flow: {
+    type: 'object',
+    additionalProperties: false,
+    description:
+      'The runtime path this plan touches. Code draws it as the diagram at the top of the plan ' +
+      'comment, which the approver reads BEFORE the steps. Never write Mermaid. nodes: [] only when ' +
+      'nothing runs (docs, CI config).',
+    properties: {
+      nodes: {
+        type: 'array',
+        description:
+          'The code units in the order a request reaches them, entry point first. Most plans need ' +
+          '4-14; 18 at most — the renderer drops the rest, context first.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: str('Short unique slug that edges refer to, e.g. "summary_view". Never shown.'),
+            label: str(
+              'The exact identifier a developer would grep: "LeaveSummaryView", "get_person_leave_info()", ' +
+              '"LeaveLimit", "0020_add_employee_maternity_leave_limit". No path, no sentence, no +/~ ' +
+              'prefix. <= 40 chars.',
+            ),
+            kind: { type: 'string', enum: [...FLOW_KINDS], description: FLOW_KIND_DOC },
+            change: {
+              type: 'string',
+              enum: [...FLOW_CHANGES],
+              description: 'new: does not exist yet. modified: exists and this plan changes its code (a ' +
+                'model: its fields, constraints or Meta). removed: this plan deletes it. unchanged: shown ' +
+                'only as context.',
+            },
+            detail: strArr(
+              'What changes here, 0-2 lines of <= 45 chars; [] for unchanged context. Models: one line ' +
+              'per field, up to 4: "+ cycle_start: DateField", "- legacy_flag", "~ count: 45 -> 90". A ' +
+              'data migration names its rows: "+ row: Maternity, EMPLOYEE, count 90".',
+            ),
+          },
+          required: ['id', 'label', 'kind', 'change', 'detail'],
+        },
+      },
+      edges: {
+        type: 'array',
+        description:
+          'Caller -> callee, reader -> what it reads or writes, listener -> what it listens to. ' +
+          'Never back along a response.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            from: str('Node id of the caller / reader / listener.'),
+            to: str('Node id of the callee / what is read or written / what is listened to.'),
+            label: str(
+              '"" for a plain call or render. Otherwise what the arrow cannot say, <= 32 chars: ' +
+              '"GET leaves/leave_summary/get/", "if Maternity", "reads count", "seeds row", "enqueues".',
+            ),
+          },
+          required: ['from', 'to', 'label'],
+        },
+      },
+    },
+    required: ['nodes', 'edges'],
+  },
+}, ['approach', 'reuse', 'steps', 'migrations', 'risks', 'openQuestions', 'outOfScope', 'acceptanceCoverage',
+  'feedbackResponse', 'fileChanges', 'flow']);
 
 export const TESTCASES_SCHEMA = phaseSchema({
   module: str('Module name for suite tagging'),
