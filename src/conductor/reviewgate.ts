@@ -71,7 +71,7 @@ import {
   type ReviewGateState, type RunJournal,
 } from '../lib/artifacts.js';
 import {
-  addIssueNote, issueNotes, issueUrl, swapLabel, uploadFile, type Upload,
+  addIssueNote, issueNotes, issueUrl, swapLabel, uploadFile, type IssueNote, type Upload,
 } from '../lib/gitlab.js';
 import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/slack.js';
 import { isMachineNote } from '../lib/claims.js';
@@ -183,7 +183,11 @@ export function triggerLine(trigger: GateTrigger): string {
     + 'gates apply whether or not the ticket carries the `Review` label.';
 }
 
-function isApprovedReply(text: string): boolean {
+/**
+ * Exported so the Ready For Automation mode's approval tally
+ * (src/automation/runner.ts) applies the same word rule instead of a copy of it.
+ */
+export function isApprovedReply(text: string): boolean {
   // Exact match, case-insensitive, trimmed — deliberately NOT a substring
   // test. "approved, but see my comment above" is feedback, not a sign-off:
   // the whole point of requiring the bare word is that a reviewer who wants
@@ -287,8 +291,34 @@ async function setBoardLabel(iid: number, gate: Gate, on: boolean): Promise<void
  * matched, and `id` replaces the Slack ts as the watermark — note ids are
  * monotonic per project, so "strictly after the request" is an integer
  * comparison rather than a string one.
+ *
+ * `at` is the note's `created_at`. The gates here never read it; the Ready For
+ * Automation mode files an approval under the year it was GIVEN, not the year
+ * the conductor happened to notice it.
  */
-interface NoteReply { id: number; text: string; user: string | null }
+export interface GateReply { id: number; text: string; user: string | null; at: string | null }
+type NoteReply = GateReply;
+
+/**
+ * Human replies strictly after `since`: not system, not machine notes. Pure.
+ * Input order is kept. Shared with the Ready For Automation mode, so both
+ * read "a person answered" the same way.
+ */
+export function repliesAfter(notes: IssueNote[], since: number): GateReply[] {
+  return notes
+    // Strictly after the standing request, so a round never re-reads the
+    // previous round's replies — and never reads the request itself.
+    .filter((n) => n.id > since)
+    // GitLab's own notes (label swaps, assignments) are board noise, and
+    // Oneshot's audit records are its own voice; neither is a human verdict.
+    .filter((n) => n.system !== true)
+    // A claim note is an ordinary comment, so `system` does not catch it. On a
+    // desk whose token belongs to a listed reviewer it therefore read as that
+    // reviewer speaking — which is how run 29 approved-and-revised against its
+    // own fleet. Anything carrying an oneshot marker is this pipeline talking.
+    .filter((n) => !isMachineNote(n.body))
+    .map((n) => ({ id: n.id, text: n.body ?? '', user: n.author?.username ?? null, at: n.created_at ?? null }));
+}
 
 /**
  * Whether this comment's author may resolve the gate.
@@ -512,19 +542,7 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
   }
 
   const since = state.requestNoteId;
-  const replies: NoteReply[] = notes.data
-    // Strictly after the standing request, so a round never re-reads the
-    // previous round's replies — and never reads the request itself.
-    .filter((n) => n.id > since)
-    // GitLab's own notes (label swaps, assignments) are board noise, and
-    // Oneshot's audit records are its own voice; neither is a human verdict.
-    .filter((n) => n.system !== true)
-    // A claim note is an ordinary comment, so `system` does not catch it. On a
-    // desk whose token belongs to a listed reviewer it therefore read as that
-    // reviewer speaking — which is how run 29 approved-and-revised against its
-    // own fleet. Anything carrying an oneshot marker is this pipeline talking.
-    .filter((n) => !isMachineNote(n.body))
-    .map((n) => ({ id: n.id, text: n.body ?? '', user: n.author?.username ?? null }));
+  const replies: NoteReply[] = repliesAfter(notes.data, since);
 
   for (const r of replies) {
     if (isApprovedReply(r.text) && !mayApprove(r, gate)) {

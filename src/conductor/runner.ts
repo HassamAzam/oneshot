@@ -102,6 +102,7 @@ import {
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
+import { automationOwns } from './watcher.js';
 import {
   branchFiles, loadZoneMap, refusedTicket, zoneBlockReason, zoneCheckDue, zoneGuardApplies, zoneVerdict,
   type ZoneVerdict,
@@ -182,6 +183,23 @@ export interface RunOutcome {
    */
   status: 'done' | 'blocked' | 'aborted' | 'refused' | 'parked';
   reason?: string;
+  /**
+   * On a refusal: true when waiting cannot clear it, only a person changing
+   * the ticket can (today: it carries the automation mode's trigger label), so
+   * `--follow` stops instead of re-checking every few minutes forever.
+   */
+  final?: true;
+}
+
+/**
+ * Whether `--follow` should stop on this outcome's refusal rather than check
+ * again next tick: a refusal marked `final`, or one naming an assignee who is
+ * not this desk. A lost claim race or a block's cooldown clears by waiting.
+ */
+export function refusalIsFinal(o: RunOutcome): boolean {
+  if (o.status !== 'refused') return false;
+  if (o.final) return true;
+  return Boolean(o.reason?.includes('assigned to') || o.reason?.includes('GITLAB_USERNAME'));
 }
 
 export interface CodePhaseCtx {
@@ -921,6 +939,15 @@ export async function runTicket(
   const carried = new Set(issue.labels.map((l) => l.toLowerCase()));
   const list = phases().filter((p) => !p.labelGated || carried.has(p.labelGated.toLowerCase()));
   const owner = opts.conductor;
+
+  // The scan skips a ticket the automation mode owns; `--ticket` never scans,
+  // so the same rule is asked here, before anything is claimed, posted or
+  // paid for.
+  const owned = automationOwns(issue.labels);
+  if (owned) {
+    log.info(`#${iid} — ${owned}`);
+    return { runId: '', iid, status: 'refused', reason: owned, final: true };
+  }
 
   if (issue.assignees.length > 0) {
     const me = gitlabUsername();

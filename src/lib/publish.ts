@@ -58,7 +58,7 @@ export function mimeFor(name: string): string {
 // ------------------------------------------------------------------ rendering
 
 /** One CSV field: quoted always, inner quotes doubled. Steps keep their newlines. */
-function csvCell(v: unknown): string {
+export function csvCell(v: unknown): string {
   return `"${String(v ?? '').replace(/"/g, '""')}"`;
 }
 
