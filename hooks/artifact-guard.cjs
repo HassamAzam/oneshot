@@ -271,6 +271,48 @@ function chdir(dirs, argv0, rest) {
   return [...new Set(dirs.map((b) => path.resolve(b, d)))];
 }
 
+/**
+ * Every literal path an interpreter call in `text` appears to WRITE.
+ *
+ * Run over each segment by writeTargets(), and once more over the whole
+ * command by the dispatch below. segments() splits on newlines, so a heredoc
+ * that puts its path on the line after the call —
+ *
+ *   python3 - <<'EOF'
+ *   with open(
+ *       "<run>/verify.json", "w") as f:
+ *
+ * — leaves `open(` in one segment and the path in the next, and neither
+ * matches. Scanning the raw command (as the guard did before it walked
+ * segments) refused that; walking segments alone let it through.
+ */
+function interpreterWrites(text) {
+  const found = [];
+  // Interpreter one-liners. `python3 -c "... json.dump(d, open(p,'w'))"` is the
+  // shape the transcripts show these sessions reaching for, so the write MODE
+  // is what is matched — an `open(p)` or `open(p,'r')` is a read and ignored.
+  // 'r+' is a write that starts with an r, so it is spelled out.
+  const pyOpen = /open\(\s*(["'])([^"']+)\1\s*,\s*(["'])(?:[wax]|r\+|rb\+)/g;
+  for (let m = pyOpen.exec(text); m; m = pyOpen.exec(text)) found.push(m[2]);
+  // Every alternative hangs off the one Path(...) capture: a bare
+  // `write_text(` alternative matched without capturing a path, and the write
+  // it was written to catch was dropped.
+  const pyPath = /Path\(\s*(["'])([^"']+)\1\s*\)\s*\.\s*(?:write_text|write_bytes|unlink|rename|replace|open\(\s*(["'])(?:[wax]|r\+|rb\+))/g;
+  for (let m = pyPath.exec(text); m; m = pyPath.exec(text)) found.push(m[2]);
+  // os/shutil by literal path. A move or rename takes its source away and
+  // overwrites its destination, so both count; a copy only writes its
+  // destination — copying a handoff OUT is a read.
+  const pyFs = /\b(os\.(?:remove|unlink|rename|replace)|shutil\.(?:move|copy|copy2|copyfile))\(\s*(["'])([^"']+)\2(?:\s*,\s*(["'])([^"']+)\4)?/g;
+  for (let m = pyFs.exec(text); m; m = pyFs.exec(text)) {
+    const copies = m[1].startsWith('shutil.copy');
+    if (!copies) found.push(m[3]);
+    if (m[5]) found.push(m[5], path.join(m[5], path.basename(m[3])));
+  }
+  const nodeWrite = /(?:writeFileSync|appendFileSync|createWriteStream|writeFile)\(\s*(["'`])([^"'`]+)\1/g;
+  for (let m = nodeWrite.exec(text); m; m = nodeWrite.exec(text)) found.push(m[2]);
+  return found;
+}
+
 /** Every path this segment appears to WRITE. Reads are not collected at all. */
 function writeTargets(seg, { argv0, rest, args }) {
   const found = [];
@@ -279,28 +321,7 @@ function writeTargets(seg, { argv0, rest, args }) {
   const redirect = /(?:^|[\s;&|])\d*>>?\|?\s*(["']?)([^\s"'|;&<>]+)\1/g;
   for (let m = redirect.exec(seg); m; m = redirect.exec(seg)) found.push(m[2]);
 
-  // Interpreter one-liners. `python3 -c "... json.dump(d, open(p,'w'))"` is the
-  // shape the transcripts show these sessions reaching for, so the write MODE
-  // is what is matched — an `open(p)` or `open(p,'r')` is a read and ignored.
-  // 'r+' is a write that starts with an r, so it is spelled out.
-  const pyOpen = /open\(\s*(["'])([^"']+)\1\s*,\s*(["'])(?:[wax]|r\+|rb\+)/g;
-  for (let m = pyOpen.exec(seg); m; m = pyOpen.exec(seg)) found.push(m[2]);
-  // Every alternative hangs off the one Path(...) capture: a bare
-  // `write_text(` alternative matched without capturing a path, and the write
-  // it was written to catch was dropped.
-  const pyPath = /Path\(\s*(["'])([^"']+)\1\s*\)\s*\.\s*(?:write_text|write_bytes|unlink|rename|replace|open\(\s*(["'])(?:[wax]|r\+|rb\+))/g;
-  for (let m = pyPath.exec(seg); m; m = pyPath.exec(seg)) found.push(m[2]);
-  // os/shutil by literal path. A move or rename takes its source away and
-  // overwrites its destination, so both count; a copy only writes its
-  // destination — copying a handoff OUT is a read.
-  const pyFs = /\b(os\.(?:remove|unlink|rename|replace)|shutil\.(?:move|copy|copy2|copyfile))\(\s*(["'])([^"']+)\2(?:\s*,\s*(["'])([^"']+)\4)?/g;
-  for (let m = pyFs.exec(seg); m; m = pyFs.exec(seg)) {
-    const copies = m[1].startsWith('shutil.copy');
-    if (!copies) found.push(m[3]);
-    if (m[5]) found.push(m[5], path.join(m[5], path.basename(m[3])));
-  }
-  const nodeWrite = /(?:writeFileSync|appendFileSync|createWriteStream|writeFile)\(\s*(["'`])([^"'`]+)\1/g;
-  for (let m = nodeWrite.exec(seg); m; m = nodeWrite.exec(seg)) found.push(m[2]);
+  found.push(...interpreterWrites(seg));
 
   // Braces on every branch, including the one-statement ones. Without them
   // the `for` below swallows the following `else if`s as the body of its own
@@ -466,6 +487,20 @@ try {
           const hit = protectedArtifact(candidate, names);
           if (hit) refuse(hit, 'this command');
         }
+      }
+    }
+    // The interpreter calls once more over the whole command, for a call whose
+    // path sits on a later line than its `(` (see interpreterWrites). Absolute
+    // paths only: a relative one means wherever the shell stood at that point,
+    // which only the segment walk knows. Resolved against every base instead,
+    // `cd artifacts && python3 -c "open('verify.json','w')"` from a shell in
+    // the run directory would be refused for a file in artifacts/.
+    if (mentionsName) {
+      for (const raw of interpreterWrites(cmd)) {
+        const target = expandVars(raw);
+        if (!path.isAbsolute(target)) continue;
+        const hit = protectedArtifact(target, names);
+        if (hit) refuse(hit, 'this command');
       }
     }
   }

@@ -847,6 +847,18 @@ expect_deny  "shutil.copy onto verify.json" \
                                        artifact-guard.cjs "$(bash_payload "python3 -c \"import shutil; shutil.copy('/tmp/f', '$RUN/verify.json')\"")"
 expect_deny  "open(..., 'r+')"         artifact-guard.cjs "$(bash_payload "python3 -c \"f=open('$RUN/findings.json','r+'); f.truncate(0)\"")"
 expect_deny  "Path(...).open('r+')"    artifact-guard.cjs "$(bash_payload "python3 -c \"from pathlib import Path; Path('$RUN/verify.json').open('r+')\"")"
+# A heredoc can put the path on the line after the call. Segments split on
+# newlines, so only the pass over the whole command sees the two together.
+expect_deny  "python heredoc: open( and its path on separate lines" \
+                                       artifact-guard.cjs "$(bash_payload "python3 - <<'EOF'"$'\n'"with open("$'\n'"    '$RUN/verify.json', 'w') as f:"$'\n'"    f.write('{}')"$'\n'"EOF")"
+expect_deny  "node heredoc: writeFileSync( and its path on separate lines" \
+                                       artifact-guard.cjs "$(bash_payload "node - <<'EOF'"$'\n'"require('fs').writeFileSync("$'\n'"  '$RUN/verify.json',"$'\n'"  '{}')"$'\n'"EOF")"
+expect_allow "python heredoc: a read whose path is on the next line" \
+                                       artifact-guard.cjs "$(bash_payload "python3 - <<'EOF'"$'\n'"import json"$'\n'"with open("$'\n'"    '$RUN/verify.json') as f:"$'\n'"    print(json.load(f))"$'\n'"EOF")"
+# That pass takes absolute paths only. A relative one means wherever the shell
+# stood at that point, and here that is artifacts/, not the run directory.
+expect_allow "cd on into artifacts/, then a relative python write" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$RUN" "cd artifacts && python3 -c \"open('verify.json','w')\"")"
 expect_deny  "sed -i.bak"              artifact-guard.cjs "$(bash_payload "sed -i.bak 's/fail/pass/' $RUN/verify.json")"
 expect_deny  "sed --in-place"          artifact-guard.cjs "$(bash_payload "sed --in-place 's/fail/pass/' $RUN/verify.json")"
 expect_deny  "find -name findings.json -delete" \
