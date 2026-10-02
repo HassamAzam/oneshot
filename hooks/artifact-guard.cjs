@@ -81,7 +81,7 @@ const JOURNAL = 'run.json';
  */
 const FALLBACK = [
   'recall.json', 'research.json', 'design.json', 'plan.json', 'implement.json',
-  'mr-open.json', 'testcases.json', 'findings.json', 'verify.json',
+  'mr-open.json', 'testcases.json', 'findings.json', 'verify.json', 'base-check.json',
   'ui-evidence.json', 'mr.json', 'merge.json', 'remediate.json', 'mr-feedback.json',
 ];
 
