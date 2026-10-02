@@ -170,7 +170,7 @@ pytest is unaffected and is fine to run.
   When the ticket is about which one is on top, check that separately with
   `document.elementsFromPoint()` at the centre of `region`.
 
-  Five ways this reads the wrong verdict, all of them paid for already:
+  Six ways this reads the wrong verdict, all of them paid for already:
 
   - **`areaPx` is an area, not a distance.** It is about
     `region.width * region.height`: each side of `region` is rounded on its own
