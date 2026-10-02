@@ -56,6 +56,9 @@ test('the readiness script gives its own answer before runGuard kills it', () =>
   // Guards without an entry keep the default.
   assert.equal(guardTimeoutMs('pause-check.cjs'), 15_000);
   assert.equal(guardTimeoutMs('py-lint.cjs'), 60_000);
+  // eslint-guard spawns eslint with its own 55s bound, so the kill must land
+  // after that or the hook dies with nothing said about which file was slow.
+  assert.equal(guardTimeoutMs('eslint-guard.cjs'), 60_000);
 });
 
 test('runAutomationReadyGuard with GitLab unreachable reads as unknown, with the reason', async () => {

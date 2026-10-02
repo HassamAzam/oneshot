@@ -104,6 +104,10 @@ mode commits them (`fix: remove dead code`) and pushes to the MR's source branch
 1. **Unused imports** — read directly from tool output, do not hand-roll detection:
    - Backend: `flake8`/`pylint` output (`F401`, `unused-import`) per [`python-linting`](../python-linting/SKILL.md).
    - Frontend: `eslint` `no-unused-vars` output per [`react-frontend-standards`](../react-frontend-standards/SKILL.md).
+     Run it as `NODE_ENV=development node_modules/.bin/eslint <files>` — without `NODE_ENV` the
+     parser fails on every file and reports nothing, which reads like a clean sweep. Inside an
+     Oneshot run the `eslint-guard` hook already ran it on the lines each write added, so what is
+     left for you here is the lines nobody touched.
    - **An unused import is a symptom, not just the disease.** Two equivalent triggers, same
      handling: (a) the import is still present in the file but nothing references it anymore, or
      (b) the user already deleted the import line themselves. Either way, find the function in this
