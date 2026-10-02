@@ -98,8 +98,13 @@ export function countsAsFailure(r: { result?: string; evidence?: string }): bool
  * from somebody else's: both "fail the same way". An implement lap that fixed
  * the wrong code path left verify citing a base file:line the diff truly does
  * not touch, and the base check then confirmed the ticket's own bug as not
- * this change's. This is the floor that needs nobody's judgement: the tags
- * were written by testcases before implement ran, so no outcome can move them.
+ * this change's. This is the floor that needs nobody's judgement. testcases
+ * (n:4) writes the tags after implement's first lap and before verify (n:6),
+ * and a cycle never re-runs it: nextIndex() and the remediation resume both
+ * skip testcases when they re-force a window. The one path that does re-run
+ * it, a revise at the test-case gate, fires before review and takes its
+ * feedback from a person. So the tags a verify lap is judged against were
+ * always written before that lap ran, and no verify outcome can move them.
  */
 export function ticketScopeIds(cases: ReadonlyArray<{ id?: unknown; pass?: unknown }>): Set<string> {
   return new Set(cases
