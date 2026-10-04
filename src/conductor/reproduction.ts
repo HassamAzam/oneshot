@@ -107,6 +107,27 @@ function blockerOf(verdict: Reproduction['verdict'], blocker: unknown): Blocker 
 }
 
 /**
+ * How many of the evidence lines are screenshots.
+ *
+ * `evidence` is free prose that LEADS with the filename — "repro-1-podpeople.png
+ * — /pod/people/ unfiltered, 566 people" — so the obvious `endsWith('.png')`
+ * matched nothing and this counted 0 on a run that captured four. It shipped
+ * that way and made the one quantity the telemetry can measure permanently zero.
+ *
+ * `includes('.png')` is the wrong correction: the blocked lap of erp#8771 wrote
+ * "No repro-*.png — the app never came up, so no screenshot could be captured",
+ * which names the extension precisely to say there are none. Counting that as a
+ * screenshot turns a false negative into a false positive, which is worse — it
+ * would report evidence for a run that produced none.
+ *
+ * So the test is on the FIRST token only: a line that opens with a filename is
+ * citing a file, and a line that opens with prose is talking about one.
+ */
+export function shotsIn(evidence: string[]): number {
+  return evidence.filter((e) => /\.(png|jpe?g|webp)$/i.test(e.trim().split(/\s+/)[0] ?? '')).length;
+}
+
+/**
  * What a verdict must carry before it is asserted on the ticket: the ticket is a
  * bug, steps were actually executed, something was observed, on a recorded
  * commit, with a screenshot someone can look at.

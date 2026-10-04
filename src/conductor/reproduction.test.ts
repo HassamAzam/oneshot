@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   declareReproduced, incompleteness, notABugApprovalRequestBody, notABugDecision, notABugSlackText,
-  reproductionComment, reproductionOf,
+  reproductionComment, reproductionOf, shotsIn,
 } from './reproduction.js';
 import { gateApprovedText, gateAskText } from './reviewgate.js';
 import type { RunJournal } from '../lib/artifacts.js';
@@ -190,4 +190,33 @@ test('blocker is derived from the verdict, never trusted beside it', () => {
   assert.equal(at('nonsense', 'env'), 'env');
   assert.equal(at('inconclusive', 'wat'), 'none');
   assert.equal(at('inconclusive'), 'none');
+});
+
+test('screenshots are counted by the filename that opens the line, not by mentioning .png', () => {
+  // Verbatim from erp#8771's reproduced lap: the filename LEADS and prose follows.
+  // `endsWith('.png')` counted 0 of these four, which is the bug this pins.
+  const reproduced = [
+    'repro-1-podpeople.png \u2014 /pod/people/ unfiltered, 566 people, Total Experience column visible',
+    'repro-2-filterpanel.png \u2014 Filter popover open showing the Experience select',
+    'repro-3-exp-2-4-years.png \u2014 THE DEFECT. Experience=\'2-4 Years\' applied; rows 1 and 2 are outside',
+    'repro-4-exp-1-2-years.png \u2014 Experience=\'1-2 Years\' applied; 15 rows, all inside [0,2) years',
+    'Measurement (SQL, dev hrdb): 609 active people compared; 60 values differ',
+  ];
+  assert.equal(shotsIn(reproduced), 4);
+
+  // Verbatim from the same ticket's BLOCKED lap. It names the extension precisely
+  // to say there are none, so `includes('.png')` would report a screenshot for a
+  // run that captured nothing — a false positive, the expensive direction.
+  const blocked = [
+    'No repro-*.png \u2014 the app never came up, so no screenshot of the POD > People screen could be captured.',
+    'app.cjs ensure stderr: E_SEED_MISSING, /Users/x/Documents/erp/venv does not exist',
+  ];
+  assert.equal(shotsIn(blocked), 0);
+
+  // A bare filename is still a filename; other image types count; empty is zero.
+  assert.equal(shotsIn(['repro-1.png']), 1);
+  assert.equal(shotsIn(['  repro-1.png  ']), 1);
+  assert.equal(shotsIn(['shot.jpeg x', 'shot.webp y', 'shot.JPG z']), 3);
+  assert.equal(shotsIn([]), 0);
+  assert.equal(shotsIn(['']), 0);
 });
