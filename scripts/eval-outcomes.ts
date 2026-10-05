@@ -21,7 +21,8 @@ import {
 } from '../src/lib/outcomes.js';
 
 type Cause = 'change' | 'pre-existing' | 'bad-case' | 'untested';
-interface GoldFile { project: string; cases: Record<string, Record<string, { cause: Cause; why: string }>> }
+type Labels = Record<string, { cause: Cause; why: string }>;
+interface GoldFile { projects: Record<string, Record<string, Labels>> }
 
 const GOLD = join(ROOT, 'evals', 'failure-cause', 'gold.json');
 const RUNS = join(STATE, 'runs');
@@ -114,8 +115,9 @@ function gold(): void {
   const wrong: string[] = [];
   for (const dir of runDirs()) {
     const journal = readJson<RunJournal>(join(dir, 'run.json'));
-    const labels = journal && file.cases[String(journal.iid)];
-    if (!journal || !labels || !journal.url.startsWith(file.project)) continue;
+    const project = journal && Object.keys(file.projects).find((p) => journal.url.startsWith(`${p}/`));
+    const labels = project && file.projects[project]?.[String(journal.iid)];
+    if (!journal || !labels) continue;
     const verdicts = new Map((inputsAt(dir).verify?.results ?? []).map((r) => [r.id ?? '', verifyLabel(r)]));
     let right = 0;
     let missed = 0;

@@ -1,7 +1,8 @@
 /**
  * Missing edge cases: for each ticket in evals/edge-coverage/gold.json, does
  * the test list its run holds now contain a case for every edge a good list
- * must have?
+ * must have? Tickets are grouped by GitLab project, and a run on disk is
+ * graded only when its URL is in that ticket's project.
  *
  *   npm run eval:edges            # every gold ticket
  *   npm run eval:edges -- <iid> <iid>  # just these
@@ -23,7 +24,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { BASE_ENV, ROOT, STATE } from '../src/lib/config.js';
 
 interface Edge { id: string; source: 'bug' | 'ticket'; edge: string }
-interface GoldFile { project: string; tickets: Record<string, Edge[]> }
+interface GoldFile { projects: Record<string, Record<string, Edge[]>> }
 interface Case { id: string; scenario: string; precondition: string; steps: string[]; expected: string }
 interface Verdict { edge: string; coveredBy: string; reason: string }
 
@@ -55,6 +56,10 @@ const VERDICT_SCHEMA = {
 
 function readJson<T>(path: string): T | null {
   try { return JSON.parse(readFileSync(path, 'utf8')) as T; } catch { return null; }
+}
+
+function repoName(project: string): string {
+  return project.split('/').pop() ?? project;
 }
 
 function judgeModel(): string {
@@ -112,21 +117,22 @@ async function main(): Promise<void> {
   const gold = readJson<GoldFile>(GOLD);
   if (!gold) { console.error(`cannot read ${GOLD}`); process.exit(2); }
   const only = process.argv.slice(2).filter((a) => /^\d+$/.test(a));
-  const iids = Object.keys(gold.tickets).filter((iid) => !only.length || only.includes(iid));
+  const targets = Object.entries(gold.projects)
+    .flatMap(([project, tickets]) => Object.entries(tickets).map(([iid, edges]) => ({ project, iid, edges })))
+    .filter(({ iid }) => !only.length || only.includes(iid));
   const model = judgeModel();
   const rows: Array<Record<string, string | number>> = [];
   const missing: string[] = [];
   let graded = 0;
 
-  await Promise.all(iids.map(async (iid) => {
+  await Promise.all(targets.map(async ({ project, iid, edges }) => {
     const dir = join(STATE, 'runs', iid);
     const run = readJson<{ url: string; runId: string }>(join(dir, 'run.json'));
     const cases = readJson<{ cases: Case[] }>(join(dir, 'testcases.json'))?.cases;
-    if (!run || !run.url.startsWith(gold.project) || !cases?.length) {
-      console.log(`#${iid}: no test list on disk for this project, skipped`);
+    if (!run || !run.url.startsWith(`${project}/`) || !cases?.length) {
+      console.log(`${repoName(project)}#${iid}: no test list on disk for this project, skipped`);
       return;
     }
-    const edges = gold.tickets[iid] ?? [];
     graded += edges.length;
     const verdicts = new Map((await judge(edges, cases, model)).map((v) => [v.edge, v]));
     const uncovered = edges.filter((e) => {
@@ -135,9 +141,10 @@ async function main(): Promise<void> {
     });
     const bugEdges = edges.filter((e) => e.source === 'bug');
     for (const e of uncovered) {
-      missing.push(`#${iid} ${e.id} [${e.source}] ${e.edge}\n      judge: ${verdicts.get(e.id)?.reason ?? 'no verdict'}`);
+      missing.push(`${repoName(project)}#${iid} ${e.id} [${e.source}] ${e.edge}\n      judge: ${verdicts.get(e.id)?.reason ?? 'no verdict'}`);
     }
     rows.push({
+      repo: repoName(project),
       iid: Number(iid),
       runId: run.runId,
       covered: `${edges.length - uncovered.length}/${edges.length}`,
@@ -145,7 +152,7 @@ async function main(): Promise<void> {
     });
   }));
 
-  rows.sort((a, b) => Number(a.iid) - Number(b.iid));
+  rows.sort((a, b) => String(a.repo).localeCompare(String(b.repo)) || Number(a.iid) - Number(b.iid));
   console.table(rows);
   console.log(`judge: ${model}. ${missing.length} of ${graded} edges missing.`);
   for (const m of missing) console.log(`  ${m}`);
