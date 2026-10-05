@@ -21,6 +21,7 @@
     "eval": "DRY_RUN=1 tsx scripts/eval-phase.ts",
     "eval:outcomes": "tsx scripts/eval-outcomes.ts",
     "eval:edges": "tsx scripts/eval-edges.ts",
+    "replay:testcases": "tsx scripts/replay-testcases.ts",
     "memory:backfill": "tsx scripts/backfill-memory.ts",
     "hooks:verify": "bash scripts/verify-hooks.sh",
     "verify": "npm run deps:verify && npm run hooks:verify && npm run doctor",
