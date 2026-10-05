@@ -87,6 +87,11 @@ export function countsAsFailure(r: { result?: string; evidence?: string }): bool
   return r.result === 'pre-existing' && !String(r.evidence ?? '').trim();
 }
 
+/** The test-design passes a case can be tagged with; testcases runs every one. */
+export const TEST_PASSES = [
+  'happy', 'boundary', 'negative', 'state', 'side-effect', 'cross-module', 'regression', 'hostile',
+] as const;
+
 /**
  * The ids of the cases that exercise this ticket's own acceptance criteria:
  * those tagged with the `happy` pass, which the testcases prompt defines as

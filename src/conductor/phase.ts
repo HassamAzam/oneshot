@@ -28,6 +28,8 @@ import { accountActionRequired } from '../lib/accountgate.js';
 import { schemaFor } from './schemas.js';
 import { hooksFor } from './hooks.js';
 
+const IPV4_SHIM = join(ROOT, 'scripts', 'ipv4-dns.cjs');
+
 export interface PhaseInput {
   iid: number;
   runId: string;
@@ -475,6 +477,10 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
         allowDangerouslySkipPermissions: true,
         ...(schema ? { outputFormat: { type: 'json_schema' as const, schema } } : {}),
         env,
+        // FortiClient black-holes the IPv6 route to the API: the CLI's sockets
+        // sit in SYN_SENT and the phase stalls with no stream. Force IPv4.
+        // NODE_OPTIONS in .env cannot do this — the phase env is an allowlist.
+        executableArgs: ['--require', IPV4_SHIM],
         abortController: ac,
         stderr: (d: string) => {
           try { appendFileSync(tee, `${JSON.stringify({ type: 'cli-stderr', text: d })}\n`); } catch { /* best effort */ }

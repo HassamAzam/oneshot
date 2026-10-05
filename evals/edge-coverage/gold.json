@@ -1,0 +1,26 @@
+{
+  "_about": "Edge cases a good test list for each ticket must contain, graded by `npm run eval:edges` against whatever testcases.json each ticket's run holds now. A judge model decides, per edge, which case (if any) exercises it; an edge no case exercises is a missing edge case. Edges marked `source: bug` are real defects found in that run by verify or review, so a list without them provably let a bug through; `source: ticket` edges come from the ticket's own scope. Re-run the testcases phase on a ticket after a prompt change, then run the eval, to see whether the change made the lists weaker. `project` is the GitLab project the iids belong to.",
+  "project": "https://gitlab.arbisoft.com/arbisoft/erp",
+  "tickets": {
+    "8772": [
+      { "id": "E1", "source": "ticket", "edge": "A People Report amount with a long float tail (API 145635.25999999998) renders as 145,635.26, with no comma inside the decimals." },
+      { "id": "E2", "source": "ticket", "edge": "A small amount with a float tail (API 78.00000000000001) renders as 78.00, keeping two decimal places." },
+      { "id": "E3", "source": "ticket", "edge": "An amount over a million (API 1460414.8599999999) is grouped every three digits in the whole-number part only and renders as 1,460,414.86." },
+      { "id": "E4", "source": "ticket", "edge": "An amount of exactly zero renders as 0.00 on the People Report." },
+      { "id": "E5", "source": "ticket", "edge": "A negative amount keeps its minus sign and is grouped in the whole-number part only." },
+      { "id": "E6", "source": "ticket", "edge": "The People Report CSV export writes every Amount with at most two decimal places, matching the table." },
+      { "id": "E7", "source": "ticket", "edge": "Profile Entitlements, which shares the number formatter, shows its figures without a comma inside the decimals and with the same digits as before." },
+      { "id": "E8", "source": "ticket", "edge": "Person Equity, which shares the number formatter, shows its figures without a comma inside the decimals, keeping every decimal it had and its currency prefix." },
+      { "id": "E9", "source": "ticket", "edge": "The Payroll Dashboard financial summary, which shares the number formatter, keeps its existing money formatting with no comma inside the decimals." }
+    ],
+    "8781": [
+      { "id": "E1", "source": "ticket", "edge": "A recreational-trip claim with 4 participants reimbursed at an Amount Paid of 44,000 records exactly 11,000 against each participant." },
+      { "id": "E2", "source": "ticket", "edge": "An Amount Paid that does not divide evenly across participants is split so the active rows total it exactly to the cent and never exceed it." },
+      { "id": "E3", "source": "ticket", "edge": "Submitting a trip claim creates exactly one expense-person row per participant, with no inactive duplicate rows at 0.00." },
+      { "id": "E4", "source": "ticket", "edge": "A global-subcontractor participant stays at 0.00 and is left out of the divisor, so the eligible participants split the whole Amount Paid." },
+      { "id": "E5", "source": "ticket", "edge": "Reimbursing several trip claims in one bulk decision apportions each claim from its own Amount Paid." },
+      { "id": "E6", "source": "bug", "edge": "A bulk reimbursement whose request body sends status as the string \"3\" instead of the integer 3 still apportions the Amount Paid to the per-person rows." },
+      { "id": "E7", "source": "ticket", "edge": "An Official Trip claim is reimbursed without the equal-share apportionment touching its participants' rows." }
+    ]
+  }
+}

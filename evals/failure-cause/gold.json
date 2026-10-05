@@ -1,0 +1,12 @@
+{
+  "_about": "Hand labels for every non-passing case in the gold runs, judged by reading the ticket, the diff and verify's evidence. cause = change (this change is wrong or incomplete: it must go back to implement), pre-existing (fails the same way without this change), bad-case (the case itself is wrong: a stale premise, an unreachable state, or it checks something that is not code), untested (never actually exercised: no data, no route, broken tooling). Graded by `npm run eval:outcomes -- --gold` against whatever verify.json each ticket's run holds now: verify's 'fail' means change, 'pre-existing' means pre-existing, 'blocked'/'skipped' mean untested, 'pass' means it saw nothing wrong. A bad-case is graded right on any verdict except 'fail', because the only harm it can do is a wasted implement lap. `project` is the GitLab project the iids belong to.",
+  "project": "https://gitlab.arbisoft.com/arbisoft/erp",
+  "cases": {
+    "8772": {
+      "TC-06": { "cause": "untested", "why": "No person in the environment has an amount with exactly one decimal place, and the case does not allow mocking, so the padding path was never shown." },
+      "TC-08": { "cause": "untested", "why": "The non-accountant fixture account is logged out by an HTTP 400 from person_permission before the Payroll gating can be checked; this is an account/data issue, not the diff." },
+      "TC-14": { "cause": "untested", "why": "The Entitlements tab needs an OTP that only a running Celery worker prints, and no worker was running." },
+      "TC-16": { "cause": "untested", "why": "The Invoices summary part passed, but Bonus Distribution had no awarded bonus and the Expenses report had no amount with four or more decimals, so two of the three screens were never exercised." }
+    }
+  }
+}
