@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { ROOT, STATE } from '../src/lib/config.js';
 import type { RunJournal } from '../src/lib/artifacts.js';
 import {
-  OUTCOMES_LOG, appendOutcome, outcomeOf, readOutcomes, type OutcomeInputs, type OutcomeRow,
+  OUTCOMES_LOG, appendOutcome, outcomeOf, readOutcomes, verifyLabel, type OutcomeInputs, type OutcomeRow,
 } from '../src/lib/outcomes.js';
 
 type Cause = 'change' | 'pre-existing' | 'bad-case' | 'untested';
@@ -80,6 +80,7 @@ function weekly(rows: OutcomeRow[]): void {
   console.table([...weeks].map(([week, rs]) => {
     const handed = rs.filter((r) => r.handedOff);
     const bad = handed.filter((r) => r.realFailureAtHandoff).length;
+    const passScored = rs.filter((r) => r.passesMissing);
     return {
       week,
       runs: rs.length,
@@ -90,10 +91,13 @@ function weekly(rows: OutcomeRow[]): void {
       failBlamedElsewhere: rs.reduce((n, r) => n + r.failBlamedElsewhere.length, 0),
       ownCaseDismissed: rs.reduce((n, r) => n + r.ownCaseDismissed.length, 0),
       implementLaps: rs.reduce((n, r) => n + r.implementLaps, 0),
-      passesMissing: rs.reduce((n, r) => n + (r.passesMissing?.length ?? 0), 0),
+      passesMissing: passScored.length
+        ? `${passScored.reduce((n, r) => n + (r.passesMissing?.length ?? 0), 0)} (${passScored.length} runs)`
+        : '-',
     };
   }));
   console.log('realFailureAtHandoff: an MR was opened with a failing case or regression still in it. This is the number that has to fall.');
+  console.log('passesMissing: counted only over runs whose row records it; rows written before the field read "-".');
 }
 
 function causeOf(result: string | undefined): Cause | 'none' {
@@ -112,7 +116,7 @@ function gold(): void {
     const journal = readJson<RunJournal>(join(dir, 'run.json'));
     const labels = journal && file.cases[String(journal.iid)];
     if (!journal || !labels || !journal.url.startsWith(file.project)) continue;
-    const verdicts = new Map((inputsAt(dir).verify?.results ?? []).map((r) => [r.id ?? '', r.result]));
+    const verdicts = new Map((inputsAt(dir).verify?.results ?? []).map((r) => [r.id ?? '', verifyLabel(r)]));
     let right = 0;
     let missed = 0;
     let wrongBlame = 0;

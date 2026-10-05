@@ -19,7 +19,7 @@ import { dirname, join } from 'node:path';
 import { DRY_RUN, ONESHOT_HOME } from './config.js';
 import { readArtifact, type RunJournal } from './artifacts.js';
 import { log } from './log.js';
-import { TEST_PASSES, countsAsFailure, ticketScopeIds } from '../phases/types.js';
+import { OVERRULED_PRE_EXISTING, TEST_PASSES, countsAsFailure, ticketScopeIds } from '../phases/types.js';
 
 export const OUTCOMES_LOG = join(ONESHOT_HOME, 'evals', 'live', 'outcomes.jsonl');
 
@@ -50,9 +50,16 @@ export interface OutcomeRow {
   /** Cases counted as this change's failure, by the merge gate's own rule. */
   failing: string[];
   regressions: number;
-  /** 'fail' verdicts whose evidence blames something other than this change. */
+  /**
+   * Verify's own 'fail' verdicts whose evidence blames something other than
+   * this change. A 'pre-existing' label the base check overruled is not one.
+   */
   failBlamedElsewhere: string[];
-  /** 'pre-existing' verdicts on the ticket's own acceptance cases. */
+  /**
+   * Verify's own 'pre-existing' labels on the ticket's own acceptance cases.
+   * The base check always refuses these, so they are read from the label
+   * verify gave, not the 'fail' the case was rescored to.
+   */
   ownCaseDismissed: string[];
   reviewBlockers: number;
   /**
@@ -100,10 +107,10 @@ export function outcomeOf(journal: RunJournal, inputs: OutcomeInputs, at = Date.
     failing,
     regressions,
     failBlamedElsewhere: results
-      .filter((c) => c.result === 'fail' && NOT_THIS_CHANGE.test(c.evidence ?? ''))
+      .filter((c) => verifyLabel(c) === 'fail' && NOT_THIS_CHANGE.test(c.evidence ?? ''))
       .map(idOf),
     ownCaseDismissed: results
-      .filter((c) => c.result === 'pre-existing' && ownCases.has(idOf(c)))
+      .filter((c) => verifyLabel(c) === 'pre-existing' && ownCases.has(idOf(c)))
       .map(idOf),
     reviewBlockers: (inputs.findings?.findings ?? [])
       .filter((f) => f.severity === 'blocker' || f.severity === 'major').length,
@@ -112,12 +119,27 @@ export function outcomeOf(journal: RunJournal, inputs: OutcomeInputs, at = Date.
   };
 }
 
-/** Empty when there is no test list yet: a run that never wrote one skipped nothing. */
+/**
+ * The label verify itself gave a case. verify.json is written after the base
+ * check, which rescores a refused 'pre-existing' as 'fail'; that fail is the
+ * conductor's verdict, not verify's.
+ */
+export function verifyLabel(c: CaseVerdict): string | undefined {
+  if (c.result === 'fail' && (c.evidence ?? '').startsWith(OVERRULED_PRE_EXISTING)) return 'pre-existing';
+  return c.result;
+}
+
+/**
+ * Empty when there is no test list yet: a run that never wrote one skipped
+ * nothing. A passesEmpty note declares a pass only when it opens with that
+ * pass's name, so a note that merely mentions "state" does not declare it.
+ */
 export function passesMissing(testcases: TestcasesArtifact | null): string[] {
   if (!testcases?.cases?.length) return [];
   const tagged = new Set(testcases.cases.flatMap((c) => (Array.isArray(c.pass) ? c.pass : [])));
-  const declaredEmpty = (testcases.passesEmpty ?? []).join('\n');
-  return TEST_PASSES.filter((p) => !tagged.has(p) && !declaredEmpty.includes(p));
+  const notes = testcases.passesEmpty ?? [];
+  const declared = (pass: string): boolean => notes.some((n) => new RegExp(`^[\\s\`'"*-]*${pass}\\b`, 'i').test(n));
+  return TEST_PASSES.filter((p) => !tagged.has(p) && !declared(p));
 }
 
 export function outcomeInputs(iid: number): OutcomeInputs {

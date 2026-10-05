@@ -87,6 +87,13 @@ export function countsAsFailure(r: { result?: string; evidence?: string }): bool
   return r.result === 'pre-existing' && !String(r.evidence ?? '').trim();
 }
 
+/**
+ * How the base check's evidence opens when it refuses a 'pre-existing' label
+ * and rescores the case as 'fail'. The written verify.json keeps only the
+ * rescored result, so this prefix is how a reader recovers verify's own label.
+ */
+export const OVERRULED_PRE_EXISTING = 'claimed pre-existing, NOT confirmed';
+
 /** The test-design passes a case can be tagged with; testcases runs every one. */
 export const TEST_PASSES = [
   'happy', 'boundary', 'negative', 'state', 'side-effect', 'cross-module', 'regression', 'hostile',

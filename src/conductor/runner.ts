@@ -110,7 +110,7 @@ import {
 } from './zoneguard.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import {
-  countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type Ticket, type TestCase,
+  OVERRULED_PRE_EXISTING, countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type Ticket, type TestCase,
 } from '../phases/types.js';
 import {
   activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
@@ -584,7 +584,7 @@ export function applyBaseCheck(
       return { ...r, evidence: `confirmed on ${base}${at}: ${seen?.evidence ?? ''} — verify: ${r.evidence}` };
     }
     rejected.push(r.id);
-    return { ...r, result: 'fail' as const, evidence: `claimed pre-existing, NOT confirmed — ${why} — verify: ${r.evidence}` };
+    return { ...r, result: 'fail' as const, evidence: `${OVERRULED_PRE_EXISTING} — ${why} — verify: ${r.evidence}` };
   });
   return { results: out, confirmed, rejected };
 }

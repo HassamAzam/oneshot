@@ -4,7 +4,7 @@
  * must have?
  *
  *   npm run eval:edges            # every gold ticket
- *   npm run eval:edges -- 241 53  # just these
+ *   npm run eval:edges -- <iid> <iid>  # just these
  *
  * Case wording never matches an edge's wording, so a judge model decides which
  * case, if any, exercises each edge. It gets no tools and sees only the edges
@@ -20,7 +20,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { ROOT, STATE } from '../src/lib/config.js';
+import { BASE_ENV, ROOT, STATE } from '../src/lib/config.js';
 
 interface Edge { id: string; source: 'bug' | 'ticket'; edge: string }
 interface GoldFile { project: string; tickets: Record<string, Edge[]> }
@@ -91,6 +91,7 @@ async function judge(edges: Edge[], cases: Case[], model: string): Promise<Verdi
     prompt: judgePrompt(edges, cases),
     options: {
       model,
+      env: { ...BASE_ENV },
       tools: [],
       maxTurns: JUDGE_MAX_TURNS,
       settingSources: [],
