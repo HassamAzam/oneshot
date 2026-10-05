@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import { labelledLayers, mrOpenNote, promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
 import { gateSubjectDigest } from '../lib/artifacts.js';
 import { ROOT, phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { writeDesignTokens } from '../lib/designtokens.js';
 import type { Ticket } from './types.js';
 import { PRIOR_ART_KINDS, RESEARCH_SCHEMA } from '../conductor/schemas.js';
 
@@ -743,4 +745,45 @@ test('review sees the plan\'s reuse verdicts one per line, under a heading that 
     '  - reuse: leave_days() in apps/leaves/utils.py, called as it stands\n' +
     '  - rejected: carry_forward() — it has 12 callers, and a flag would split them\n',
   ));
+});
+
+// ---------------------------------------------------------------- design tokens
+
+test('design is told the tokens are generated, where they are, and not to redo them', () => {
+  const prompt = promptFor(cfg('design'), ctx(ticket({ iid: 424242, labels: ['Design'] })));
+  assert.ok(prompt.includes(join(runDir(424242), 'artifacts', 'design', 'tokens.css')));
+  assert.ok(prompt.includes('./tokens.css'));
+  assert.ok(!prompt.includes('../tokens.css'), 'a mockup in design/ importing ../tokens.css misses the file');
+  assert.doesNotMatch(prompt, /Distil them into one/);
+});
+
+test('plan and implement are pointed at the tokens the design added, not told to avoid new ones', () => {
+  const design = {
+    applicable: true,
+    tokensFile: 'design/tokens.css',
+    screens: [{ id: 's1', name: 'Completed list', purpose: 'p', mockupHtml: 'design/s1.html', screenshot: 's1.png' }],
+    newPatterns: ['x'],
+  };
+  for (const phase of ['plan', 'implement']) {
+    const prompt = promptFor(cfg(phase), ctx(ticket({ iid: 424243 }), { design }));
+    assert.ok(prompt.includes(join(runDir(424243), 'artifacts', 'design', 'tokens.css')), phase);
+    assert.ok(prompt.includes(join(runDir(424243), 'artifacts', 'design', 'new-tokens.css')), phase);
+    assert.doesNotMatch(prompt, /rather than new ones/, phase);
+  }
+});
+
+test('the design prompt names the very file writeDesignTokens wrote, and tells a dark screen to set data-theme', (t) => {
+  const iid = 990374;
+  const wt = mkdtempSync(join(tmpdir(), 'oneshot-tokens-prompt-'));
+  t.after(() => {
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(runDir(iid), { recursive: true, force: true });
+  });
+  mkdirSync(join(wt, 'frontend', 'src', 'scss'), { recursive: true });
+  writeFileSync(join(wt, 'frontend', 'src', 'scss', '_variables.scss'), '$brand: #111;\n');
+  const written = writeDesignTokens(iid, wt);
+  assert.ok(written);
+  const prompt = promptFor(cfg('design'), ctx(ticket({ iid, labels: ['Design'] })));
+  assert.ok(prompt.includes(written.path), 'the prompt must point at the file the writer produced');
+  assert.match(prompt, /data-theme="dark"/);
 });

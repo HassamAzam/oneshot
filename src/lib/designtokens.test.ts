@@ -1,0 +1,640 @@
+/**
+ * What these tests are really protecting.
+ *
+ * The extractor's output is read by a design phase that has no way to check it.
+ * A wrong hex looks exactly like a right one in a mockup, and a missing token
+ * looks like a colour nobody used. So the cases below are weighted towards the
+ * two failures that would survive review: a token that vanishes without being
+ * named in `unresolved`, and a value that is silently WRONG — a light colour
+ * emitted as the dark one because a ternary was read inside out.
+ *
+ * Everything runs against fixture files written into a temp dir. Pointing them
+ * at the real frontend would make them a test of that checkout's current theme,
+ * green today and red the next time a designer adds a colour.
+ */
+import { test } from 'node:test';
+import type { TestContext } from 'node:test';
+import assert from 'node:assert/strict';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { artifactDir, runDir } from './config.js';
+import { extractDesignTokens, writeDesignTokens, type TokenExtraction } from './designtokens.js';
+
+interface Fixture {
+  theme?: string;
+  style?: string;
+  scss?: string;
+}
+
+/** A frontend checkout containing only the files a case names. */
+function frontend(t: TestContext, files: Fixture): string {
+  const root = mkdtempSync(join(tmpdir(), 'oneshot-tokens-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, 'src', 'jss'), { recursive: true });
+  mkdirSync(join(root, 'src', 'scss'), { recursive: true });
+  if (files.theme !== undefined) writeFileSync(join(root, 'src/jss/Theme.js'), files.theme);
+  if (files.style !== undefined) writeFileSync(join(root, 'src/jss/style.js'), files.style);
+  if (files.scss !== undefined) writeFileSync(join(root, 'src/scss/_variables.scss'), files.scss);
+  return root;
+}
+
+const THEME = `// theme generator
+import { createTheme } from '@mui/material/styles';
+
+const RGBA_255_255_255_0_23 = 'rgba(255, 255, 255, 0.23)';
+const whiteTextColor = '#fff';
+const alsoWhite = whiteTextColor;
+const textPrimary = '#0088CC';
+const interpolated = \`#\${'f'}\`;
+
+export const getColors = (isDark = false) => ({
+    primaryColor: isDark ? whiteTextColor : '#464C53',
+    btnBordercolor: isDark ? RGBA_255_255_255_0_23 : 'rgba(0, 0, 0, 0.23)',
+    fancyCard: isDark ? "#353434" : alsoWhite,
+    warningColor: '#FF9800',
+    yellowColor: isDark ? '' : '#ffff48',
+    mystery: isDark ? neverDeclared : '#111',
+    inverted: !isDark ? '#aaa' : '#bbb',
+    spread: { ...somethingElse },
+    templated: isDark ? \`\${whiteTextColor}\` : '#000',
+    textPrimary,
+    interpolated,
+    navyBlue: '#083671'
+});
+
+const getPalateColors = colors => ({
+    catalinaBlue: {
+        primary: { light: colors.paleBlue, main: '#083671' },
+    },
+});
+
+export default getPalateColors;
+`;
+
+test('literals, identifiers and one-hop aliases all resolve, light and dark', (t) => {
+  const { light, dark } = extractDesignTokens(frontend(t, { theme: THEME }));
+
+  assert.equal(light.primaryColor, '#464C53');
+  assert.equal(dark.primaryColor, '#fff');
+  // A value that is the same in both themes still belongs in both maps — a
+  // mockup reading only the dark block must not find a hole where it sits.
+  assert.equal(light.warningColor, '#FF9800');
+  assert.equal(dark.warningColor, '#FF9800');
+  assert.equal(light.textPrimary, '#0088CC');
+  assert.equal(dark.textPrimary, '#0088CC');
+  assert.equal(light.fancyCard, '#fff');
+  assert.equal(dark.fancyCard, '#353434');
+  assert.equal(light.navyBlue, '#083671');
+});
+
+test('the dark branch of a ternary is never emitted as the light value', (t) => {
+  const { light, dark } = extractDesignTokens(frontend(t, { theme: THEME }));
+
+  assert.notEqual(light.primaryColor, dark.primaryColor);
+  assert.equal(light.btnBordercolor, 'rgba(0, 0, 0, 0.23)');
+  assert.equal(dark.btnBordercolor, 'rgba(255, 255, 255, 0.23)');
+});
+
+test('rgba values keep their commas and spaces intact', (t) => {
+  const { light, dark, css } = extractDesignTokens(frontend(t, { theme: THEME }));
+
+  assert.equal(dark.btnBordercolor, 'rgba(255, 255, 255, 0.23)');
+  assert.equal(light.btnBordercolor, 'rgba(0, 0, 0, 0.23)');
+  assert.match(css, /--color-btnBordercolor: rgba\(0, 0, 0, 0\.23\);/);
+});
+
+test('an identifier with no binding is named in unresolved, not dropped', (t) => {
+  const { dark, light, unresolved } = extractDesignTokens(frontend(t, { theme: THEME }));
+
+  assert.equal(dark.mystery, undefined);
+  assert.equal(light.mystery, '#111');
+  assert.ok(unresolved.includes('dark.mystery'));
+  assert.ok(!unresolved.includes('light.mystery'));
+});
+
+test('an empty string literal counts as no value', (t) => {
+  const { dark, light, css, unresolved } = extractDesignTokens(frontend(t, { theme: THEME }));
+
+  assert.equal(light.yellowColor, '#ffff48');
+  assert.equal(dark.yellowColor, undefined);
+  assert.ok(unresolved.includes('dark.yellowColor'));
+  assert.ok(!/--color-yellowColor:\s*;/.test(css));
+});
+
+test('a dark value that did not resolve is cleared in the dark block, not inherited from the light one', (t) => {
+  const { css } = extractDesignTokens(frontend(t, { theme: THEME }));
+  const darkBlock = css.slice(css.indexOf('[data-theme="dark"] {'));
+
+  // Both selectors match <html data-theme="dark">, so a key the dark block
+  // leaves out renders its :root value: a light colour on a dark mockup, with
+  // nothing in the output looking wrong.
+  assert.match(darkBlock, /--color-mystery: initial;/);
+  assert.match(darkBlock, /--color-yellowColor: initial;/);
+  assert.match(css, /:root \{[^}]*--color-yellowColor: #ffff48;/);
+  // A key with no light value either has nothing in :root to leak.
+  assert.doesNotMatch(css, /--color-inverted:/);
+  assert.match(css, /not inherited from :root/);
+});
+
+test('a template literal that interpolates is named in unresolved, never emitted as its source', (t) => {
+  const { light, dark, css, unresolved } = extractDesignTokens(frontend(t, { theme: THEME }));
+
+  assert.equal(light.templated, '#000');
+  assert.equal(dark.templated, undefined);
+  assert.equal(light.interpolated, undefined);
+  assert.equal(dark.interpolated, undefined);
+  for (const name of ['dark.templated', 'light.interpolated', 'dark.interpolated']) {
+    assert.ok(unresolved.includes(name), `${name} missing from unresolved`);
+  }
+  assert.ok(!css.includes('${'), 'template source text reached the css');
+});
+
+test('a template literal with nothing interpolated is still a plain string', (t) => {
+  const theme = 'export const getColors = (isDark = false) => ({\n    plain: `#123`,\n});\n';
+  const { light, dark } = extractDesignTokens(frontend(t, { theme }));
+
+  assert.equal(light.plain, '#123');
+  assert.equal(dark.plain, '#123');
+});
+
+test('a ternary on anything but the dark parameter is refused rather than guessed', (t) => {
+  const { light, dark, unresolved } = extractDesignTokens(frontend(t, { theme: THEME }));
+
+  // `!isDark ? '#aaa' : '#bbb'` is the inverse of every other entry. Reading it
+  // positionally would put the dark colour in the light theme with nothing in
+  // the output looking wrong, so both sides are withheld and named instead.
+  assert.equal(light.inverted, undefined);
+  assert.equal(dark.inverted, undefined);
+  assert.ok(unresolved.includes('light.inverted'));
+  assert.ok(unresolved.includes('dark.inverted'));
+});
+
+test('an entry that is not a plain key/value lands in unresolved', (t) => {
+  const { light, dark, unresolved } = extractDesignTokens(frontend(t, { theme: THEME }));
+
+  assert.equal(light.spread, undefined);
+  assert.equal(dark.spread, undefined);
+  assert.ok(unresolved.includes('light.spread'));
+});
+
+test('getPalateColors in the same file contributes no tokens', (t) => {
+  const { light } = extractDesignTokens(frontend(t, { theme: THEME }));
+
+  assert.equal(light.catalinaBlue, undefined);
+  assert.equal(light.primary, undefined);
+  assert.equal(Object.keys(light).length, 9);
+});
+
+test('every palette key reaches a map or the unresolved list, never neither', (t) => {
+  const { light, dark, unresolved } = extractDesignTokens(frontend(t, { theme: THEME }));
+  const keys = [
+    'primaryColor', 'btnBordercolor', 'fancyCard', 'warningColor',
+    'yellowColor', 'mystery', 'inverted', 'spread', 'templated', 'textPrimary',
+    'interpolated', 'navyBlue',
+  ];
+
+  for (const key of keys) {
+    assert.ok(light[key] !== undefined || unresolved.includes(`light.${key}`), `light.${key} vanished`);
+    assert.ok(dark[key] !== undefined || unresolved.includes(`dark.${key}`), `dark.${key} vanished`);
+  }
+});
+
+test('scss parses tight colons, quotes, functions and comments', (t) => {
+  const scssSource = [
+    '// a line comment',
+    '$white : #fff;',
+    '$silver:#ccc;',
+    '/* block */',
+    '$green: rgb(72, 176, 121);',
+    "$stack: 'Lato, sans-serif';",
+    '$family: "Montserrat";',
+    '$blue-mid : #18a4fd;',
+    '$flagged: #abc !default;',
+    '$denim:#0e76bc;',
+  ].join('\n');
+  const { scss, css } = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assert.equal(scss.white, '#fff');
+  assert.equal(scss.silver, '#ccc');
+  assert.equal(scss.green, 'rgb(72, 176, 121)');
+  assert.equal(scss.stack, "'Lato, sans-serif'");
+  assert.equal(scss.family, '"Montserrat"');
+  assert.equal(scss['blue-mid'], '#18a4fd');
+  assert.equal(scss.flagged, '#abc');
+  assert.equal(scss.denim, '#0e76bc');
+  assert.equal(scss.comment, undefined);
+  assert.match(css, /--scss-blue-mid: #18a4fd;/);
+});
+
+test('a url with a scheme in scss is a value, not a comment that swallows the next line', (t) => {
+  const scssSource = [
+    '$bg: url(http://h/a.png);',
+    '$next: #fff;',
+    '$secure: url(https://h/b.png);',
+    '$relative: url(//h/c.png);',
+    '$after: #000;',
+  ].join('\n');
+  const { scss, unresolved } = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assert.equal(scss.bg, 'url(http://h/a.png)');
+  assert.equal(scss.next, '#fff');
+  assert.equal(scss.secure, 'url(https://h/b.png)');
+  assert.equal(scss.relative, 'url(//h/c.png)');
+  assert.equal(scss.after, '#000');
+  assert.deepEqual(unresolved.filter((name) => name.startsWith('scss.')), []);
+});
+
+test('a comment after a url is still stripped', (t) => {
+  const { scss } = extractDesignTokens(frontend(t, { scss: '$bg: url(http://h/a.png); // hero\n$next: #fff;\n' }));
+
+  assert.equal(scss.bg, 'url(http://h/a.png)');
+  assert.equal(scss.next, '#fff');
+});
+
+test('a scss declaration swallowed by the one before it is named in unresolved, never dropped', (t) => {
+  // An unterminated url( never closes on its line, so the `//` is read as a
+  // comment, the `;` goes with it, and $bg's value runs on through $next's.
+  const scssSource = '$bg: url(http://h/a.png;\n$next: #fff;\n$after: #000;\n';
+  const { scss, unresolved } = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assert.equal(scss.next, undefined);
+  assert.ok(unresolved.includes('scss.bg'));
+  assert.ok(unresolved.includes('scss.next'), 'the swallowed name vanished');
+  assert.equal(scss.after, '#000');
+});
+
+test('stacked !default and !global flags are all stripped', (t) => {
+  const { scss } = extractDesignTokens(frontend(t, { scss: '$flag: #abc !default !global;\n$other: #def !global  !default ;\n' }));
+
+  assert.equal(scss.flag, '#abc');
+  assert.equal(scss.other, '#def');
+});
+
+test('a scss name redeclared later takes the later value, as sass does', (t) => {
+  const { scss } = extractDesignTokens(frontend(t, { scss: '$gallery:#eee;\n$gallery:#ebebeb;\n' }));
+
+  assert.equal(scss.gallery, '#ebebeb');
+  assert.equal(Object.keys(scss).length, 1);
+});
+
+test('scss names differing only in case stay two separate tokens', (t) => {
+  const { scss, css } = extractDesignTokens(frontend(t, { scss: '$mineShaft: #1F1F1F;\n$mineshaft:#333333;\n' }));
+
+  assert.equal(scss.mineShaft, '#1F1F1F');
+  assert.equal(scss.mineshaft, '#333333');
+  assert.match(css, /--scss-mineShaft: #1F1F1F;/);
+  assert.match(css, /--scss-mineshaft: #333333;/);
+});
+
+test('font constants are keyed without their prefix, non-strings ignored', (t) => {
+  const style = [
+    '// Generic Theme Styles',
+    "const fontMontserrat = 'Montserrat, sans-serif';",
+    "const fontLato = 'Lato, sans-serif';",
+    'const fontWeightNormal = {',
+    "    fontWeight: '500',",
+    '};',
+    "const transition = { transition: 'all 0.3s' };",
+    'export { fontMontserrat, fontLato };',
+  ].join('\n');
+  const { fonts, css } = extractDesignTokens(frontend(t, { style }));
+
+  assert.deepEqual(fonts, { montserrat: 'Montserrat, sans-serif', lato: 'Lato, sans-serif' });
+  assert.match(css, /--font-montserrat: Montserrat, sans-serif;/);
+});
+
+test('a font const that is not a plain string is named in unresolved, not left out', (t) => {
+  const style = [
+    "const fontLato = 'Lato, sans-serif';",
+    'const fontSerif = `${fontLato}, serif`;',
+    'const fontBody = fontLato;',
+    "const fontWeightBold = { fontWeight: 'bold' };",
+  ].join('\n');
+  const { fonts, css, unresolved } = extractDesignTokens(frontend(t, { style }));
+
+  assert.deepEqual(fonts, { lato: 'Lato, sans-serif' });
+  assert.ok(unresolved.includes('font.fontSerif'));
+  assert.ok(unresolved.includes('font.fontBody'));
+  // A style object is not a font stack, so it is neither a token nor a gap.
+  assert.ok(!unresolved.includes('font.fontWeightBold'));
+  assert.ok(!css.includes('${'));
+});
+
+test('a style file whose only font consts are unreadable names them, not "no font constants"', (t) => {
+  const { unresolved } = extractDesignTokens(frontend(t, { style: 'const fontX = `${base}`;\n' }));
+
+  assert.ok(unresolved.includes('font.fontX'));
+  assert.ok(!unresolved.includes('file:src/jss/style.js (no font constants found)'));
+});
+
+test('a missing file is reported, not thrown, and the rest still extracts', (t) => {
+  const result = extractDesignTokens(frontend(t, { scss: '$white: #fff;\n' }));
+
+  assert.equal(result.scss.white, '#fff');
+  assert.deepEqual(result.sources, ['src/scss/_variables.scss']);
+  assert.ok(result.unresolved.includes('file:src/jss/Theme.js (missing)'));
+  assert.ok(result.unresolved.includes('file:src/jss/style.js (missing)'));
+  assert.match(result.css, /Sources MISSING from this checkout:[\s\S]*src\/jss\/Theme\.js/);
+  assert.equal(result.css.includes('[data-theme="dark"]'), false);
+});
+
+test('a frontend root that does not exist returns empty rather than throwing', (t) => {
+  const root = join(frontend(t, {}), 'no', 'such', 'place');
+  const result = extractDesignTokens(root);
+
+  assert.deepEqual(result.sources, []);
+  assert.deepEqual(result.light, {});
+  assert.equal(result.unresolved.length, 3);
+  assert.match(result.css, /Sources read:\n \*   \(none\)/);
+});
+
+test('a theme file with no recognisable palette says so instead of reporting zero tokens', (t) => {
+  const { unresolved } = extractDesignTokens(frontend(t, { theme: 'export const other = 1;\n' }));
+
+  assert.ok(unresolved.includes('file:src/jss/Theme.js (no getColors palette found)'));
+});
+
+test('the css header names every source read and every unresolved key', (t) => {
+  const { css, unresolved } = extractDesignTokens(frontend(t, {
+    theme: THEME,
+    style: "const fontLato = 'Lato, sans-serif';\n",
+    scss: '$white: #fff;\n',
+  }));
+
+  assert.match(css, /Sources read:\n \*   src\/jss\/Theme\.js\n \*   src\/jss\/style\.js\n \*   src\/scss\/_variables\.scss/);
+  assert.match(css, /Tokens: 9 light, 6 dark, 1 font, 1 scss/);
+  assert.match(css, new RegExp(`UNRESOLVED \\(${unresolved.length}\\)`));
+  for (const name of unresolved) assert.ok(css.includes(` *   ${name}`), `${name} absent from header`);
+});
+
+test('a clean extraction says so out loud', (t) => {
+  const { css, unresolved } = extractDesignTokens(frontend(t, {
+    theme: "export const getColors = (isDark = false) => ({\n    black: isDark ? '#fff' : '#000',\n});\n",
+    style: "const fontLato = 'Lato, sans-serif';\n",
+    scss: '$white: #fff;\n',
+  }));
+
+  assert.deepEqual(unresolved, []);
+  assert.match(css, /UNRESOLVED: none/);
+  assert.match(css, /:root \{\n {2}--color-black: #000;\n {2}--font-lato: Lato, sans-serif;\n {2}--scss-white: #fff;\n\}/);
+  assert.match(css, /\[data-theme="dark"\] \{\n {2}--color-black: #fff;\n\}/);
+});
+
+test('the same input produces byte-identical css', (t) => {
+  const root = frontend(t, { theme: THEME, style: "const fontLato = 'x';\n", scss: '$white: #fff;\n' });
+
+  assert.equal(extractDesignTokens(root).css, extractDesignTokens(root).css);
+});
+
+test('a scss value that is another variable takes that variable\'s value', (t) => {
+  const { scss, unresolved } = extractDesignTokens(frontend(t, { scss: '$white: #fff;\n$bg: $white;\n' }));
+  assert.equal(scss.bg, '#fff');
+  assert.deepEqual(unresolved, ['file:src/jss/Theme.js (missing)', 'file:src/jss/style.js (missing)']);
+});
+
+test('a scss value only sass can evaluate is named in unresolved, never emitted', (t) => {
+  const scssSource = [
+    '$white: #fff;',
+    '$dim: darken($white, 5%);',
+    '$wide: $gutter * 2;',
+    '$chain: $dim;',
+    '$unknown: $neverDeclared;',
+    '$map: map-get($palette, primary);',
+    '$shade: rgba(0, 0, 0, 0.5);',
+    '$quoted: "darken(x)";',
+  ].join('\n');
+  const { scss, css, unresolved } = extractDesignTokens(frontend(t, { scss: scssSource }));
+  for (const key of ['dim', 'wide', 'chain', 'unknown', 'map']) {
+    assert.equal(scss[key], undefined, key);
+    assert.ok(unresolved.includes(`scss.${key}`), key);
+  }
+  assert.equal(scss.shade, 'rgba(0, 0, 0, 0.5)');
+  assert.equal(scss.quoted, '"darken(x)"');
+  assert.doesNotMatch(css, /--scss-[\w-]+: [^;]*\$/);
+  assert.match(css, /UNRESOLVED \(7\)/);
+});
+
+/** Kept out of the css and named in unresolved: withheld out loud, never dropped quietly. */
+function assertWithheld({ scss, css, unresolved }: TokenExtraction, keys: string[]): void {
+  for (const key of keys) {
+    assert.equal(scss[key], undefined, key);
+    assert.ok(unresolved.includes(`scss.${key}`), `${key} missing from unresolved`);
+    assert.ok(!css.includes(`--scss-${key}:`), `${key} emitted`);
+  }
+  assert.doesNotMatch(css, /UNRESOLVED: none/);
+}
+
+test('a colour handed to rgb() or rgba() is sass-only and lands in unresolved', (t) => {
+  const scssSource = [
+    '$veil: rgba(#000, 0.5);',
+    '$mist: rgb(#fff, .2);',
+    '$shadow: rgba(black, .5);',
+    '$overlay: $veil;',
+  ].join('\n');
+  const result = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assertWithheld(result, ['veil', 'mist', 'shadow', 'overlay']);
+});
+
+test('arithmetic outside parentheses lands in unresolved, since css only computes it in calc()', (t) => {
+  const scssSource = [
+    '$double: 16px * 2;',
+    '$packed: 16px*2;',
+    '$grown: 10px + 4px;',
+    '$shrunk: 20px - 4px;',
+    '$remainder: 10 % 3;',
+  ].join('\n');
+  const result = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assertWithheld(result, ['double', 'packed', 'grown', 'shrunk', 'remainder']);
+});
+
+test('a sass map or parenthesised list lands in unresolved', (t) => {
+  const scssSource = [
+    '$breakpoints: (sm: 576px, md: 768px);',
+    '$gutters: (',
+    '  4px,',
+    '  8px',
+    ');',
+  ].join('\n');
+  const result = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assertWithheld(result, ['breakpoints', 'gutters']);
+});
+
+test('numbers joined only by a slash land in unresolved, since sass divides a variable that is nothing else', (t) => {
+  const scssSource = [
+    '$line: 12px/1.5;',
+    '$ratio: 16 / 9;',
+    '$area: 1 / 3 / 2;',
+  ].join('\n');
+  const result = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assertWithheld(result, ['line', 'ratio', 'area']);
+});
+
+test('valid css that only looks like sass is still emitted as written', (t) => {
+  const valid: Record<string, string> = {
+    legacy: 'rgba(0,0,0,.5)',
+    modern: 'rgb(0 0 0 / 50%)',
+    themed: 'rgb(var(--x))',
+    inset: 'calc(100% - 8px)',
+    ref: 'var(--x)',
+    low: 'min(10px, 2vw)',
+    high: 'max(10px, 2vw)',
+    fluid: 'clamp(1rem, 2vw + 1rem, 3rem)',
+    fade: 'linear-gradient(to right, rgba(0, 0, 0, 0.5), #fff)',
+    stack: `"Helvetica Neue", 'Segoe UI', sans-serif`,
+    caption: '"a - b"',
+    nudge: '-4px',
+    offset: '0 -4px',
+    font: '12px/1.5 sans-serif',
+  };
+  const scssSource = Object.entries(valid).map(([key, value]) => `$${key}: ${value};`).join('\n');
+  const { scss, css, unresolved } = extractDesignTokens(frontend(t, { scss: scssSource }));
+
+  assert.deepEqual(scss, valid);
+  assert.deepEqual(unresolved.filter((name) => name.startsWith('scss.')), []);
+  assert.match(css, /--scss-font: 12px\/1\.5 sans-serif;/);
+});
+
+// ------------------------------------------- scope, literal ends, key names
+
+test('a const indented inside a function never overrides the module-level binding', (t) => {
+  const theme = `const primary = '#111111';
+function overrides() {
+  const primary = '#ff0000';
+  return primary;
+}
+export const getColors = (isDark) => ({
+  primary,
+  accent: isDark ? primary : '#222222',
+});
+`;
+  const { light, dark, unresolved } = extractDesignTokens(frontend(t, { theme }));
+  assert.equal(light.primary, '#111111');
+  assert.equal(dark.accent, '#111111');
+  assert.deepEqual(unresolved.filter((u) => /primary|accent/.test(u)), []);
+});
+
+test('a string literal ends at its first closing quote, so a concatenation or a second const is never one value', (t) => {
+  const theme = `const a = 'x'; const b = 'y';
+const joined = '#ab' + 'cdef';
+const escaped = 'it\\'s #fff';
+export const getColors = (isDark) => ({
+  fromA: a,
+  joined,
+  inline: '#12' + '3456',
+  escaped,
+});
+`;
+  const { light, css, unresolved } = extractDesignTokens(frontend(t, { theme }));
+  for (const key of ['fromA', 'joined', 'inline']) {
+    assert.equal(light[key], undefined, key);
+    assert.ok(unresolved.includes(`light.${key}`), key);
+  }
+  assert.equal(light.escaped, "it's #fff", 'an escaped quote is not the closing one');
+  assert.doesNotMatch(css, /const b|' \+ '/);
+});
+
+test('a key that is not a css name lands in unresolved, and a quoted kebab key still emits', (t) => {
+  const theme = `export const getColors = (isDark) => ({
+  [dyn]: '#fff',
+  'has space': '#000',
+  'kebab-key': '#123456',
+});
+`;
+  const style = "export const fontLato = 'Lato';\nexport const font$Odd = 'Odd';\n";
+  const { light, fonts, css, unresolved } = extractDesignTokens(frontend(t, { theme, style }));
+  assert.equal(light['kebab-key'], '#123456');
+  for (const key of ['[dyn]', 'has space']) {
+    assert.equal(light[key], undefined, key);
+    assert.ok(unresolved.includes(`light.${key}`) && unresolved.includes(`dark.${key}`), key);
+  }
+  assert.equal(fonts.lato, 'Lato');
+  assert.ok(unresolved.includes('font.font$Odd'));
+  assert.doesNotMatch(css, /--color-\[dyn\]|--color-has space|--font-\$/);
+});
+
+test('a block-scoped sass variable never overrides the global one', (t) => {
+  const scss = `$brand: #111111;
+.card {
+  $brand: #ff0000;
+  color: $brand;
+}
+@media (min-width: 600px) { $gap: 99px; }
+$after: #{$brand}-x;
+$next: #fafafa;
+`;
+  const { scss: tokens, unresolved } = extractDesignTokens(frontend(t, { scss }));
+  assert.equal(tokens.brand, '#111111');
+  assert.equal(tokens.gap, undefined, 'a variable only declared inside a block is local, not a token');
+  assert.ok(!unresolved.includes('scss.gap'), 'and it is not a swallowed declaration either');
+  assert.equal(tokens.next, '#fafafa', 'interpolation braces do not open a block');
+  assert.ok(unresolved.includes('scss.after'));
+});
+
+test('a variable a block assigns with !global is named in unresolved, never emitted at its depth-0 value', (t) => {
+  const scss = `$brand: #111111;
+@mixin rebrand { $brand: #222222 !global; }
+@mixin only-here { $accent: #00ff00 !global; }
+$plain: #333333;
+`;
+  const { scss: tokens, unresolved } = extractDesignTokens(frontend(t, { scss }));
+  assert.equal(tokens.brand, undefined);
+  assert.ok(unresolved.includes('scss.brand'));
+  assert.ok(unresolved.includes('scss.accent'));
+  assert.equal(tokens.plain, '#333333');
+});
+
+test('the header tells a dark mockup to set data-theme', (t) => {
+  const { css } = extractDesignTokens(frontend(t, { theme: THEME }));
+  assert.match(css, /Dark mode: put data-theme="dark" on <html>/);
+});
+
+// ------------------------------------------------------------ the writer
+
+/** A worktree whose frontend/ holds the given theme files, in the reserved 990000+ iid band. */
+function worktree(t: TestContext, iid: number, files: Fixture): string {
+  const wt = mkdtempSync(join(tmpdir(), 'oneshot-tokens-wt-'));
+  t.after(() => {
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(runDir(iid), { recursive: true, force: true });
+  });
+  const root = frontend(t, files);
+  mkdirSync(wt, { recursive: true });
+  for (const rel of ['src/jss/Theme.js', 'src/jss/style.js', 'src/scss/_variables.scss']) {
+    if (!existsSync(join(root, rel))) continue;
+    mkdirSync(join(wt, 'frontend', rel, '..'), { recursive: true });
+    writeFileSync(join(wt, 'frontend', rel), readFileSync(join(root, rel)));
+  }
+  return wt;
+}
+
+test('writeDesignTokens writes the extraction into design/ of the run and says what it read', (t) => {
+  const iid = 990371;
+  const wt = worktree(t, iid, { theme: THEME, scss: '$brand: #111;\n' });
+  const out = writeDesignTokens(iid, wt);
+  assert.ok(out);
+  assert.equal(out.path, join(artifactDir(iid), 'design', 'tokens.css'));
+  assert.equal(readFileSync(out.path, 'utf8'), extractDesignTokens(join(wt, 'frontend')).css);
+  assert.deepEqual(out.sources, ['src/jss/Theme.js', 'src/scss/_variables.scss']);
+});
+
+test('a worktree with no theme files reports no sources, so the conductor can warn', (t) => {
+  const iid = 990372;
+  const wt = worktree(t, iid, {});
+  assert.deepEqual(writeDesignTokens(iid, wt)?.sources, []);
+});
+
+test('a failed write removes the previous lap\'s file instead of leaving it to be read as current', (t) => {
+  if (process.getuid?.() === 0) return t.skip('root writes through a read-only file');
+  const iid = 990373;
+  const wt = worktree(t, iid, { theme: THEME });
+  const first = writeDesignTokens(iid, wt);
+  assert.ok(first && existsSync(first.path));
+  chmodSync(first.path, 0o444);
+  assert.equal(writeDesignTokens(iid, wt), null);
+  assert.equal(existsSync(first.path), false);
+});
