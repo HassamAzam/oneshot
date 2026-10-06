@@ -12,7 +12,7 @@
  * that finishes more than once (parked at merge, then done) appends a row each
  * time; readers keep the last row per runId.
  *
- *   npm run eval:outcomes   weekly table, plus the gold-label check
+ *   npm run eval:outcomes   weekly table
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
