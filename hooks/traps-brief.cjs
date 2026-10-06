@@ -53,13 +53,26 @@ const MAX_INLINE_BYTES = 24_000;
  * hooks stay dependency-free: they must run before `npm install` and must not
  * be breakable by a bad node_modules.
  */
+const REPO = path.join(__dirname, '..');
+
 function trapsPath() {
   // Off `__dirname`, NOT `ONESHOT_HOME`: under a dry run the latter is
   // `ROOT/state-dry`, which symlinks only `config` and `.env`, so the skills
   // path beneath it does not exist and this injected nothing in exactly the
   // mode you would rehearse it in.
-  const root = C.expandTilde(process.env.ONESHOT_SKILLS_ROOT || path.join(__dirname, '..', 'context'));
-  return path.join(root, 'skills', SKILL, 'refs', 'traps.md');
+  //
+  // Both roots are checked for the same reason `repro-conditions.cjs` checks
+  // them: `claudedir.ts` seeds `context/skills` AND the repo's own `skills/`,
+  // and a session resolves the skill through its composed `.claude` either way.
+  // A single-root lookup here goes quiet while the phase carries on without the
+  // brief — point ONESHOT_SKILLS_ROOT at a `.claude` that lacks this file and
+  // that is exactly what happens.
+  const root = C.expandTilde(process.env.ONESHOT_SKILLS_ROOT || path.join(REPO, 'context'));
+  const candidates = [
+    path.join(root, 'skills', SKILL, 'refs', 'traps.md'),
+    path.join(REPO, 'skills', SKILL, 'refs', 'traps.md'),
+  ];
+  return candidates.find((p) => fs.existsSync(p)) || candidates[0];
 }
 
 function inject(context) {

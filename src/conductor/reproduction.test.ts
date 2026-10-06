@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   declareReproduced, incompleteness, notABugApprovalRequestBody, notABugDecision, notABugSlackText,
-  reproductionComment, reproductionOf, shotName, shotsIn,
+  mimeOf, reproductionComment, reproductionOf, shotCaption, shotName, shotsIn,
 } from './reproduction.js';
 import { gateApprovedText, gateAskText } from './reviewgate.js';
 import type { RunJournal } from '../lib/artifacts.js';
@@ -192,56 +192,68 @@ test('blocker is derived from the verdict, never trusted beside it', () => {
   assert.equal(at('inconclusive'), 'none');
 });
 
-test('screenshots are counted by the filename that opens the line, not by mentioning .png', () => {
-  // Verbatim from a real reproduced lap: the filename LEADS and prose follows.
-  // `endsWith('.png')` counted 0 of these four, which is the bug this pins.
-  const reproduced = [
-    'repro-1-podpeople.png \u2014 /pod/people/ unfiltered, 566 people, Total Experience column visible',
-    'repro-2-filterpanel.png \u2014 Filter popover open showing the Experience select',
-    'repro-3-exp-2-4-years.png \u2014 THE DEFECT. Experience=\'2-4 Years\' applied; rows 1 and 2 are outside',
-    'repro-4-exp-1-2-years.png \u2014 Experience=\'1-2 Years\' applied; 15 rows, all inside [0,2) years',
-    'Measurement (SQL, dev hrdb): 609 active people compared; 60 values differ',
+test('a screenshot is recognised wherever the filename sits in the line', () => {
+  // Two anchored attempts failed here before. `/\.png$/i` missed every line that
+  // continued into prose; the leading-token fix then missed six ordinary shapes AND
+  // was narrower than what it replaced, so a run parked at the gate could resume and
+  // walk past it. Each of these is a regression guard, not a hypothetical.
+  const cases: [string, string | null][] = [
+    // filename first, prose after — the shape the model actually writes
+    ['repro-1-podpeople.png \u2014 /pod/people/ unfiltered, 566 people', 'repro-1-podpeople.png'],
+    ['repro-1.png, 566 people', 'repro-1.png'],
+    ['repro-1.png; and then', 'repro-1.png'],
+    ['repro-1.png. Shows the row', 'repro-1.png'],
+    ['repro-1.png\u2014caption', 'repro-1.png'],
+    ['  repro-1.png  ', 'repro-1.png'],
+    // wrapped in the punctuation markdown invites
+    ['`repro-1.png` \u2014 caption', 'repro-1.png'],
+    ['**repro-1.png**', 'repro-1.png'],
+    ['"repro-1.png"', 'repro-1.png'],
+    ['(repro-1.png)', 'repro-1.png'],
+    // filename LAST — both of these matched before the leading-token fix broke them
+    ['Screenshot: repro-1.png', 'repro-1.png'],
+    ['see repro-1.png', 'repro-1.png'],
+    // a path resolves to its basename, which every caller already applies
+    ['artifacts/repro-1.png: shows the row', 'repro-1.png'],
+    // other image types
+    ['shot.jpeg x', 'shot.jpeg'], ['shot.webp y', 'shot.webp'], ['shot.JPG z', 'shot.JPG'],
+    // and the lines that must NEVER count: a glob says there are none
+    ['No repro-*.png \u2014 the app never came up, so nothing was captured', null],
+    ['Measurement (SQL): 609 active people compared; 60 values differ', null],
+    ['Measurement: band 1 returns 15 people', null],
+    ['', null],
   ];
-  assert.equal(shotsIn(reproduced), 4);
-
-  // Verbatim from the same ticket's BLOCKED lap. It names the extension precisely
-  // to say there are none, so `includes('.png')` would report a screenshot for a
-  // run that captured nothing — a false positive, the expensive direction.
-  const blocked = [
-    'No repro-*.png \u2014 the app never came up, so no screenshot of the POD > People screen could be captured.',
-    'app.cjs ensure stderr: E_SEED_MISSING, /Users/x/Documents/erp/venv does not exist',
-  ];
-  assert.equal(shotsIn(blocked), 0);
-
-  // A bare filename is still a filename; other image types count; empty is zero.
-  assert.equal(shotsIn(['repro-1.png']), 1);
-  assert.equal(shotsIn(['  repro-1.png  ']), 1);
-  assert.equal(shotsIn(['shot.jpeg x', 'shot.webp y', 'shot.JPG z']), 3);
-  assert.equal(shotsIn([]), 0);
-  assert.equal(shotsIn(['']), 0);
-
-  // Punctuation the same model plausibly emits straight after the filename.
-  assert.equal(shotName('repro-1.png, 566 people'), 'repro-1.png');
-  assert.equal(shotName('artifacts/repro-1.png: shows the row'), 'artifacts/repro-1.png');
-  assert.equal(shotName('repro-1.png; and then'), 'repro-1.png');
-  // But prose that merely names the extension still cites nothing.
-  assert.equal(shotName('No repro-*.png was captured'), null);
-  assert.equal(shotName('Measurement: 609 people compared'), null);
+  for (const [line, want] of cases) {
+    assert.equal(shotName(line), want, `shotName(${JSON.stringify(line)})`);
+  }
+  assert.equal(shotsIn(cases.map(([l]) => l)), 16);
 });
 
-test('a reproduction whose evidence leads with filenames is not judged screenshot-less', () => {
-  // The regression this pins cost a real run: `incompleteness` used an
-  // end-anchored /\.png$/i, so a confirmed reproduction carrying four
-  // screenshots reported 'no screenshot was recorded' and `declareReproduced`
-  // posted NOTHING on the ticket. Every reader of `evidence` shared the bug;
-  // fixing only the telemetry counter left the suppression in place.
+test('the note on a screenshot line is kept, not swallowed by the filename', () => {
+  assert.equal(
+    shotCaption('repro-1-podpeople.png \u2014 /pod/people/ unfiltered, 566 people', 'repro-1-podpeople.png'),
+    '/pod/people/ unfiltered, 566 people',
+  );
+  assert.equal(shotCaption('`repro-1.png` \u2014 caption', 'repro-1.png'), 'caption');
+  // A bare introducing label is not a caption — rendering it under the image is noise.
+  assert.equal(shotCaption('Screenshot: repro-1.png', 'repro-1.png'), '');
+  assert.equal(shotCaption('see repro-1.png', 'repro-1.png'), '');
+  assert.equal(shotCaption('Screenshot: repro-1.png shows the row', 'repro-1.png'), 'Screenshot: shows the row');
+  assert.equal(shotCaption('repro-1.png', 'repro-1.png'), '');
+  assert.equal(shotCaption('**repro-1.png**', 'repro-1.png'), '');
+});
+
+test('a reproduction whose evidence names screenshots is not judged screenshot-less', () => {
+  // The regression this pins cost a real run: every reader of `evidence` used an
+  // end-anchored test, so a confirmed reproduction carrying four screenshots
+  // reported 'no screenshot was recorded' and posted NOTHING on the ticket.
   const repro = reproductionOf({
     reproduction: {
       ...complete,
       verdict: 'reproduced',
       evidence: [
         'repro-1-podpeople.png \u2014 /pod/people/ unfiltered, 566 people, column visible',
-        'repro-3-exp-2-4.png \u2014 THE DEFECT. Two rows outside the selected range',
+        'Screenshot: repro-3-exp.png',
         'Measurement (SQL): 609 active people compared; 60 values differ',
       ],
     },
@@ -258,4 +270,47 @@ test('a reproduction whose evidence leads with filenames is not judged screensho
     },
   })!;
   assert.deepEqual(incompleteness(blocked), ['no screenshot was recorded']);
+});
+
+test('a screenshot note rides with its image, and survives when the image does not', () => {
+  const repro = reproductionOf({
+    reproduction: {
+      ...complete,
+      verdict: 'reproduced',
+      evidence: [
+        'repro-1.png \u2014 566 people, column visible',
+        'repro-9.png \u2014 the fourth shot, past the attachment cap',
+      ],
+    },
+  })!;
+
+  // Attached: the note becomes the image's caption rather than vanishing.
+  const withShot = reproductionComment(repro, {
+    screenshots: [{
+      url: '/uploads/x/repro-1.png',
+      markdown: '![repro-1](/uploads/x/repro-1.png)',
+      name: 'repro-1.png',
+      caption: '566 people, column visible',
+    }],
+  });
+  assert.match(withShot, /!\[repro-1\][\s\S]*566 people, column visible/);
+  // Not attached: its note falls back to a measurement instead of being dropped twice.
+  assert.match(withShot, /repro-9\.png \(not attached\): the fourth shot/);
+
+  // A bare filename has no note, so it adds no Measurements section either way.
+  const bare = reproductionOf({
+    reproduction: { ...complete, verdict: 'reproduced', evidence: ['repro-1.png'] },
+  })!;
+  const bareBody = reproductionComment(bare, { screenshots: [] });
+  assert.match(bareBody, /No screenshot was attached/);
+  assert.doesNotMatch(bareBody, /Measurements/);
+});
+
+test('the upload media type follows the extension, since more than png is detected', () => {
+  assert.equal(mimeOf('repro-1.png'), 'image/png');
+  assert.equal(mimeOf('repro-1.PNG'), 'image/png');
+  assert.equal(mimeOf('repro-1.webp'), 'image/webp');
+  assert.equal(mimeOf('repro-1.jpg'), 'image/jpeg');
+  assert.equal(mimeOf('repro-1.jpeg'), 'image/jpeg');
+  assert.equal(mimeOf('repro-1.JPG'), 'image/jpeg');
 });

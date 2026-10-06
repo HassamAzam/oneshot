@@ -105,8 +105,10 @@ Login goes through the real form with `ONESHOT_TEST_LOGIN`. Record the account.
   result. Quote the `region` it returns ("a 43px band, the whole Title row"),
   never `areaPx` as "N px": it is an area, in px².
 - Screenshot the moment the bug should appear into the run artifacts dir
-  (`state/runs/<iid>/artifacts/`), named `repro-<n>.png`, and list the bare
-  filenames in `evidence`. This applies to **both** verdicts: for `reproduced` the
+  (`state/runs/<iid>/artifacts/`), named `repro-<n>.png`, and name each one in its
+  own `evidence` item — the filename plus any note about it, e.g.
+  `repro-3-filter.png — two rows outside the selected range`. The note is attached
+  as the image's caption, so write it on the same item rather than separately. This applies to **both** verdicts: for `reproduced` the
   shot shows the defect, for `not-reproduced` it shows the correct behaviour at
   the same point. Crop or scroll so the affected element is visible without
   zooming. A full page where the bug is one pixel row proves nothing to a
@@ -169,7 +171,7 @@ means fix the record, or change the verdict to `inconclusive`.
       (not something you read in code).
 - [ ] `observed` holds a value (number, style, cell text), not "looks fine" or
       "looks broken".
-- [ ] `evidence` lists at least one `repro-<n>.png` that exists in the artifacts
+- [ ] `evidence` names at least one screenshot file that exists in the artifacts
       dir and shows the element in question, plus the measurement.
 - [ ] `expected` is quoted or paraphrased from the ticket, not from the code.
 - [ ] `reason` could be checked by a QA engineer who never saw this session.
@@ -192,9 +194,9 @@ Fill `reproduction` in the research output: `kind`, `verdict`, `testedCommit`,
 
 The conductor turns that record into a ticket comment, with the screenshots
 attached, for both `reproduced` (straight away) and `not-reproduced` (the Not a Bug
-gate's request first, then the closing comment once QA confirms). A verdict with
-no `.png` in `evidence`, no `steps`, no `observed` or no `testedCommit` posts
-nothing, and a `not-reproduced` one is treated as `inconclusive`. The wording is in
+gate's request first, then the closing comment once QA confirms). A verdict whose
+`evidence` names no screenshot file, or which has no `steps`, no `observed` or no
+`testedCommit`, posts nothing, and a `not-reproduced` one is treated as `inconclusive`. The wording is in
 [templates/](templates/README.md), which also shows which field fills which line.
 Anything you leave out of the record is missing from the comment too.
 

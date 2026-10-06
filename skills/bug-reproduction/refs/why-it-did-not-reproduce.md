@@ -79,19 +79,20 @@ shared by every option: a fault in it is not specific to the option the reporter
 happened to use. Only its *visibility* is — the symptom appears solely where a
 record exists that can expose it.
 
-This has already happened on a range filter here: the option the ticket named
-returned correct rows throughout, and the fault showed on a neighbouring one. The
-shape is general — where a filter compares two computations of the same quantity,
-the mismatch is only visible on an option that some record's two values straddle,
-and an option whose records all agree looks correct on a broken build.
+Where a filter compares two computations of the same quantity, the mismatch is
+only visible on an option that some record's two values straddle. An option whose
+records all happen to agree looks correct on a broken build — which is why the
+option named in a report is not evidence about the option, only about the data the
+reporter had.
 
-**Do:** before concluding anything, run every option, not the named one. Then
-derive which option *can* show it — find a record where the two computations
-disagree and select the option its values straddle — instead of trusting the one
-in the ticket. A reproduction on a different option is still a reproduction of the
-same defect: say which option showed it, and say plainly that the ticket's own
-illustration does not occur, or the fix lands on that one option and the
-mechanism stays broken.
+**Do:** derive the option before you click anything — query for a record whose two
+computations disagree, and take the option its values straddle. Then run that one
+and the one the report names: two, not the whole list. Enumerating a dozen values
+costs a navigate-filter-screenshot round trip each and is how a phase dies at its
+turn cap before it derives anything. A reproduction on a different option is still
+a reproduction of the same defect: say which option showed it, and say plainly if
+the report's own illustration does not occur, or the fix lands on that one option
+and the mechanism stays broken.
 
 ---
 
