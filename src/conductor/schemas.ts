@@ -211,7 +211,7 @@ export const RESEARCH_SCHEMA = phaseSchema({
       steps: strArr('The steps you actually executed, in order, each with what you did.'),
       expected: str('What the ticket says SHOULD happen.'),
       observed: str('What actually happened when you ran the steps — concrete values, not impressions.'),
-      evidence: strArr('Bare filenames of screenshots written to the run artifacts dir, plus any measurement. For reproduced and not-reproduced the screenshots are attached to the ticket comment.'),
+      evidence: strArr('One item per piece of evidence. A screenshot item STARTS with the bare filename as written to the run artifacts dir — `repro-1-people.png` — and any note comes after it. A measurement item must NOT start with a filename. The leading token is what decides which it is, so never open a measurement with a filename and never write a path. For reproduced and not-reproduced the screenshots are attached to the ticket comment.'),
       reason: str('Why this verdict. For inconclusive or not-applicable, what stopped you.'),
       blocker: {
         type: 'string',

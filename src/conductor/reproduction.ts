@@ -107,24 +107,34 @@ function blockerOf(verdict: Reproduction['verdict'], blocker: unknown): Blocker 
 }
 
 /**
- * How many of the evidence lines are screenshots.
+ * The screenshot filename an evidence line cites, or null if it cites none.
  *
- * `evidence` is free prose that LEADS with the filename — "repro-1-podpeople.png
- * — /pod/people/ unfiltered, 566 people" — so the obvious `endsWith('.png')`
- * matched nothing and this counted 0 on a run that captured four. It shipped
- * that way and made the one quantity the telemetry can measure permanently zero.
+ * `evidence` is documented as bare filenames, and the model writes prose that
+ * LEADS with the filename — "repro-1-podpeople.png — /pod/people/ unfiltered,
+ * 566 people". Every reader of this field used an end-anchored `/\.png$/i`, so
+ * all of them saw zero screenshots on a run that captured four: `incompleteness`
+ * reported "no screenshot was recorded" and `declareReproduced` posted NOTHING
+ * on a confirmed bug, while the attachment paths ran `basename()` over the whole
+ * sentence and resolved to a fragment of the prose.
  *
- * `includes('.png')` is the wrong correction: the blocked lap of erp#8771 wrote
- * "No repro-*.png — the app never came up, so no screenshot could be captured",
- * which names the extension precisely to say there are none. Counting that as a
- * screenshot turns a false negative into a false positive, which is worse — it
- * would report evidence for a run that produced none.
+ * `includes('.png')` is the wrong correction. A blocked run wrote "No repro-*.png
+ * — the app never came up, so no screenshot could be captured", naming the
+ * extension precisely to say there are none; counting that reports evidence for a
+ * run that produced none, which is the expensive direction.
  *
- * So the test is on the FIRST token only: a line that opens with a filename is
- * citing a file, and a line that opens with prose is talking about one.
+ * So the test is the FIRST token, minus one trailing comma or colon: a line that
+ * opens with a filename is citing a file, a line that opens with prose is talking
+ * about one. Returning the NAME rather than a boolean is the point — the callers
+ * that attach and upload need the filename, not the sentence it came in.
  */
+export function shotName(line: string): string | null {
+  const first = (line.trim().split(/\s+/)[0] ?? '').replace(/[,:;]+$/, '');
+  return /\.(png|jpe?g|webp)$/i.test(first) ? first : null;
+}
+
+/** How many of the evidence lines cite a screenshot. */
 export function shotsIn(evidence: string[]): number {
-  return evidence.filter((e) => /\.(png|jpe?g|webp)$/i.test(e.trim().split(/\s+/)[0] ?? '')).length;
+  return evidence.filter((e) => shotName(e) !== null).length;
 }
 
 /**
@@ -142,7 +152,7 @@ export function incompleteness(repro: Reproduction): string[] {
     repro.steps.length === 0 ? 'no executed steps were recorded' : '',
     !repro.observed ? 'nothing observed was recorded' : '',
     !repro.testedCommit ? 'no tested commit was recorded' : '',
-    !repro.evidence.some((e) => /\.png$/i.test(e)) ? 'no screenshot was recorded' : '',
+    !repro.evidence.some((e) => shotName(e)) ? 'no screenshot was recorded' : '',
   ].filter(Boolean);
 }
 
@@ -182,7 +192,7 @@ export function reproductionComment(
     throw new Error(`reproductionComment: ${repro.verdict} does not post a comment`);
   }
   const verdict = repro.verdict;
-  const measurements = repro.evidence.filter((e) => !/\.png$/i.test(e));
+  const measurements = repro.evidence.filter((e) => !shotName(e));
   const values: Record<string, string> = {
     reason: repro.reason || '(no reason recorded)',
     commit: repro.testedCommit || '(not recorded)',
@@ -208,7 +218,7 @@ export function reproductionComment(
 /** Steps, expected, observed and measurements — the evidence half of the gate's request. */
 function evidenceBody(repro: Reproduction): string[] {
   const steps = repro.steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
-  const extraEvidence = repro.evidence.filter((e) => !/\.png$/i.test(e));
+  const extraEvidence = repro.evidence.filter((e) => !shotName(e));
   return [
     '**What was run**',
     `- Code: \`${repro.testedCommit}\` (unfixed base branch)`,
@@ -263,7 +273,7 @@ export function notABugSlackText(iid: number, title: string, repro: Reproduction
  * research ran again and took new ones.
  */
 export function reproAttachments(iid: number, evidence: string[]): GateAttachment[] {
-  return evidence.filter((e) => /\.png$/i.test(e)).slice(0, MAX_SCREENSHOTS)
+  return evidence.map(shotName).filter((n): n is string => n !== null).slice(0, MAX_SCREENSHOTS)
     .map((name) => join(artifactDir(iid), basename(name)))
     .filter((path) => existsSync(path))
     .map((path) => ({ name: basename(path), content: readFileSync(path), mime: 'image/png' }));
@@ -272,7 +282,8 @@ export function reproAttachments(iid: number, evidence: string[]): GateAttachmen
 /** Upload up to MAX_SCREENSHOTS evidence screenshots research wrote to the run's artifacts dir. */
 async function uploadScreenshots(iid: number, evidence: string[]): Promise<Upload[]> {
   const out: Upload[] = [];
-  for (const name of evidence.filter((e) => /\.png$/i.test(e)).slice(0, MAX_SCREENSHOTS)) {
+  const names = evidence.map(shotName).filter((n): n is string => n !== null);
+  for (const name of names.slice(0, MAX_SCREENSHOTS)) {
     const path = join(artifactDir(iid), basename(name));
     if (!existsSync(path)) continue;
     const res = await uploadFile(basename(name), readFileSync(path), 'image/png');

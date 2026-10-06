@@ -6,8 +6,8 @@
  *
  * WHY A HOOK AND NOT A PROMPT LINE. `bug-reproduction/SKILL.md` already says to
  * read `refs/why-it-did-not-reproduce.md`, and that instruction has now been
- * measured: across two research laps on erp#8771 the phase made three Read
- * calls and not one of them was this file. It did not disobey — an instruction
+ * measured: across two research laps on one bug ticket the phase made three
+ * Read calls and not one was this file. It did not disobey — an instruction
  * to read a file is a request, and the first thing a session under turn
  * pressure drops is a read whose value it cannot see yet. Injecting the content
  * costs the phase zero turns and cannot be skipped.
@@ -54,12 +54,22 @@ const MAX_INLINE_BYTES = 24_000;
  * checked so moving it between them does not silently stop the injection.
  * Duplicated rather than imported because hooks stay dependency-free: they run
  * before `npm install` and must not be breakable by a bad node_modules.
+ *
+ * NOT off `ONESHOT_HOME`. Under a dry run that is `ROOT/state-dry`, which
+ * symlinks only `config` and `.env`, so every skills path beneath it is absent
+ * and the hook would log `repro_conditions_missing` and inject nothing — while
+ * the session still resolves the skill fine through its composed `.claude`. The
+ * mode you would rehearse this in is the one mode it would not fire in. The
+ * hook lives beside the roots it is looking for, so `__dirname/..` is exact and
+ * independent of where state happens to be pointed.
  */
+const REPO = path.join(__dirname, '..');
+
 function refPath() {
-  const root = C.expandTilde(process.env.ONESHOT_SKILLS_ROOT || path.join(C.ONESHOT, 'context'));
+  const root = C.expandTilde(process.env.ONESHOT_SKILLS_ROOT || path.join(REPO, 'context'));
   const candidates = [
     path.join(root, 'skills', SKILL, 'refs', REF),
-    path.join(C.ONESHOT, 'skills', SKILL, 'refs', REF),
+    path.join(REPO, 'skills', SKILL, 'refs', REF),
   ];
   return candidates.find((p) => fs.existsSync(p)) || candidates[0];
 }
@@ -70,6 +80,20 @@ function inject(context) {
 }
 
 if (C.phase() !== PHASE) C.allow();
+
+/**
+ * Project-level gate. The per-ticket `Bug` label is genuinely not reachable from
+ * a SessionStart hook, but the project switch is — and with reproduction off,
+ * `reproductionBlock()` tells research to record `not-applicable` and never
+ * start the app, so a brief about reading account flags and enumerating filter
+ * options would contradict the prompt it arrives beside. Fails open: an
+ * unreadable config injects rather than silently going quiet.
+ */
+const project = C.loadConfig('project.json');
+if (project && project.bugReproduction === false) {
+  C.event('repro_conditions_skipped', { why: 'bugReproduction is false for this project' });
+  C.allow();
+}
 
 const file = refPath();
 let ref = '';

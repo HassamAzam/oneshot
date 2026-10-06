@@ -145,9 +145,10 @@ Rules that keep `not-reproduced` honest:
 - **Read [`refs/why-it-did-not-reproduce.md`](refs/why-it-did-not-reproduce.md)
   before you record it.** One principle from QA's own history — you ran it under
   different conditions than the reporter, and the difference is the bug — and the
-  five conditions that differ most often. The first is that the test accounts are
-  superusers, so a permission bug behaves correctly for you and wrongly for
-  whoever reported it.
+  six conditions that differ most often. The first is the account: read its real
+  flags and permissions rather than assuming them, because a session running as a
+  superuser sees a permission bug behave correctly for it and wrongly for whoever
+  reported it.
 - **Different environment is not "not a bug".** The ticket may come from
   stage/production data, another browser, a narrow viewport or a specific user. If
   the conditions the ticket names are not the ones you ran, that is `inconclusive`.
@@ -179,8 +180,9 @@ means fix the record, or change the verdict to `inconclusive`.
       `reason` if a later phase needs it.
 - [ ] For `not-reproduced`: you observed the correct value you planned for, on
       the ticket's own conditions.
-- [ ] For `not-reproduced`: `refs/why-it-did-not-reproduce.md` walked, and the
-      account you used is not a superuser where the ticket is about permissions.
+- [ ] For `not-reproduced`: `refs/why-it-did-not-reproduce.md` walked, and where
+      the ticket is about permissions, `account` records the flags and the
+      specific permission you actually read — not an assumption about the login.
 
 ## Output
 

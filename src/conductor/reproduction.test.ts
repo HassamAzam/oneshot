@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   declareReproduced, incompleteness, notABugApprovalRequestBody, notABugDecision, notABugSlackText,
-  reproductionComment, reproductionOf, shotsIn,
+  reproductionComment, reproductionOf, shotName, shotsIn,
 } from './reproduction.js';
 import { gateApprovedText, gateAskText } from './reviewgate.js';
 import type { RunJournal } from '../lib/artifacts.js';
@@ -193,7 +193,7 @@ test('blocker is derived from the verdict, never trusted beside it', () => {
 });
 
 test('screenshots are counted by the filename that opens the line, not by mentioning .png', () => {
-  // Verbatim from erp#8771's reproduced lap: the filename LEADS and prose follows.
+  // Verbatim from a real reproduced lap: the filename LEADS and prose follows.
   // `endsWith('.png')` counted 0 of these four, which is the bug this pins.
   const reproduced = [
     'repro-1-podpeople.png \u2014 /pod/people/ unfiltered, 566 people, Total Experience column visible',
@@ -219,4 +219,43 @@ test('screenshots are counted by the filename that opens the line, not by mentio
   assert.equal(shotsIn(['shot.jpeg x', 'shot.webp y', 'shot.JPG z']), 3);
   assert.equal(shotsIn([]), 0);
   assert.equal(shotsIn(['']), 0);
+
+  // Punctuation the same model plausibly emits straight after the filename.
+  assert.equal(shotName('repro-1.png, 566 people'), 'repro-1.png');
+  assert.equal(shotName('artifacts/repro-1.png: shows the row'), 'artifacts/repro-1.png');
+  assert.equal(shotName('repro-1.png; and then'), 'repro-1.png');
+  // But prose that merely names the extension still cites nothing.
+  assert.equal(shotName('No repro-*.png was captured'), null);
+  assert.equal(shotName('Measurement: 609 people compared'), null);
+});
+
+test('a reproduction whose evidence leads with filenames is not judged screenshot-less', () => {
+  // The regression this pins cost a real run: `incompleteness` used an
+  // end-anchored /\.png$/i, so a confirmed reproduction carrying four
+  // screenshots reported 'no screenshot was recorded' and `declareReproduced`
+  // posted NOTHING on the ticket. Every reader of `evidence` shared the bug;
+  // fixing only the telemetry counter left the suppression in place.
+  const repro = reproductionOf({
+    reproduction: {
+      ...complete,
+      verdict: 'reproduced',
+      evidence: [
+        'repro-1-podpeople.png \u2014 /pod/people/ unfiltered, 566 people, column visible',
+        'repro-3-exp-2-4.png \u2014 THE DEFECT. Two rows outside the selected range',
+        'Measurement (SQL): 609 active people compared; 60 values differ',
+      ],
+    },
+  })!;
+  assert.deepEqual(incompleteness(repro), []);
+  assert.equal(shotsIn(repro.evidence), 2);
+
+  // And the blocked shape still reports honestly rather than inventing evidence.
+  const blocked = reproductionOf({
+    reproduction: {
+      ...complete,
+      verdict: 'reproduced',
+      evidence: ['No repro-*.png \u2014 the app never came up, so nothing was captured'],
+    },
+  })!;
+  assert.deepEqual(incompleteness(blocked), ['no screenshot was recorded']);
 });

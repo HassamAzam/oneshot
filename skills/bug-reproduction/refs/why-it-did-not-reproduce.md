@@ -19,12 +19,12 @@ can act, the wrong person is stopped — and reproducing one proves half of it.
 permission the view requires. An account you cannot confirm is not a tested
 account, and no suitable account at all is `inconclusive` / `blocker: access`.
 
-**Read them, do not assume them.** `ONESHOT_TEST_LOGIN` was asserted here to be a
-superuser, and it is not: on erp#8771 it resolved to `is_superuser=False`,
-`is_staff=True`, 57 permissions, holding exactly the `core.pod_member` the view
-required — so the permission gate was genuinely exercised. A guess about the
-account propagates into every verdict that account produces, in the expensive
-direction: it makes a real permission reproduction look untrustworthy.
+**Read them, do not assume them.** This file once asserted what the configured
+test login was without looking, and was wrong. A guess about the account
+propagates into every verdict that account produces, in the expensive direction:
+it writes off a whole ticket class as unreproducible, and makes a genuine
+permission reproduction look untrustworthy. The flags are one query away; the
+assumption is never worth it.
 
 ### 2. The record
 
@@ -79,20 +79,19 @@ shared by every option: a fault in it is not specific to the option the reporter
 happened to use. Only its *visibility* is — the symptom appears solely where a
 record exists that can expose it.
 
-erp#8771 is the case. The ticket said the Experience filter `1-2 Years` returns
-people with 17–19 years. Band 1 returned 15 people and every one was correct, so
-the ticket's literal claim does not occur on that database. The defect is real and
-shows on `2-4 Years`, with two of the people the ticket itself names — because the
-fault needs a record whose two calculations land in *different* bands, and band 1
-contained none while band 2 did.
+This has already happened on a range filter here: the option the ticket named
+returned correct rows throughout, and the fault showed on a neighbouring one. The
+shape is general — where a filter compares two computations of the same quantity,
+the mismatch is only visible on an option that some record's two values straddle,
+and an option whose records all agree looks correct on a broken build.
 
 **Do:** before concluding anything, run every option, not the named one. Then
-derive which option *can* show it: find a record where the two computations
-disagree and select the option its values straddle, instead of trusting the one
+derive which option *can* show it — find a record where the two computations
+disagree and select the option its values straddle — instead of trusting the one
 in the ticket. A reproduction on a different option is still a reproduction of the
-same defect — say which option showed it, and say plainly that the ticket's
-illustration was wrong, or the fix lands on one band and the mechanism stays
-broken.
+same defect: say which option showed it, and say plainly that the ticket's own
+illustration does not occur, or the fix lands on that one option and the
+mechanism stays broken.
 
 ---
 
@@ -111,3 +110,17 @@ yet; "the link on that payroll ticket was too long" does not.
 Retire one the same way. If no reproduction has cited an entry and no `blocker`
 in the run telemetry matches its cause, it is not firing. An entry nobody has
 used is furniture, not knowledge.
+
+**State the class in the entry and keep the case in Sources.** This file is
+injected into every reproduction session, so a worked example naming the ticket,
+the option and the records is an answer key for the run that is about to derive
+them. Cite the ticket; do not solve it here.
+
+## Sources
+
+Ticket numbers are not unique across projects, so each is cited by full URL.
+
+- Conditions 1–5: the QA team's own history, collected rather than drawn from one
+  ticket.
+- Condition 6, and the correction to condition 1:
+  [erp#8771](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8771).
