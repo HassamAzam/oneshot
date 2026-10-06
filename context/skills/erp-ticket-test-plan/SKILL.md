@@ -61,15 +61,32 @@ For each such fact:
 ❌ `Select 'PF Staff' in the Pay Structure filter` — the column's text reused as the option name.
 ✅ `Select 'PF'` — the filter's options are the keys of `PAY_STRUCTURE`; only the column shows 'PF Staff'.
 
+## Write every step for the run that executes the list
+
+**Each read, seed and side-effect check names a tool the executing run has.** In the Oneshot `testcases` phase that run is `verify`, on this machine: one worktree of the ticket branch, a dev server on a leased port, the local seeded database, Playwright for the screen and the venv `python manage.py shell` for data. It has no webshell, no dev or stage server, no table of sent mail, no Celery worker, no copy of dev data and no build of another branch. `erp-ticket-test-data` and `erp-ticket-execution` describe a person testing on dev/stage, so their webshell is not a tool here. When a person runs this skill for `test-erp-ticket`, their server is the run, and its tools are the ones to name.
+
+- **Read and seed stored rows in the shell,** as a step or a precondition, since this phase creates nothing itself. The Django admin is not a step unless the ticket changes the admin.
+- **Trace where a side-effect lands before you assert it.** An email, a queued task and a log line are facts like a label, but the line that places them is in settings, not in the view: `EMAIL_BACKEND` (`hrdb/config.py`), `CELERY_TASK_ALWAYS_EAGER` and `LOGGING` (`hrdb/settings.py`). With eager mode off, a `.delay()` hands the mail to a worker that is not running, so nothing is sent from the process you watch, even on a correct build. A `logger.info` or `logger.warning` on the `hrdb` logger goes to its log file and, through the root logger's console handler, to stderr, never to a command's stdout. A send wrapped in `transaction.on_commit` goes out only when the transaction commits, so a step that seeds and runs inside a rollback reads an empty mailbox on a correct build: run it outside the rollback, or inside `django.test.TestCase.captureOnCommitCallbacks(execute=True)`. Put the capture in the precondition: what is switched on, which stream (`2>&1`), and where the result is read.
+- **Change a setting where it is read last.** The untracked `hrdb/local_settings.py` loads at the end of `hrdb/config.py`, so it can change what `config.py` sets, such as `EMAIL_BACKEND`, but not what `hrdb/settings.py` assigns after importing it, such as `CELERY_TASK_ALWAYS_EAGER`. Change those on `django.conf.settings` inside the process you observe: one `python manage.py shell` session that sets them, then runs the code. Setting `celery_app.conf.task_always_eager` there does nothing, because the Celery app reads the `CELERY_`-prefixed Django setting first.
+- **A comparison needs a value this run holds.** A baseline comes from an artifact earlier in this run (research's reproduction) or from a reading earlier in the same case. A build of `origin/dev`, a deployed server and the ticket's own figures, which live in the reporter's data, are not in this run. If nothing holds the value, assert something measurable instead or drop the comparison.
+
+❌ `In the Django webshell read the row …` and `Note the highest existing mail record id before starting` — a staging shell and a mail table this run does not have; QA rewrote 17 of the 20 cases on erp#8783 for it.
+❌ `Add CELERY_TASK_ALWAYS_EAGER = True to hrdb/local_settings.py and restart the dev server` — `hrdb/settings.py` sets it back to `False` after `local_settings.py` has loaded, so no mail is sent.
+❌ `from hrdb import celery_app; celery_app.conf.task_always_eager = True` — eager mode stays off; run on erp#8783's branch, the command reported four reminders sent and the mailbox stayed empty.
+✅ `In one python manage.py shell session: settings.CELERY_TASK_ALWAYS_EAGER = True; settings.EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'; mail.outbox = []; call_command('send_not_started_training_reminders'); list mail.outbox` — run on erp#8783's branch, it captured both evaluator reminders and the L&D escalation.
+
+Sources: [erp#8783](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8783), where QA corrected one tool per round (webshell and mail table, then the in-process mailbox, then stdout); [erp#8782](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8782), an `origin/dev` baseline and webshell seeds; [erp#8772](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8772), the reporter's figures used as an Expected.
+
 ## Walk the traps list before you present
 
 **Read `refs/traps.md` and walk it against your draft before the GATE.** It holds numbered **principles**, each generalising revision requests QA has already had to make on real tickets — cases that failed on a correct build, passed on an unchanged one, or were never written at all. Walk the principles, not the examples: the bullets under each one are illustrations of it, and the principle is what has to fire on a screen they never mention. It is the difference between a list that is approved in one round and one that costs three.
 
-Three checks to run over the finished draft:
+Four checks to run over the finished draft:
 
 - **Can you point at the line behind every literal the case quotes — and is that line outside the diff?** If you cannot, trace it or loosen it; if the diff wrote it, take it from the ticket or plan instead (see "Trace every fact about the product").
 - **Would this case still pass if the diff were reverted?** If yes it proves nothing about the change. Keep it if it guards a regression, but label it a smoke check and give it a positive control (principle 5).
 - **Does this change REMOVE something that was hiding a state** — a blur, a disabled look, a muted colour, a collapsed row? Then write the cases for what it was hiding, not just for its absence (principle 6). This class is the most-missed one on record.
+- **Does every read, seed and side-effect step name a tool the executing run has, and say where the side-effect lands under its settings?** A webshell, a mail table, the Django admin, a restored snapshot or another branch in a step means it was written for a different run (see "Write every step for the run that executes the list").
 
 Note in your output which traps you applied and which you considered and ruled out, so the reviewer can see the list was walked rather than skimmed.
 
@@ -79,7 +96,7 @@ Show the full plan as a numbered list (Type · Scenario · Expected). Then:
 
 > **GATE — WAIT for explicit go-ahead.** Do not create data or execute until the user confirms. If the reply is anything other than a go-ahead, route each line by intent (see "Revising the plan after feedback"): **add** appends a new case, **drop/modify** act on the case named — delete, edit, re-prioritize, reclassify, reorder, merge or split it in place — then re-confirm. Only "add" ever creates a case.
 
-Also surface here: which scenarios are UI-driven vs API/webshell, and which **persist data / send real emails** (destructive) vs which roll back (safe).
+Also surface here: which scenarios are UI-driven vs API/shell, and which **persist data / send real emails** (destructive) vs which roll back (safe).
 
 ## Revising the plan after feedback
 
@@ -148,7 +165,7 @@ Expected: After the refresh the focused row renders the same title, detail and d
 If a line genuinely implies no observable outcome, ask for the pass condition rather than writing a placeholder.
 
 **4. Classify every added scenario like the rest of the plan.**
-Added scenarios are not exempt from the labelling the original plan carries: assign a Type from the five under "Plan the scenarios" — happy / negative / edge / boundary / **side-effects / regression** — and carry the UI-vs-API/webshell and destructive-vs-safe labels described under "Present + GATE".
+Added scenarios are not exempt from the labelling the original plan carries: assign a Type from the five under "Plan the scenarios" — happy / negative / edge / boundary / **side-effects / regression** — and carry the UI-vs-API/shell and destructive-vs-safe labels described under "Present + GATE".
 
 Anything that would invalidate other scenarios if it failed — wrong server, wrong page version, wrong permission group, defect not reproducible pre-fix — is a side-effects / regression scenario that must run FIRST, not last.
 
@@ -210,7 +227,7 @@ The remaining intents change nothing structurally — they are answered, acted o
 **7. Re-confirm with a diff, then re-gate.**
 Show: count before → after; the ids added and what each one came from (intent 1); the ids changed or retired under rule 5 (intents 2–8), each with the line that did it; every line answered or discarded under rule 6 (intents 9–12) and why; and confirmation that no other existing case was touched. Then run the GATE again.
 
-Walk `refs/traps.md` over the revised list too — a revision round is exactly where a trap resurfaces, because the cases you just rewrote are the ones nobody has checked yet. And trace every literal you added or changed this round to its line: the fix for one wrong label is where the next wrong label usually comes from.
+Walk `refs/traps.md` over the revised list too — a revision round is exactly where a trap resurfaces, because the cases you just rewrote are the ones nobody has checked yet. And trace every literal you added or changed this round to its line: the fix for one wrong label is where the next wrong label usually comes from. A tool or a channel is the same: when feedback replaces the one a step names, trace the replacement under the run's settings before you write it. On erp#8783 each replacement (an in-process mailbox, then stdout) became the next round's correction.
 
 **8. Name the trap this round taught you.**
 If the feedback names something `refs/traps.md` does not already cover, end your output with a `candidateTraps` block. **Say which of the two it is, because they are curated differently:**
