@@ -775,8 +775,9 @@ this a beta, and a plan that folds them into "build v2" is how they get forgotte
 \`acceptanceCoverage\` places each criterion in v2. If there is nothing to switch back to — the
 ticket creates a screen that does not exist today — say so in \`openQuestions\` with the default
 "ship it without a switch" rather than inventing a v1.
-The reuse hunt still runs, but v1's COMPONENTS are not prior art for v2 to extend: v2's copy of
-a component is the requirement, not a duplicate to reuse or collapse — the same carve-out
+Research's \`codePath\` may hand you v1's COMPONENTS as \`callable:\` or \`duplicate:\`; for v2
+they are \`reject\`, the reason being the Beta label. v2's copy of a component is the
+requirement, not a duplicate to reuse or collapse — the same carve-out
 \`implement\` and \`review\` are given. Collapsing a duplicate that already sits in v1's
 directory is out of scope too: under point 1 it is an edit to v1. What v2 reuses from v1 is its
 data layer — actions, selectors, utils, API helpers — imported from where it lives.`,
@@ -856,6 +857,14 @@ routes it wraps, where the choice is kept and that it does not follow a user to 
 what a user gets by default, the v1 files v2 had to extend and why, and what retiring v1 later
 takes — the routes to point straight at v2 and the files to delete. That last line is what
 makes the beta removable by someone who never read this ticket.`,
+
+  'base-check': () => `The base branch is v1 only — no \`<module>_v2/\`, no switch, no stored choice — so a case
+whose steps reach a version by CLICKING THE SWITCH cannot run as written: run v1's own flow
+directly, since the base has nothing else to reach, and score a case that only reaches v2 or the
+switch itself \`inconclusive\`, never \`fails\` or \`passes\`. Every v1-regression, switch or v2 case
+is THIS ticket's own scope (\`inTicketScope\` true) whatever the base shows: the Beta label put it
+there and the ticket text will not say so. So a v1-regression case that fails is the change
+breaking v1 — it goes back to being a fail, and the \`pre-existing\` label does not stick.`,
 };
 
 function betaBlock(ctx: PromptCtx, phase: string): string {
@@ -1175,7 +1184,10 @@ Produce an implementation plan an engineer could follow without re-deriving the 
   callers yourself, "leave it" → reject, "mirror it" → not a reuse verdict at all, it is the
   placement signal below. End on one of four verdicts: reuse, extend, collapse a duplicate
   onto, or reject — and a rejection stays in \`reuse\` with its reason on the same line. Never
-  write "no prior art" against a trace you did not open; \`implement\` reads that as permission.
+  write "no prior art" against a trace you did not open; \`implement\` reads that as permission.${betaRequested(ctx, 'plan') ? `
+  On this beta ticket a v1 COMPONENT handed as \`callable:\` or \`duplicate:\` is \`reject\`: v2
+  needs its own copy (your beta block below), and reusing or collapsing onto v1 is an edit to v1.
+  Only v1's data layer — actions, selectors, utils, API helpers — is reused.` : ''}
 - What your APPROACH introduces is still yours to search, because research could not trace it.
   That residual is: the unit you are about to add (search the identifiers it reads or writes —
   never the name you would have chosen), its mirror, the second site already carrying the same
@@ -2066,7 +2078,7 @@ the surrounding product that the ticket does not ask to change. When you cannot 
 ${ORACLE}
 
 Screenshot each case you score 'fails' as \`base-<case-id>.png\`. ${artifactsBlock(ctx)}
-
+${betaBlock(ctx, 'base-check')}
 Do not change a line of code anywhere. You are checking a claim, not fixing anything.`;
   },
 

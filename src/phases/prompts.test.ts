@@ -803,8 +803,9 @@ const flat = (phase: string, c: PromptCtx = beta()): string => promptFor(cfg(pha
 
 test('the Beta label reaches every phase that plans, builds, checks or shows the change', () => {
   // verify executes testcases' list and nothing else, so a switch no case was
-  // written for is a switch nobody verified; review is where an edit to v1 is caught.
-  for (const phase of ['plan', 'implement', 'testcases', 'review', 'verify', 'ui-evidence', 'mr']) {
+  // written for is a switch nobody verified; review is where an edit to v1 is caught;
+  // base-check re-runs a 'pre-existing' case on a base branch that has only v1.
+  for (const phase of ['plan', 'implement', 'testcases', 'review', 'verify', 'base-check', 'ui-evidence', 'mr']) {
     assert.ok(loadsBeta().includes(phase), `${phase} does not load ${BETA}`);
   }
   assert.ok(!loadsBeta().includes('design'), 'design must not load Beta: the contract and the skill both state its mockups carry no switch');
@@ -841,14 +842,19 @@ test('the skill the Beta label loads ships in this repo', () => {
 });
 
 test('plan is told v1\'s components are not prior art for v2, and a duplicate inside v1 is not its to collapse', () => {
-  // plan loads util-reuse-methodology, whose reuse-first hunt finds v1's component
-  // as the obvious thing for v2 to extend; implement and review already carve the
-  // copy out, and without the same line here the plan they inherit has folded it.
+  // research now hands prior art to plan in `codePath`, and change-scoping tells plan
+  // to CONFIRM it and offers "collapse a duplicate onto" as a verdict; on a Beta ticket
+  // v1's component arrives as callable:/duplicate: and that verdict would fold v2 away.
   const p = flat('plan');
-  assert.match(p, /v1's COMPONENTS are not prior art for v2 to extend/);
+  assert.match(p, /Research's `codePath` may hand you v1's COMPONENTS as `callable:` or `duplicate:`/);
+  assert.match(p, /for v2\s+they are `reject`, the reason being the Beta label/);
   assert.match(p, /not a duplicate to reuse or collapse/);
   assert.match(p, /Collapsing a duplicate that already sits in v1's directory is out of scope too/);
-  assert.doesNotMatch(flat('plan', ctx(ticket({ labels: ['Loop'] }))), /not prior art for v2/);
+  // and the prior-art bullet main injects above the beta block carries the same pointer.
+  assert.match(p, /On this beta ticket a v1 COMPONENT handed as `callable:` or `duplicate:` is `reject`/);
+  const plain = flat('plan', ctx(ticket({ labels: ['Loop'] })));
+  assert.doesNotMatch(plain, /for v2\s+they are `reject`/);
+  assert.doesNotMatch(plain, /On this beta ticket a v1 COMPONENT handed as/);
 });
 
 test('implement is told the v2 copy is the requirement, not duplication to fold away', () => {
@@ -935,6 +941,15 @@ test('review proves in code that the choice is per user, since no browser case c
   const p = flat('review');
   assert.match(p, /Point 5's second account is yours to prove, because no browser case can/);
   assert.match(p, /A username cached at module scope or once per page load is a `major` finding/);
+});
+
+test('base-check is told the base has only v1 and that a v1-regression is in this ticket scope', () => {
+  const p = flat('base-check');
+  assert.match(p, /The base branch is v1 only/);
+  assert.match(p, /run v1's own flow\s+directly/);
+  assert.match(p, /Every v1-regression, switch or v2 case\s+is THIS ticket's own scope/);
+  assert.match(p, /the `pre-existing` label does not stick/);
+  assert.doesNotMatch(flat('base-check', ctx(ticket({ labels: ['Loop'] }))), /The base branch is v1 only/);
 });
 
 test('ui-evidence takes its before from v1 on its own instance and checks it against the base', () => {
