@@ -807,6 +807,7 @@ test('the Beta label reaches every phase that plans, builds, checks or shows the
   for (const phase of ['plan', 'implement', 'testcases', 'review', 'verify', 'ui-evidence', 'mr']) {
     assert.ok(loadsBeta().includes(phase), `${phase} does not load ${BETA}`);
   }
+  assert.ok(!loadsBeta().includes('design'), 'design must not load Beta: the contract and the skill both state its mockups carry no switch');
 });
 
 test('each of those phases is offered the skill and told its own part in the beta', () => {
