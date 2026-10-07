@@ -98,8 +98,15 @@ is not only appearance — it is what stopped anyone looking.
   only in a defensive branch, assert the helper directly instead.
 - Derive the period and the record from the listing, or seed them. A hard-coded
   month plus an exact count rots the first time anything changes that state.
+- Prefer each case seeding its own record. Where cases share one, they run in order
+  on one database: a case that reuses a record an earlier case changed states what
+  that case left ("the evaluator is E2 after TC-10", not E1), and a positive control
+  is never something another case in the list expects to fail on this build.
 - Put a known pre-existing failure's workaround in the pre-condition rather than
-  letting the case inherit it.
+  letting the case inherit it, but only for a failure traced in code or in
+  research's reproduction, and never one that touches what the case asserts: "if
+  the cell is stale, clear the cache and re-read; that is not a failure" waives the
+  case's own check.
 - Where a plan step has a branch ("delete the key unless another consumer exists"),
   the case records which branch happened. Hard-coding one arm fails the build where
   the other was correct.
@@ -127,6 +134,11 @@ the one below — so every source is cited by full URL, and a new one must be to
 - **Principle 7's reachability bullet**:
   [erp#8775](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8775), where a run
   wrote fourteen cases resting on a state the listing filters out.
+- **Principle 7's run-order bullet and workaround limit**:
+  [erp#8783](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8783) (a case
+  kept the evaluator an earlier case had replaced) and
+  [erp#8745](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8745) (a
+  revision added a cache waiver to the case that checks the cache is reset).
 - **Principle 2's `keepMounted` bullet**: not a QA round at all — testing the
   `local-browser-verify` helpers against a live app (`f9c7901`), where a MUI `Popper`
   with `keepMounted` kept its geometry after being dismissed.
