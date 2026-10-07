@@ -85,7 +85,7 @@ import {
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
 import {
   declareNotABug, declareReproduced, notABugApprovalRequestBody, notABugDecision, reproAttachments,
-  reproductionOf,
+  reproductionOf, shotsIn,
 } from './reproduction.js';
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
@@ -2012,7 +2012,7 @@ export async function runTicket(
           logEvent('reproduction', {
             iid, kind: repro.kind, verdict: repro.verdict, blocker: repro.blocker,
             steps: repro.steps.length,
-            shots: repro.evidence.filter((e) => e.endsWith('.png')).length,
+            shots: shotsIn(repro.evidence),
           }, { runId, phase: 'research' });
         }
         if (repro?.verdict === 'reproduced') await declareReproduced(iid, repro);

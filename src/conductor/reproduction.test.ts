@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   declareReproduced, incompleteness, notABugApprovalRequestBody, notABugDecision, notABugSlackText,
-  reproductionComment, reproductionOf,
+  mimeOf, reproductionComment, reproductionOf, shotCaption, shotName, shotsIn,
 } from './reproduction.js';
 import { gateApprovedText, gateAskText } from './reviewgate.js';
 import type { RunJournal } from '../lib/artifacts.js';
@@ -190,4 +190,138 @@ test('blocker is derived from the verdict, never trusted beside it', () => {
   assert.equal(at('nonsense', 'env'), 'env');
   assert.equal(at('inconclusive', 'wat'), 'none');
   assert.equal(at('inconclusive'), 'none');
+});
+
+test('a screenshot is recognised wherever the filename sits in the line', () => {
+  // Two anchored attempts failed here before. `/\.png$/i` missed every line that
+  // continued into prose; the leading-token fix then missed six ordinary shapes AND
+  // was narrower than what it replaced, so a run parked at the gate could resume and
+  // walk past it. Each of these is a regression guard, not a hypothetical.
+  const cases: [string, string | null][] = [
+    // filename first, prose after — the shape the model actually writes
+    ['repro-1-podpeople.png \u2014 /pod/people/ unfiltered, 566 people', 'repro-1-podpeople.png'],
+    ['repro-1.png, 566 people', 'repro-1.png'],
+    ['repro-1.png; and then', 'repro-1.png'],
+    ['repro-1.png. Shows the row', 'repro-1.png'],
+    ['repro-1.png\u2014caption', 'repro-1.png'],
+    ['  repro-1.png  ', 'repro-1.png'],
+    // wrapped in the punctuation markdown invites
+    ['`repro-1.png` \u2014 caption', 'repro-1.png'],
+    ['**repro-1.png**', 'repro-1.png'],
+    ['"repro-1.png"', 'repro-1.png'],
+    ['(repro-1.png)', 'repro-1.png'],
+    // filename LAST — both of these matched before the leading-token fix broke them
+    ['Screenshot: repro-1.png', 'repro-1.png'],
+    ['see repro-1.png', 'repro-1.png'],
+    // a path resolves to its basename, which every caller already applies
+    ['artifacts/repro-1.png: shows the row', 'repro-1.png'],
+    // other image types
+    ['shot.jpeg x', 'shot.jpeg'], ['shot.webp y', 'shot.webp'], ['shot.JPG z', 'shot.JPG'],
+    // a caption may describe a defect in negative terms and is still a screenshot
+    ['repro-3.png \u2014 the aria-label is missing', 'repro-3.png'],
+    ['repro-3.png \u2014 no second email was sent', 'repro-3.png'],
+    ['repro-3.png \u2014 the row is not blurred', 'repro-3.png'],
+    ['Screenshot no. 3: repro-3.png', 'repro-3.png'],
+    // but a line that SAYS the shot is absent is not evidence that it exists.
+    // Three of these were a regression: the end-anchored test read them as none.
+    ['No repro-1.png was captured \u2014 the app never came up', null],
+    ['Could not capture repro-1.png; bring-up failed', null],
+    ['No screenshot: repro-1.png was never written', null],
+    ['Failed to write repro-1.png', null],
+    ['Unable to save repro-2.png', null],
+    ['No repro-*.png \u2014 the app never came up, so nothing was captured', null],
+    ['Measurement (SQL): 609 active people compared; 60 values differ', null],
+    ['Measurement: band 1 returns 15 people', null],
+    ['', null],
+  ];
+  for (const [line, want] of cases) {
+    assert.equal(shotName(line), want, `shotName(${JSON.stringify(line)})`);
+  }
+  assert.equal(shotsIn(cases.map(([l]) => l)), 20);
+});
+
+test('the note on a screenshot line is kept, not swallowed by the filename', () => {
+  assert.equal(
+    shotCaption('repro-1-podpeople.png \u2014 /pod/people/ unfiltered, 566 people', 'repro-1-podpeople.png'),
+    '/pod/people/ unfiltered, 566 people',
+  );
+  assert.equal(shotCaption('`repro-1.png` \u2014 caption', 'repro-1.png'), 'caption');
+  // A bare introducing label is not a caption — rendering it under the image is noise.
+  assert.equal(shotCaption('Screenshot: repro-1.png', 'repro-1.png'), '');
+  assert.equal(shotCaption('see repro-1.png', 'repro-1.png'), '');
+  assert.equal(shotCaption('Screenshot: repro-1.png shows the row', 'repro-1.png'), 'Screenshot: shows the row');
+  assert.equal(shotCaption('repro-1.png', 'repro-1.png'), '');
+  assert.equal(shotCaption('**repro-1.png**', 'repro-1.png'), '');
+});
+
+test('a reproduction whose evidence names screenshots is not judged screenshot-less', () => {
+  // The regression this pins cost a real run: every reader of `evidence` used an
+  // end-anchored test, so a confirmed reproduction carrying four screenshots
+  // reported 'no screenshot was recorded' and posted NOTHING on the ticket.
+  const repro = reproductionOf({
+    reproduction: {
+      ...complete,
+      verdict: 'reproduced',
+      evidence: [
+        'repro-1-podpeople.png \u2014 /pod/people/ unfiltered, 566 people, column visible',
+        'Screenshot: repro-3-exp.png',
+        'Measurement (SQL): 609 active people compared; 60 values differ',
+      ],
+    },
+  })!;
+  assert.deepEqual(incompleteness(repro), []);
+  assert.equal(shotsIn(repro.evidence), 2);
+
+  // And the blocked shape still reports honestly rather than inventing evidence.
+  const blocked = reproductionOf({
+    reproduction: {
+      ...complete,
+      verdict: 'reproduced',
+      evidence: ['No repro-*.png \u2014 the app never came up, so nothing was captured'],
+    },
+  })!;
+  assert.deepEqual(incompleteness(blocked), ['no screenshot was recorded']);
+});
+
+test('a screenshot note rides with its image, and survives when the image does not', () => {
+  const repro = reproductionOf({
+    reproduction: {
+      ...complete,
+      verdict: 'reproduced',
+      evidence: [
+        'repro-1.png \u2014 566 people, column visible',
+        'repro-9.png \u2014 the fourth shot, past the attachment cap',
+      ],
+    },
+  })!;
+
+  // Attached: the note becomes the image's caption rather than vanishing.
+  const withShot = reproductionComment(repro, {
+    screenshots: [{
+      url: '/uploads/x/repro-1.png',
+      markdown: '![repro-1](/uploads/x/repro-1.png)',
+      name: 'repro-1.png',
+      caption: '566 people, column visible',
+    }],
+  });
+  assert.match(withShot, /!\[repro-1\][\s\S]*566 people, column visible/);
+  // Not attached: its note falls back to a measurement instead of being dropped twice.
+  assert.match(withShot, /repro-9\.png \(not attached\): the fourth shot/);
+
+  // A bare filename has no note, so it adds no Measurements section either way.
+  const bare = reproductionOf({
+    reproduction: { ...complete, verdict: 'reproduced', evidence: ['repro-1.png'] },
+  })!;
+  const bareBody = reproductionComment(bare, { screenshots: [] });
+  assert.match(bareBody, /No screenshot was attached/);
+  assert.doesNotMatch(bareBody, /Measurements/);
+});
+
+test('the upload media type follows the extension, since more than png is detected', () => {
+  assert.equal(mimeOf('repro-1.png'), 'image/png');
+  assert.equal(mimeOf('repro-1.PNG'), 'image/png');
+  assert.equal(mimeOf('repro-1.webp'), 'image/webp');
+  assert.equal(mimeOf('repro-1.jpg'), 'image/jpeg');
+  assert.equal(mimeOf('repro-1.jpeg'), 'image/jpeg');
+  assert.equal(mimeOf('repro-1.JPG'), 'image/jpeg');
 });
