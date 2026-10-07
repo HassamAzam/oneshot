@@ -26,7 +26,38 @@ person and people label optimistically; a design phase that invents a screen to
 justify its own existence spends a reviewer's round on being told there was
 nothing here.
 
-## 2. Ground it in the real product, not in taste
+## 2. Understand what the feature is for — and where it lives
+
+A mockup can be pixel-perfect and still be the wrong feature. Before you ground
+anything in tokens, settle two things the ticket usually does not spell out:
+what the feature is *for*, and where in the app it surfaces.
+
+**A terse ticket is an inference task, not a literal one.** A one- or two-line
+description names a thing; it does not specify it. The noun in the title —
+"announcement module", "activity feed", "dashboard" — is where you start
+reading, not where you stop. Derive, before drawing: who posts and who reads
+this, and what behaviour it formalises or replaces. "Everyone can add an
+announcement about their work" is not a CRUD list — it can be a company-wide
+feed people use to broadcast their own achievements, a formal alternative to
+doing it ad-hoc in chat. Design the literal reading and you spend a reviewer's
+round being told what the feature was always for. So state the interpretation
+you are designing to as the **first `openQuestion`, carrying a default** — a
+wrong reading then costs one comment, not a re-rendered lap.
+
+**A feature has entry points in the app it joins, not just a page of its own.**
+Where does someone already mid-flow meet this — a card on the homepage, a
+slider, a nav entry, a badge on a screen they already open? That surface is part
+of the design, and the existing screen it lands on gets its own `before`/`after`
+the same as the feature's own page. A feature reachable only from its own URL is
+a design that drew half the ticket and left the reviewer to name the other half.
+
+**Match the input affordance to the content.** Expressive, long-form or
+attachment-bearing content gets a rich-text editor and an upload, not a
+single-line text field; a one-off choice gets a control, not free text. The
+affordance is a decision the reviewer will argue with, so it belongs in
+`decisions`, not defaulted silently to a bare input.
+
+## 3. Ground it in the real product, not in taste
 
 A mockup succeeds when the reaction is "that's our app with the feature in it"
 and fails when it is "that's a nice generic dashboard". Generic is the default
@@ -68,7 +99,7 @@ In order:
 A `before` is empty only when the screen does not exist yet — never because you
 did not capture it.
 
-## 3. Draw the screens
+## 4. Draw the screens
 
 One self-contained `.html` per screen, in `design/` beside the tokens and
 importing `./tokens.css` (and `./new-tokens.css` if you made one). No CDN
@@ -89,7 +120,7 @@ scripts, no external fonts, no remote images: inline everything.
   you find — a flaw you could have caught yourself spends the reviewer's
   attention on your typo instead of on your design.
 
-## 4. A flow change is drawn as states, not prototyped
+## 5. A flow change is drawn as states, not prototyped
 
 When the change spans more than one screen or adds a step to an existing journey, set
 `flowChange` and draw each state of that flow as its own screen, in order, so the reviewer
@@ -99,7 +130,7 @@ Do **not** build a clickable prototype and do **not** record a walkthrough. Both
 their own change, once real runs have measured what this phase actually costs — they are
 the most expensive and most breakable part of an estimated budget.
 
-## 5. Give the reviewer the decisions, not a changelog
+## 6. Give the reviewer the decisions, not a changelog
 
 - **`decisions`** — the two or three choices you made on their behalf that they
   would argue with. Not everything you did.
@@ -110,7 +141,7 @@ the most expensive and most breakable part of an estimated budget.
 - **`openQuestions`** — always with a recommendation. A question carrying a
   default gets answered; one without it parks the run on somebody's inbox.
 
-## 6. When feedback comes back
+## 7. When feedback comes back
 
 A non-`approved` comment from a reviewer re-runs this phase with their words
 appended. Address them directly and visibly: re-render, re-screenshot, and make
