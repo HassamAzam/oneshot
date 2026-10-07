@@ -123,12 +123,23 @@ function blockerOf(verdict: Reproduction['verdict'], blocker: unknown): Blocker 
  * `see repro-1.png` had matched before and stopped matching, so a run already
  * parked at the gate could resume and walk past it. Position is not the signal.
  *
- * The signal is the GLOB. A blocked run writes "No repro-*.png — the app never
- * came up, so no screenshot could be captured", naming the extension precisely to
- * say there are none; counting that reports evidence for a run that produced none,
- * which is the expensive direction. `*` is absent from the name class, so the
- * pattern cannot match inside a glob — the explicit check is the second line of
- * defence if that class is ever widened.
+ * THE SIGNAL IS THE SENTENCE, NOT THE FILENAME. A lap that captured nothing says
+ * so while naming the file it did not write — "No repro-1.png was captured", "Could
+ * not capture repro-1.png", "Failed to write repro-1.png". Reading those as evidence
+ * is the expensive direction: a `not-reproduced` whose only evidence is a statement
+ * that nothing was captured clears `incompleteness`, stops the run and parks the Not
+ * a Bug gate on a person, while `existsSync` quietly drops the file that never
+ * existed. Three of those shapes were a REGRESSION against the end-anchored test,
+ * which read them as no screenshot at all.
+ *
+ * So the text BEFORE the filename is checked for a negation. The glob in
+ * "No repro-*.png" is one special case of the same thing rather than the whole rule.
+ * Only the PRECEDING text counts, and that boundary is deliberate: "repro-3.png —
+ * the aria-label is missing", "— no second email was sent", "— the row is not
+ * blurred" are captions describing the defect, and they are the notes the caption
+ * exists to carry. A trailing "repro-1.png missing" is therefore read as a
+ * screenshot; telling the two apart needs semantics rather than a word list, and
+ * the shapes a blocked lap actually writes all lead with the negation.
  *
  * Returning the NAME rather than a boolean is the point: the callers that attach
  * and upload need the filename, not the sentence it arrived in. A path resolves to
@@ -136,9 +147,18 @@ function blockerOf(verdict: Reproduction['verdict'], blocker: unknown): Blocker 
  */
 const SHOT = /(?:^|[\s"'`(\[*—–/])([A-Za-z0-9][\w.-]*\.(?:png|jpe?g|webp))(?=$|[\s"'`)\].,;:*—–])/i;
 
+/**
+ * Words that, standing before the filename, mean the file is not there. `no` is
+ * guarded against the "no. 3" ordinal, which is prose rather than a negation.
+ */
+const ABSENT = /\b(?:none|never|without|cannot|can't|couldn't|didn't|unable|missing|failed|fails|fail|could\s+not|did\s+not|not)\b|\bno\b(?!\.?\s*\d)/i;
+
 export function shotName(line: string): string | null {
-  const name = SHOT.exec(line)?.[1];
-  return name && !name.includes('*') ? name : null;
+  const m = SHOT.exec(line);
+  const name = m?.[1];
+  if (!m || !name || name.includes('*')) return null;
+  const before = line.slice(0, m.index + (m[0].length - name.length));
+  return ABSENT.test(before) ? null : name;
 }
 
 /**

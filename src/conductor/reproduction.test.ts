@@ -217,7 +217,18 @@ test('a screenshot is recognised wherever the filename sits in the line', () => 
     ['artifacts/repro-1.png: shows the row', 'repro-1.png'],
     // other image types
     ['shot.jpeg x', 'shot.jpeg'], ['shot.webp y', 'shot.webp'], ['shot.JPG z', 'shot.JPG'],
-    // and the lines that must NEVER count: a glob says there are none
+    // a caption may describe a defect in negative terms and is still a screenshot
+    ['repro-3.png \u2014 the aria-label is missing', 'repro-3.png'],
+    ['repro-3.png \u2014 no second email was sent', 'repro-3.png'],
+    ['repro-3.png \u2014 the row is not blurred', 'repro-3.png'],
+    ['Screenshot no. 3: repro-3.png', 'repro-3.png'],
+    // but a line that SAYS the shot is absent is not evidence that it exists.
+    // Three of these were a regression: the end-anchored test read them as none.
+    ['No repro-1.png was captured \u2014 the app never came up', null],
+    ['Could not capture repro-1.png; bring-up failed', null],
+    ['No screenshot: repro-1.png was never written', null],
+    ['Failed to write repro-1.png', null],
+    ['Unable to save repro-2.png', null],
     ['No repro-*.png \u2014 the app never came up, so nothing was captured', null],
     ['Measurement (SQL): 609 active people compared; 60 values differ', null],
     ['Measurement: band 1 returns 15 people', null],
@@ -226,7 +237,7 @@ test('a screenshot is recognised wherever the filename sits in the line', () => 
   for (const [line, want] of cases) {
     assert.equal(shotName(line), want, `shotName(${JSON.stringify(line)})`);
   }
-  assert.equal(shotsIn(cases.map(([l]) => l)), 16);
+  assert.equal(shotsIn(cases.map(([l]) => l)), 20);
 });
 
 test('the note on a screenshot line is kept, not swallowed by the filename', () => {
