@@ -1960,7 +1960,9 @@ the case asserts is VISIBLE in the viewport. A screenshot is published as proof 
 one that cannot show the asserted value proves nothing and reads as if it did: for a \`<title>\`,
 an \`aria-*\`/\`alt\` value, a header or a redirect, leave \`screenshot\` empty and put the measured
 value verbatim in \`evidence\`. Never add anything to the page before capturing it — no overlay,
-label, style or script; \`page.evaluate\` reads, it does not write.
+label, style or script; \`page.evaluate\` reads, it does not write.${betaRequested(ctx, 'verify') ? ` The one
+exception is the never-touched case's setup named in your beta block above: removing the single
+stored key restores that case's precondition, it does not paint the page for a shot.` : ''}
 
 A case passes only if its precondition was really in place. If you could not establish it — the
 dark theme did not apply, the role could not be granted, the data could not be made — the case
