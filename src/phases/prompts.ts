@@ -979,7 +979,12 @@ journey, and draw each state of that flow as its own screen so the mockups read 
 build a clickable prototype and do not record a walkthrough — those follow in a later change,
 once real runs have measured what this phase's budget actually is.
 
-${artifactsBlock(ctx)}
+Everything you make goes in ${join(artifactDir(ctx.ticket.iid), DESIGN_DIR)} (create it if it is
+not there) — the mockups, their renders, and the before-captures, beside the tokens. Report
+\`mockupHtml\`, \`screenshot\` and \`before\` as \`${DESIGN_DIR}/<filename>\`: artifact-relative and
+the very form \`tokensFile\` already uses, never a bare filename. The gate and the MR resolve these
+against the run's artifact dir, so a name missing the \`${DESIGN_DIR}/\` prefix points at a file
+that is not on disk — and the gate refuses a design the reviewer cannot see.
 
 ## What the reviewer decides
 
