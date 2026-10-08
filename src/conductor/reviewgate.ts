@@ -84,7 +84,7 @@ import { artifactDir } from '../lib/config.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
-export type Gate = 'plan' | 'testcases' | 'design' | 'notABug';
+export type Gate = 'plan' | 'testcases' | 'design' | 'notABug' | 'verifyCases';
 export type GateVerdict = 'approved' | 'feedback' | 'pending' | 'unavailable';
 
 export interface GateResult {
@@ -213,7 +213,12 @@ export type ReviewRole = 'dev' | 'qa' | 'design';
 // `notABug` is QA's: whether a reported defect really does not happen is a
 // testing judgement, and the people who own the case list are the ones who
 // know which data, role or environment the reproduction may have missed.
-const GATE_ROLE: Record<Gate, ReviewRole> = { plan: 'dev', testcases: 'qa', design: 'design', notABug: 'qa' };
+// `verifyCases` is QA's for the same reason `notABug` is: whether a still-failing
+// case is invalid, expected, pre-existing or just worth skipping is a testing
+// judgement, owned by the people who wrote the case list.
+const GATE_ROLE: Record<Gate, ReviewRole> = {
+  plan: 'dev', testcases: 'qa', design: 'design', notABug: 'qa', verifyCases: 'qa',
+};
 
 /**
  * Does the DESIGN gate apply to this run?
@@ -338,11 +343,12 @@ function blankState(): ReviewGateState {
 }
 
 const GATE_STATE: Record<Gate, keyof Pick<RunJournal,
-  'planApproval' | 'testcasesApproval' | 'designApproval' | 'notABugApproval'>> = {
+  'planApproval' | 'testcasesApproval' | 'designApproval' | 'notABugApproval' | 'verifyCasesApproval'>> = {
   plan: 'planApproval',
   testcases: 'testcasesApproval',
   design: 'designApproval',
   notABug: 'notABugApproval',
+  verifyCases: 'verifyCasesApproval',
 };
 
 function stateOf(j: RunJournal, gate: Gate): ReviewGateState {
@@ -745,6 +751,14 @@ const ASK_WORDS: Record<Gate, { what: string; next: string; other: string }> = {
     next: '*Not a Bug* — the ticket is labelled and the run stops',
     other: 'what was missed (data, role, steps, environment) to have it reproduced again',
   },
+  // Present only to keep ASK_WORDS exhaustive over `Gate`. The verify-case gate
+  // does NOT resolve on a bare `approved` — it reads a verdict per failing case
+  // — so it posts its own ask text (`verifyCaseGateAskText`) rather than this.
+  verifyCases: {
+    what: 'the still-failing verify case(s)',
+    next: '`mr` (only the cases QA resolves are recorded)',
+    other: 'a verdict per case — `skip`, `invalid`, `expected` or `pre-existing`',
+  },
 };
 
 export function gateAskText(
@@ -1050,6 +1064,175 @@ export function appendEdgeCases(iid: number, feedback: string): TestCase[] | nul
   const updated = [...cases, ...added];
   writeArtifact(iid, 'testcases.json', { ...data, cases: updated });
   return updated;
+}
+
+// -------------------------------------------------------- verify-case gate
+
+/**
+ * The four verdicts a QA reviewer can hand a still-failing verify case.
+ *
+ * `skip` and `invalid` both drop the case; they are kept distinct so the audit
+ * records which was meant — "this case should not run" vs "this case is wrong".
+ * `expected` accepts the observed behaviour as correct. `pre-existing` says the
+ * failure is real but not this change's, and splits it into its own bug.
+ */
+export type VerifyVerdict = 'skip' | 'invalid' | 'expected' | 'pre-existing';
+
+export interface VerifyDirective { caseId: string; verdict: VerifyVerdict; by: string | null; raw: string }
+
+export interface VerifyGateResult {
+  verdict: 'resolved' | 'pending' | 'unavailable';
+  directives: VerifyDirective[];
+  /** Failing case ids with no directive yet — empty exactly when `resolved`. */
+  unresolved: string[];
+}
+
+/**
+ * Read a QA reply into per-case verdicts. Pure; shared with the resolver and
+ * its tests.
+ *
+ * Only numbers that match a FAILING case id count, so an ordinary "that's the
+ * 2024 figure" in prose never reads as a directive against TC-24. A fragment
+ * carries one verdict and applies it to every failing case it names, so
+ * "skip 14 and 15" resolves both. Fragments are split on newlines and on `;`
+ * `,` — never on `.`, because "skip test case no. 14" depends on the period
+ * after "no". First verdict wins per case: a reviewer who corrects themselves
+ * re-states the whole line rather than appending.
+ */
+export function parseVerifyDirectives(text: string, failingIds: string[]): VerifyDirective[] {
+  const byNumber = new Map<string, string>();
+  for (const id of failingIds) {
+    const m = /(\d{1,5})\s*$/.exec(id);
+    if (m) byNumber.set(String(Number(m[1])), id);
+  }
+  const verdictOf = (s: string): VerifyVerdict | null => {
+    if (/pre[\s-]?exist|existing\s+(issue|bug)/i.test(s)) return 'pre-existing';
+    if (/\binvalid\b/i.test(s)) return 'invalid';
+    if (/\bexpected\b/i.test(s)) return 'expected';
+    if (/\bskip\b/i.test(s)) return 'skip';
+    return null;
+  };
+  const out: VerifyDirective[] = [];
+  const claimed = new Set<string>();
+  for (const fragment of text.split(/[\n;,]+/)) {
+    const verdict = verdictOf(fragment);
+    if (!verdict) continue;
+    const nums = [...fragment.matchAll(/(?:tc[-\s]?|case\s*|no\.?\s*|#)?0*(\d{1,5})/gi)].map((x) => String(Number(x[1])));
+    for (const n of new Set(nums)) {
+      const caseId = byNumber.get(n);
+      if (!caseId || claimed.has(caseId)) continue;
+      claimed.add(caseId);
+      out.push({ caseId, verdict, by: null, raw: fragment.trim() });
+    }
+  }
+  return out;
+}
+
+/** The comment the verify-case gate posts, listing each failing case and the four verdicts. */
+export function verifyCasesRequestBody(failing: Array<{ id: string; evidence?: string }>): string {
+  const lines = failing.map((c) => {
+    const ev = (c.evidence ?? '').split('\n')[0]!.slice(0, 300).trim();
+    return `- **${c.id}**${ev ? ` — ${ev}` : ''}`;
+  });
+  return [
+    '## Verify needs a QA decision',
+    '',
+    'Verify re-ran these case(s) through `implement` twice and they still fail. ' +
+    'No code change fixed them, so QA decides what each one means:',
+    '',
+    ...lines,
+    '',
+    'Reply with **one verdict per case** (one per line), using the case number:',
+    '',
+    '- `skip test case no. N` — drop it; verify completes and the run goes on to the MR.',
+    '- `TC-N: invalid` — the case is wrong; drop it.',
+    '- `TC-N: expected` — the observed behaviour is correct; accept it as a pass.',
+    '- `TC-N: pre-existing` — the failure is real but not this change\'s; a separate bug is opened and linked, and verify completes.',
+    '',
+    '_The run reads this from the ticket. It continues once every case above has a verdict._',
+  ].join('\n');
+}
+
+/** The Slack heads-up for the verify-case gate — its own, because it does not resolve on `approved`. */
+function verifyCaseGateAskText(journal: RunJournal, noteId: number, mentions: string, count: number): string {
+  const link = `<${issueUrl(journal.iid)}#note_${noteId}|#${journal.iid} ${linkLabel(journal.title)}>`;
+  const who = mentions || `_QA reviewers (${approversFor('verifyCases').join(', ') || 'nobody configured'})_`;
+  return `:pause_button: *QA decision needed on verify* for ${link}\n` +
+    `${who} — ${count} case(s) still fail after two laps through \`implement\`. A verdict per case ` +
+    'is posted on the ticket (*skip*, *invalid*, *expected* or *pre-existing*). Reply there, per case.\n' +
+    '_Reply on the ticket, not here — this run reads its verdict from GitLab._';
+}
+
+/**
+ * One check of the verify-case QA gate. Same engine shape as
+ * `checkApprovalGate` — never sleeps, never loops, one poll per call — but it
+ * resolves on a verdict PER CASE rather than on a single `approved`, so it has
+ * its own resolver rather than a branch inside that one.
+ *
+ * Accumulates across ticks off the standing request note: every tick re-reads
+ * all qualified replies after it and re-parses, so a reviewer may answer the
+ * cases over several comments. It resolves the moment every failing case
+ * carries a directive; until then it is `pending`, exactly as the engine's
+ * other gates are while they wait.
+ */
+export async function checkVerifyGate(
+  opts: { iid: number; failing: Array<{ id: string; evidence?: string }> },
+): Promise<VerifyGateResult> {
+  const { iid, failing } = opts;
+  const failingIds = failing.map((c) => c.id);
+
+  if (DRY_RUN) {
+    log.warn('[dry-run] would pause at the verify-case QA gate — auto-skipping every failing case', { iid });
+    return {
+      verdict: 'resolved',
+      directives: failingIds.map((id) => ({ caseId: id, verdict: 'skip', by: null, raw: 'dry-run' })),
+      unresolved: [],
+    };
+  }
+
+  const approvers = approversFor('verifyCases');
+  if (!approvers.length) {
+    log.warn("no qa reviewers in config/reviewers.json — 'verifyCases' gate cannot be satisfied", { iid });
+    return { verdict: 'unavailable', directives: [], unresolved: failingIds };
+  }
+
+  const journal = readJournal(iid);
+  if (!journal) return { verdict: 'pending', directives: [], unresolved: failingIds };
+
+  let state = stateOf(journal, 'verifyCases');
+
+  if (state.requestNoteId == null) {
+    const posted = await addIssueNote(iid, verifyCasesRequestBody(failing));
+    if (!posted.ok || !posted.data) {
+      log.warn('verify-case gate request could not be posted to the ticket — will retry next tick', { iid });
+      return { verdict: 'pending', directives: [], unresolved: failingIds };
+    }
+    state = { ...state, requestNoteId: posted.data.id };
+    persist(iid, 'verifyCases', state);
+    const mentions = await mentionsFor('verifyCases');
+    await notifySlack(journal, verifyCaseGateAskText(journal, posted.data.id, mentions, failing.length), true);
+    log.phase(`verify-case QA decision requested on #${iid}`, { note: posted.data.id, cases: failing.length });
+    return { verdict: 'pending', directives: [], unresolved: failingIds };
+  }
+
+  const notes = await issueNotes(iid);
+  if (!notes.ok || !notes.data) {
+    log.warn('verify-case gate could not read the ticket comments — will retry next tick', { iid });
+    return { verdict: 'pending', directives: [], unresolved: failingIds };
+  }
+
+  const replies = repliesAfter(notes.data, state.requestNoteId).filter((r) => mayApprove(r, 'verifyCases'));
+  const directives: VerifyDirective[] = [];
+  const claimed = new Set<string>();
+  for (const r of replies) {
+    for (const d of parseVerifyDirectives(r.text, failingIds)) {
+      if (claimed.has(d.caseId)) continue;
+      claimed.add(d.caseId);
+      directives.push({ ...d, by: r.user });
+    }
+  }
+  const unresolved = failingIds.filter((id) => !claimed.has(id));
+  return { verdict: unresolved.length ? 'pending' : 'resolved', directives, unresolved };
 }
 
 // ------------------------------------------------------------- design gate

@@ -73,7 +73,7 @@ import {
   leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort, seedWorktree,
 } from '../lib/worktrees.js';
 import {
-  addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
+  addIssueNote, createIssue, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
   allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue, type IssueNote,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
@@ -97,7 +97,7 @@ import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
-  appendEdgeCases, checkApprovalGate, declaredFiles, designApprovalRequestBody,
+  appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
   rearmGate,
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
@@ -139,6 +139,57 @@ const GATE_UNAVAILABLE =
   'this ticket carries the Review label, but Slack is not configured (token + channel), so its '
   + 'approval gates have nowhere to ask — configure Slack, or remove the Review label to run '
   + 'this ticket in the ordinary full-auto mode';
+
+/**
+ * The verify-case gate's own `unavailable`. Like Not a Bug, it arms on any run
+ * (no Review label needed), and what it is missing is a QA list to ask.
+ */
+const VERIFY_GATE_UNAVAILABLE =
+  'verify failed the same case(s) twice through implement and no code change fixed them, but '
+  + 'config/reviewers.json names no QA reviewer to decide what each one means — add one there and '
+  + 'unblock';
+
+/** The new issue opened when QA classifies a still-failing verify case as pre-existing. */
+function preExistingIssueBody(parentIid: number, title: string, c: CaseResult): string {
+  const ev = (c.evidence ?? '').trim();
+  return [
+    `Split from the verify run of #${parentIid} (${title}).`,
+    '',
+    `Verify case **${c.id}** failed, and a QA reviewer classified it **pre-existing** — a real `
+    + 'defect this change did not introduce, tracked separately so it does not hold the MR for '
+    + `#${parentIid}.`,
+    '',
+    '### What verify observed',
+    '',
+    ev || '_No evidence text was recorded on the case._',
+    '',
+    `_Opened by Oneshot from the verify-case QA gate on #${parentIid}._`,
+  ].join('\n');
+}
+
+/** The audit comment posted on the ticket when the verify-case gate resolves. */
+function verifyDecisionsAuditBody(
+  decisions: Array<{ caseId: string; verdict: string; by: string; issueIid?: number }>,
+): string {
+  const word: Record<string, string> = {
+    skip: 'skipped', invalid: 'invalid — dropped',
+    expected: 'expected behaviour — accepted as a pass', 'pre-existing': 'pre-existing',
+  };
+  const rows = decisions.map(
+    (d) => `- **${d.caseId}** — ${word[d.verdict] ?? d.verdict} (QA: ${d.by})${d.issueIid ? ` → #${d.issueIid}` : ''}`,
+  );
+  return [
+    '## Verify completed by QA decision',
+    '',
+    'After two laps through `implement` the case(s) below still failed, and QA ruled on each so the '
+    + 'run could continue to the MR:',
+    '',
+    ...rows,
+    '',
+    '_Recorded on the MR for the reviewer. `skip`/`invalid` dropped the case; `expected` accepted it '
+    + 'as a pass; `pre-existing` was split into its own bug._',
+  ].join('\n');
+}
 
 /**
  * How long a block is respected before a re-claim is allowed.
@@ -1976,6 +2027,34 @@ export async function runTicket(
           // the session already established; skip/warn phases still degrade
           // gracefully through afterFailure.
           claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.out.blocked}` }, r.cfg.name);
+        } else if (
+          r.cfg.name === 'verify' && caseFail
+          && failedLapsOf(iid, 'verify', fixingSince()) >= (r.cfg.maxLaps ?? 2)
+        ) {
+          // Verify spent its full lap budget and still records failing cases.
+          // Where afterFailure would block, ask QA what each one means instead.
+          const outcome = await verifyCaseGate(r);
+          if (outcome === 'resolved') {
+            // Re-record the lap as resolved so the phase reads succeeded, and keep
+            // the rewritten (now non-failing) results as prior — verifyCaseGate
+            // has already set prior.verify, so do not null it below.
+            recordPhase(iid, {
+              phase: 'verify', lap: r.lap, status: 'warned',
+              startedAt: r.startedAt, endedAt: r.endedAt, model: modelFor(r.cfg),
+              turns: r.out.turns, weighted: r.out.weighted, sessionId: r.out.sessionId,
+              error: 'resolved by the verify-case QA gate',
+            });
+            j = readJournal(iid) ?? j;
+            // flow stays empty → the loop advances to the next phase.
+          } else {
+            prior[r.cfg.name] = null;
+            claim(
+              'park' in outcome
+                ? { kind: 'stop', status: 'parked', reason: `verify: ${outcome.park}` }
+                : { kind: 'stop', status: 'blocked', reason: `verify: ${outcome.block}` },
+              r.cfg.name,
+            );
+          }
         } else {
           claim(
             afterFailure(
@@ -2351,6 +2430,85 @@ export async function runTicket(
     }
 
     return { kind: 'stop', status: 'blocked', reason: `${p.name}: ${why}` };
+  }
+
+  /**
+   * The failure window `failedLapsOf` is measured from — 0 normally, or the
+   * start of an active MR-feedback fix round, so a case that failed before the
+   * reviewer asked for a change does not count against the fix lap's budget.
+   * The same reckoning `afterFailure` uses, named so the verify-case gate agrees
+   * with it on when the laps are spent.
+   */
+  function fixingSince(): number {
+    const round = activeRound(j.mrFeedback);
+    return round?.status === 'fixing' ? round.startedAt : 0;
+  }
+
+  /**
+   * The verify-case QA gate. Reached when verify has cycled through `implement`
+   * its full `maxLaps` and still records failing cases — where the run would
+   * otherwise block. QA classifies each still-failing case on the ticket; this
+   * applies their verdicts to verify.json in place and returns 'resolved' so the
+   * run continues, or a park/block for the caller to claim while it waits.
+   */
+  async function verifyCaseGate(r: PhaseResult): Promise<'resolved' | { park: string } | { block: string }> {
+    const caseResults = (r.out.data?.results ?? []) as CaseResult[];
+    const failing = caseResults.filter(countsAsFailure).map((c) => ({ id: c.id, evidence: c.evidence }));
+    const gate = await checkVerifyGate({ iid, failing });
+    if (gate.verdict === 'unavailable') return { block: VERIFY_GATE_UNAVAILABLE };
+    if (gate.verdict === 'pending') {
+      return {
+        park: 'awaiting a QA decision on the verify case(s) still failing after two laps — a QA '
+          + 'reviewer classifies each on the ticket (`skip`, `invalid`, `expected` or `pre-existing`) '
+          + 'and the run continues once every one has a verdict',
+      };
+    }
+
+    const decisions: NonNullable<RunJournal['verifyCaseDecisions']> = [];
+    const applied = caseResults.map((c) => ({ ...c }));
+    for (const d of gate.directives) {
+      const c = applied.find((x) => x.id === d.caseId);
+      if (!c) continue;
+      const by = d.by ?? 'unknown';
+      if (d.verdict === 'expected') {
+        c.result = 'pass';
+        c.evidence = `QA (${by}) confirmed expected behaviour. ${c.evidence ?? ''}`.trim();
+        decisions.push({ caseId: d.caseId, verdict: 'expected', by });
+      } else if (d.verdict === 'pre-existing') {
+        const issue = await createIssue(
+          `${ticket.title} — ${d.caseId}: pre-existing failure (from #${iid})`,
+          preExistingIssueBody(iid, ticket.title, c),
+        );
+        const newIid = issue.ok ? issue.data?.iid : undefined;
+        c.result = 'skipped';
+        c.evidence = `QA (${by}) classified pre-existing${newIid ? `; tracked as #${newIid}` : ''}. `
+          + `${c.evidence ?? ''}`.trim();
+        if (newIid) {
+          await addIssueNote(iid,
+            `**${d.caseId}** is a pre-existing issue, not caused by this change (QA: ${by}). `
+            + `A separate bug has been created: #${newIid}.`);
+        } else {
+          log.warn(`verify-case gate: could not open a pre-existing bug for ${d.caseId}`,
+            { iid, error: issue.error?.slice(0, 120) });
+        }
+        decisions.push({ caseId: d.caseId, verdict: 'pre-existing', by, issueIid: newIid });
+      } else {
+        // `skip` and `invalid` both drop the case; the verdict is kept for the audit.
+        c.result = 'skipped';
+        c.evidence = `QA (${by}) marked ${d.verdict}. ${c.evidence ?? ''}`.trim();
+        decisions.push({ caseId: d.caseId, verdict: d.verdict, by });
+      }
+    }
+
+    r.out.data = { ...r.out.data, results: applied };
+    writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
+    prior.verify = r.out.data;
+    j = updateJournal(iid, {
+      verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
+    }) ?? j;
+    if (decisions.length) await addIssueNote(iid, verifyDecisionsAuditBody(decisions));
+    log.ok(`verify-case QA gate resolved on #${iid}`, { decided: decisions.length });
+    return 'resolved';
   }
 
   /**

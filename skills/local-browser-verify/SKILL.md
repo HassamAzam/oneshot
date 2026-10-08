@@ -346,6 +346,36 @@ pytest is unaffected and is fine to run.
   is reported separately from a case failure, because no case will be watching
   for it.
 
+## When a case still fails after the second lap — the QA gate
+
+A `fail` sends the run back to `implement` and verify re-runs. That happens at
+most **twice**. If a case is still `fail` after the second lap — the fix did not
+work and no further code change is going to be tried automatically — the run
+does **not** block. It arms a **QA decision gate**: the still-failing case(s) are
+posted on the ticket and a QA reviewer (config/reviewers.json `qa`) rules on each
+one. Your job is unchanged — record the honest `fail` with actual-vs-expected
+evidence and a screenshot. The evidence you leave is exactly what QA reads to
+decide, so make it specific.
+
+A reviewer answers each failing case on the ticket with one of:
+
+- **`skip test case no. N`** — drop the case. It is recorded `skipped` and verify
+  completes; the run goes on to the MR.
+- **`TC-N: invalid`** — the case itself is wrong. Dropped, same as skip.
+- **`TC-N: expected`** — the behaviour you observed is actually correct. The case
+  is accepted as a **pass** by exception.
+- **`TC-N: pre-existing`** — the failure is real but not this change's. A separate
+  bug is opened and linked on the ticket, the case is set aside, and verify
+  completes.
+
+The run continues the moment **every** still-failing case has a verdict, and each
+decision — who made it and why — is recorded on the MR for its reviewer. Until
+then the run waits on QA; it never merges a case that is actually `fail`.
+
+Do not pre-empt this by softening a real failure into `skipped`, `pre-existing`
+or `blocked` to avoid the gate: the gate exists so a **person** makes that call,
+and your changing a verdict to dodge it removes exactly the signal they need.
+
 ## Do not
 
 - Do not fix the defect you found. A verify pass that also patches the code has

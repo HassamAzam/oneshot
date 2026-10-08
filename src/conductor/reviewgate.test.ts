@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  planApprovalRequestBody, repliesAfter, testcasesApprovalRequestBody, testcasesApprovedRecordBody,
+  parseVerifyDirectives, planApprovalRequestBody, repliesAfter, testcasesApprovalRequestBody,
+  testcasesApprovedRecordBody, verifyCasesRequestBody,
 } from './reviewgate.js';
 import { renderPlanMd } from '../lib/publish.js';
 
@@ -207,4 +208,56 @@ test('repliesAfter drops system notes, machine notes and anything at or before t
     { id: 313, text: 'approved', user: 'anosha.saeed', at },
     { id: 314, text: 'no author, no time', user: null, at: null },
   ]);
+});
+
+// ---------------------------------------------------- verify-case gate parser
+
+const FAILING = ['TC-14', 'TC-09', 'TC-2', 'TC-20'];
+
+test('parses "skip test case no. N" despite the period after "no"', () => {
+  const d = parseVerifyDirectives('skip test case no. 14', FAILING);
+  assert.deepEqual(d.map((x) => [x.caseId, x.verdict]), [['TC-14', 'skip']]);
+});
+
+test('parses each classification keyword against the case number', () => {
+  const text = 'TC-14: invalid\nTC-09: expected\nTC-2: pre-existing\nskip TC-20';
+  const got = Object.fromEntries(parseVerifyDirectives(text, FAILING).map((x) => [x.caseId, x.verdict]));
+  assert.deepEqual(got, { 'TC-14': 'invalid', 'TC-09': 'expected', 'TC-2': 'pre-existing', 'TC-20': 'skip' });
+});
+
+test('matches a bare or TC- or padded number to the failing case id', () => {
+  // "9" and "09" and "TC-9" all mean TC-09; "2" means TC-2, not TC-20.
+  assert.equal(parseVerifyDirectives('skip 9', FAILING)[0]?.caseId, 'TC-09');
+  assert.equal(parseVerifyDirectives('invalid TC-09', FAILING)[0]?.caseId, 'TC-09');
+  assert.equal(parseVerifyDirectives('expected 2', FAILING)[0]?.caseId, 'TC-2');
+});
+
+test('applies one verdict to every case a fragment names', () => {
+  const got = parseVerifyDirectives('skip 14 and 20', FAILING);
+  assert.deepEqual(got.map((x) => x.caseId).sort(), ['TC-14', 'TC-20']);
+  assert.ok(got.every((x) => x.verdict === 'skip'));
+});
+
+test('ignores numbers that are not failing cases, and verdict-less prose', () => {
+  assert.deepEqual(parseVerifyDirectives('that is the 2024 figure', FAILING), []);
+  assert.deepEqual(parseVerifyDirectives('TC-99: skip', FAILING), []);
+  assert.deepEqual(parseVerifyDirectives('TC-14 looks odd', FAILING), []);
+});
+
+test('pre-existing is recognised from "existing issue" phrasing too', () => {
+  assert.equal(parseVerifyDirectives('TC-14 is an existing issue', FAILING)[0]?.verdict, 'pre-existing');
+});
+
+test('first verdict wins when a case is named twice', () => {
+  const got = parseVerifyDirectives('skip 14\nTC-14: invalid', FAILING);
+  assert.equal(got.length, 1);
+  assert.equal(got[0]?.verdict, 'skip');
+});
+
+test('the request body lists each failing case and all four verdicts', () => {
+  const body = verifyCasesRequestBody([{ id: 'TC-14', evidence: 'filter reset on reload' }, { id: 'TC-09' }]);
+  assert.match(body, /TC-14/);
+  assert.match(body, /filter reset on reload/);
+  assert.match(body, /TC-09/);
+  for (const w of ['skip', 'invalid', 'expected', 'pre-existing']) assert.match(body, new RegExp(w));
 });

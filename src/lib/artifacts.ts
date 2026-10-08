@@ -247,6 +247,24 @@ export interface RunJournal {
    */
   notABugApproval?: ReviewGateState;
   /**
+   * Verify-case QA gate state (armed only when `verify` has cycled through
+   * `implement` its full `maxLaps` and still records failing cases). A QA
+   * reviewer classifies each still-failing case — skip, invalid, expected
+   * behaviour or pre-existing — and the gate resolves once every failing case
+   * carries a directive, after which verify completes rather than blocking.
+   */
+  verifyCasesApproval?: ReviewGateState;
+  /**
+   * The QA verdicts that resolved the verify-case gate, kept so the MR note can
+   * list who decided what and why (the audit the gate exists to leave). One
+   * entry per case the gate resolved; `issueIid` is set only on `pre-existing`,
+   * the case that split off its own tracked bug.
+   */
+  verifyCaseDecisions?: Array<{
+    caseId: string; verdict: 'skip' | 'invalid' | 'expected' | 'pre-existing';
+    by: string; note?: string; issueIid?: number;
+  }>;
+  /**
    * When the `merge` phase last asked GitLab whether a human has merged the
    * MR. A Review-labelled ticket is never merged by Oneshot, so this phase is
    * a wait, not an action, and re-asking on every --follow tick is pure noise.

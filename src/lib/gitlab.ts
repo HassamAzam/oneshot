@@ -145,6 +145,27 @@ export function getIssue(iid: number): Promise<GitlabResult<Issue>> {
 }
 
 /**
+ * Open a new issue on the same project and return it (its `iid` and `web_url`
+ * are what a caller links back to). Used by the verify-case QA gate's
+ * `pre-existing` route, which splits a failure QA judged not this change's into
+ * its own tracked bug. `labels` are applied only if they exist on the project —
+ * Oneshot never creates a label — so an unknown name is dropped by GitLab, not
+ * created, exactly as `editIssueLabels` behaves.
+ */
+export async function createIssue(
+  title: string, description: string, labels: string[] = [],
+): Promise<GitlabResult<Issue>> {
+  if (DRY_RUN) {
+    log.warn(`[dry-run] would create issue "${title}"`, { labels });
+    return { ok: true, kind: 'ok', status: 200, data: null };
+  }
+  const body: Record<string, string> = { title, description };
+  const clean = labels.filter((l) => l !== '');
+  if (clean.length) body.labels = clean.join(',');
+  return call<Issue>('POST', `/projects/${projectId()}/issues`, body, true);
+}
+
+/**
  * Open issues carrying the entry label, oldest-updated first (rough FIFO), one
  * page of 50 — minus, server-side, those carrying the Ready For Automation
  * trigger (automationTriggerLabel). Those are the automation mode's, and they
