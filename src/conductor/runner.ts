@@ -167,6 +167,24 @@ function preExistingIssueBody(parentIid: number, title: string, c: CaseResult): 
   ].join('\n');
 }
 
+/**
+ * Fold a scoped verify re-run's fresh results back over the full pre-scope list.
+ *
+ * `baseline` is the whole case list as it stood before the re-run; `fresh` is
+ * what the scoped session returned (only the rescoped cases are trusted, the
+ * rest of `fresh` is ignored). Every baseline case keeps its verdict unless the
+ * re-run produced a new one for it, so a one-case re-run cannot erase the cases
+ * it did not touch — the bug this exists to prevent. Pure, so it is unit-tested.
+ */
+export function mergeScopedVerify(
+  baseline: CaseResult[], fresh: CaseResult[], scope: Set<string>,
+): CaseResult[] {
+  const freshById = new Map(fresh.filter((c) => scope.has(c.id)).map((c) => [c.id, c]));
+  const merged = baseline.map((c) => freshById.get(c.id) ?? c);
+  for (const c of freshById.values()) if (!baseline.some((p) => p.id === c.id)) merged.push(c);
+  return merged;
+}
+
 /** The audit comment posted on the ticket when the verify-case gate resolves. */
 function verifyDecisionsAuditBody(
   decisions: Array<{ caseId: string; verdict: string; by: string; issueIid?: number }>,
@@ -1697,20 +1715,21 @@ export async function runTicket(
       }
 
       // A scoped re-run (QA's corrected steps for a `missing-steps` case) ran
-      // ONLY the rescoped case(s). Merge their fresh results back over the full
-      // verify.json so the rest keep their prior verdicts — before the overrules
-      // and failedCases() below read the list, so they see every case, not one.
+      // ONLY the rescoped case(s). Merge their fresh results back over the FULL
+      // pre-scope list — snapshotted to verify-prescope.json before the re-run,
+      // because the scoped session already overwrote verify.json with just the
+      // rescoped case (phase.ts writes the artifact on return). Done before the
+      // overrules and failedCases() below, so they see every case, not one.
       if (r.cfg.name === 'verify' && r.out.ok && (j.verifyRescopeCases?.length)) {
         const scope = new Set(j.verifyRescopeCases);
-        const priorResults = readArtifact<{ results?: CaseResult[] }>(iid, 'verify.json')?.results ?? [];
-        const fresh = ((r.out.data?.results ?? []) as CaseResult[]).filter((c) => scope.has(c.id));
-        const freshById = new Map(fresh.map((c) => [c.id, c]));
-        const merged = priorResults.map((c) => freshById.get(c.id) ?? c);
-        for (const c of fresh) if (!priorResults.some((p) => p.id === c.id)) merged.push(c);
+        const baseline = readArtifact<{ results?: CaseResult[] }>(iid, 'verify-prescope.json')?.results
+          ?? readArtifact<{ results?: CaseResult[] }>(iid, 'verify.json')?.results ?? [];
+        const fresh = (r.out.data?.results ?? []) as CaseResult[];
+        const merged = mergeScopedVerify(baseline, fresh, scope);
         r.out.data = { ...r.out.data, results: merged };
         writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
         j = updateJournal(iid, { verifyRescopeCases: [] }) ?? j;
-        log.phase(`verify merged ${fresh.length} re-run case(s) back into the full result set`, { iid });
+        log.phase(`verify merged ${scope.size} re-run case(s) back into the ${baseline.length}-case list`, { iid });
       }
 
       // A verify that executed the list but passed NOTHING is not a green
@@ -2569,6 +2588,13 @@ export async function runTicket(
       await addIssueNote(iid,
         `Re-running ${gate.rescope.map((x) => `**${x.caseId}**`).join(', ')} with the corrected steps `
         + '— only that case, since no code changed.');
+      // Snapshot the FULL current list before the scoped re-run. The scoped
+      // verify session runs only the rescoped case(s), and phase.ts writes its
+      // output straight to verify.json the instant it returns — so by the time
+      // the merge below runs, verify.json holds only the rescoped case. The
+      // merge reads this snapshot instead, so every other case (passes and
+      // still-unsettled fails alike) survives.
+      writeArtifact(iid, 'verify-prescope.json', r.out.data);
       log.phase(`verify re-running ${gate.rescope.length} case(s) with QA's corrected steps`, {
         iid, cases: gate.rescope.map((x) => x.caseId).join(', '),
       });
