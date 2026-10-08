@@ -174,6 +174,7 @@ function verifyDecisionsAuditBody(
   const word: Record<string, string> = {
     skip: 'skipped', invalid: 'invalid — dropped',
     expected: 'expected behaviour — accepted as a pass', 'pre-existing': 'pre-existing',
+    'missing-steps': "re-run with QA's corrected steps",
   };
   const rows = decisions.map(
     (d) => `- **${d.caseId}** — ${word[d.verdict] ?? d.verdict} (QA: ${d.by})${d.issueIid ? ` → #${d.issueIid}` : ''}`,
@@ -1695,6 +1696,23 @@ export async function runTicket(
         }
       }
 
+      // A scoped re-run (QA's corrected steps for a `missing-steps` case) ran
+      // ONLY the rescoped case(s). Merge their fresh results back over the full
+      // verify.json so the rest keep their prior verdicts — before the overrules
+      // and failedCases() below read the list, so they see every case, not one.
+      if (r.cfg.name === 'verify' && r.out.ok && (j.verifyRescopeCases?.length)) {
+        const scope = new Set(j.verifyRescopeCases);
+        const priorResults = readArtifact<{ results?: CaseResult[] }>(iid, 'verify.json')?.results ?? [];
+        const fresh = ((r.out.data?.results ?? []) as CaseResult[]).filter((c) => scope.has(c.id));
+        const freshById = new Map(fresh.map((c) => [c.id, c]));
+        const merged = priorResults.map((c) => freshById.get(c.id) ?? c);
+        for (const c of fresh) if (!priorResults.some((p) => p.id === c.id)) merged.push(c);
+        r.out.data = { ...r.out.data, results: merged };
+        writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
+        j = updateJournal(iid, { verifyRescopeCases: [] }) ?? j;
+        log.phase(`verify merged ${fresh.length} re-run case(s) back into the full result set`, { iid });
+      }
+
       // A verify that executed the list but passed NOTHING is not a green
       // phase, whatever its structured output says. Zero passes with blocked
       // cases means the environment (or the change) is broken end to end, and
@@ -2046,6 +2064,18 @@ export async function runTicket(
             });
             j = readJournal(iid) ?? j;
             // flow stays empty → the loop advances to the next phase.
+          } else if (outcome === 'reverify') {
+            // QA gave corrected steps for a `missing-steps` case: re-run verify
+            // scoped to that case alone (cycle to verify itself, not implement —
+            // no code changed). The scoped results merge back in the next pass.
+            const vIdx = list.findIndex((q) => q.name === 'verify');
+            prior[r.cfg.name] = null;
+            claim(
+              vIdx === -1
+                ? { kind: 'stop', status: 'blocked', reason: 'verify: cannot re-run — verify is not in the phase list' }
+                : { kind: 'cycle', jumpTo: vIdx, windowEnd: vIdx },
+              r.cfg.name,
+            );
           } else {
             prior[r.cfg.name] = null;
             claim(
@@ -2451,64 +2481,108 @@ export async function runTicket(
    * applies their verdicts to verify.json in place and returns 'resolved' so the
    * run continues, or a park/block for the caller to claim while it waits.
    */
-  async function verifyCaseGate(r: PhaseResult): Promise<'resolved' | { park: string } | { block: string }> {
-    const caseResults = (r.out.data?.results ?? []) as CaseResult[];
-    const failing = caseResults.filter(countsAsFailure).map((c) => ({ id: c.id, evidence: c.evidence }));
+  async function verifyCaseGate(
+    r: PhaseResult,
+  ): Promise<'resolved' | 'reverify' | { park: string } | { block: string }> {
+    let caseResults = (r.out.data?.results ?? []) as CaseResult[];
+    const meta = new Map(
+      (readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases ?? []).map((c) => [c.id, c]),
+    );
+    const failing = caseResults.filter(countsAsFailure).map((c) => ({
+      id: c.id, evidence: c.evidence, scenario: meta.get(c.id)?.scenario, steps: meta.get(c.id)?.steps,
+    }));
     const gate = await checkVerifyGate({ iid, failing });
     if (gate.verdict === 'unavailable') return { block: VERIFY_GATE_UNAVAILABLE };
-    if (gate.verdict === 'pending') {
-      return {
-        park: 'awaiting a QA decision on the verify case(s) still failing after two laps — a QA '
-          + 'reviewer classifies each on the ticket (`skip`, `invalid`, `expected` or `pre-existing`) '
-          + 'and the run continues once every one has a verdict',
-      };
-    }
 
-    const decisions: NonNullable<RunJournal['verifyCaseDecisions']> = [];
-    const applied = caseResults.map((c) => ({ ...c }));
-    for (const d of gate.directives) {
-      const c = applied.find((x) => x.id === d.caseId);
-      if (!c) continue;
-      const by = d.by ?? 'unknown';
-      if (d.verdict === 'expected') {
-        c.result = 'pass';
-        c.evidence = `QA (${by}) confirmed expected behaviour. ${c.evidence ?? ''}`.trim();
-        decisions.push({ caseId: d.caseId, verdict: 'expected', by });
-      } else if (d.verdict === 'pre-existing') {
-        const issue = await createIssue(
-          `${ticket.title} — ${d.caseId}: pre-existing failure (from #${iid})`,
-          preExistingIssueBody(iid, ticket.title, c),
-        );
-        const newIid = issue.ok ? issue.data?.iid : undefined;
-        c.result = 'skipped';
-        c.evidence = `QA (${by}) classified pre-existing${newIid ? `; tracked as #${newIid}` : ''}. `
-          + `${c.evidence ?? ''}`.trim();
-        if (newIid) {
-          await addIssueNote(iid,
-            `**${d.caseId}** is a pre-existing issue, not caused by this change (QA: ${by}). `
-            + `A separate bug has been created: #${newIid}.`);
+    // Apply the terminal verdicts (skip / invalid / expected / pre-existing) to verify.json in place.
+    if (gate.apply.length) {
+      const decisions: NonNullable<RunJournal['verifyCaseDecisions']> = [];
+      const applied = caseResults.map((c) => ({ ...c }));
+      for (const d of gate.apply) {
+        const c = applied.find((x) => x.id === d.caseId);
+        if (!c) continue;
+        const by = d.by ?? 'unknown';
+        if (d.verdict === 'expected') {
+          c.result = 'pass';
+          c.evidence = `QA (${by}) confirmed expected behaviour. ${c.evidence ?? ''}`.trim();
+          decisions.push({ caseId: d.caseId, verdict: 'expected', by });
+        } else if (d.verdict === 'pre-existing') {
+          const issue = await createIssue(
+            `${ticket.title} — ${d.caseId}: pre-existing failure (from #${iid})`,
+            preExistingIssueBody(iid, ticket.title, c),
+          );
+          const newIid = issue.ok ? issue.data?.iid : undefined;
+          c.result = 'skipped';
+          c.evidence = `QA (${by}) classified pre-existing${newIid ? `; tracked as #${newIid}` : ''}. `
+            + `${c.evidence ?? ''}`.trim();
+          if (newIid) {
+            await addIssueNote(iid,
+              `**${d.caseId}** is a pre-existing issue, not caused by this change (QA: ${by}). `
+              + `A separate bug has been created: #${newIid}.`);
+          } else {
+            log.warn(`verify-case gate: could not open a pre-existing bug for ${d.caseId}`,
+              { iid, error: issue.error?.slice(0, 120) });
+          }
+          decisions.push({ caseId: d.caseId, verdict: 'pre-existing', by, issueIid: newIid });
         } else {
-          log.warn(`verify-case gate: could not open a pre-existing bug for ${d.caseId}`,
-            { iid, error: issue.error?.slice(0, 120) });
+          // `skip` and `invalid` both drop the case; the verdict is kept for the audit.
+          c.result = 'skipped';
+          c.evidence = `QA (${by}) marked ${d.verdict}. ${c.evidence ?? ''}`.trim();
+          decisions.push({ caseId: d.caseId, verdict: d.verdict, by });
         }
-        decisions.push({ caseId: d.caseId, verdict: 'pre-existing', by, issueIid: newIid });
-      } else {
-        // `skip` and `invalid` both drop the case; the verdict is kept for the audit.
-        c.result = 'skipped';
-        c.evidence = `QA (${by}) marked ${d.verdict}. ${c.evidence ?? ''}`.trim();
-        decisions.push({ caseId: d.caseId, verdict: d.verdict, by });
       }
+      r.out.data = { ...r.out.data, results: applied };
+      writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
+      prior.verify = r.out.data;
+      j = updateJournal(iid, {
+        verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
+      }) ?? j;
+      if (decisions.length) await addIssueNote(iid, verifyDecisionsAuditBody(decisions));
+      log.ok(`verify-case gate applied ${decisions.length} QA verdict(s) on #${iid}`);
+      caseResults = applied;
     }
 
-    r.out.data = { ...r.out.data, results: applied };
-    writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
-    prior.verify = r.out.data;
-    j = updateJournal(iid, {
-      verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
-    }) ?? j;
-    if (decisions.length) await addIssueNote(iid, verifyDecisionsAuditBody(decisions));
-    log.ok(`verify-case QA gate resolved on #${iid}`, { decided: decisions.length });
-    return 'resolved';
+    // QA supplied corrected steps for a `missing-steps` case: write them onto the
+    // case, scope the next verify run to it, mark the correction spent, and go
+    // re-run verify on only that case (no code changed, so nothing else re-runs).
+    if (gate.rescope.length) {
+      const data = readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json');
+      const cases = (data?.cases ?? []).map((c) => {
+        const rs = gate.rescope.find((x) => x.caseId === c.id);
+        return rs ? { ...c, steps: rs.steps } : c;
+      });
+      writeArtifact(iid, 'testcases.json', { ...(data ?? {}), cases });
+      const missing = { ...(j.verifyMissingSteps ?? {}) };
+      for (const rs of gate.rescope) {
+        const st = missing[rs.caseId];
+        if (st) missing[rs.caseId] = { ...st, rerunDone: true };
+      }
+      const decisions = gate.rescope.map((x) => ({
+        caseId: x.caseId, verdict: 'missing-steps' as const, by: x.by ?? 'unknown',
+        note: 'QA supplied corrected steps; re-running only this case',
+      }));
+      j = updateJournal(iid, {
+        verifyMissingSteps: missing,
+        verifyRescopeCases: gate.rescope.map((x) => x.caseId),
+        verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
+      }) ?? j;
+      await addIssueNote(iid,
+        `Re-running ${gate.rescope.map((x) => `**${x.caseId}**`).join(', ')} with the corrected steps `
+        + '— only that case, since no code changed.');
+      log.phase(`verify re-running ${gate.rescope.length} case(s) with QA's corrected steps`, {
+        iid, cases: gate.rescope.map((x) => x.caseId).join(', '),
+      });
+      return 'reverify';
+    }
+
+    // No failing cases remain → verify completes. Otherwise wait on QA.
+    const stillFailing = ((r.out.data?.results ?? []) as CaseResult[]).filter(countsAsFailure);
+    if (!stillFailing.length) return 'resolved';
+    return {
+      park: 'awaiting a QA decision on the verify case(s) still failing after two laps — a QA reviewer '
+        + 'classifies each on the ticket (`skip`, `invalid`, `expected`, `pre-existing`, or `missing steps` '
+        + 'to supply corrected steps) and the run continues once every one is settled',
+    };
   }
 
   /**

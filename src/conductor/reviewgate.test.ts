@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseVerifyDirectives, planApprovalRequestBody, repliesAfter, testcasesApprovalRequestBody,
-  testcasesApprovedRecordBody, verifyCasesRequestBody,
+  parseCorrectedSteps, parseVerifyDirectives, planApprovalRequestBody, repliesAfter,
+  testcasesApprovalRequestBody, testcasesApprovedRecordBody, verifyCasesRequestBody, verifyOurStepsBody,
 } from './reviewgate.js';
 import { renderPlanMd } from '../lib/publish.js';
 
@@ -260,4 +260,47 @@ test('the request body lists each failing case and all four verdicts', () => {
   assert.match(body, /filter reset on reload/);
   assert.match(body, /TC-09/);
   for (const w of ['skip', 'invalid', 'expected', 'pre-existing']) assert.match(body, new RegExp(w));
+});
+
+// ---------------------------------------------- verify-case gate: missing-steps
+
+test('parses a missing-steps directive and maps it to the case', () => {
+  for (const phrase of ['TC-14: missing steps', 'TC-14 steps are incomplete', '14: steps missing']) {
+    const d = parseVerifyDirectives(phrase, FAILING);
+    assert.deepEqual(d.map((x) => [x.caseId, x.verdict]), [['TC-14', 'missing-steps']], phrase);
+  }
+});
+
+test('a terminal verdict in the same fragment beats missing-steps', () => {
+  // "skip, the steps are missing anyway" is a reviewer settling the case.
+  assert.equal(parseVerifyDirectives('TC-14: skip, steps missing', FAILING)[0]?.verdict, 'skip');
+});
+
+test('parseCorrectedSteps extracts a numbered list that names the case', () => {
+  const reply = 'TC-14 steps:\n1. Open /pod/people\n2. Apply the 2-4 band\n3. Reload and read the footer';
+  assert.deepEqual(parseCorrectedSteps(reply, 'TC-14'), [
+    'Open /pod/people', 'Apply the 2-4 band', 'Reload and read the footer',
+  ]);
+});
+
+test('parseCorrectedSteps accepts bullets and bare numbers for the case', () => {
+  assert.deepEqual(parseCorrectedSteps('for 9:\n- first\n- second', 'TC-09'), ['first', 'second']);
+});
+
+test('parseCorrectedSteps returns null without a case reference or without steps', () => {
+  assert.equal(parseCorrectedSteps('1. do a thing\n2. do another', 'TC-14'), null); // no case ref
+  assert.equal(parseCorrectedSteps('TC-14 looks wrong to me', 'TC-14'), null);       // no enumerated steps
+  assert.equal(parseCorrectedSteps('TC-14: skip', 'TC-14'), null);                   // a directive, not steps
+});
+
+test('the our-steps comment shows the steps followed and asks for a numbered reply', () => {
+  const body = verifyOurStepsBody('TC-14', 'Filter survives reload', ['Open', 'Apply', 'Reload'], 'footer reset to 566');
+  assert.match(body, /TC-14/);
+  assert.match(body, /1\. Open/);
+  assert.match(body, /footer reset to 566/);
+  assert.match(body, /\*\*only TC-14\*\*/);
+});
+
+test('the request body lists the missing-steps option', () => {
+  assert.match(verifyCasesRequestBody([{ id: 'TC-14' }]), /missing steps/i);
 });

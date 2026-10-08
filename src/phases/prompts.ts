@@ -1590,6 +1590,21 @@ above, under the run directory — nothing else.`;
     const migrations = i.migrationsAdded ?? [];
     const mins = budgetMin('verify', 60);
 
+    // A scoped re-run: QA supplied corrected steps for one or more `missing-steps`
+    // cases, so this runs ONLY those, with their steps now updated in the list.
+    // No code changed since the last lap — every other case keeps its verdict.
+    const rescope = ctx.journal.verifyRescopeCases ?? [];
+    const scopedCases = rescope.length ? cases.filter((c) => rescope.includes(c.id)) : cases;
+    const scopeBlock = rescope.length
+      ? `## Scoped re-run — ONLY ${rescope.join(', ')}
+
+A QA reviewer said ${rescope.length === 1 ? 'this case was' : 'these cases were'} failing because the
+steps were incomplete, and supplied corrected steps — already written into the list below. **No code
+has changed** since the last lap. Run ONLY the case(s) listed here, with these exact steps, and
+output a result for each. Do NOT run or re-report any other case: their verdicts stand.
+`
+      : '';
+
     const lapBlock = ctx.lap > 0 && prevResults.length
       ? `## This is verify lap ${ctx.lap}
 
@@ -1611,7 +1626,7 @@ re-run it, and keep that label only if the proof still holds.
       : '';
 
     return `${ticketBlock(ctx.ticket)}
-${lapBlock}
+${rescope.length ? scopeBlock : lapBlock}
 ## Acceptance criteria (phase 1)
 ${criteria(ctx)}
 
@@ -1721,7 +1736,7 @@ naming exactly what was missing — data archaeology is where whole sessions qui
 and an honest 'blocked' costs the pipeline far less than a session that died mid-list.
 
 ## The case list — execute it id for id (phase 4)
-${caseList(cases, { steps: true })}
+${caseList(scopedCases, { steps: true })}
 
 Report one result per case, using the case's own id. A case you did not run is 'skipped' with
 the reason in \`evidence\` — never a silent omission, and never a 'pass'.

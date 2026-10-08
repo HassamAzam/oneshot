@@ -1076,15 +1076,24 @@ export function appendEdgeCases(iid: number, feedback: string): TestCase[] | nul
  * `expected` accepts the observed behaviour as correct. `pre-existing` says the
  * failure is real but not this change's, and splits it into its own bug.
  */
-export type VerifyVerdict = 'skip' | 'invalid' | 'expected' | 'pre-existing';
+export type VerifyVerdict = 'skip' | 'invalid' | 'expected' | 'pre-existing' | 'missing-steps';
+
+/** The four terminal verdicts, which settle a case outright (unlike `missing-steps`). */
+const TERMINAL_VERDICTS: ReadonlySet<VerifyVerdict> = new Set(['skip', 'invalid', 'expected', 'pre-existing']);
 
 export interface VerifyDirective { caseId: string; verdict: VerifyVerdict; by: string | null; raw: string }
 
+/** A still-failing case described to the gate: its evidence, and (for `missing-steps`) its scenario and steps. */
+export interface VerifyFailingCase { id: string; evidence?: string; scenario?: string; steps?: string[] }
+
 export interface VerifyGateResult {
-  verdict: 'resolved' | 'pending' | 'unavailable';
-  directives: VerifyDirective[];
-  /** Failing case ids with no directive yet — empty exactly when `resolved`. */
-  unresolved: string[];
+  verdict: 'actionable' | 'unavailable';
+  /** Terminal verdicts (skip / invalid / expected / pre-existing) the caller applies to verify.json now. */
+  apply: VerifyDirective[];
+  /** Cases whose QA-corrected steps have just arrived — the caller re-runs each one, scoped. */
+  rescope: Array<{ caseId: string; steps: string[]; by: string | null }>;
+  /** Failing cases still awaiting a QA answer this tick (no directive, or mid `missing-steps` exchange). */
+  pending: string[];
 }
 
 /**
@@ -1106,10 +1115,15 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
     if (m) byNumber.set(String(Number(m[1])), id);
   }
   const verdictOf = (s: string): VerifyVerdict | null => {
+    // Terminal verdicts first: a fragment that says both "skip" and "missing
+    // steps" is a reviewer settling the case, so the terminal word wins.
     if (/pre[\s-]?exist|existing\s+(issue|bug)/i.test(s)) return 'pre-existing';
     if (/\binvalid\b/i.test(s)) return 'invalid';
     if (/\bexpected\b/i.test(s)) return 'expected';
     if (/\bskip\b/i.test(s)) return 'skip';
+    if (/missing\s+steps?|steps?\s+(are\s+|were\s+)?(missing|incomplete|wrong|insufficient)|incomplete\s+steps?|wrong\s+steps?/i.test(s)) {
+      return 'missing-steps';
+    }
     return null;
   };
   const out: VerifyDirective[] = [];
@@ -1128,8 +1142,8 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
   return out;
 }
 
-/** The comment the verify-case gate posts, listing each failing case and the four verdicts. */
-export function verifyCasesRequestBody(failing: Array<{ id: string; evidence?: string }>): string {
+/** The comment the verify-case gate posts, listing each failing case and the five verdicts. */
+export function verifyCasesRequestBody(failing: VerifyFailingCase[]): string {
   const lines = failing.map((c) => {
     const ev = (c.evidence ?? '').split('\n')[0]!.slice(0, 300).trim();
     return `- **${c.id}**${ev ? ` — ${ev}` : ''}`;
@@ -1148,9 +1162,59 @@ export function verifyCasesRequestBody(failing: Array<{ id: string; evidence?: s
     '- `TC-N: invalid` — the case is wrong; drop it.',
     '- `TC-N: expected` — the observed behaviour is correct; accept it as a pass.',
     '- `TC-N: pre-existing` — the failure is real but not this change\'s; a separate bug is opened and linked, and verify completes.',
+    '- `TC-N: missing steps` — the case\'s steps are incomplete. I\'ll post the steps I followed; reply with the corrected ones and I\'ll re-run **only that case**.',
     '',
-    '_The run reads this from the ticket. It continues once every case above has a verdict._',
+    '_The run reads this from the ticket. It continues once every case above is settled._',
   ].join('\n');
+}
+
+/** The comment that opens the `missing-steps` exchange: the steps verify followed, and a request for the corrected ones. */
+export function verifyOurStepsBody(
+  caseId: string, scenario: string | undefined, steps: string[], evidence: string | undefined,
+): string {
+  const num = (/(\d+)\s*$/.exec(caseId) ?? [])[1] ?? caseId;
+  const out: string[] = [`### ${caseId} — the steps verify followed`, ''];
+  if (scenario) { out.push(`**Scenario:** ${scenario}`, ''); }
+  out.push(steps.length ? steps.map((s, i) => `${i + 1}. ${s}`).join('\n') : '_(no steps were recorded on this case)_', '');
+  const ev = (evidence ?? '').split('\n')[0]!.trim();
+  if (ev) { out.push(`**What verify observed:** ${ev}`, ''); }
+  out.push(
+    `If these are missing something, reply with the corrected steps for **${caseId}** as a numbered `
+    + `list that mentions \`TC-${num}\`, for example:`,
+    '',
+    '```',
+    `TC-${num} steps:`,
+    '1. …',
+    '2. …',
+    '```',
+    '',
+    `I'll re-run **only ${caseId}** with your steps — nothing else is re-executed, since no code changed.`,
+  );
+  return out.join('\n');
+}
+
+/**
+ * Pull a corrected step list out of a QA reply for one case. Pure.
+ *
+ * Returns the steps only when the reply (a) refers to the case by its number
+ * and (b) actually enumerates steps — a numbered or bulleted list. A reply that
+ * merely restates a verdict ("TC-14: skip") enumerates nothing and returns
+ * null, so it is read as a directive elsewhere rather than as steps.
+ */
+export function parseCorrectedSteps(text: string, caseId: string): string[] | null {
+  const num = (/(\d{1,5})\s*$/.exec(caseId) ?? [])[1];
+  if (!num) return null;
+  if (!new RegExp(`(?:tc[-\\s]?|case\\s*|no\\.?\\s*|#)?0*${Number(num)}\\b`, 'i').test(text)) return null;
+  const enumerated = text.split('\n').map((l) => l.trim())
+    .filter((l) => /^(?:step\s*)?\d+[.)]\s|^[-*]\s/i.test(l))
+    .map((l) => l.replace(/^(?:step\s*)?\d+[.)]\s*/i, '').replace(/^[-*]\s*/, '').trim())
+    .filter(Boolean);
+  if (!enumerated.length) return null;
+  // A single "step" that is only a verdict word is a directive, not steps.
+  if (enumerated.length === 1 && /^(skip|invalid|expected|pre[\s-]?exist|missing\s+steps?)/i.test(enumerated[0]!)) {
+    return null;
+  }
+  return enumerated;
 }
 
 /** The Slack heads-up for the verify-case gate — its own, because it does not resolve on `approved`. */
@@ -1176,28 +1240,29 @@ function verifyCaseGateAskText(journal: RunJournal, noteId: number, mentions: st
  * other gates are while they wait.
  */
 export async function checkVerifyGate(
-  opts: { iid: number; failing: Array<{ id: string; evidence?: string }> },
+  opts: { iid: number; failing: VerifyFailingCase[] },
 ): Promise<VerifyGateResult> {
   const { iid, failing } = opts;
   const failingIds = failing.map((c) => c.id);
+  const caseOf = new Map(failing.map((c) => [c.id, c]));
 
   if (DRY_RUN) {
     log.warn('[dry-run] would pause at the verify-case QA gate — auto-skipping every failing case', { iid });
     return {
-      verdict: 'resolved',
-      directives: failingIds.map((id) => ({ caseId: id, verdict: 'skip', by: null, raw: 'dry-run' })),
-      unresolved: [],
+      verdict: 'actionable',
+      apply: failingIds.map((id) => ({ caseId: id, verdict: 'skip' as const, by: null, raw: 'dry-run' })),
+      rescope: [], pending: [],
     };
   }
 
   const approvers = approversFor('verifyCases');
   if (!approvers.length) {
     log.warn("no qa reviewers in config/reviewers.json — 'verifyCases' gate cannot be satisfied", { iid });
-    return { verdict: 'unavailable', directives: [], unresolved: failingIds };
+    return { verdict: 'unavailable', apply: [], rescope: [], pending: failingIds };
   }
 
-  const journal = readJournal(iid);
-  if (!journal) return { verdict: 'pending', directives: [], unresolved: failingIds };
+  let journal = readJournal(iid);
+  if (!journal) return { verdict: 'actionable', apply: [], rescope: [], pending: failingIds };
 
   let state = stateOf(journal, 'verifyCases');
 
@@ -1205,34 +1270,82 @@ export async function checkVerifyGate(
     const posted = await addIssueNote(iid, verifyCasesRequestBody(failing));
     if (!posted.ok || !posted.data) {
       log.warn('verify-case gate request could not be posted to the ticket — will retry next tick', { iid });
-      return { verdict: 'pending', directives: [], unresolved: failingIds };
+      return { verdict: 'actionable', apply: [], rescope: [], pending: failingIds };
     }
     state = { ...state, requestNoteId: posted.data.id };
     persist(iid, 'verifyCases', state);
     const mentions = await mentionsFor('verifyCases');
     await notifySlack(journal, verifyCaseGateAskText(journal, posted.data.id, mentions, failing.length), true);
     log.phase(`verify-case QA decision requested on #${iid}`, { note: posted.data.id, cases: failing.length });
-    return { verdict: 'pending', directives: [], unresolved: failingIds };
+    return { verdict: 'actionable', apply: [], rescope: [], pending: failingIds };
   }
 
   const notes = await issueNotes(iid);
   if (!notes.ok || !notes.data) {
     log.warn('verify-case gate could not read the ticket comments — will retry next tick', { iid });
-    return { verdict: 'pending', directives: [], unresolved: failingIds };
+    return { verdict: 'actionable', apply: [], rescope: [], pending: failingIds };
   }
+  const noteData = notes.data;
 
-  const replies = repliesAfter(notes.data, state.requestNoteId).filter((r) => mayApprove(r, 'verifyCases'));
-  const directives: VerifyDirective[] = [];
-  const claimed = new Set<string>();
+  // Every directive per case, across every qualified reply, in the order sent.
+  const replies = repliesAfter(noteData, state.requestNoteId).filter((r) => mayApprove(r, 'verifyCases'));
+  const perCase = new Map<string, Array<{ verdict: VerifyVerdict; by: string | null; raw: string }>>();
   for (const r of replies) {
     for (const d of parseVerifyDirectives(r.text, failingIds)) {
-      if (claimed.has(d.caseId)) continue;
-      claimed.add(d.caseId);
-      directives.push({ ...d, by: r.user });
+      const arr = perCase.get(d.caseId) ?? [];
+      arr.push({ verdict: d.verdict, by: r.user, raw: d.raw });
+      perCase.set(d.caseId, arr);
     }
   }
-  const unresolved = failingIds.filter((id) => !claimed.has(id));
-  return { verdict: unresolved.length ? 'pending' : 'resolved', directives, unresolved };
+
+  const missing: Record<string, { oursNoteId: number; rerunDone?: boolean }> = { ...(journal.verifyMissingSteps ?? {}) };
+  const apply: VerifyDirective[] = [];
+  const rescope: VerifyGateResult['rescope'] = [];
+  const pending: string[] = [];
+
+  for (const id of failingIds) {
+    const ds = perCase.get(id) ?? [];
+    // A terminal verdict settles the case, even if a `missing-steps` directive
+    // is also present — a reviewer who classifies it has moved past the steps.
+    const terminal = ds.find((d) => TERMINAL_VERDICTS.has(d.verdict));
+    if (terminal) {
+      apply.push({ caseId: id, verdict: terminal.verdict, by: terminal.by, raw: terminal.raw });
+      continue;
+    }
+    if (!ds.some((d) => d.verdict === 'missing-steps')) { pending.push(id); continue; }
+
+    const st = missing[id];
+    if (!st) {
+      // First `missing-steps`: post the steps verify followed, ask for corrected ones.
+      const c = caseOf.get(id);
+      const posted = await addIssueNote(iid, verifyOurStepsBody(id, c?.scenario, c?.steps ?? [], c?.evidence));
+      if (posted.ok && posted.data) {
+        missing[id] = { oursNoteId: posted.data.id };
+        journal = updateJournal(iid, { verifyMissingSteps: missing }) ?? journal;
+        log.phase(`verify-case gate posted the steps for ${id}, awaiting QA's corrected ones`, { iid });
+      }
+      pending.push(id);
+      continue;
+    }
+    if (st.rerunDone) {
+      // Re-ran once with corrected steps and it still fails — a correction is
+      // spent, so this now needs a terminal verdict rather than another round.
+      pending.push(id);
+      continue;
+    }
+    // Corrected steps are whatever QA enumerated after our posting.
+    const after = repliesAfter(noteData, st.oursNoteId).filter((r) => mayApprove(r, 'verifyCases'));
+    let steps: string[] | null = null;
+    let by: string | null = null;
+    for (const r of after) {
+      const s = parseCorrectedSteps(r.text, id);
+      if (s) { steps = s; by = r.user; break; }
+    }
+    if (steps) rescope.push({ caseId: id, steps, by });
+    else pending.push(id);
+  }
+
+  return { verdict: 'actionable', apply, rescope, pending };
 }
 
 // ------------------------------------------------------------- design gate

@@ -367,10 +367,20 @@ A reviewer answers each failing case on the ticket with one of:
 - **`TC-N: pre-existing`** — the failure is real but not this change's. A separate
   bug is opened and linked on the ticket, the case is set aside, and verify
   completes.
+- **`TC-N: missing steps`** — the case's steps are incomplete, not the product.
+  The conductor posts the steps you followed and asks QA for the corrected ones;
+  when QA replies with them, **only that one case** is re-run with the new steps
+  (nothing else re-executes, because no code changed). If it passes, it's done;
+  if it still fails, QA settles it with one of the verdicts above.
 
-The run continues the moment **every** still-failing case has a verdict, and each
+The run continues the moment **every** still-failing case is settled, and each
 decision — who made it and why — is recorded on the MR for its reviewer. Until
 then the run waits on QA; it never merges a case that is actually `fail`.
+
+This is why the steps you record matter beyond your own run: on a `missing steps`
+case they are exactly what QA reads to see what you did and to hand back a
+corrected list. Follow the case's authored steps and say, in `evidence`, what you
+actually did and saw — a vague `fail` makes the correction a guess.
 
 Do not pre-empt this by softening a real failure into `skipped`, `pre-existing`
 or `blocked` to avoid the gate: the gate exists so a **person** makes that call,

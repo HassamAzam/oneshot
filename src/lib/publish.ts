@@ -341,6 +341,7 @@ const SPECS: Spec[] = [
       const verdictWord: Record<string, string> = {
         skip: 'skipped', invalid: 'invalid — dropped',
         expected: 'expected behaviour — accepted as a pass', 'pre-existing': 'pre-existing',
+        'missing-steps': "re-run with QA's corrected steps",
       };
       return {
         body: `**Local verification** — ${tally(results)}.\n\n${resultTable(results)}\n\n` +
