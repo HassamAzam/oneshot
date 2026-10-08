@@ -89,7 +89,6 @@ import {
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
-import { recordOutcome } from '../lib/outcomes.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
@@ -2907,7 +2906,6 @@ export async function runTicket(
       status, ended_at: Date.now(), blocked_why: reason ?? null, owner_seen_at: Date.now(),
     });
     logEvent('run_finished', { status, reason }, { runId: journal.runId });
-    recordOutcome(journal);
 
     // Both leases go back on EVERY terminal status. Holding a port for a
     // blocked run's forensics starves the pool with nothing to show for it —
