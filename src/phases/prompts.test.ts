@@ -787,3 +787,15 @@ test('the design prompt names the very file writeDesignTokens wrote, and tells a
   assert.ok(prompt.includes(written.path), 'the prompt must point at the file the writer produced');
   assert.match(prompt, /data-theme="dark"/);
 });
+
+test('the design prompt reports renders as design/<file>, not the bare filename the gate cannot find', () => {
+  // design writes its mockups and renders into design/, and the schema + every reader
+  // (approvedDesignBlock, designAttachments, designDeliverableRefusal) resolve those fields
+  // against the run's artifact dir. The shared artifactsBlock told this phase to use a BARE
+  // FILENAME, so a render written to design/ was looked for in the root and the gate refused a
+  // design nobody could see (run r-muzdgwta-9ac10b, ticket #8800). The design phase must carry
+  // the design/ prefix, exactly as tokensFile already does.
+  const prompt = promptFor(cfg('design'), ctx(ticket({ iid: 424244, labels: ['Design'] })));
+  assert.ok(prompt.includes('design/<filename>'), 'design names mockupHtml/screenshot/before as design/<file>');
+  assert.doesNotMatch(prompt, /BARE FILENAME/, 'the generic bare-filename instruction contradicts design/ outputs');
+});
