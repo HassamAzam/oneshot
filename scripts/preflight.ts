@@ -513,7 +513,7 @@ function checkNodeModulesDrift(): void {
 /**
  * Can a local-tests run start cleanly right now?
  *
- * Doctor has already said whether this desk is set up for the step; this is
+ * Doctor has already said whether this desk is set up for the mode; this is
  * the part that changes between runs. Reported, never repaired: a leftover
  * database or worktree may belong to a run a live conductor is in the middle
  * of, and `scripts/localtests.cjs gc` is the one place that knows how to tell.
@@ -526,6 +526,10 @@ function checkLocalTests(): void {
     else skip('local tests: off', lt.off ?? '');
     return;
   }
+  // Said here too, because this is what an operator reads before starting the
+  // conductor: which tickets this desk will pick up for a local run.
+  pass('local tests on', `after the merge, for tickets labelled "${lt.labels.trigger}" — `
+    + `"${lt.labels.running}" while a run is in progress, "${lt.labels.done}" when it is over`);
 
   const holder = cypressLeaseHolder();
   if (holder) {

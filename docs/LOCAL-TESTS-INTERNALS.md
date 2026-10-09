@@ -1,8 +1,9 @@
 # Local tests: `scripts/localtests.cjs` internals
 
-The plain-code half of the local automation tests step. The conductor calls it; no session may
+The plain-code half of the local automation tests mode (`src/localtests`), which runs after a
+ticket's change is merged, never inside the Loop. The conductor calls it; no session may
 (`git-guard` refuses it). Setting a desk up is in [LOCAL-TESTS.md](LOCAL-TESTS.md); this page is
-what each subcommand does and what it names things.
+how the mode drives it, what each subcommand does and what it names things.
 
 **Contract.** stdout is exactly one JSON object; logs go to stderr. A non-zero exit means stdout
 is `{code, message, hint}` with a named code (`E_CONFIG`, `E_PORT_BUSY`, `E_PORT_FOREIGN`,
@@ -10,10 +11,11 @@ is `{code, message, hint}` with a named code (`E_CONFIG`, `E_PORT_BUSY`, `E_PORT
 `E_APP_FAILED`, `E_PATCH_MISMATCH`, `E_DEADLINE`, `E_ABORTED`, …). Failing tests are a result, not
 an error: `run` exits 0 with `status: 'failed'`.
 
-Three codes mean "try again later", and the conductor parks on them instead of recording an
-error: `E_PORT_BUSY` (a port is held by another local-tests run or a harness — anything else on the
-port is `E_PORT_FOREIGN`, which needs a person), `E_RUN_IN_PROGRESS` (this ticket's previous run
-is still alive) and `E_BASELINE_BUSY` (something is connected to the baseline). `E_DEADLINE` from
+Three codes mean "try again later", and the mode waits and tries again on a later tick instead of
+recording an error: `E_PORT_BUSY` (a port is held by another local-tests run or a harness —
+anything else on the port is `E_PORT_FOREIGN`, which needs a person), `E_RUN_IN_PROGRESS` (this
+ticket's previous run is still alive) and `E_BASELINE_BUSY` (something is connected to the
+baseline). `E_DEADLINE` from
 the script means it stopped short of the conductor's `--until` so that its cleanup could still run.
 
 **Config.** Read like `hooks/_common.cjs` and `scripts/app.cjs` read it: the Oneshot `.env` and
@@ -35,6 +37,51 @@ string value of the credentials file and every value of a secret-named variable 
 `ONESHOT_TEST_LOGIN`) is replaced by `***`, wherever it sits: a test's `error`, `reason`, `notes`,
 a hint.
 
+## How the mode drives it
+
+One ticket at a time, in this order. The mode keeps its own journal at
+`state/localtests/<iid>/journal.json`; the script's run directory stays `state/runs/<iid>/`
+(artifacts, `wsa`, `wsa-run`, the patch), which is what `localTestsWorktree()` and
+`localTestsPatchFile()` in `src/lib/config.ts` name. Under `DRY_RUN` both live under
+`state-dry/state/`.
+
+1. **Ready?** `hooks/local-tests-ready.cjs`, run by the conductor (docs/HOOKS.md, "Not a hook:
+   `local-tests-ready`"): the trigger label, and the ticket's own merge request (one that closes it,
+   or names its iid in the source branch or title) merged into `branches.base`, never a promotion or
+   a backmerge. Own MRs that are all still open mean not ready, quietly; only a ticket with no linked
+   MR that closes or names it falls back to any linked MR merged into the base. The latest own
+   merged MR is the one tested: its merge (or squash) commit is `--ref`, and `mergedMr.base` is
+   `--base` — `diff_refs.base_sha` for an MR merged with no merge commit, else the merge commit's
+   first parent (`<mergeSha>^1` when the hook could not say). `mergedMr.ranges` lists every own MR
+   merged into the base, oldest first, as `{mrIid, base, head}`; the scope covers all of them and
+   the list comment names each.
+   Only one desk per team runs the mode: the per-ticket `lock` is an O_EXCL file under
+   `state/localtests/<iid>/` and does not reach other machines, and a desk skips a ticket whose
+   notes already carry another desk's list.
+2. **Scope.** A throwaway ERP worktree at the merge commit, `prepare-scope`, the
+   `local-tests-scope` session (`runPhase`, the phase is `onDemand`), `capture`. When no existing
+   spec reaches the change the session returns no specs and an `add` proposal; it writes a temporary
+   spec only when QA asked for one (`request: 'write-temporary'` in its prompt context).
+3. **Ask QA**, and wait for the first reply from `config/reviewers.json` `qa`. The quick re-check
+   behind `disapproved: please check again` runs no session: `git fetch` in the clone, a fresh
+   throwaway worktree at `origin/<automationRef>`, then
+   `node skills/local-tests-impact/scripts/index.cjs --erp <erp worktree> --base <first parent>
+   --head <merge sha> --automation <worktree> --json`; a spec reached for any reason but `module`
+   counts as found. `disapproved: added <path>` is checked with
+   `git cat-file -e origin/<automationRef>:<path>` in the clone.
+4. **Run** the approved list: `run --iid N --worktree <erp worktree> --ref <merge sha>
+   --specs-file F --patch P --patch-sha S --base <base> --until <deadline>`, under the
+   desk-wide Cypress lease (`src/lib/cypresslease.ts`). A dry run stops before this step unless
+   `ONESHOT_LOCAL_TESTS_DRY_CYPRESS=1`. The result is written to
+   `state/runs/<iid>/artifacts/local-tests-run.json` stamped with the request's run id (the
+   journal's `runId`). A saved run is reused instead of running Cypress only when its run id, its
+   cache key (specs, merge commit, automation commit, patch, baseline, `maxRunMinutes`) and its
+   status (`passed`/`failed`) all match — that is, only after a crash inside the same request. A new
+   request (the trigger put back after Done, or a new dry rehearsal) always runs Cypress, and is
+   announced with a start note of its own.
+5. **Clean up.** `gc --keep <tickets in flight>` on boot and on every tick of the mode, so a
+   crashed run's copies and worktrees do not outlive it.
+
 ## Subcommands
 
 | Command | Does | Prints |
@@ -52,6 +99,10 @@ process that shows it is in use.
 [{"spec", "why"}]}`. A bare list of paths (or of `{file}`) is still accepted. A `notRunnable` spec
 is never run, even when `specs` names it too, and comes back unchanged in the result's
 `notRunnable`.
+
+**`outsideAllowed`**, **`weakened`** and **`weakenedDetail`** (`[{file, why}]`) are saved in the
+scope's `capture`, and the found comment shows every file they name, with each `why`, in a bold
+line just before it asks QA to approve.
 
 **`outsideAllowed`** is every changed path not under `localTests.allowedPaths` (a prefix is a
 directory: `cypress/e2e/` does not admit `cypress/e2e-old/`), plus `cypress.env.json` when it was

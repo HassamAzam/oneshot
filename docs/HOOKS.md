@@ -68,6 +68,8 @@ between phases).
 
 #### Local tests (`local-tests-scope`, `local-tests-run`)
 
+Both belong to the local automation tests mode (`src/localtests`), which runs after a ticket's
+change is merged; they are `onDemand`, so the Loop never schedules either.
 `local-tests-scope` is a session. It may make **temporary** edits to specs, page objects and
 fixtures in a throwaway worktree of the workstream-automation clone at `state/runs/<iid>/wsa`.
 Those edits are never committed. They are saved as
@@ -144,6 +146,24 @@ missing token, GitLab down or answering 401/500, too many label events, a bug �
 output) resolves to `{}` like any guard, and the conductor reads `{}`, or anything short of a
 well-formed verdict for this ticket under `automationReadiness`, as `unknown` too. `unknown` is a
 hold: nothing is spent and nothing is posted.
+
+### Not a hook: `local-tests-ready`
+
+`hooks/local-tests-ready.cjs` is the local automation tests mode's readiness check, and the same
+kind of thing as `automation-ready`: it speaks the guard contract, `hooksFor()` registers it for
+**no** event, and its only caller is the conductor (`src/localtests/readiness.ts`), which runs it
+on each tick before it spends a scope session on a ticket. A hook would be the wrong layer for the same reason (§1): what it
+decides is whether the mode starts at all, before any session exists, and every comment and label
+edit the mode makes is conductor code.
+
+A ticket is ready when `Ready for Automation Testing` (`labels.localTestsTrigger`) is on it —
+or the operator passed `--assume-label`, which a dry run alone accepts — **and** a merge request
+linked to it is merged into `branches.base` and is the ticket's own change, not a promotion or a
+backmerge (source `stage`/`master`/`main`/`dev`, or a title like `stage -> dev` or `Backmerge`).
+That MR's merge commit is the code under test, and its first parent is the base. A labelled
+ticket whose change is not merged yet waits quietly, with no comment, and is checked again on
+later ticks. Anything the check cannot answer is a hold, never a start: nothing is spent and
+nothing is posted.
 
 ### SessionEnd
 

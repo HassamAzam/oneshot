@@ -286,7 +286,7 @@ function checkCypress(repo: string): void {
 }
 
 /**
- * Is this desk set up for the local automation tests step?
+ * Is this desk set up for the local automation tests mode (src/localtests)?
  *
  * Read-only, every line of it: nothing here fetches, installs, connects to the
  * baseline or creates a database. What is true only at this instant — sessions
@@ -302,6 +302,11 @@ function checkLocalTests(lt: LocalTestsConfig): void {
     else pass('local tests: off', lt.off ?? '');
     return;
   }
+
+  // The mode runs after the merge, on these three labels (whether they exist
+  // on the project is checked with every other label, under GitLab).
+  pass('local tests labels', `"${lt.labels.trigger}" starts a run once the ticket's MR is merged, `
+    + `"${lt.labels.running}" while QA's approved list runs, "${lt.labels.done}" when it finishes`);
 
   // The clone every run cuts its throwaway worktree from.
   const repo = lt.repo;

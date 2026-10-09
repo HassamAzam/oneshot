@@ -12,24 +12,24 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const VAR = 'GITLAB_REPO_URL';
-/** The desk switch for the local-tests phases, which phases() also filters on. */
+/** The desk switch for the local automation tests mode, which must not change the Loop's list. */
 const LT_VAR = 'ONESHOT_LOCAL_TESTS_REPO';
+
+type Listed = { name: string; targets?: string[]; onDemand?: boolean; group?: string };
 
 /**
  * The target is the last path segment of GITLAB_REPO_URL. The empty string for
  * no target, never `delete` — dotenv fills a missing key (see target.test.ts).
- * The local-tests step is OFF unless `localTestsRepo` is given, whatever this
+ * The local-tests mode is OFF unless `localTestsRepo` is given, whatever this
  * desk's .env says, so these assertions mean the same on every desk.
  */
-async function phasesWith(
-  value: string, localTestsRepo = '',
-): Promise<Array<{ name: string; targets?: string[] }>> {
+async function phasesWith(value: string, localTestsRepo = ''): Promise<Listed[]> {
   const saved = [VAR, LT_VAR].map((k) => [k, Object.prototype.hasOwnProperty.call(process.env, k), process.env[k]] as const);
   process.env[VAR] = value ? `https://gitlab.example.com/acme/${value}` : '';
   process.env[LT_VAR] = localTestsRepo;
   try {
     const m = await import(`./config.js?phases=${encodeURIComponent(value)}-${localTestsRepo ? 'lt' : ''}-${Date.now()}`);
-    return (m.phases as () => Array<{ name: string; targets?: string[] }>)();
+    return (m.phases as () => Listed[])();
   } finally {
     for (const [k, had, before] of saved) {
       if (had) process.env[k] = before;
@@ -52,26 +52,53 @@ test('the erp target runs mr-open between implement and testcases', async () => 
   assert.equal(names[names.indexOf('mr-open') + 1], 'testcases');
 });
 
-test('adding the target gate adds exactly one phase and removes none', async () => {
-  const off = (await phasesWith('')).map((p) => p.name);
-  const on = (await phasesWith('erp')).map((p) => p.name);
-  assert.deepEqual(on.filter((n) => !off.includes(n)), ['mr-open']);
-  assert.deepEqual(off.filter((n) => !on.includes(n)), []);
+/** What the Loop schedules: on-demand phases are invoked by name, never walked into. */
+const scheduled = (list: Listed[]): string[] => list.filter((p) => !p.onDemand).map((p) => p.name);
+
+test('adding the target gate adds exactly one scheduled phase and removes none', async () => {
+  const off = await phasesWith('');
+  const on = await phasesWith('erp');
+  assert.deepEqual(scheduled(on).filter((n) => !scheduled(off).includes(n)), ['mr-open']);
+  assert.deepEqual(scheduled(off).filter((n) => !scheduled(on).includes(n)), []);
+  // The rest of what erp adds is the local automation tests mode's, which the
+  // Loop never runs.
+  assert.deepEqual(on.filter((p) => !off.some((o) => o.name === p.name) && p.onDemand).map((p) => p.name),
+    ['local-tests-scope', 'local-tests-run']);
 });
 
-test('a desk without the automation clone runs neither local-tests phase, and ui-evidence still pairs with mr', async () => {
-  const names = (await phasesWith('erp')).map((p) => p.name);
-  assert.ok(!names.includes('local-tests-scope'), names.join(', '));
-  assert.ok(!names.includes('local-tests-run'), names.join(', '));
-  assert.equal(names[names.indexOf('ui-evidence') + 1], 'mr', 'the two batch together exactly as before');
+test('the local automation tests clone changes nothing in the Loop\'s list', async () => {
+  // The two phases left the pre-merge pipeline for the post-merge mode
+  // (src/localtests). A desk with the clone and a desk without one walk the
+  // same list, so pointing ONESHOT_LOCAL_TESTS_REPO at a clone cannot change
+  // what a Loop run does.
+  for (const target of ['', 'erp']) {
+    const without = await phasesWith(target);
+    const withClone = await phasesWith(target, '/nowhere/workstream-automation');
+    assert.deepEqual(withClone.map((p) => p.name), without.map((p) => p.name), `target '${target}'`);
+  }
 });
 
-test('a desk with the clone runs both local-tests phases between ui-evidence and mr, on erp only', async () => {
-  const on = (await phasesWith('erp', '/nowhere/workstream-automation')).map((p) => p.name);
-  assert.deepEqual(on.slice(on.indexOf('ui-evidence'), on.indexOf('mr') + 1),
-    ['ui-evidence', 'local-tests-scope', 'local-tests-run', 'mr']);
-  const off = (await phasesWith('erp')).map((p) => p.name);
-  assert.deepEqual(on.filter((n) => !off.includes(n)), ['local-tests-scope', 'local-tests-run']);
+test('ui-evidence and mr stay adjacent in the package group, with or without the clone', async () => {
+  // A group is a run of CONSECUTIVE phases (runner.ts), so any phase between
+  // the two, even an on-demand one the Loop steps over, would split the pair.
+  for (const repo of ['', '/nowhere/workstream-automation']) {
+    const list = await phasesWith('erp', repo);
+    const at = list.findIndex((p) => p.name === 'ui-evidence');
+    assert.equal(list[at + 1]?.name, 'mr', list.map((p) => p.name).join(', '));
+    assert.equal(list[at]?.group, 'package');
+    assert.equal(list[at + 1]?.group, 'package');
+  }
+});
+
+test('both local-tests phases are on demand, after every phase the Loop runs, on erp only', async () => {
+  const list = await phasesWith('erp', '/nowhere/workstream-automation');
+  const names = list.map((p) => p.name);
+  const lastScheduled = Math.max(...list.map((p, i) => (p.onDemand ? -1 : i)));
+  for (const name of ['local-tests-scope', 'local-tests-run']) {
+    const p = list.find((x) => x.name === name);
+    assert.equal(p?.onDemand, true, `${name} must be onDemand, or the Loop would schedule it`);
+    assert.ok(names.indexOf(name) > lastScheduled, `${name} sits inside the Loop's sequence: ${names.join(', ')}`);
+  }
   // The automation suite is the erp target's; another project never gets them.
   const elsewhere = (await phasesWith('', '/nowhere/workstream-automation')).map((p) => p.name);
   assert.ok(!elsewhere.includes('local-tests-scope') && !elsewhere.includes('local-tests-run'));

@@ -562,25 +562,25 @@ export const UI_EVIDENCE_SCHEMA = phaseSchema({
 }, ['screenshots', 'observations']);
 
 /**
- * The local automation tests plan (skill: local-tests-impact). Read by code,
- * not by a later session: local-tests-run runs `specs` as listed, the ticket
- * note is rendered from it, and the localSpecs gate arms on `proposals`. So a
- * spec missing from `specs` is a spec that does not run, and a change to the
- * team's test list that is not in `proposals` is one QA never sees.
+ * The local automation tests plan (skill: local-tests-impact), made for a
+ * merged ticket by the post-merge mode (src/localtests/runner.ts). Read by
+ * code, not by a later session: the ticket note is rendered from it, QA
+ * approves that list before every run, and the run executes `specs` as listed.
+ * So a spec missing from `specs` is a spec that does not run.
  *
- * A plan with no spec to run is written back as not applicable whatever it
- * said (afterScopeSession): one "not needed" line, no label, no gate, and its
- * proposals shown as suggestions. The descriptions below say so, so the
- * session is never promised a QA question that will not be asked.
+ * An empty `specs` is posted as "Oneshot found no automation test for this
+ * ticket", with the `add` proposals as the suggested tests, and the mode waits
+ * for QA's reply. The descriptions below say so, so the session's picture of
+ * what happens next matches the mode's.
  */
 export const LOCAL_TESTS_SCOPE_SCHEMA = phaseSchema({
   applicable: {
     type: 'boolean',
     description:
-      'False when no workstream-automation spec covers what this diff touches. Say why in `reason` ' +
-      'and send empty lists. That is a correct answer, not a failure: the run continues to `mr` ' +
-      'and the ticket gets one line saying local tests were not needed. A plan with no spec in ' +
-      '`specs` is posted that same way even if you say true: no label, no QA question.',
+      'False when nothing a workstream-automation spec could observe changed (a backend path no screen ' +
+      'reaches, say). Say why in `reason` and send empty lists. True when the change is observable, even ' +
+      'if no existing spec reaches it: then `specs` is empty, `proposals` names the suggested test, and ' +
+      'the ticket is told "Oneshot found no automation test" and QA decides what happens next.',
   },
   reason: str('Why applicable is what it is, in one sentence a non-developer can read.'),
   modules: strArr('The automation modules the chosen specs belong to, e.g. "Leaves", "Payroll".'),
@@ -597,7 +597,7 @@ export const LOCAL_TESTS_SCOPE_SCHEMA = phaseSchema({
         module: str('Its module, one of `modules`'),
         cases: { type: 'number', description: 'How many test cases (it blocks) the file holds.' },
         ciSeconds: { type: 'number', description: 'Its last CI duration in seconds, when spec-timings.json records one.' },
-        why: str('What in the diff this spec exercises, in one plain line'),
+        why: str('What in the diff this spec exercises, in one plain line. Start a health-check spec with "Health check:"'),
       },
       required: ['file', 'module', 'cases', 'why'],
     },
@@ -622,11 +622,10 @@ export const LOCAL_TESTS_SCOPE_SCHEMA = phaseSchema({
   proposals: {
     type: 'array',
     description:
-      'Changes to the team\'s test list that QA should approve: a new test worth adding, or an existing ' +
-      'one this ticket makes obsolete. When `specs` has something to run, any entry here pauses the run ' +
-      'for a QA sign-off before the tests run. When `specs` is empty the plan is posted as not needed and ' +
-      'these become suggestions on that line that nobody is asked to approve. Empty when the existing ' +
-      'tests are enough.',
+      'Changes to the team\'s test list worth QA\'s attention: a new test worth adding, or an existing one ' +
+      'this ticket makes obsolete. QA approves every list before it runs, these included. When `specs` is ' +
+      'empty, the `add` entries here are the suggested tests on the "no automation test found" note. ' +
+      'Empty when the existing tests are enough.',
     items: {
       type: 'object',
       additionalProperties: false,
