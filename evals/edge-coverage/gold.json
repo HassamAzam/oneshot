@@ -1,0 +1,95 @@
+{
+  "_about": "Edge cases a good test list for each ticket must contain, graded by `npm run eval:edges` against whatever testcases.json each ticket's run holds now. A judge model decides, per edge, which case (if any) exercises it; an edge no case exercises is a missing edge case. Edges marked `source: bug` are real defects found in that run by verify or review, so a list without them provably let a bug through; `source: ticket` edges come from the ticket's own scope. Re-run the testcases phase on a ticket after a prompt change, then run the eval, to see whether the change made the lists weaker. `projects` groups tickets by the GitLab project their iids belong to, since an iid means nothing without its project; add another repo as a sibling key.",
+  "projects": {
+    "https://gitlab.arbisoft.com/arbisoft/erp": {
+      "8772": [
+        {"id": "E1", "source": "ticket", "edge": "A People Report amount with a long float tail (API 145635.25999999998) renders as 145,635.26, with no comma inside the decimals."},
+        {"id": "E2", "source": "ticket", "edge": "A small amount with a float tail (API 78.00000000000001) renders as 78.00, keeping two decimal places."},
+        {"id": "E3", "source": "ticket", "edge": "An amount over a million (API 1460414.8599999999) is grouped every three digits in the whole-number part only and renders as 1,460,414.86."},
+        {"id": "E4", "source": "ticket", "edge": "An amount of exactly zero renders as 0.00 on the People Report."},
+        {"id": "E5", "source": "ticket", "edge": "A negative amount keeps its minus sign and is grouped in the whole-number part only."},
+        {"id": "E6", "source": "ticket", "edge": "The People Report CSV export writes every Amount with at most two decimal places, matching the table."},
+        {"id": "E7", "source": "ticket", "edge": "Profile Entitlements, which shares the number formatter, shows its figures without a comma inside the decimals and with the same digits as before."},
+        {"id": "E8", "source": "ticket", "edge": "Person Equity, which shares the number formatter, shows its figures without a comma inside the decimals, keeping every decimal it had and its currency prefix."},
+        {"id": "E9", "source": "ticket", "edge": "The Payroll Dashboard financial summary, which shares the number formatter, keeps its existing money formatting with no comma inside the decimals."}
+      ],
+      "8781": [
+        {"id": "E1", "source": "ticket", "edge": "A recreational-trip claim with 4 participants reimbursed at an Amount Paid of 44,000 records exactly 11,000 against each participant."},
+        {"id": "E2", "source": "ticket", "edge": "An Amount Paid that does not divide evenly across participants is split so the active rows total it exactly to the cent and never exceed it."},
+        {"id": "E3", "source": "ticket", "edge": "Submitting a trip claim creates exactly one expense-person row per participant, with no inactive duplicate rows at 0.00."},
+        {"id": "E4", "source": "ticket", "edge": "A global-subcontractor participant stays at 0.00 and is left out of the divisor, so the eligible participants split the whole Amount Paid."},
+        {"id": "E5", "source": "ticket", "edge": "Reimbursing several trip claims in one bulk decision apportions each claim from its own Amount Paid."},
+        {"id": "E6", "source": "bug", "edge": "A bulk reimbursement whose request body sends status as the string \"3\" instead of the integer 3 still apportions the Amount Paid to the per-person rows."},
+        {"id": "E7", "source": "ticket", "edge": "An Official Trip claim is reimbursed without the equal-share apportionment touching its participants' rows."}
+      ]
+    },
+    "https://gitlab.arbisoft.com/arbisoft/workstreamai": {
+      "53": [
+        {"id": "E1", "source": "ticket", "edge": "On Project Logs v2 (account with logs_v2_testing), Complete & Send then Complete & send in the modal puts \"Week sent for approval.\" into an aria-live region that was already in the DOM, empty, before the click, so a screen reader announces it without the user moving focus."},
+        {"id": "E2", "source": "ticket", "edge": "On Project Logs v1 (account without logs_v2_testing), Complete & Send announces \"Project logs updated successfully\" in full, and the redirect to the Project Logs list about 3 seconds later does not cut the announcement off or leave a blank screen."},
+        {"id": "E3", "source": "ticket", "edge": "The confirmation is announced exactly once: the visible toast body no longer carries role=\"alert\" while the persistent live region speaks it, so it is not read twice."},
+        {"id": "E4", "source": "ticket", "edge": "When the Complete & Send save fails (week-save request forced to 500), \"Failed to complete week.\" is announced through the assertive region and the red error toast still shows, so the user does not believe the week was sent."},
+        {"id": "E5", "source": "ticket", "edge": "The visible toast is unchanged by the fix: same position and colours, the success toast auto-closes after about 3 seconds and the error toast after about 5 seconds, and nothing new is visible on screen."},
+        {"id": "E6", "source": "bug", "edge": "With the announcer mounted at bootstrap, the login page, the home page, /project-logs/ and /project-logs/update/<id>/ all render with no uncaught \"Cannot read properties of undefined\" TypeError, rather than the whole app going blank."},
+        {"id": "E7", "source": "bug", "edge": "Two announcements fired less than 3 seconds apart (e.g. LOG_ENTRY_MOVED at t=0 and Log entry updated at t=2.9s on v2) leave the second message in the live region until it is read, rather than the first message's 3-second clear timer blanking it about 100 ms after it appears."},
+        {"id": "E8", "source": "ticket", "edge": "The same confirmation fired twice in a row (Save Draft clicked twice) is announced both times, not only the first time."},
+        {"id": "E9", "source": "ticket", "edge": "A toast raised through the shared showSuccessAlert/showErrorAlert helpers in another module (e.g. Payroll Create Pay Slips with no person selected, or a wrong-password login before the app shell mounts) still shows its toast and is also announced, and callers that use the returned toastId keep working."}
+      ],
+      "74": [
+        {"id": "E1", "source": "ticket", "edge": "On the Training Dashboard (/training/dashboard/) the filter control next to the search field is a button whose accessible name is \"Filter\", and getByRole('button', { name: 'Filter' }) matches exactly one node."},
+        {"id": "E2", "source": "ticket", "edge": "On Publish Training (/training/published/), with the default Publish Training tab selected, the filter control is a button with the accessible name \"Filter\", and exactly one such node exists."},
+        {"id": "E3", "source": "bug", "edge": "An axe scan of each of the two screens reports zero button-name ('Buttons must have discernible text') violations, including the search field's clear (X) icon button next to Filter, not just the Filter button itself."},
+        {"id": "E4", "source": "ticket", "edge": "On Publish Training, switching to the Enrollment Requests or Saved Training tab removes the filter control, and switching back restores exactly one button named \"Filter\"."},
+        {"id": "E5", "source": "ticket", "edge": "Clicking the named Filter button still opens the filter menu, and choosing an option such as In-House narrows the list, adds ?type=1 to the URL and closes the menu."},
+        {"id": "E6", "source": "ticket", "edge": "Choosing the 'All' item resets the filters: the URL loses its filter params, the full list returns and the menu closes, just as before the change."},
+        {"id": "E7", "source": "ticket", "edge": "A screen reader on the Filter button announces 'Filter, button' rather than bare 'button', and reports it collapsed before activation and expanded while the menu is open."},
+        {"id": "E8", "source": "ticket", "edge": "The Filter button stays keyboard operable after its decorative fa-filter icon is hidden from assistive tech: Tab reaches it, and Enter or Space opens the menu."},
+        {"id": "E9", "source": "ticket", "edge": "When TrainingFilter is rendered with isLoading=true, the button is disabled, keeps the accessible name \"Filter\", and clicking it opens no menu."}
+      ],
+      "179": [
+        {"id": "E1", "source": "ticket", "edge": "With the Reminders card scrolled to the middle of a 12+ reminder list at a viewport of 960px or wider, Shift+Tab up through the rows leaves each focused row's whole focus ring visible below the header, with none of it under the header's 25px overlap."},
+        {"id": "E2", "source": "bug", "edge": "The top edge of a focused row's ring also clears the header's drop shadow: after a scroll caused by focus, the 4px ring sits fully below the shadow under the header, not tinted by it. A 32px clearance left about 4px under the shadow; 41px was needed."},
+        {"id": "E3", "source": "bug", "edge": "Tabbing forward onto a row below the fold, or onto the last reminder, shows the bottom edge of the row's focus ring; the card's overflow does not clip it at the scrollport's bottom edge."},
+        {"id": "E4", "source": "ticket", "edge": "Rows are unobscured under both header variants: a POD member's header with the 'My Reminders'/'POD Reminders' Select (reminder-menu), and a non-POD user's static 'My Reminders' text (my-reminder-text)."},
+        {"id": "E5", "source": "ticket", "edge": "A focused reminder row still navigates to its link on Enter and on click, and switching the POD header between My Reminders and POD Reminders still swaps the list."},
+        {"id": "E6", "source": "ticket", "edge": "The Team Updates switcher and filter chips on the same Home page show the same focus ring as before, in light and dark themes, after the shared ring helper was renamed."},
+        {"id": "E7", "source": "bug", "edge": "When two reminders share the same link (for example two incomplete-profile reminders that both point to the profile page), both still render as separate rows, and the card shows as many rows as the reminders API returns."},
+        {"id": "E8", "source": "bug", "edge": "When the reminders list refreshes while a row has keyboard focus and only a reminder's detail text changes, focus is not dropped to the document body and the user can keep tabbing from where they were."},
+        {"id": "E9", "source": "bug", "edge": "On the POD dashboard, the Requests and Team Update Requests card header selects look and behave exactly as on dev; the Reminders fix does not restyle them or add a focus ring to them."}
+      ],
+      "193": [
+        {"id": "E1", "source": "ticket", "edge": "The landing page hero sub-heading 'Easily integrate business functions...' renders in #6B6E72 on white, a contrast of about 5.12:1 (at least 4.5:1); it was #76797d at 4.37:1."},
+        {"id": "E2", "source": "ticket", "edge": "All five places that render the shared description text reach at least 4.5:1 on white: the hero sub-heading, the Single Sign-on sign-up copy, every module card description (including cards reached by paging the carousel), the feature card descriptions and an expanded FAQ answer. Checking only the FAQ is not enough."},
+        {"id": "E3", "source": "ticket", "edge": "Module card descriptions render in the fixed grey, not a theme textSecondary colour that overrides the fix, so a logged-out visitor with darkTheme=true already in localStorage sees dark-grey text on the white cards, not near-white text."},
+        {"id": "E4", "source": "ticket", "edge": "The shared theme.colors.osloGrey token stays #76797d, and an app screen that uses it (for example Project Logs or the global header) looks exactly as it did before."},
+        {"id": "E5", "source": "ticket", "edge": "Each FAQ accordion still expands and collapses on click, Enter and Space, with aria-expanded switching false, then true, then false, and its answer showing only while it is expanded."},
+        {"id": "E6", "source": "ticket", "edge": "Text in hover and focus states on the landing page, such as a footer link like Privacy Policy or Contact Us under the pointer, keeps a computed colour of at least 4.5:1 against white."},
+        {"id": "E7", "source": "ticket", "edge": "A logged-in user who opens / is still redirected to /home/; the landing page stays reachable only when logged out."},
+        {"id": "E8", "source": "bug", "edge": "The contrast helper rejects a malformed colour, for example getRelativeLuminance('#12345') (five hex digits), by throwing or returning NaN, not by returning a plausible finite luminance (0.0259...). The same holds for '', 'rebeccapurple' and '#ZZZZZZ'."},
+        {"id": "E9", "source": "bug", "edge": "If the landing page description colour is reverted to #76797d, the automated contrast test fails, because it checks the colour the component actually uses and not a hard-coded '#6B6E72' in the test."}
+      ],
+      "241": [
+        {"id": "E1", "source": "ticket", "edge": "Person Team Total Hours with a main team (e.g. POD) selected lists a person whose only active PersonTeam is directly on POD (the Ayesha shape), with Total Hours equal to the hours she logged in the range."},
+        {"id": "E2", "source": "ticket", "edge": "People Day Logs with the same main team selected lists that billable direct POD member, with one row per date she logged and that date's hours."},
+        {"id": "E3", "source": "ticket", "edge": "Members of POD's sub-teams, including a team two levels below POD, still appear when POD is selected, with the same hours as before the change."},
+        {"id": "E4", "source": "ticket", "edge": "A person with one PersonTeam on POD and another on a POD sub-team is not double-counted: each membership shows its own hours (e.g. 3.0 and 5.0) and the person's hours total 8.0, not 16.0."},
+        {"id": "E5", "source": "ticket", "edge": "A person who is a direct member of two different main teams appears only under the main team that was selected, with only that team's hours."},
+        {"id": "E6", "source": "ticket", "edge": "A direct POD member whose PersonTeam is billable=False is listed in Person Team Total Hours with her hours, and her treatment in People Day Logs (which filters on billable=True) is checked and stated rather than assumed."},
+        {"id": "E7", "source": "ticket", "edge": "An inactive PersonTeam directly on POD, or a direct member of an inactive main team, is still left out of both reports."},
+        {"id": "E8", "source": "ticket", "edge": "The CSV export of Person Team Total Hours for POD contains the direct POD member's row, matching the table."},
+        {"id": "E9", "source": "ticket", "edge": "Team-scoped figures on another screen built on the same team-descendants helper (e.g. a Costing or Invoices view filtered by a main team) are unchanged, so the helper's default was not widened."}
+      ],
+      "259": [
+        {"id": "E1", "source": "ticket", "edge": "A row whose increment is processed for the selected review month renders with computed filter none (it was blur(2px) before), and its full name, designation, Current Salary and Review At are readable."},
+        {"id": "E2", "source": "ticket", "edge": "That processed row shows exactly one non-obstructive status indicator reading Processed (displayed as PROCESSED), which does not cover the row's checkbox or name."},
+        {"id": "E3", "source": "ticket", "edge": "A forwarded row that is not processed still shows its single Forwarded tag in the red fill (#F7412E), not a Processed badge."},
+        {"id": "E4", "source": "ticket", "edge": "A row that is neither processed nor forwarded shows no status tag and no blur."},
+        {"id": "E5", "source": "ticket", "edge": "With dark theme on (localStorage darkTheme), processed rows are still unblurred and the Processed badge is visible and readable against the dark table background."},
+        {"id": "E6", "source": "bug", "edge": "The Processed badge's label is legible against its fill: white 9px text on #47B04C measures about 2.77:1, below the 4.5:1 WCAG AA bar for normal text."},
+        {"id": "E7", "source": "ticket", "edge": "Processed rows, which sort last and load only after scrolling past the first page, are also unblurred and carry the Processed badge."},
+        {"id": "E8", "source": "ticket", "edge": "After the increment email is sent for a person whose latest increment is dated in the selected review month, the refreshed row shows the Processed badge, stays unblurred, and its email button is disabled."},
+        {"id": "E9", "source": "ticket", "edge": "The Project Logs approver view, which shares StatusTag, still shows Completed in green (#47B04C) and Incomplete in red (#F7412E), with no Processed or Forwarded label leaking in."}
+      ]
+    }
+  }
+}
