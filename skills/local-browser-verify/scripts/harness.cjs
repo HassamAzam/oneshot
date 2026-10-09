@@ -23,11 +23,13 @@
  *     (`re_path(r"^.*$", index)`) that serves the SPA for every frontend route, so one
  *     port answers for the whole app. The webpack port is never navigated to; it only
  *     serves the bundle that Django's template points at.
- *   - Django renders templates/index.html, whose {% render_bundle %} reads
- *     static/webpack-stats.dev.json. Webpack writes that file with an ABSOLUTE
- *     publicPath taken from frontend/config/localPaths.js (`http://localhost:3000/`,
- *     webpack.config.js:67). So moving webpack off 3000 requires patching that file, or
- *     the browser fetches the bundle from a port with nothing on it.
+ *   - Django renders templates/index.html, whose {% render_entrypoint %} reads
+ *     static/webpack-entrypoints.dev.json (checkouts older than the app's 2026-09-23
+ *     chunk split use {% render_bundle %} and static/webpack-stats.dev.json instead).
+ *     Webpack writes either file with an ABSOLUTE publicPath taken from
+ *     frontend/config/localPaths.js (`http://localhost:3000/`). So moving webpack off
+ *     3000 requires patching that file, or the browser fetches the bundle from a port
+ *     with nothing on it.
  *   - frontend/src/constants/config.js pins `apiUrl` to `http://localhost:8000/`. The
  *     SPA calls the API at that absolute URL, so it must name the Django port we lease.
  *
@@ -532,8 +534,9 @@ async function httpStatus(url, timeoutMs = 5000) {
 /**
  * Probe Django on a page that does NOT render the React bundle.
  *
- * `/login/` goes through templates/index.html, whose {% render_bundle %} raises
- * WebpackLoaderBadStatsError until webpack has written static/webpack-stats.dev.json.
+ * `/login/` goes through templates/index.html, which raises until webpack has written
+ * its manifest (ImproperlyConfigured for a missing static/webpack-entrypoints.dev.json;
+ * WebpackLoaderBadStatsError for webpack-stats.dev.json on an older checkout).
  * Probing it means a perfectly healthy Django reads as dead for the whole first compile,
  * which is minutes. The admin login page is plain Django templating and answers as soon
  * as the process is actually serving, which is the thing this check is for.
@@ -583,33 +586,161 @@ async function waitDjango(port, pid, budgetMs) {
     + `${last ? ` (last status ${last})` : ''}`, tail(p.django(), 6));
 }
 
-/**
- * Webpack readiness is the log marker, not a port probe.
- *
- * Django's catch-all answers 200 for every path from the moment it boots, including
- * while the bundle is missing — which is why a curl check passed in run 24 while the page
- * was blank. "Compiled successfully" plus a real fetch of the emitted bundle URL is the
- * only pair that proves the app can actually render.
- */
 function tail(file, n) {
   try { return fs.readFileSync(file, 'utf8').trim().split('\n').slice(-n).join(' | ').slice(0, 400); }
   catch { return '(no log)'; }
 }
 
-async function waitWebpack(wt, port, pid, budgetMs) {
+/**
+ * The two manifests Django can read the bundle's script tags from, relative to the
+ * worktree. Which one a checkout writes depends on its webpack config, not on us.
+ */
+const ENTRYPOINTS_FILE = 'static/webpack-entrypoints.dev.json';
+const STATS_FILE = 'static/webpack-stats.dev.json';
+
+/**
+ * The verdict of the LATEST compile in the webpack log: 'building', 'compiled', 'failed'
+ * or null when no compile has started yet.
+ *
+ * The markers are react-dev-utils' own lines (WebpackDevServerUtils.createCompiler):
+ * `Starting the development server...` before the first build, `Compiling...` on every
+ * rebuild, then exactly one of `Compiled successfully!`, `Compiled with warnings.` or
+ * `Failed to compile.` when it ends. Only the last marker counts — an earlier build's
+ * result is history, and a `Compiling...` after it means the current build is not done.
+ * Matched only at the start of a line, colour codes stripped, so a warning that quotes
+ * one of these words mid-sentence cannot flip the verdict.
+ */
+function compileVerdict(logText) {
+  const lines = String(logText || '').replace(/\x1b\[[0-9;]*m/g, '').split('\n').map((l) => l.trim());
+  let verdict = null;
+  let at = -1;
+  lines.forEach((line, i) => {
+    if (/^(Compiling\.\.\.|Starting the development server)/.test(line)) { verdict = 'building'; at = i; }
+    else if (/^Compiled (successfully|with warnings)/.test(line)) { verdict = 'compiled'; at = i; }
+    else if (/^Failed to compile/.test(line)) { verdict = 'failed'; at = i; }
+  });
+  const errors = verdict === 'failed'
+    ? lines.slice(at + 1).filter(Boolean).slice(0, 8).join(' | ').slice(0, 400)
+    : '';
+  return { verdict, errors };
+}
+
+/**
+ * Is the bundle Django will point at finished, for the webpack started at `since`?
+ *
+ * Returns { state: 'ready' | 'building' | 'failed', via, detail }. Exported so that
+ * app.cjs and localtests.cjs ask the same question this file does instead of keeping
+ * their own copy of which file means "done" — that copy is how this went stale once.
+ *
+ * TWO SIGNALS, because the app changed its manifest under us:
+ *
+ *   - Older checkouts use webpack-bundle-tracker, which writes webpack-stats.dev.json
+ *     TWICE per compile: {"status":"compiling"} the moment a build starts, then
+ *     {"status":"done", chunks:{...}} when it finishes. django-webpack-loader reads that
+ *     exact file and raises WebpackLoaderBadStatsError on anything but `done`, which
+ *     Django serves as a bare 500. The file's own status is the whole answer.
+ *
+ *   - The app replaced that plugin on 2026-09-23 (d0fa609b4e, the ~500 KB chunk split)
+ *     with its own EntrypointFilesPlugin, which writes webpack-entrypoints.dev.json as
+ *     {hash, entrypoints} and carries NO status. It is written once, in webpack's `done`
+ *     hook — which fires for a failed compile too — so the file existing says only that
+ *     SOME compile ended. Waiting for a `status` that file never has is what failed every
+ *     fresh worktree on current code: webpack logged `Compiled with warnings.` and the
+ *     harness still gave up 20 minutes later with E_WEBPACK_DEAD.
+ *
+ * For the second shape the answer needs both halves: the manifest was written by THIS
+ * webpack (mtime at or after `since`, so a file left by an earlier build or an earlier
+ * ref does not count), and the log's latest compile verdict is `Compiled`. The plugin's
+ * `done` tap is registered before react-dev-utils' own, so by the time the log says
+ * `Compiled` the manifest has already been rewritten.
+ *
+ * The log alone was rejected once, rightly: a `Compiled successfully` from an EARLIER
+ * build stays in the log, so a restart read as ready while the current build was still
+ * running and every navigation took a 500. Both reasons are gone here — up() truncates
+ * the log before it starts webpack, compileVerdict() reads only the LAST marker, and the
+ * manifest must be fresh as well.
+ *
+ * The stats file gets the same freshness rule. A checkout that still writes it rewrites
+ * it at the start of every build, so its behaviour is unchanged; a stale `done` left in a
+ * reused worktree that has since moved to the entrypoints plugin would otherwise read as
+ * ready while Django 500s for want of the other file.
+ *
+ * `since` is floored to the second: a filesystem that stores whole-second mtimes would
+ * otherwise date a manifest written 300 ms after start as before it, forever.
+ */
+function bundleState(wt, opts = {}) {
+  const since = Math.floor(Number(opts.since || 0) / 1000) * 1000;
+  const logFile = opts.log || p.webpack();
+  const fresh = (rel) => {
+    const st = fs.statSync(path.join(wt, rel), { throwIfNoEntry: false });
+    return Boolean(st && st.mtimeMs >= since);
+  };
+
+  if (fresh(STATS_FILE)) {
+    const stats = readJson(path.join(wt, STATS_FILE));
+    if (stats && stats.status === 'done') return { state: 'ready', via: STATS_FILE, detail: null };
+    if (stats && stats.status === 'error') {
+      return { state: 'failed', via: STATS_FILE, detail: String(stats.error || '').slice(0, 300) || null };
+    }
+  }
+
+  const logText = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
+  const { verdict, errors } = compileVerdict(logText);
+  if (verdict === 'failed') return { state: 'failed', via: 'webpack log', detail: errors || null };
+  if (verdict === 'compiled') {
+    if (fresh(ENTRYPOINTS_FILE)) return { state: 'ready', via: ENTRYPOINTS_FILE, detail: null };
+    return {
+      state: 'building', via: 'webpack log',
+      detail: `webpack logged a finished compile but wrote neither a fresh ${ENTRYPOINTS_FILE} `
+        + `nor a "done" ${STATS_FILE}`,
+    };
+  }
+  return { state: 'building', via: null, detail: null };
+}
+
+/**
+ * When did this process start? The fallback for a caller that is waiting on a webpack
+ * somebody else started (app.cjs joining a bring-up already in progress) and so has no
+ * start time of its own to hand over. LC_ALL=C because `ps` localises lstart, and a
+ * French month name is not a date Date.parse knows. 0 when it cannot tell, which drops
+ * the freshness half of the check and leaves the log verdict to decide.
+ */
+function processStartedAt(pid) {
+  const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)],
+    { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } });
+  const t = Date.parse(String(r.stdout || '').trim());
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * Wait until the bundle Django points at is finished — bundleState() says what that
+ * means — never a port probe.
+ *
+ * Django's catch-all answers 200 for every path from the moment it boots, including
+ * while the bundle is missing — which is why a curl check passed in run 24 while the page
+ * was blank. A finished manifest plus a real fetch of the bundle URL it names
+ * (assertBundleReachable) is the only pair that proves the app can actually render.
+ *
+ * `startedAt` is when THIS webpack was started; up() records it right before
+ * startWebpack(). The timeout message keeps `did not reach status "done"`: localtests.cjs
+ * matches that phrase to decide to keep waiting on a slow cold build.
+ */
+async function waitWebpack(wt, port, pid, budgetMs, startedAt) {
   const deadline = Date.now() + budgetMs;
-  const statsFile = path.join(wt, 'static/webpack-stats.dev.json');
+  const since = Number.isFinite(Number(startedAt)) && Number(startedAt) > 0
+    ? Number(startedAt) : processStartedAt(pid);
   let sawPort = false;
+  let last = { state: 'building', via: null, detail: null };
   while (Date.now() < deadline) {
     if (!alive(pid)) {
       throw new HarnessError('E_WEBPACK_DEAD', 'the webpack process exited during startup',
         `Last lines of ${p.webpack()}: ${tail(p.webpack(), 8)}`);
     }
-    const logText = fs.existsSync(p.webpack()) ? fs.readFileSync(p.webpack(), 'utf8') : '';
 
     // start.js:69 calls choosePort(), which refuses a busy port rather than drifting
     // silently — but the env can still put it somewhere we did not ask for. Assert once.
     if (!sawPort) {
+      const logText = fs.existsSync(p.webpack()) ? fs.readFileSync(p.webpack(), 'utf8') : '';
       const m = logText.match(/webpack output is served from http:\/\/localhost:(\d+)/);
       if (m) {
         sawPort = true;
@@ -621,47 +752,44 @@ async function waitWebpack(wt, port, pid, budgetMs) {
       }
     }
 
-    /**
-     * Readiness is the stats file's own `status`, not the log.
-     *
-     * webpack-bundle-tracker writes this file TWICE per compile: once with
-     * {"status":"compiling"} the moment a build starts, then again with
-     * {"status":"done", chunks:{...}} when it finishes. django-webpack-loader reads this
-     * exact file, and on anything but `done` it raises WebpackLoaderBadStatsError, which
-     * Django serves as a bare 500 — with DEBUG off there is no traceback in the response,
-     * so from the browser it is indistinguishable from a broken app.
-     *
-     * A log-marker check is not good enough: `Compiled successfully` from an EARLIER
-     * build stays in the log forever, so a restart reads as ready while the current
-     * build is still running. Measured here: the harness reported ready, and every
-     * navigation then took a 500. Reading the file Django reads removes the whole class.
-     */
-    const stats = readJson(statsFile);
-    if (stats && stats.status === 'done') return true;
-    if (stats && stats.status === 'error') {
+    last = bundleState(wt, { since, log: p.webpack() });
+    if (last.state === 'ready') return true;
+    if (last.state === 'failed') {
       throw new HarnessError('E_WEBPACK_DEAD', 'webpack finished with a build error',
-        String(stats.error || '').slice(0, 300) || tail(p.webpack(), 8));
+        last.detail || tail(p.webpack(), 8));
     }
-    await sleep(2000);
+    // Never sleep past the deadline: a short budget is a promise, not a suggestion.
+    await sleep(Math.max(0, Math.min(2000, deadline - Date.now())));
   }
   throw new HarnessError('E_WEBPACK_DEAD',
-    `webpack did not reach status "done" within ${Math.round(budgetMs / 60000)} min`,
-    tail(p.webpack(), 8));
+    `webpack did not reach status "done" within ${Math.round(budgetMs / 60000)} min — no `
+    + `finished compile with a fresh ${ENTRYPOINTS_FILE} or ${STATS_FILE}`,
+    [last.detail, tail(p.webpack(), 8)].filter(Boolean).join(' — '));
 }
 
-/** Prove the browser can actually fetch the bundle Django points at. */
+/**
+ * Prove the browser can actually fetch the bundle Django points at.
+ *
+ * The entrypoints manifest gives the page several script tags per entry, in load order
+ * — the split vendor chunks (`vendors~main.chunk.js`) BEFORE the entry's own
+ * `static/js/bundle.js` — next to Google's gtag loader at the top of the page. Every tag
+ * is read and the entry bundle preferred, so the URL recorded in app-env.json is the
+ * app's own code rather than whichever chunk happened to come first.
+ */
 async function assertBundleReachable(bePort) {
   const html = await (async () => {
     try { return await (await fetch(`http://localhost:${bePort}/login/`)).text(); } catch { return ''; }
   })();
-  const m = html.match(/<script[^>]+src="([^"]+bundle[^"]*|[^"]*main[^"]*\.js)"/i)
-    || html.match(/src="(http:\/\/localhost:\d+\/[^"]+\.js)"/i);
-  if (!m) {
+  const srcs = [...html.matchAll(/<script\b[^>]*\ssrc="([^"]+)"/gi)].map((m) => m[1]);
+  const src = srcs.find((s) => /bundle[^"]*\.js/i.test(s))
+    || srcs.find((s) => /main[^"]*\.js$/i.test(s))
+    || srcs.find((s) => /^http:\/\/localhost:\d+\/[^"]+\.js$/i.test(s));
+  if (!src) {
     throw new HarnessError('E_BUNDLE_UNREACHABLE',
       'Django served /login/ but emitted no bundle script tag',
-      'webpack-stats.dev.json is missing or stale. Check ' + p.webpack());
+      `${ENTRYPOINTS_FILE} (or ${STATS_FILE} on an older checkout) is missing or stale. Check ${p.webpack()}`);
   }
-  const url = m[1].startsWith('http') ? m[1] : `http://localhost:${bePort}${m[1]}`;
+  const url = src.startsWith('http') ? src : `http://localhost:${bePort}${src}`;
   const status = await httpStatus(url, 20000);
   if (status !== 200) {
     throw new HarnessError('E_BUNDLE_UNREACHABLE',
@@ -713,15 +841,22 @@ async function up(opts = {}) {
   if (collectStatic(wt)) log('collected staticfiles');
 
   const djangoPid = startDjango(wt, bePort);
+  // Right before the spawn, not after: a manifest this webpack writes must never date
+  // from before the moment we say it started. waitWebpack() uses it to tell its own
+  // manifest from one an earlier build left in the worktree.
+  const webpackStartedAt = Date.now();
   const webpackPid = startWebpack(wt, fePort);
-  writeJson(p.servers(), { djangoPid, webpackPid, bePort, fePort, worktree: wt, startedAt: Date.now() });
+  writeJson(p.servers(), {
+    djangoPid, webpackPid, bePort, fePort, worktree: wt, startedAt: Date.now(), webpackStartedAt,
+  });
   log('django pid', djangoPid, 'webpack pid', webpackPid);
 
   await waitDjango(bePort, djangoPid, Number(opts.djangoTimeoutMs || 90000));
   log('django ready on', bePort);
   // The first compile is minutes on a cold cache; incremental is seconds. Silence is
   // not failure, so the budget is generous and the liveness check is the pid.
-  await waitWebpack(wt, fePort, webpackPid, Number(opts.webpackTimeoutMs || 20 * 60000));
+  await waitWebpack(wt, fePort, webpackPid, Number(opts.webpackTimeoutMs || 20 * 60000),
+    webpackStartedAt);
   log('webpack compiled on', fePort);
   const bundleUrl = await assertBundleReachable(bePort);
   log('bundle reachable', bundleUrl);
@@ -1249,11 +1384,12 @@ const API = {
    * app.cjs owns the machine-wide question ("is an app already up, and is it on my
    * code?"); this file owns the repository facts ("how does this app actually start").
    * Exporting rather than re-implementing keeps every hard-won fact above — the ASGI
-   * wedge, CI=true, the stats-file readiness, the two pinned files — in ONE place.
+   * wedge, CI=true, the bundle readiness (bundleState), the two pinned files — in ONE
+   * place.
    */
   preflight, checkDb, disabledIntegrations, applyPatches, composeConfigJs,
   needsCollectstatic, collectStatic,
-  startDjango, startWebpack, waitDjango, waitWebpack,
+  startDjango, startWebpack, waitDjango, waitWebpack, bundleState,
   assertBundleReachable, describeEnv, listenerPid, pidCwd, alive, httpStatus,
 };
 module.exports = API;
