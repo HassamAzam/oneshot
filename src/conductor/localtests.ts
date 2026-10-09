@@ -1,13 +1,17 @@
 /**
- * The local automation tests step, on the conductor's side.
+ * The local automation tests, on the conductor's side: the plumbing the
+ * post-merge local automation tests mode (src/localtests/runner.ts) drives.
  *
- * Two phases share this file. `local-tests-scope` is a session: it picks the
- * workstream-automation specs the diff reaches and may edit specs in a
- * throwaway automation worktree. The conductor checks that worktree out before
- * the session (`prepare-scope`) and, the moment it ends, saves the edits as a
- * patch and removes it (`capture`). `local-tests-run` is plain code: it runs
- * exactly the listed specs against the ticket's code on a copy of the
- * automation database (`run`), and posts what happened.
+ * Two halves share this file. The scope half serves the `local-tests-scope`
+ * session, which picks the workstream-automation specs a merged change
+ * reaches and may edit specs in a throwaway automation worktree: the
+ * conductor checks that worktree out before the session (`prepare-scope`)
+ * and, the moment it ends, saves the edits as a patch and removes it
+ * (`capture`). The run half is plain code: it runs exactly the list QA
+ * approved against the merge commit, on a copy of the automation database
+ * (`run`), under the desk's Cypress lease. Neither half knows a journal: the
+ * mode records what each call holds in its own, so nothing here reads or
+ * writes the Loop's state/runs/<iid>/run.json.
  *
  * Everything that touches Postgres, the automation clone, the credentials or
  * Cypress lives in scripts/localtests.cjs, which this file only starts. Its
@@ -16,17 +20,18 @@
  * forwarded to the conductor's log. No session may start that script
  * (git-guard), so every call to it goes through here.
  *
- * Three rules shape the run phase, and each is the answer to a way this step
- * could mislead the developer who reads its results:
+ * Three rules shape the run, and each is the answer to a way this step could
+ * mislead whoever reads its results:
  *
- *   - It runs on EVERY pass, like every code phase, so it is idempotent by
- *     cache key: the specs, the ticket's commit, the automation commit and the
- *     patch. A resume, or a run re-walking its list after a park, gets the
- *     saved result instead of another forty minutes of Cypress — a setup error
- *     included, unless it only said the desk was busy. And once mr has run,
- *     no NEW run starts unless an MR review round planned one (noNewRunReason):
- *     results that arrived after the MR would reach the ticket with nobody
- *     asked to sign them.
+ *   - It is idempotent by cache key — the specs, the merge commit, the
+ *     automation commit and the patch — within ONE request (the mode's run
+ *     id). A mode that crashed between a finished run and its journal write
+ *     gets the saved results instead of another forty minutes of Cypress. A
+ *     new request never does: QA putting the trigger back on is asking for the
+ *     tests to run again, and an old result posted as new would say Cypress
+ *     ran when it did not. A setup error is NOT reused either: the mode puts
+ *     the list back to QA after one, and their next `approved` means "try
+ *     again".
  *   - One Cypress run per desk (src/lib/cypresslease.ts). A busy desk PARKS
  *     the run and the next tick tries again — whether the lease says so or the
  *     script does (deskBusy). Two runs at once fail each other's specs, and a
@@ -40,7 +45,7 @@
  *     to finish rather than being killed in the middle of it.
  *
  * Every external effect goes through LocalTestsDeps, so the tests drive the
- * whole phase with a fake script, a fake lease and a fake GitLab.
+ * whole run with a fake script, a fake lease and a fake GitLab.
  */
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -49,21 +54,19 @@ import { join, sep } from 'node:path';
 import type { Readable } from 'node:stream';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, ONESHOT_HOME, ROOT, RUNS, artifactDir, localTestsConfig, localTestsPatchFile, localTestsWorktree,
-  projectConfig, type LocalTestsConfig,
+  DRY_RUN, ONESHOT_HOME, ROOT, RUNS, artifactDir, localTestsConfig, localTestsPatchFile,
+  type LocalTestsConfig,
 } from '../lib/config.js';
-import {
-  readArtifact, readJournal, updateJournal, writeArtifact, type RunJournal,
-} from '../lib/artifacts.js';
+import { readArtifact, writeArtifact } from '../lib/artifacts.js';
 import {
   RUN_KILL_GRACE_MS, acquireCypressLease, cypressLeaseHolder, localTestsRunDeadlineMs, releaseCypressLease,
 } from '../lib/cypresslease.js';
 import { activeRunsFleet } from '../lib/db.js';
-import { addIssueNote, editIssueLabels, issueNotes } from '../lib/gitlab.js';
+import { addIssueNote, issueNotes } from '../lib/gitlab.js';
 import { localTestsStartNote } from '../lib/publish.js';
 import { log } from '../lib/log.js';
-import type { LocalTestsRun, LocalTestsScope } from '../phases/types.js';
-import type { CodePhaseCtx, CodePhaseResult } from './runner.js';
+import { heldLtIids } from '../localtests/journal.js';
+import type { LocalTestsRun } from '../phases/types.js';
 
 const execFileP = promisify(execFile);
 
@@ -75,6 +78,12 @@ export const RUN_ARTIFACT = 'local-tests-run.json';
 
 /** The marker localTestsStartNote() ends with, so a start note is posted once per run of the same code. */
 const START_MARKER = '<!-- oneshot:local-tests-start -->';
+
+/**
+ * The line announce() adds under the start note: which request it announced.
+ * A new request on the same code is a new run, and is announced again.
+ */
+const startRunMarker = (runId: string): string => `<!-- oneshot:local-tests-start:${runId} -->`;
 
 /**
  * The conductor's kill deadline for a `run` and its grace live beside the
@@ -340,10 +349,18 @@ function readOutcome(
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const strList = (v: unknown): string[] =>
   (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim() !== '') : []);
+const findingList = (v: unknown): WeakenedFinding[] =>
+  (Array.isArray(v) ? v : [])
+    .filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
+    .map((x) => ({ file: str(x.file).trim(), why: str(x.why).trim() }))
+    .filter((x) => x.file !== '');
 
 export interface PrepareScopeResult { wsa: string; automationSha: string }
 
 /** The answer to `capture`: the patch the scope's edits were saved as, and what they did. */
+/** One reason capture flagged a file: what the change did to it. */
+export interface WeakenedFinding { file: string; why: string }
+
 export interface CaptureResult {
   /** Where the patch is. '' when the scope changed nothing, so there is no patch. */
   patchFile: string;
@@ -354,8 +371,10 @@ export interface CaptureResult {
   changedFiles: string[];
   /** Changed files outside localTests.allowedPaths. Counted as weakened tests. */
   outsideAllowed: string[];
-  /** Files whose change made an existing test easier to pass. */
+  /** Files whose change made an existing test easier to pass, or reaches outside the browser. */
   weakened: string[];
+  /** Why each of those was flagged, one entry per finding (`adds cy.exec(`, `removes an expect( assertion`). */
+  weakenedDetail: WeakenedFinding[];
   addedSpecs: string[];
   removedSpecs: string[];
 }
@@ -369,7 +388,7 @@ export interface GcResult {
 
 /**
  * The external effects of this step, injectable so a test can drive the run
- * phase end to end without Postgres, Cypress, GitLab or the desk's lease.
+ * end to end without Postgres, Cypress, GitLab or the desk's lease.
  */
 export interface LocalTestsDeps {
   cli: CliDeps;
@@ -385,9 +404,12 @@ export interface LocalTestsDeps {
     list(iid: number): Promise<string[] | null>;
     add(iid: number, body: string): Promise<boolean>;
   };
-  labels: { add(iid: number, label: string): Promise<boolean> };
   config(): LocalTestsConfig;
-  /** The iids of every run in flight on this desk, for gc's --keep. */
+  /**
+   * The tickets whose local-tests resources are in use on this desk, for gc's
+   * --keep: every ticket the mode is advancing (its per-ticket lock is held)
+   * and, so nothing of theirs is ever touched, every Loop run in flight.
+   */
   activeIids(): number[];
   dryRun: boolean;
   /** How long the conductor lets a `run` call live, from the minutes it gives the script (localTestsRunDeadlineMs). */
@@ -413,9 +435,8 @@ export function defaultDeps(): LocalTestsDeps {
       },
       add: async (iid, body) => (await addIssueNote(iid, body)).ok,
     },
-    labels: { add: async (iid, label) => (await editIssueLabels(iid, { add: [label] })).ok },
     config: () => localTestsConfig(),
-    activeIids: () => activeRunsFleet().map((r) => r.iid),
+    activeIids: () => [...new Set([...heldLtIids(), ...activeRunsFleet().map((r) => r.iid)])],
     dryRun: DRY_RUN,
     deadlineMs: (min) => localTestsRunDeadlineMs(min),
   };
@@ -462,6 +483,7 @@ export async function captureScope(iid: number, over: Partial<LocalTestsDeps> = 
       changedFiles: strList(d.changedFiles),
       outsideAllowed: strList(d.outsideAllowed),
       weakened: strList(d.weakened),
+      weakenedDetail: findingList(d.weakenedDetail),
       addedSpecs: strList(d.addedSpecs),
       removedSpecs: strList(d.removedSpecs),
     },
@@ -582,8 +604,9 @@ export function normaliseRun(
  * Postgres server, sparing only what it is told to keep, and a dry run's
  * `activeIids` come from the dry run's own database, which knows nothing of the
  * real runs on this desk — its gc would drop a real run's copy out from under
- * it. A dry run makes no copy to clean up anyway: local-tests-run starts no
- * Cypress there.
+ * it. A dry run usually makes no copy to clean up anyway: it starts no Cypress
+ * unless ONESHOT_LOCAL_TESTS_DRY_CYPRESS asks it to, and then the script's own
+ * cleanup drops what that run made.
  */
 export async function gcLocalTests(
   activeIids: Iterable<number>, over: Partial<LocalTestsDeps> = {},
@@ -623,7 +646,7 @@ let lastGcErrors = '';
 /** What the conductor adds to local-tests-scope.json after the session: the saved edits, and what they ran against. */
 export interface ScopeCapture extends CaptureResult {
   automationSha: string;
-  /** The ERP commits the scope was chosen for. */
+  /** The ERP commits the scope was chosen for: the merge commit's first parent, and the merge commit. */
   base: string;
   head: string;
 }
@@ -633,11 +656,24 @@ export interface ScopeInputs {
   /** The throwaway automation worktree, <runDir>/wsa. */
   wsa: string;
   automationSha: string;
-  /** merge-base of the ticket's HEAD with origin/<base branch>. */
+  /** The first parent of the merge commit under test. */
   base: string;
+  /** The merge commit. */
   head: string;
   /** Where the edits will be saved — and where the previous round's are, on a redo. */
   patchFile: string;
+  /**
+   * What QA asked of this round, when it is not the first: `write-temporary`
+   * (no existing spec reaches the change, and QA wants one written for this
+   * run only) or `feedback` (QA's `disapproved:` text, in `feedback`). Absent,
+   * the session writes no test of its own: an uncovered change comes back as
+   * an empty list with an `add` proposal, and QA decides.
+   */
+  request?: 'write-temporary' | 'feedback';
+  feedback?: string;
+  /** The merge commit and the MR that made it, named in the prompt. */
+  mergeSha?: string;
+  mrIid?: number;
 }
 
 /** The scope's spec files, de-duplicated, in the order the scope listed them. */
@@ -674,6 +710,7 @@ export function captureOf(scope: Record<string, unknown> | null | undefined): Sc
     changedFiles: strList(c.changedFiles),
     outsideAllowed: strList(c.outsideAllowed),
     weakened: strList(c.weakened),
+    weakenedDetail: findingList(c.weakenedDetail),
     addedSpecs: strList(c.addedSpecs),
     removedSpecs: strList(c.removedSpecs),
     automationSha: c.automationSha,
@@ -683,149 +720,12 @@ export function captureOf(scope: Record<string, unknown> | null | undefined): Sc
 }
 
 /**
- * Files the localSpecs gate treats as weakened tests: what capture flagged as
+ * Files to put in front of QA as weakened tests: what capture flagged as
  * weakened, and every changed file outside localTests.allowedPaths. A change
  * where no change was allowed is a test nobody can vouch for.
  */
 export function weakenedFiles(capture: ScopeCapture | null): string[] {
   return capture ? [...new Set([...capture.weakened, ...capture.outsideAllowed])] : [];
-}
-
-/** The last record of a phase in the journal. */
-function lastRecord(journal: Pick<RunJournal, 'phases'> | null, phase: string): RunJournal['phases'][number] | undefined {
-  return [...(journal?.phases ?? [])].reverse().find((r) => r.phase === phase);
-}
-
-/** A record that settles its phase — phaseSettled()'s statuses. */
-const SETTLED = new Set<RunJournal['phases'][number]['status']>(['ok', 'warned', 'skipped']);
-
-/** Where in the journal mr last settled, or -1 when it never has. */
-function mrSettledAt(journal: Pick<RunJournal, 'phases'> | null): number {
-  const phases = journal?.phases ?? [];
-  for (let k = phases.length - 1; k >= 0; k -= 1) {
-    if (phases[k]!.phase === 'mr' && SETTLED.has(phases[k]!.status)) return k;
-  }
-  return -1;
-}
-
-/** Where in the journal local-tests-scope last ran — a 'skipped' record is not a run — or -1. */
-function scopeRanAt(journal: Pick<RunJournal, 'phases'> | null): number {
-  const phases = journal?.phases ?? [];
-  for (let k = phases.length - 1; k >= 0; k -= 1) {
-    if (phases[k]!.phase === 'local-tests-scope' && phases[k]!.status !== 'skipped') return k;
-  }
-  return -1;
-}
-
-/**
- * Why neither local-tests phase applies to this run, or null when they do.
- *
- * A run whose mr has already settled and whose scope never ran is a run the
- * step was switched on under: ONESHOT_LOCAL_TESTS_REPO set on a desk with runs
- * in flight. phases() adds both phases to every run's list, and a run parked
- * at merge walks that list again on its next poll — it would spend a scope
- * session and a run of up to two hours on an MR that is already open, and a
- * localSpecs gate armed there would hold the walk from ever reaching merge, so
- * a merge a person has already made goes unnoticed. The runner records both
- * phases 'skipped' with this reason instead, unless an MR review round has
- * forced the scope: that round re-plans and runs them like any other.
- */
-export function lateForLocalTests(journal: Pick<RunJournal, 'phases'> | null): string | null {
-  if (mrSettledAt(journal) === -1 || scopeRanAt(journal) !== -1) return null;
-  return 'this run\'s MR step had already run when the local automation tests step was switched on, so they are '
-    + 'not run for it; an MR review round would plan and run them';
-}
-
-/**
- * Why local-tests-run must not start a NEW Cypress run, or null when it may.
- *
- * Once mr has settled, only a plan made since — by an MR review round, which
- * forces the scope, then this phase, then mr, whose localResults gate asks a
- * developer about the new results — may start one. Anything else after mr is
- * a re-walk of a run waiting at merge (every MERGE_POLL_MS on a Review desk),
- * and a run started there would hold the desk's Cypress lease for up to two
- * hours, park the walk short of merge whenever another run held it, and post
- * results nobody is asked to sign, because the localResults gate is passed.
- */
-export function noNewRunReason(journal: Pick<RunJournal, 'phases'> | null): string | null {
-  const mrAt = mrSettledAt(journal);
-  if (mrAt === -1 || scopeRanAt(journal) > mrAt) return null;
-  return 'the MR step has already run and no MR review round has re-planned the local tests since, '
-    + 'so no new local run is started';
-}
-
-/**
- * Why local-tests-run starts no Cypress, judged from the plan alone, or null
- * when it has something to run.
- *
- * `quiet` is set when the scope itself answered "nothing to run": its own note
- * on the ticket already says so in one line, and a second line from the run
- * step saying the same would only be noise.
- */
-export function runSkipReason(
-  journal: Pick<RunJournal, 'phases'> | null, scope: Record<string, unknown> | null,
-): { reason: string; quiet: boolean } | null {
-  const rec = lastRecord(journal, 'local-tests-scope');
-  if (!rec) return { reason: 'local-tests-scope has not run', quiet: false };
-  if (rec.status !== 'ok') {
-    return { reason: `local-tests-scope did not finish (${rec.error ?? rec.status})`, quiet: false };
-  }
-  if (!scope) return { reason: 'local-tests-scope left no plan to run', quiet: false };
-  const blocked = typeof scope.blocked === 'string' ? scope.blocked.trim() : '';
-  if (blocked) return { reason: `local-tests-scope was blocked: ${blocked}`, quiet: false };
-  if (scope.applicable !== true || specFiles(scope).length === 0) {
-    const why = typeof scope.reason === 'string' && scope.reason.trim() ? scope.reason.trim() : 'no spec to run';
-    return { reason: `not needed for this ticket: ${why}`, quiet: true };
-  }
-  if (!captureOf(scope)) {
-    return { reason: 'the scope\'s temporary spec changes were never saved, so its plan cannot be run as made', quiet: false };
-  }
-  return null;
-}
-
-/**
- * The localSpecs gate for this plan: why it arms and what it asks QA to sign,
- * or null when it does not arm — a plan with nothing to run, or one that
- * changes nothing about the team's test list.
- *
- * The subject is the list, the proposals and the patch, so an approval stops
- * covering the moment any of them is redone.
- */
-export function localSpecsGate(
-  journal: Pick<RunJournal, 'phases'> | null, scope: Record<string, unknown> | null,
-  reason: (scope: Record<string, unknown> | null, weakened: string[]) => string | null,
-): { why: string; subject: Record<string, unknown> } | null {
-  if (runSkipReason(journal, scope)) return null;
-  const capture = captureOf(scope);
-  const why = reason(scope, weakenedFiles(capture));
-  if (!why) return null;
-  const proposals = (Array.isArray(scope?.proposals) ? scope.proposals : [])
-    .filter((p): p is Record<string, unknown> => !!p && typeof p === 'object')
-    .map((p) => ({ action: str(p.action), title: str(p.title), file: str(p.file) }));
-  return { why, subject: { specs: [...specFiles(scope)].sort(), proposals, patchSha: capture?.patchSha ?? null } };
-}
-
-/**
- * What the localResults gate asks a developer to sign: the outcome of each
- * test against exactly this code. Null when the run has no results to judge —
- * it was skipped or could not be run.
- */
-export function localResultsSubject(run: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
-  const r = (run ?? {}) as Partial<LocalTestsRun>;
-  if (r.status !== 'passed' && r.status !== 'failed') return null;
-  const results = Array.isArray(r.results) ? r.results : [];
-  return {
-    cacheKey: r.cacheKey ?? '',
-    status: r.status,
-    totals: r.totals ?? null,
-    // A pass that needed the retry is a different outcome to sign than a clean
-    // one. Only present when true, so a subject approved before the flag
-    // existed still matches.
-    results: results.map((x) => ({
-      spec: x.spec, title: x.title, state: x.state,
-      ...((x as { flaky?: unknown }).flaky === true ? { flaky: true } : {}),
-    })),
-  };
 }
 
 /**
@@ -856,90 +756,59 @@ export function cacheKey(
 // ------------------------------------------------------ the scope session
 
 /**
- * Before the `local-tests-scope` session: read the ticket's commits, then
- * check out the throwaway automation worktree and record it in the journal,
- * so a run killed mid-session can still be cleaned up. The commits first, so a
- * failure there leaves nothing behind.
+ * Before a `local-tests-scope` session: check out the throwaway automation
+ * worktree for the scope of `base..head` (the merge commit's first parent and
+ * the merge commit). Records nothing: the mode writes the worktree into its own
+ * journal, and gc keeps it while the ticket's lock is held, so a mode killed
+ * mid-session still has it cleaned up afterwards.
  */
-export async function prepareScopeSession(
-  iid: number, worktree: string, over: Partial<LocalTestsDeps> = {},
+export async function prepareScopeAt(
+  iid: number, commits: { base: string; head: string }, over: Partial<LocalTestsDeps> = {},
 ): Promise<CliResult<ScopeInputs>> {
   const deps = withDefaults(over);
-  let head: string;
-  let base: string;
-  const baseBranch = projectConfig().branches.base || 'dev';
-  try {
-    head = await deps.git(['rev-parse', 'HEAD'], worktree);
-    base = await deps.git(['merge-base', 'HEAD', `origin/${baseBranch}`], worktree);
-  } catch (err) {
-    return fail('E_GIT', `could not read the ticket's commits in ${worktree}: ${(err as Error).message.slice(0, 200)}`);
-  }
-  if (!head || !base) return fail('E_GIT', `git named no commit for HEAD or its merge-base with origin/${baseBranch}`);
-
+  if (!commits.base || !commits.head) return fail('E_GIT', 'the scope needs both the merge commit and its first parent');
   const prep = await prepareScope(iid, deps.config(), deps);
   if (!prep.ok) return prep;
-  updateJournal(iid, { localTests: { wt: prep.data.wsa, startedAt: Date.now() } });
-  return { ok: true, data: { ...prep.data, base, head, patchFile: localTestsPatchFile(iid) } };
-}
-
-/** Up to three proposal titles, for a one-line reason that would otherwise hide them. */
-function proposalTitles(scope: Record<string, unknown>): string {
-  const titles = (Array.isArray(scope.proposals) ? scope.proposals : [])
-    .map((p) => (p && typeof p === 'object' ? str((p as Record<string, unknown>).title).trim() : ''))
-    .filter(Boolean);
-  if (!titles.length) return '';
-  const shown = titles.slice(0, 3).map((t) => t.replace(/[.\s]+$/, '')).join('; ');
-  return ` Suggested for the suite: ${shown}${titles.length > 3 ? `; and ${titles.length - 3} more` : ''}.`;
+  return {
+    ok: true,
+    data: { ...prep.data, base: commits.base, head: commits.head, patchFile: localTestsPatchFile(iid) },
+  };
 }
 
 /**
- * After the `local-tests-scope` session, whatever it concluded.
+ * After a `local-tests-scope` session, whatever it concluded.
  *
  * The throwaway worktree is always captured, which saves the edits and removes
  * it: a scope that blocked or failed still leaves nothing on the desk. Then,
  * for a scope that finished:
  *
- *   - nothing to run (not applicable, or applicable with no spec listed): the
- *     second case is written back as not applicable, so the ticket gets the
- *     same one line and no gate or run treats an empty list as a plan;
+ *   - nothing to run: returned as it is. That is the "no automation test
+ *     reaches this change" answer, and its `add` proposal is the suggested
+ *     test QA reads; there is no patch worth keeping for a list of nothing;
  *   - something to run: the capture is written into the scope as `capture`,
- *     where the localSpecs gate and local-tests-run read it, and the ticket
- *     gets the local-tests label;
+ *     where the run reads the patch and the commit it was cut against;
  *   - something to run but the edits could not be saved: a refusal, because
- *     running the specs without the edits the plan depends on would report
- *     failures the plan already explained.
+ *     running the specs without the edits the list depends on would report
+ *     failures the list already explained.
  */
-export async function afterScopeSession(
+export async function captureScopeSession(
   iid: number,
   out: { ok: boolean; data: Record<string, unknown> | null },
-  inputs: ScopeInputs | null | undefined,
+  inputs: ScopeInputs,
   over: Partial<LocalTestsDeps> = {},
 ): Promise<{ data: Record<string, unknown> | null; refusal: string | null }> {
-  if (!inputs) return { data: out.data, refusal: null };
   const deps = withDefaults(over);
   const captured = await captureScope(iid, deps);
-  updateJournal(iid, { localTests: undefined });
   if (!captured.ok) log.warn(`local-tests-scope: capture failed — ${cliErrorText(captured.error)}`);
   if (!out.ok || !out.data) return { data: out.data, refusal: null };
 
   const scope = out.data;
-  if (scope.applicable !== true || specFiles(scope).length === 0) {
-    if (scope.applicable !== true) return { data: scope, refusal: null };
-    const said = typeof scope.reason === 'string' ? scope.reason.trim().replace(/[.\s]+$/, '') : '';
-    const data = {
-      ...scope,
-      applicable: false,
-      reason: `${said ? `${said}, but ` : ''}no spec was chosen to run.${proposalTitles(scope)}`,
-    };
-    writeArtifact(iid, SCOPE_ARTIFACT, data);
-    return { data, refusal: null };
-  }
-
+  if (specFiles(scope).length === 0) return { data: scope, refusal: null };
   if (!captured.ok) {
     return {
       data: scope,
       refusal: `the temporary spec changes could not be saved (${cliErrorText(captured.error)}), `
-        + 'so the planned specs are not run',
+        + 'so the listed tests cannot be run as chosen',
     };
   }
   // The commit capture says the patch was cut against wins over the one
@@ -952,15 +821,10 @@ export async function afterScopeSession(
   };
   const data = { ...scope, capture };
   writeArtifact(iid, SCOPE_ARTIFACT, data);
-
-  const label = projectConfig().labels.localTests;
-  if (label && !await deps.labels.add(iid, label)) {
-    log.warn(`local-tests-scope: could not add the '${label}' label to #${iid}`);
-  }
   return { data, refusal: null };
 }
 
-// --------------------------------------------------------- the run phase
+// --------------------------------------------------------------- the run
 
 /**
  * Codes the script uses for "the desk is busy — try again later", none of
@@ -971,13 +835,6 @@ export async function afterScopeSession(
  */
 export const BUSY_CODES: ReadonlySet<string> = new Set(['E_PORT_BUSY', 'E_RUN_IN_PROGRESS', 'E_BASELINE_BUSY']);
 
-/**
- * Codes whose recorded error is not reused for the same cache key: the busy
- * ones (recorded before they parked), and a script stopped from outside. They
- * describe the desk at one moment, not the run, so the next pass asks again.
- */
-const RERUN_CODES: ReadonlySet<string> = new Set([...BUSY_CODES, 'E_ABORTED']);
-
 /** A directory the script runs things in: state/runs/<iid>/<one of its checkouts>. */
 const RUN_CHECKOUT = /[\\/]runs[\\/]\d+[\\/](?:erp-lt|erp-base-lt|wsa-run|wsa)(?:[\\/]|\s|$)/;
 
@@ -985,8 +842,7 @@ const RUN_CHECKOUT = /[\\/]runs[\\/]\d+[\\/](?:erp-lt|erp-base-lt|wsa-run|wsa)(?
  * Whether a script error means the desk is busy, so the run PARKS — nothing
  * recorded, nothing posted, and the next tick tries again — the same answer a
  * held Cypress lease gets. Recorded as an error instead, it would read on the
- * ticket as "could not be run" for a ticket that merely came second, and send
- * that ticket on to mr with no local results.
+ * ticket as "could not be run" for a ticket that merely came second.
  *
  * E_PORT_BUSY only when the holder is another local-tests run: the script
  * names the holder's directory, and only that step's apps and Cypress stand in
@@ -999,189 +855,164 @@ export function deskBusy(e: CliError, runsRoot: string = RUNS): boolean {
   return e.message.includes(`${runsRoot}${sep}`) || RUN_CHECKOUT.test(e.message) || /localtests|local-tests run/i.test(e.message);
 }
 
-/** The code a recorded error's reason starts with (cliErrorText), or ''. */
-function reasonCode(reason: string | undefined): string {
-  return /^(E_[A-Z0-9_]+):/.exec(reason ?? '')?.[1] ?? '';
-}
+/** local-tests-run.json: the run, and the request (the mode's run id) it was made for. */
+export type RecordedRun = LocalTestsRun & { runId?: string };
 
 /**
- * Whether a saved run answers for `key` without running again: its results,
- * or a setup error that would only repeat — a migration that fails, a spec
- * that is missing, a run past its deadline. Re-running those on every pass
- * meant a run parked at merge restarted up to two hours of work every poll.
+ * Whether a saved run answers for `key` without running again: only results,
+ * and only the same request's. Within one request (one run id) it is the run
+ * a crash interrupted before the journal heard of it, so it is not run twice.
+ * A new request — the trigger put back after Done, or a new dry rehearsal —
+ * asked for the tests to run again, so its results must come from Cypress,
+ * never from the file an earlier request left behind; a run recorded with no
+ * run id belongs to no request and is never reused. A setup error is not reused — the mode puts
+ * the list back to QA after one, and their next `approved` asks for another
+ * try, not for the same error.
  */
-function reusable(saved: LocalTestsRun | null, key: string): saved is LocalTestsRun {
-  if (!saved || !key || saved.cacheKey !== key) return false;
-  if (saved.status === 'passed' || saved.status === 'failed') return true;
-  return saved.status === 'error' && !RERUN_CODES.has(reasonCode(saved.reason));
+function reusable(saved: RecordedRun | null, key: string, runId: string): saved is RecordedRun {
+  return !!saved && !!key && !!runId && saved.runId === runId && saved.cacheKey === key
+    && (saved.status === 'passed' || saved.status === 'failed');
 }
 
 /** A run that started no Cypress. */
 function notRun(
   status: 'skipped' | 'error', reason: string,
   key: { cacheKey: string; ticketSha: string; automationSha: string; patchSha: string | null },
+  notRunnable: LocalTestsRun['notRunnable'] = [],
 ): LocalTestsRun {
   const now = new Date().toISOString();
   return {
     status, reason, ...key, db: '',
     totals: { specs: 0, tests: 0, passed: 0, failed: 0, skipped: 0 },
-    results: [], notRunnable: [], newTests: [], startedAt: now, endedAt: now,
+    results: [], notRunnable, newTests: [], startedAt: now, endedAt: now,
   };
 }
 
 /**
- * Write the run's result and decide whether the ticket hears about it again.
- *
- * Unchanged (same key, status and reason as the saved one): nothing is written
- * and nothing re-posted, which is what lets this phase run on every pass. A
- * new result takes `local-tests-run` out of `journal.published` so the report
- * reaches the ticket; a quiet one puts it in, because the scope's own note has
- * already said everything there is to say.
- */
-function settle(iid: number, next: LocalTestsRun, saved: LocalTestsRun | null, quiet = false): LocalTestsRun {
-  const same = saved !== null && saved.cacheKey === next.cacheKey && saved.status === next.status
-    && (saved.reason ?? '') === (next.reason ?? '');
-  if (same) return saved;
-  writeArtifact(iid, RUN_ARTIFACT, next);
-  const published = (readJournal(iid)?.published ?? []).filter((k) => k !== 'local-tests-run');
-  updateJournal(iid, { published: quiet ? [...published, 'local-tests-run'] : published });
-  return next;
-}
-
-/**
- * What a finished run means for the phase. Only failuresBlock turns failing tests into a stop,
- * and only real failures: a run cut off at the deadline with none failed is reported, not blocked.
- */
-function verdict(run: LocalTestsRun, cfg: Pick<LocalTestsConfig, 'failuresBlock'>): CodePhaseResult {
-  const data = run as unknown as Record<string, unknown>;
-  if (run.status === 'failed' && cfg.failuresBlock && run.totals.failed > 0) {
-    return {
-      ok: false,
-      block: true,
-      data,
-      error: `local-tests-run: ${run.totals.failed} local automation test(s) failed, and localTests.failuresBlock `
-        + 'stops the run before mr — the results are on the ticket',
-    };
-  }
-  if (run.status === 'error') {
-    return { ok: false, data, error: `local-tests-run: could not run the specs — ${run.reason ?? 'no reason recorded'}` };
-  }
-  return { ok: true, data };
-}
-
-/**
- * Post the start note, once per run of the same code: a note already carrying
- * the marker and both commits means this run was announced before a restart.
- * When GitLab cannot list the notes it is posted anyway — a duplicate line
- * costs less than a forty-minute run nobody was told about.
+ * Post the start note, once per request and code: a note already carrying the
+ * marker, this request's run id and both commits means this run was announced
+ * before a restart. A new request on the same code runs again, so it is
+ * announced again. When GitLab cannot list the notes it is posted anyway — a
+ * duplicate line costs less than a forty-minute run nobody was told about.
  */
 async function announce(
-  iid: number, run: { tests: number; minutes: number; branch: string; ticketSha: string; automationSha: string },
+  iid: number, runId: string,
+  run: { tests: number; minutes: number; branch: string; ticketSha: string; automationSha: string },
   cfg: Pick<LocalTestsConfig, 'automationRef'>, deps: LocalTestsDeps,
 ): Promise<void> {
   const shas = [run.ticketSha.slice(0, 7), run.automationSha.slice(0, 7)];
+  const mine = startRunMarker(runId);
   const bodies = await deps.notes.list(iid);
-  if (bodies?.some((b) => b.includes(START_MARKER) && shas.every((s) => b.includes(s)))) return;
-  const ok = await deps.notes.add(iid, localTestsStartNote({ ...run, automationRef: cfg.automationRef }));
-  if (!ok) log.warn(`local-tests-run: could not post the start note on #${iid}`);
+  if (bodies?.some((b) => b.includes(START_MARKER) && b.includes(mine) && shas.every((s) => b.includes(s)))) return;
+  const ok = await deps.notes.add(iid, `${localTestsStartNote({ ...run, automationRef: cfg.automationRef })}\n${mine}`);
+  if (!ok) log.warn(`local tests: could not post the start note on #${iid}`);
+}
+
+/** One approved list, ready to run against the merge commit. */
+export interface ApprovedRun {
+  iid: number;
+  /**
+   * The mode's run id for this request: who holds the desk's Cypress lease
+   * while this runs, and what the recorded run is stamped with, so a saved run
+   * is reused only by the request that made it.
+   */
+  runId: string;
+  /** The ERP clone the script cuts its own detached checkout (erp-lt) from: WORK_REPO. */
+  erpRepo: string;
+  /** The merge commit the specs run against. */
+  ref: string;
+  /** Its first parent: where a spec that failed twice is re-run, to say whether it fails there too. */
+  base: string;
+  specs: string[];
+  notRunnable: Array<{ spec: string; why: string }>;
+  /** The automation commit the list, and its patch, are true of. */
+  automationSha: string;
+  patchFile: string | null;
+  patchSha: string | null;
+  /** For the start note: what the code is, how many tests, and about how long. */
+  code: string;
+  tests: number;
+  minutes: number;
+  /** DRY_RUN only: run Cypress anyway (ONESHOT_LOCAL_TESTS_DRY_CYPRESS). Every GitLab write stays a log line. */
+  dryCypress?: boolean;
+  signal?: AbortSignal;
+  /** Called once with the script's pid, so the mode can record what it is holding. */
+  onSpawn?: (pid: number) => void;
 }
 
 /**
- * The `local-tests-run` code phase.
- *
- * In order: a run the step was switched on under skips quietly; the plan
- * decides whether there is anything to run; an identical earlier run is reused
- * (an error that would only repeat included); past mr, nothing new starts
- * unless an MR review round planned it; a dry run starts nothing; a busy desk
- * parks; and only then is anything announced, written or started. A script
- * that finds the desk busy parks too, with nothing recorded. The lease is
- * released, and the journal's record of what the run holds cleared, whatever
- * happens after it was taken. A run that did not finish cleanly is followed by
- * a gc for this ticket, because whatever it left — a database copy, a
- * worktree, a browser — would otherwise wait for the run to end.
+ * What one attempt at an approved list came to:
+ *   ran      the specs ran (passed or failed) — or a dry run started no Cypress, `skipped`;
+ *   error    a setup error: the run could not happen, and the script says why;
+ *   park     the desk is busy (the lease, or the script) — nothing recorded, try next tick;
+ *   stopped  the conductor asked this run to stop — nothing recorded, try on the next boot.
  */
-export async function localTestsRunPhase(
-  ctx: CodePhaseCtx, over: Partial<LocalTestsDeps> = {},
-): Promise<CodePhaseResult> {
+export type ApprovedRunResult =
+  | { kind: 'ran'; run: LocalTestsRun; reused: boolean }
+  | { kind: 'error'; run: LocalTestsRun }
+  | { kind: 'park'; why: string }
+  | { kind: 'stopped'; why: string };
+
+/**
+ * Run exactly the list QA approved, against the merge commit.
+ *
+ * In order: an identical earlier run of this same request is reused; a dry run starts nothing
+ * unless asked to (`dryCypress`); a list with nothing runnable records why; a
+ * busy desk parks; and only then is anything announced, written or started. A
+ * script that finds the desk busy parks too, with nothing recorded. The lease
+ * is released whatever happens after it was taken, and a run that did not
+ * finish cleanly is followed by a gc for this ticket, because whatever it left
+ * — a database copy, a worktree, a browser — would otherwise wait for the next
+ * tick's gc. The result is written to state/runs/<iid>/local-tests-run.json,
+ * stamped with the request's run id, where the report and the cache read it.
+ */
+export async function runApprovedTests(
+  o: ApprovedRun, over: Partial<LocalTestsDeps> = {},
+): Promise<ApprovedRunResult> {
   const deps = withDefaults(over);
   const cfg = deps.config();
-  const { iid } = ctx;
-  const journal = readJournal(iid) ?? ctx.journal;
-  const scope = readArtifact<Record<string, unknown>>(iid, SCOPE_ARTIFACT);
-  const saved = readArtifact<LocalTestsRun>(iid, RUN_ARTIFACT);
-  const capture = captureOf(scope);
-  const keyed = (ticketSha = '', key = ''): Parameters<typeof notRun>[2] => ({
-    cacheKey: key, ticketSha, automationSha: capture?.automationSha ?? '', patchSha: capture?.patchSha ?? null,
-  });
+  const { iid } = o;
+  const key = cacheKey({ specs: o.specs.map((file) => ({ file })), notRunnable: o.notRunnable },
+    o.ref, o.automationSha, o.patchSha, cfg);
+  const keyed = { cacheKey: key, ticketSha: o.ref, automationSha: o.automationSha, patchSha: o.patchSha };
+  const saved = readArtifact<RecordedRun>(iid, RUN_ARTIFACT);
+  const record = (run: LocalTestsRun): RecordedRun => {
+    const stamped: RecordedRun = { ...run, runId: o.runId };
+    writeArtifact(iid, RUN_ARTIFACT, stamped);
+    return stamped;
+  };
+  const setupError = (reason: string): ApprovedRunResult =>
+    ({ kind: 'error', run: record(notRun('error', reason, keyed, o.notRunnable)) });
 
-  // The runner records this case 'skipped' before dispatching the phase; this
-  // is the same answer for any other caller, and quiet: an MR that is already
-  // open does not need a line saying a step it never had did not run.
-  const late = lateForLocalTests(journal);
-  if (late) return verdict(settle(iid, notRun('skipped', late, keyed()), saved, true), cfg);
-
-  const skip = runSkipReason(journal, scope);
-  if (skip) return verdict(settle(iid, notRun('skipped', skip.reason, keyed()), saved, skip.quiet), cfg);
-  // runSkipReason() returned null, so there is a capture.
-  const cap = capture!;
-  const specs = specFiles(scope);
-
-  const setupError = (reason: string, ticketSha = '', key = ''): CodePhaseResult =>
-    verdict(settle(iid, notRun('error', reason, keyed(ticketSha, key)), saved), cfg);
-
-  const worktree = journal.worktree;
-  if (!worktree) return setupError('the run holds no ERP worktree to run the specs against');
-  let ticketSha: string;
-  try {
-    ticketSha = await deps.git(['rev-parse', 'HEAD'], worktree);
-  } catch (err) {
-    return setupError(`could not read the ticket's commit in ${worktree}: ${(err as Error).message.slice(0, 200)}`);
-  }
-  const key = cacheKey(scope, ticketSha, cap.automationSha, cap.patchSha, cfg);
-
-  if (reusable(saved, key)) {
-    log.info(`local-tests-run — reusing the ${saved.status === 'error' ? 'setup error' : 'results'} of an identical run on #${iid}`, {
+  if (reusable(saved, key, o.runId)) {
+    log.info(`local tests — reusing the results of an identical run of this request on #${iid}`, {
       status: saved.status, passed: saved.totals?.passed, failed: saved.totals?.failed,
     });
-    return verdict(saved, cfg);
+    return { kind: 'ran', run: saved, reused: true };
   }
-
-  const frozen = noNewRunReason(journal);
-  if (frozen) {
-    log.info(`local-tests-run — ${frozen} on #${iid}`);
-    // Whatever was last recorded stands, as it was reported; a run that never
-    // recorded anything gets one quiet line in the artifact and none on the
-    // ticket.
-    return saved ? verdict(saved, cfg)
-      : verdict(settle(iid, notRun('skipped', frozen, keyed(ticketSha, key)), saved, true), cfg);
+  if (deps.dryRun && !o.dryCypress) {
+    return { kind: 'ran', run: record(notRun('skipped', 'a dry run starts no Cypress', keyed, o.notRunnable)), reused: false };
   }
-
-  if (deps.dryRun) {
-    return verdict(settle(iid, notRun('skipped', 'a dry run starts no Cypress', keyed(ticketSha, key)), saved), cfg);
+  if (!o.specs.length) {
+    const why = o.notRunnable.length
+      ? 'every approved test needs something a local machine does not have' : 'the approved list has no tests to run';
+    return { kind: 'ran', run: record(notRun('skipped', why, keyed, o.notRunnable)), reused: false };
   }
+  if (!o.ref || !o.base) return setupError('the merge commit or its first parent is not known, so there is nothing to run against');
 
-  if (!await deps.lease.acquire(ctx.runId)) {
+  if (!await deps.lease.acquire(o.runId)) {
     const holder = deps.lease.holder();
     return {
-      ok: false,
-      park: true,
-      error: `local-tests-run: another run${holder ? ` (${holder.runId})` : ''} is using Cypress on this desk — `
-        + 'parked, and tried again on a later tick',
+      kind: 'park',
+      why: `another run${holder ? ` (${holder.runId})` : ''} is using Cypress on this desk — tried again on a later tick`,
     };
   }
 
   let clean = false;
   try {
-    const notRunnable = notRunnableOf(scope);
-    const tests = (Array.isArray(scope?.specs) ? scope.specs as Array<{ file?: unknown; cases?: unknown }> : [])
-      .filter((s) => !notRunnable.some((n) => n.spec === (typeof s?.file === 'string' ? s.file.trim() : '')))
-      .reduce((n, s) => n + (Number(s?.cases) || 0), 0);
-    await announce(iid, {
-      tests,
-      minutes: Number(scope?.estimatedMinutes) || cfg.maxRunMinutes,
-      branch: journal.branch ?? '',
-      ticketSha,
-      automationSha: cap.automationSha,
+    await announce(iid, o.runId, {
+      tests: o.tests, minutes: o.minutes || cfg.maxRunMinutes, branch: o.code, ticketSha: o.ref,
+      automationSha: o.automationSha,
     }, cfg, deps);
 
     const dir = join(artifactDir(iid), 'local-tests');
@@ -1189,57 +1020,42 @@ export async function localTestsRunPhase(
     const specsFile = join(dir, 'specs.json');
     // The object form: the list, and the specs set aside as needing what a
     // local machine does not have, which the script reports and does not run.
-    writeFileSync(specsFile, `${JSON.stringify({ specs, notRunnable }, null, 2)}\n`);
+    writeFileSync(specsFile, `${JSON.stringify({ specs: o.specs, notRunnable: o.notRunnable }, null, 2)}\n`);
 
-    const startedAt = Date.now();
-    updateJournal(iid, { localTests: { wt: localTestsWorktree(iid), startedAt } });
     const res = await runLocalTests({
       iid,
-      worktree,
-      ref: ticketSha,
+      worktree: o.erpRepo,
+      ref: o.ref,
       specsFile,
-      patch: cap.patchSha ? cap.patchFile : undefined,
-      patchSha: cap.patchSha ?? undefined,
-      automationSha: cap.automationSha,
-      base: `origin/${projectConfig().branches.base || 'dev'}`,
+      patch: o.patchSha && o.patchFile ? o.patchFile : undefined,
+      patchSha: o.patchSha ?? undefined,
+      automationSha: o.automationSha,
+      base: o.base,
       deadlineMin: cfg.maxRunMinutes,
-      signal: ctx.signal,
-      onSpawn: (pid) => { updateJournal(iid, { localTests: { wt: localTestsWorktree(iid), pids: [pid], startedAt } }); },
+      signal: o.signal,
+      onSpawn: o.onSpawn,
     }, deps);
 
     if (!res.ok) {
       // A stop the conductor asked for is not a result: nothing is recorded,
-      // and the next pass runs it again. A script stopped by anything else is
-      // an error like any other.
-      if (res.error.code === 'E_ABORTED' && ctx.signal?.aborted) {
-        return { ok: false, error: `local-tests-run: ${res.error.message}` };
-      }
-      // A busy desk is not a result either: parked, like a held lease, and
-      // the next tick tries again. The script cleaned up after itself before
-      // it said so, so there is nothing for gc to clear.
+      // and the list runs again once the conductor is back.
+      if (res.error.code === 'E_ABORTED' && o.signal?.aborted) return { kind: 'stopped', why: res.error.message };
+      // A busy desk is not a result either: parked, like a held lease. The
+      // script cleaned up after itself before it said so.
       if (deskBusy(res.error)) {
         clean = true;
-        return {
-          ok: false,
-          park: true,
-          error: `local-tests-run: the desk is busy — ${cliErrorText(res.error)} — parked, and tried again on a later tick`,
-        };
+        return { kind: 'park', why: `the desk is busy — ${cliErrorText(res.error)} — tried again on a later tick` };
       }
-      return setupError(cliErrorText(res.error), ticketSha, key);
+      return setupError(cliErrorText(res.error));
     }
     clean = true;
-    const run: LocalTestsRun = {
-      ...res.data, cacheKey: key, ticketSha, automationSha: cap.automationSha, patchSha: cap.patchSha,
-    };
-    return verdict(settle(iid, run, saved), cfg);
+    const run = record({ ...res.data, ...keyed });
+    return run.status === 'error' ? { kind: 'error', run } : { kind: 'ran', run, reused: false };
   } catch (err) {
-    // Nothing above should throw, but a code phase that does escapes the run
-    // loop without finish(), and the ticket is left 'running' with no note.
     clean = false;
-    return setupError(`local-tests-run failed unexpectedly: ${(err as Error).message.slice(0, 200)}`, ticketSha, key);
+    return setupError(`the local run failed unexpectedly: ${(err as Error).message.slice(0, 200)}`);
   } finally {
-    deps.lease.release(ctx.runId);
-    updateJournal(iid, { localTests: undefined });
+    deps.lease.release(o.runId);
     if (!clean) await gcLocalTests(deps.activeIids().filter((n) => n !== iid), deps);
   }
 }

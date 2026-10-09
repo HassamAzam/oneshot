@@ -318,6 +318,9 @@ function projectJson() {
 function settingsFrom(project, e) {
   const block = project ? project.localTests : undefined;
   const p = isObj(block) ? block : {};
+  // The mode's three labels live in project.json `labels`, beside the Loop's own;
+  // mirrored here only so this reader and localTestsConfig() stay field for field.
+  const names = project && isObj(project.labels) ? project.labels : {};
   const problems = [];
   const reject = (what, fallback) => { problems.push(what); return fallback; };
   const policy = (field) => ({ v: p[field], name: `localTests.${field}` });
@@ -368,6 +371,11 @@ function settingsFrom(project, e) {
     failuresBlock: typeof p.failuresBlock === 'boolean'
       ? p.failuresBlock
       : reject('localTests.failuresBlock must be true or false', false),
+    labels: {
+      trigger: text({ v: names.localTestsTrigger, name: 'labels.localTestsTrigger' }),
+      running: text({ v: names.localTestsRunning, name: 'labels.localTestsRunning' }),
+      done: text({ v: names.localTestsDone, name: 'labels.localTestsDone' }),
+    },
   };
 
   let off = null;

@@ -856,11 +856,12 @@ test('the limits are a selection budget, each Cypress run has its own deadline',
   assert.ok(p.includes(`every Cypress run is stopped at\n${lt.maxRunMinutes} minutes`));
 });
 
-test('a plan with nothing to run is a "not needed" line, and its proposals are suggestions', () => {
+test('a list with nothing to run goes to QA as "no test found", with the add proposal as the suggestion', () => {
   const p = scopePrompt();
-  assert.match(p, /A plan with no spec in `specs` is posted the same way even if you say `applicable: true`/);
-  assert.match(p, /shown on that\s+line as suggestions for the suite, not put to QA/);
-  assert.doesNotMatch(p, /including when no existing spec reaches the change/);
+  assert.match(p, /Whatever you return goes on the ticket for QA, who approve every local run before it starts/);
+  assert.match(p, /posted as\s+"Oneshot found no automation test for this ticket", with your `add` proposals as the suggested tests/);
+  assert.doesNotMatch(p, /"not needed" line/, 'the Loop\'s one-line "not needed" note is gone with the Loop wiring');
+  assert.doesNotMatch(p, /not put to QA/);
 });
 
 test('specs that cannot run on a desk are listed apart, with why, and not run', () => {
@@ -881,21 +882,58 @@ test('the scope starts from the precise set and adds at most a few module specs,
   const p = scopePrompt();
   assert.match(p, /The precise set is the floor/);
   assert.match(p, /limits never\s+remove one/);
-  assert.match(p, /at most 5 module specs, as a health check, not as coverage/);
+  assert.match(p, /at most 5 module specs, as a health check, not as coverage, and only when the\s+precise set is not empty/);
   assert.match(p, /NEVER fill the\s+list toward/, 'module specs that cannot see the change are not added to reach the limits');
-  assert.match(p, /a ceiling for the precise set, not a target/);
+  assert.match(p, /a ceiling\s+for the precise set, not a target/);
   assert.match(p, /If the precise set alone is over either limit, keep all of it/);
   assert.match(p, /`Trim to fit the limits:`/, 'the over-limit case becomes a QA proposal, not a silent cut');
   assert.match(p, /There is no silent trim/);
 });
 
-test('an uncovered change gets a written temporary spec, not only a suggestion', () => {
+test('with an empty precise set there are no health checks, and health checks are marked for the ticket', () => {
   const p = scopePrompt();
+  assert.match(p, /With an empty\s+precise set there are no health checks either/);
+  assert.match(p, /Start each one's `why` with `Health check:`/, 'the ticket note marks those rows by this prefix');
+  assert.match(p, /`why` is one short line, starting\s+`Health check:` for a health check/);
+  assert.match(p, /clipped to about 120 characters/);
+});
+
+test('by default an uncovered change gets a suggested test, and nothing is written', () => {
+  const p = scopePrompt();
+  assert.match(p, /Then \*\*do not write one\.\*\* Return `specs: \[\]` \(no health checks either, item 2\)/);
+  assert.match(p, /one `add` proposal per missing test: `title` the way QA would name it/);
+  assert.match(p, /Temporary UPDATES of\s+existing specs \(step 4\) are not this: those stay yours to make, unasked/);
+  assert.match(p, /- Write a new spec QA did not ask for\./);
+  assert.doesNotMatch(p, /\*\*write the missing spec\*\*/);
+  assert.doesNotMatch(p, /## QA asked for a temporary test/);
+});
+
+test('when QA ask for a temporary test, the session writes it and keeps turns for it', () => {
+  const p = scopePrompt({ localTests: { ...SCOPE_INPUTS, request: 'write-temporary' } });
+  assert.match(p, /## QA asked for a temporary test/);
+  assert.match(p, /`disapproved: write a temporary test`/);
   assert.match(p, /\*\*write the missing spec\*\*/);
-  assert.match(p, /list it in `specs` and `edits`, and propose\s+the `add`/);
+  assert.match(p, /list it in `specs` and `edits`, and propose the\s+`add` for the suite/);
+  assert.match(p, /a test QA added to the suite since the last round is in\s+it, and then you write nothing/);
   assert.match(p, /Leave it unwritten ONLY when the screen cannot be\s+reached/);
   assert.match(p, /finish choosing by about turn \d+ of\s+\d+/, 'the session keeps turns for writing the spec');
   assert.match(p, /`TR_LOCAL_<what>\.ts`/);
+  assert.match(p, /no `force: true`/, 'a new spec follows the no-weakening rules too');
+  assert.doesNotMatch(p, /do not write one/);
+  assert.doesNotMatch(p, /- Write a new spec QA did not ask for/);
+});
+
+test('after the merge, head is the merge commit and base its first parent', () => {
+  const p = scopePrompt({ localTests: { ...SCOPE_INPUTS, base: 'f1rstparent', head: 'mergesha99', mergeSha: 'mergesha99', mrIid: 11042 } });
+  assert.match(p, /base {18}f1rstparent {3}\(first parent of the merge commit: dev just before this change\)/);
+  assert.match(p, /head {18}mergesha99 {3}\(the merge commit of MR !11042: the change as it landed on dev\)/);
+  assert.ok(p.includes('--base f1rstparent --head mergesha99'));
+  assert.match(p, /ERP worktree {10}\/wt\/ticket-990901 {3}\(at the merge commit\)/);
+  // Without base and head the merge sha alone still names both commits.
+  const bare = scopePrompt({ localTests: { ...SCOPE_INPUTS, base: undefined, head: undefined, mergeSha: 'mergesha99' } as unknown as PromptCtx['localTests'] });
+  assert.ok(bare.includes('--base mergesha99^1 --head mergesha99'));
+  assert.match(bare, /the merge commit of the ticket's MR/);
+  assert.doesNotMatch(scopePrompt(), /merge commit of/, 'a ctx without a merge keeps the old wording');
 });
 
 test('the scope never runs Cypress, never commits, never opens the credentials', () => {
@@ -926,18 +964,37 @@ test('the scope session is told it may edit the automation worktree, and only re
   assert.match(other, /Your worktree is \/wt\/x\. Everything you touch lives inside it\./);
 });
 
-test('a redo after QA\'s disapproval carries their bullets and how to keep the previous edits', () => {
-  const journal = { localSpecsApproval: { requestTs: null, requestNoteId: null, approved: false,
-    feedback: ['disapproved:\n- keep the half-day leave test, it still applies'] } };
+test('a redo after QA\'s disapproval carries their reply and how to keep the previous edits', () => {
   const prior = { 'local-tests-scope': {
     specs: [{ file: 'cypress/e2e/leaves/apply_leave.cy.ts' }],
     edits: [{ file: 'cypress/Pages/LeavePage.ts' }],
   } };
-  const p = scopePrompt({ journal: journal as unknown as PromptCtx['journal'], prior });
+  const p = scopePrompt({
+    localTests: { ...SCOPE_INPUTS, request: 'feedback', feedback: '- remove LV_21\n- also run LV_23' }, prior,
+  });
   assert.match(p, /## QA asked for changes to an earlier version of this list/);
-  assert.match(p, /keep the half-day leave test, it still applies/);
+  assert.ok(p.includes('- remove LV_21\n- also run LV_23'), 'their reply, verbatim');
+  assert.match(p, /by a case id such as `LV_23`: find the spec file/);
+  assert.match(p, /A spec they ask to remove leaves `specs`, with no `remove` proposal/);
+  assert.match(p, /`summary` opens with what changed from the previous list/);
   assert.ok(p.includes('`cypress/e2e/leaves/apply_leave.cy.ts`'));
   assert.ok(p.includes(`git -C ${SCOPE_INPUTS.wsa} apply ${SCOPE_INPUTS.patchFile}`));
 
   assert.doesNotMatch(scopePrompt(), /QA asked for changes/, 'a first round has no feedback block');
+  assert.doesNotMatch(scopePrompt({ localTests: { ...SCOPE_INPUTS, request: 'feedback', feedback: '  ' } }),
+    /QA asked for changes/, 'a feedback request with no text is no feedback');
+});
+
+test('a redo whose previous list is not in the inputs rebuilds it, and still keeps any saved edits', () => {
+  const p = scopePrompt({ localTests: { ...SCOPE_INPUTS, request: 'feedback', feedback: 'keep the half-day leave test' } });
+  assert.match(p, /The previous list is not in your inputs: build it again from step 1/);
+  assert.ok(p.includes(`If\n${SCOPE_INPUTS.patchFile} exists, it holds the previous round's temporary edits.`));
+  assert.ok(p.includes(`git -C ${SCOPE_INPUTS.wsa} apply ${SCOPE_INPUTS.patchFile}`));
+});
+
+test('the journal\'s old Loop gate state no longer reaches the prompt', () => {
+  // The Loop's localSpecs gate is gone; only the mode's own request carries QA's words.
+  const journal = { localSpecsApproval: { feedback: ['disapproved:\n- stale Loop feedback'] } };
+  const p = scopePrompt({ journal: journal as unknown as PromptCtx['journal'] });
+  assert.doesNotMatch(p, /stale Loop feedback/);
 });

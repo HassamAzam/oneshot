@@ -186,9 +186,9 @@ export interface LocalTestsScope {
    */
   edits: Array<{ file: string; kind: 'update' | 'add'; why: string; erpEvidence: string }>;
   /**
-   * Changes to the team's test list. QA signs them off (the localSpecs gate)
-   * only when `specs` has something to run: a plan with no spec to run is
-   * posted as not needed, and its proposals become suggestions on that line.
+   * Changes to the team's test list. QA approves every list before it runs,
+   * these included; when `specs` is empty, the `add` entries are the suggested
+   * tests on the "Oneshot found no automation test" note.
    */
   proposals: Array<{ action: 'add' | 'remove'; title: string; file?: string; why: string }>;
   /**
@@ -208,8 +208,7 @@ export interface LocalTestsRun {
   status: 'passed' | 'failed' | 'skipped' | 'error';
   /**
    * Why the run was skipped or errored — or, on a run that finished, what cut
-   * it short (Cypress stopped at its deadline), which the report and the
-   * localResults ask both show.
+   * it short (Cypress stopped at its deadline), which the results note shows.
    */
   reason?: string;
   /**

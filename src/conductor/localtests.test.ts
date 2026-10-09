@@ -1,26 +1,23 @@
 /**
- * The local-tests step on the conductor's side, driven end to end with a fake
- * scripts/localtests.cjs, a fake Cypress lease and a fake GitLab — no
+ * The local automation tests' conductor plumbing, driven end to end with a
+ * fake scripts/localtests.cjs, a fake Cypress lease and a fake GitLab — no
  * Postgres, no Cypress, no network, and the desk's real lease is never touched.
  *
- * What these pin, in the order a run meets them:
- * - The scope session's throwaway worktree is always captured; a plan with
- *   specs gets the capture and the label, a plan with none is written back as
- *   not applicable, and edits that could not be saved refuse the plan.
- * - The localSpecs gate arms only for a proposal or a weakened test, and never
- *   for a plan with nothing to run.
- * - local-tests-run: an identical earlier run is reused — a setup error that
- *   would only repeat included — a dry run starts nothing, a busy desk parks
- *   before anything is announced (and a script that finds the desk busy parks
- *   with nothing recorded), a script past its deadline has its whole process
- *   group killed, and a setup error is recorded with the script's own words
- *   and warns rather than blocking — unless the team's failuresBlock turns
- *   failing tests into a stop.
- * - Past mr, nothing new starts unless an MR review round re-planned it, and a
- *   run the step was switched on under skips both phases quietly.
+ * What these pin, in the order the post-merge mode meets them:
+ * - The scope session's throwaway worktree is always captured; a list with
+ *   specs keeps the capture, a list of nothing is returned as it is (the "no
+ *   test found" answer), and edits that could not be saved refuse the list.
+ * - runApprovedTests: an identical earlier run of the same request is reused —
+ *   never another request's, which asked for the tests to run again, and never
+ *   a setup error, which QA's next `approved` retries — a dry run starts nothing unless
+ *   asked to, a busy desk parks before anything is announced (and a script that
+ *   finds the desk busy parks with nothing recorded), a script past its deadline
+ *   has its whole process group killed, and a setup error is recorded with the
+ *   script's own words. It runs against the merge commit, re-runs failures on
+ *   its first parent, and keeps nothing in the Loop's journal.
  *
- * Journals and artifacts live under state/runs/<iid> with iids in the reserved
- * 990000+ band, removed afterwards.
+ * Artifacts live under state/runs/<iid> with iids in the reserved 990000+ band,
+ * removed afterwards.
  */
 import '../lib/test-project-env.js';
 import { after, test } from 'node:test';
@@ -30,22 +27,19 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import {
-  afterScopeSession, cacheKey, captureOf, deskBusy, gcLocalTests, killLiveLocalTests, lateForLocalTests,
-  localResultsSubject,
-  localSpecsGate, localTestsRunPhase, noNewRunReason, normaliseRun, notRunnableOf, parseCliObject,
-  prepareScopeSession, runCli, runDeadlineMs, runSkipReason, secretRedactor, specFiles, weakenedFiles,
-  type CliDeps, type LocalTestsDeps, type ScopeInputs,
+  cacheKey, captureOf, captureScopeSession, deskBusy, gcLocalTests, killLiveLocalTests, normaliseRun, notRunnableOf,
+  parseCliObject, prepareScopeAt, runApprovedTests, runCli, runDeadlineMs, secretRedactor, specFiles, weakenedFiles,
+  type ApprovedRun, type CliDeps, type LocalTestsDeps, type ScopeInputs,
 } from './localtests.js';
-import { localSpecsGateReason } from './reviewgate.js';
-import { codePhaseStatus, type CodePhaseCtx } from './runner.js';
 import { RUNS, artifactDir, localTestsPatchFile, runDir, type LocalTestsConfig, type PhaseConfig } from '../lib/config.js';
-import { readArtifact, readJournal, writeArtifact, writeJournal, type RunJournal } from '../lib/artifacts.js';
+import { readArtifact, readJournal, writeArtifact } from '../lib/artifacts.js';
 import type { LocalTestsRun } from '../phases/types.js';
 
-const TICKET_SHA = 'a'.repeat(40);
+const MERGE_SHA = 'a'.repeat(40);
 const BASE_SHA = 'b'.repeat(40);
 const AUTO_SHA = 'c'.repeat(40);
 const PATCH_SHA = 'd'.repeat(40);
+const WORK_REPO = '/nowhere/erp';
 
 const used = new Set<number>();
 let nextIid = 990801;
@@ -63,6 +57,7 @@ const CFG: LocalTestsConfig = {
   dbPrefix: 'oneshot_lt_', automationRef: 'origin/master',
   allowedPaths: ['cypress/Pages/', 'cypress/fixtures/', 'cypress/e2e/'],
   maxSpecs: 40, maxRunMinutes: 45, devApproval: 'any', failuresBlock: false,
+  labels: { trigger: 'Ready for Automation Testing', running: 'Running TestCases Locally', done: 'Automation Testing Done' },
 };
 
 // ------------------------------------------------------------- the fakes
@@ -117,7 +112,8 @@ function fakeCli(scripts: Partial<Record<string, Script>> = {}, o: { ignoreTerm?
 
 const captureAnswer = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   patchFile: '/runs/x/artifacts/local-tests/temporary-changes.patch', patchSha: PATCH_SHA,
-  changedFiles: ['cypress/Pages/LeavePage.ts'], outsideAllowed: [], weakened: [], addedSpecs: [], removedSpecs: [],
+  changedFiles: ['cypress/Pages/LeavePage.ts'], outsideAllowed: [], weakened: [], weakenedDetail: [], addedSpecs: [],
+  removedSpecs: [],
   ...over,
 });
 
@@ -125,23 +121,21 @@ interface World {
   deps: Partial<LocalTestsDeps>;
   cli: ReturnType<typeof fakeCli>;
   posted: string[];
-  labels: string[];
   acquired: string[];
   released: string[];
 }
 
 function world(over: Partial<LocalTestsDeps> = {}, cli = fakeCli()): World {
-  const w: World = { cli, posted: [], labels: [], acquired: [], released: [], deps: {} };
+  const w: World = { cli, posted: [], acquired: [], released: [], deps: {} };
   w.deps = {
     cli,
-    git: async (args) => (args[0] === 'rev-parse' ? TICKET_SHA : BASE_SHA),
+    git: async () => { throw new Error('nothing here asks git'); },
     lease: {
       acquire: async (runId) => { w.acquired.push(runId); return true; },
       release: (runId) => { w.released.push(runId); },
       holder: () => null,
     },
     notes: { list: async () => w.posted, add: async (_iid, body) => { w.posted.push(body); return true; } },
-    labels: { add: async (_iid, label) => { w.labels.push(label); return true; } },
     config: () => CFG,
     activeIids: () => [],
     dryRun: false,
@@ -161,47 +155,27 @@ const SPECS = [
 function scopeWith(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     summary: '2 specs, 9 cases, about 4 min', blocked: null, applicable: true,
-    reason: 'the diff changes the leave form', modules: ['Leaves'], specs: SPECS,
+    reason: 'the merge changes the leave form', modules: ['Leaves'], specs: SPECS,
     edits: [], proposals: [], estimatedMinutes: 4,
-    capture: { ...captureAnswer(), automationSha: AUTO_SHA, base: BASE_SHA, head: TICKET_SHA },
+    capture: { ...captureAnswer(), automationSha: AUTO_SHA, base: BASE_SHA, head: MERGE_SHA },
     ...over,
   };
 }
 
-function journalFor(iid: number, scopeStatus: RunJournal['phases'][number]['status'] = 'ok', error?: string): RunJournal {
-  const j = {
-    runId: `r-${iid}`, iid, title: 'Leave form', url: `https://gitlab.example.com/acme/erp/-/issues/${iid}`,
-    createdAt: Date.now(), status: 'running', worktree: '/nowhere/erp-wt', branch: `oneshot/ticket-${iid}-leave`,
-    phases: [{ phase: 'local-tests-scope', lap: 0, status: scopeStatus, startedAt: 1, endedAt: 2, ...(error ? { error } : {}) }],
-    published: ['local-tests-scope'],
-  } as RunJournal;
-  writeJournal(j);
-  return j;
-}
-
-/** A record for the journal, in the order given. */
-const rec = (phase: string, status: RunJournal['phases'][number]['status']): RunJournal['phases'][number] =>
-  ({ phase, lap: 0, status, startedAt: 1, endedAt: 2 });
-
-/** The run's journal with these records after the scope's, as the runner would have appended them. */
-function withRecords(iid: number, ...records: Array<RunJournal['phases'][number]>): RunJournal {
-  const j = readJournal(iid)!;
-  j.phases.push(...records);
-  writeJournal(j);
-  return j;
-}
-
-/** A run with a scope ready to run, on disk. */
-function setup(scope = scopeWith(), scopeStatus: RunJournal['phases'][number]['status'] = 'ok'): { iid: number; ctx: CodePhaseCtx } {
-  const iid = freshIid();
-  const journal = journalFor(iid, scopeStatus);
-  writeArtifact(iid, 'local-tests-scope.json', scope);
-  return { iid, ctx: { iid, runId: journal.runId, journal, prior: {} } };
+/** An approved list, as the mode hands it over. */
+function approved(iid: number, over: Partial<ApprovedRun> = {}): ApprovedRun {
+  return {
+    iid, runId: `l-${iid}`, erpRepo: WORK_REPO, ref: MERGE_SHA, base: BASE_SHA,
+    specs: SPECS.map((s) => s.file), notRunnable: [], automationSha: AUTO_SHA,
+    patchFile: captureAnswer().patchFile as string, patchSha: PATCH_SHA,
+    code: 'dev (merge of !321)', tests: 9, minutes: 4,
+    ...over,
+  };
 }
 
 function runAnswer(over: Partial<LocalTestsRun> = {}): LocalTestsRun {
   return {
-    status: 'failed', cacheKey: 'whatever-the-script-says', ticketSha: TICKET_SHA, automationSha: AUTO_SHA,
+    status: 'failed', cacheKey: 'whatever-the-script-says', ticketSha: MERGE_SHA, automationSha: AUTO_SHA,
     patchSha: PATCH_SHA, db: 'oneshot_lt_1_1',
     totals: { specs: 2, tests: 9, passed: 8, failed: 1, skipped: 0 },
     results: [
@@ -213,91 +187,163 @@ function runAnswer(over: Partial<LocalTestsRun> = {}): LocalTestsRun {
   };
 }
 
-const keyOf = (scope = scopeWith()): string => cacheKey(scope, TICKET_SHA, AUTO_SHA, PATCH_SHA, CFG);
-const published = (iid: number): string[] => readJournal(iid)?.published ?? [];
+/** The key runApprovedTests computes for a list of these specs. */
+const keyOf = (specs = SPECS.map((s) => s.file), patchSha: string | null = PATCH_SHA, notRunnable: Array<{ spec: string; why: string }> = []): string =>
+  cacheKey({ specs: specs.map((file) => ({ file })), notRunnable }, MERGE_SHA, AUTO_SHA, patchSha, CFG);
 
-// ------------------------------------------------------ the run phase
+const runCalls = (w: World): number => w.cli.calls.filter((c) => c.args[0] === 'run').length;
 
-test('an identical earlier run is reused: no lease, no note, no Cypress', async () => {
-  const { iid, ctx } = setup();
-  writeArtifact(iid, 'local-tests-run.json', runAnswer({ status: 'passed', cacheKey: keyOf() }));
+// ------------------------------------------------------ the approved run
+
+test('an identical earlier run of the same request is reused: no lease, no note, no Cypress', async () => {
+  const iid = freshIid();
+  writeArtifact(iid, 'local-tests-run.json', { ...runAnswer({ status: 'passed', cacheKey: keyOf() }), runId: `l-${iid}` });
   const w = world();
 
-  const out = await localTestsRunPhase(ctx, w.deps);
+  const res = await runApprovedTests(approved(iid), w.deps);
 
-  assert.equal(out.ok, true);
-  assert.equal((out.data as unknown as LocalTestsRun).cacheKey, keyOf());
+  assert.equal(res.kind, 'ran');
+  assert.equal(res.kind === 'ran' && res.reused, true);
   assert.deepEqual(w.cli.calls, [], 'nothing was started');
   assert.deepEqual(w.acquired, [], 'the desk was not even asked for');
   assert.deepEqual(w.posted, []);
 });
 
-test('a new commit is a new run, not the saved one', async () => {
-  const { iid, ctx } = setup();
-  writeArtifact(iid, 'local-tests-run.json', runAnswer({ status: 'passed', cacheKey: keyOf() }));
-  const w = world({ git: async () => 'e'.repeat(40) },
-    fakeCli({ run: (_a, c) => reply(c, runAnswer({ status: 'passed' })) }));
+test('a new request on the same code runs Cypress again and announces it, never posting the old results as new', async () => {
+  const iid = freshIid();
+  // The first request's run, finished and recorded; its start note is on the ticket.
+  writeArtifact(iid, 'local-tests-run.json', { ...runAnswer({ status: 'failed', cacheKey: keyOf() }), runId: 'l-first' });
+  const w = world({}, fakeCli({ run: (_a, c) => reply(c, runAnswer({ status: 'passed' })) }));
+  w.posted.push(`started @ \`${MERGE_SHA.slice(0, 7)}\` and \`${AUTO_SHA.slice(0, 7)}\`\n\n`
+    + '<!-- oneshot:local-tests-start -->\n<!-- oneshot:local-tests-start:l-first -->');
 
-  await localTestsRunPhase(ctx, w.deps);
+  const res = await runApprovedTests(approved(iid, { runId: 'l-second' }), w.deps);
 
-  assert.equal(w.cli.calls.filter((c) => c.args[0] === 'run').length, 1);
+  assert.equal(res.kind === 'ran' && res.reused, false, 'the trigger put back asks for a new run');
+  assert.equal(res.kind === 'ran' && res.run.status, 'passed', 'this request\'s own results');
+  assert.equal(runCalls(w), 1);
+  assert.deepEqual(w.acquired, ['l-second']);
+  assert.equal(w.posted.length, 2, 'a new run is announced, though the code is the same');
+  assert.match(w.posted[1]!, /<!-- oneshot:local-tests-start:l-second -->/);
+  const saved = readArtifact<LocalTestsRun & { runId?: string }>(iid, 'local-tests-run.json');
+  assert.equal(saved?.runId, 'l-second', 'stamped with the request that ran it');
+  assert.equal(saved?.status, 'passed');
+
+  // A repeat within that request — a crash after the run, before the journal heard — reuses it.
+  const again = await runApprovedTests(approved(iid, { runId: 'l-second' }), w.deps);
+  assert.equal(again.kind === 'ran' && again.reused, true);
+  assert.equal(runCalls(w), 1);
+  assert.equal(w.posted.length, 2);
 });
 
-test('a dry run records skipped and starts nothing', async () => {
-  const { iid, ctx } = setup();
+test('a run recorded with no request is no request\'s, so it is never reused', async () => {
+  const iid = freshIid();
+  writeArtifact(iid, 'local-tests-run.json', runAnswer({ status: 'passed', cacheKey: keyOf() }));
+  const w = world({}, fakeCli({ run: (_a, c) => reply(c, runAnswer({ status: 'passed' })) }));
+
+  const res = await runApprovedTests(approved(iid), w.deps);
+
+  assert.equal(res.kind === 'ran' && res.reused, false);
+  assert.equal(runCalls(w), 1);
+});
+
+test('a repeat dry rehearsal records skipped under its own request, and a real run after it is not mistaken for it', async () => {
+  const iid = freshIid();
+  const dry = world({ dryRun: true });
+  await runApprovedTests(approved(iid, { runId: 'l-dry-1' }), dry.deps);
+  assert.equal(readArtifact<LocalTestsRun & { runId?: string }>(iid, 'local-tests-run.json')?.runId, 'l-dry-1');
+
+  // A rehearsal that ran Cypress (ONESHOT_LOCAL_TESTS_DRY_CYPRESS), then a new rehearsal of the same code.
+  const cy = world({ dryRun: true }, fakeCli({ run: (_a, c) => reply(c, runAnswer({ status: 'failed' })) }));
+  await runApprovedTests(approved(iid, { runId: 'l-dry-2', dryCypress: true }), cy.deps);
+  const next = await runApprovedTests(approved(iid, { runId: 'l-dry-3', dryCypress: true }), cy.deps);
+  assert.equal(next.kind === 'ran' && next.reused, false, 'a new rehearsal runs Cypress again');
+  assert.equal(runCalls(cy), 2);
+});
+
+test('a setup error is never reused: QA\'s next approval means try again', async () => {
+  const iid = freshIid();
+  writeArtifact(iid, 'local-tests-run.json', runAnswer({ status: 'error', reason: 'E_MIGRATE_FAILED: x', cacheKey: keyOf() }));
+  const w = world({}, fakeCli({ run: (_a, c) => reply(c, runAnswer({ status: 'passed' })) }));
+
+  const res = await runApprovedTests(approved(iid), w.deps);
+
+  assert.equal(res.kind, 'ran');
+  assert.equal(runCalls(w), 1);
+  assert.equal(readArtifact<LocalTestsRun>(iid, 'local-tests-run.json')?.status, 'passed');
+});
+
+test('a dry run records skipped and starts nothing — unless asked to run Cypress', async () => {
+  const iid = freshIid();
   const w = world({ dryRun: true });
 
-  const out = await localTestsRunPhase(ctx, w.deps);
+  const res = await runApprovedTests(approved(iid), w.deps);
 
-  assert.equal(out.ok, true);
+  assert.equal(res.kind, 'ran');
   const run = readArtifact<LocalTestsRun>(iid, 'local-tests-run.json');
   assert.equal(run?.status, 'skipped');
-  assert.match(run?.reason ?? '', /dry run/);
+  assert.equal(run?.reason, 'a dry run starts no Cypress');
   assert.equal(run?.cacheKey, keyOf(), 'keyed, so a later real run is not mistaken for this one');
   assert.deepEqual(w.cli.calls, []);
   assert.deepEqual(w.acquired, []);
-  assert.ok(!published(iid).includes('local-tests-run'), 'the one-line report still reaches the ticket');
+
+  const asked = world({ dryRun: true }, fakeCli({ run: (_a, c) => reply(c, runAnswer({ status: 'passed' })) }));
+  const real = await runApprovedTests(approved(freshIid(), { dryCypress: true }), asked.deps);
+  assert.equal(real.kind === 'ran' && real.run.status, 'passed');
+  assert.equal(runCalls(asked), 1, 'ONESHOT_LOCAL_TESTS_DRY_CYPRESS runs it for real');
+});
+
+test('a list with nothing a desk can run records why, and starts nothing', async () => {
+  const iid = freshIid();
+  const w = world();
+  const res = await runApprovedTests(approved(iid, {
+    specs: [], notRunnable: [{ spec: SPECS[1]!.file, why: 'needs the mailbox' }],
+  }), w.deps);
+  assert.equal(res.kind === 'ran' && res.run.status, 'skipped');
+  assert.match(res.kind === 'ran' ? res.run.reason ?? '' : '', /needs something a local machine does not have/);
+  assert.deepEqual(res.kind === 'ran' && res.run.notRunnable, [{ spec: SPECS[1]!.file, why: 'needs the mailbox' }]);
+  assert.deepEqual(w.acquired, []);
 });
 
 test('a busy desk parks before anything is announced, written or started', async () => {
-  const { iid, ctx } = setup();
+  const iid = freshIid();
   const w = world({
-    lease: { acquire: async () => false, release: () => { throw new Error('nothing to release'); }, holder: () => ({ runId: 'r-other' }) },
+    lease: { acquire: async () => false, release: () => { throw new Error('nothing to release'); }, holder: () => ({ runId: 'l-other' }) },
   });
 
-  const out = await localTestsRunPhase(ctx, w.deps);
+  const res = await runApprovedTests(approved(iid), w.deps);
 
-  assert.equal(out.park, true);
-  assert.equal(out.ok, false);
-  assert.match(out.error ?? '', /r-other/);
+  assert.equal(res.kind, 'park');
+  assert.match(res.kind === 'park' ? res.why : '', /l-other/);
   assert.deepEqual(w.cli.calls, []);
   assert.deepEqual(w.posted, [], 'no start note for a run that did not start');
   assert.equal(readArtifact(iid, 'local-tests-run.json'), null, 'no result recorded');
-  assert.equal(codePhaseStatus({ name: 'local-tests-run', n: 7.6, kind: 'code', timeoutMin: 120, onFail: 'warn' }, out), 'parked');
 });
 
-test('a full run: announced once, the planned specs only, saved under the conductor\'s key', async () => {
-  const { iid, ctx } = setup();
+test('a full run: the merge commit, its first parent as the base, announced once, saved under the conductor\'s key', async () => {
+  const iid = freshIid();
   const w = world({}, fakeCli({ run: (_a, c) => reply(c, runAnswer()) }));
+  const spawned: number[] = [];
 
-  const out = await localTestsRunPhase(ctx, w.deps);
+  const res = await runApprovedTests(approved(iid, { onSpawn: (pid) => spawned.push(pid) }), w.deps);
 
-  assert.equal(out.ok, true, 'failing tests are the dev\'s call at the results gate, not a phase failure');
-  const run = readArtifact<LocalTestsRun>(iid, 'local-tests-run.json');
+  assert.equal(res.kind, 'ran', 'failing tests are results, not a setup error');
+  const run = readArtifact<LocalTestsRun & { runId?: string }>(iid, 'local-tests-run.json');
   assert.equal(run?.status, 'failed');
   assert.equal(run?.cacheKey, keyOf(), 'the conductor\'s key, never the script\'s');
-  assert.equal(run?.ticketSha, TICKET_SHA);
-  assert.ok(!published(iid).includes('local-tests-run'), 'a new result is reported');
+  assert.equal(run?.runId, `l-${iid}`, 'stamped with the request it ran for');
+  assert.equal(run?.ticketSha, MERGE_SHA);
+  assert.deepEqual(spawned, [4242], 'the mode is told what it holds');
 
   const call = w.cli.calls.find((c) => c.args[0] === 'run')!;
   const arg = (flag: string): string | undefined => call.args[call.args.indexOf(flag) + 1];
-  assert.equal(arg('--ref'), TICKET_SHA);
-  assert.equal(arg('--worktree'), '/nowhere/erp-wt');
+  assert.equal(arg('--ref'), MERGE_SHA, 'the code under test is the merge commit');
+  assert.equal(arg('--worktree'), WORK_REPO, 'the script cuts its own erp-lt from the clone');
+  assert.equal(arg('--base'), BASE_SHA, 'a failure is re-run on the merge commit\'s first parent');
   assert.equal(arg('--automation-sha'), AUTO_SHA);
   assert.equal(arg('--patch'), captureAnswer().patchFile);
   assert.equal(arg('--patch-sha'), PATCH_SHA, 'the script refuses a patch file changed since capture');
   assert.equal(arg('--deadline-min'), '45');
-  assert.equal(arg('--base'), 'origin/dev');
   const until = Number(arg('--until'));
   assert.ok(Math.abs(until - (Date.now() + runDeadlineMs(45))) < 60_000,
     'the script is told the conductor\'s own kill, as an absolute clock');
@@ -308,63 +354,61 @@ test('a full run: announced once, the planned specs only, saved under the conduc
   assert.equal(w.posted.length, 1);
   assert.match(w.posted[0]!, /<!-- oneshot:local-tests-start -->/);
   assert.match(w.posted[0]!, /9 tests/);
-  assert.deepEqual(w.released, [ctx.runId], 'the lease goes back');
-  assert.equal(readJournal(iid)?.localTests, undefined, 'nothing is recorded as held once it is done');
+  assert.match(w.posted[0]!, /dev \(merge of !321\)/);
+  assert.deepEqual(w.released, [`l-${iid}`], 'the lease goes back');
+  assert.equal(readJournal(iid), null, 'nothing is written to the Loop\'s journal');
   assert.equal(w.cli.calls.filter((c) => c.args[0] === 'gc').length, 0, 'a clean run cleaned up after itself');
 
-  // The same code again: the saved result, and no second start note.
-  const again = await localTestsRunPhase({ ...ctx, journal: readJournal(iid)! }, w.deps);
-  assert.equal(again.ok, true);
-  assert.equal(w.cli.calls.filter((c) => c.args[0] === 'run').length, 1);
+  // The same code again, in the same request: the saved results, and no second start note.
+  const again = await runApprovedTests(approved(iid), w.deps);
+  assert.equal(again.kind === 'ran' && again.reused, true);
+  assert.equal(runCalls(w), 1);
   assert.equal(w.posted.length, 1);
 });
 
-test('a resumed run that was announced before a restart is not announced twice', async () => {
-  const { ctx } = setup();
+test('a run announced before a restart is not announced twice', async () => {
+  const iid = freshIid();
   const w = world({}, fakeCli({ run: (_a, c) => reply(c, runAnswer()) }));
-  w.posted.push(`earlier start note @ \`${TICKET_SHA.slice(0, 7)}\` and \`${AUTO_SHA.slice(0, 7)}\`\n\n<!-- oneshot:local-tests-start -->`);
+  w.posted.push(`earlier start note @ \`${MERGE_SHA.slice(0, 7)}\` and \`${AUTO_SHA.slice(0, 7)}\`\n\n`
+    + `<!-- oneshot:local-tests-start -->\n<!-- oneshot:local-tests-start:l-${iid} -->`);
 
-  await localTestsRunPhase(ctx, w.deps);
+  await runApprovedTests(approved(iid), w.deps);
 
-  assert.equal(w.posted.length, 1, 'the existing note for this code stands');
+  assert.equal(w.posted.length, 1, 'the existing note for this request and code stands');
 });
 
-test('a scope that made no edits runs without a patch', async () => {
-  const scope = scopeWith({ capture: { ...captureAnswer({ patchSha: null, changedFiles: [] }), automationSha: AUTO_SHA, base: BASE_SHA, head: TICKET_SHA } });
-  const { ctx } = setup(scope);
+test('a list without temporary changes runs without a patch', async () => {
   const w = world({}, fakeCli({ run: (_a, c) => reply(c, runAnswer({ status: 'passed' })) }));
 
-  await localTestsRunPhase(ctx, w.deps);
+  await runApprovedTests(approved(freshIid(), { patchFile: null, patchSha: null }), w.deps);
 
   const args = w.cli.calls.find((c) => c.args[0] === 'run')!.args;
   assert.ok(!args.includes('--patch') && !args.includes('--patch-sha'));
 });
 
-test('a script stopped by anything but this run\'s own signal is recorded as an error', async () => {
-  const { iid, ctx } = setup();
+test('a script stopped by anything but this run\'s own signal is recorded as a setup error', async () => {
+  const iid = freshIid();
   const w = world({}, fakeCli({ run: (_a, c) => reply(c, { code: 'E_ABORTED', message: 'stopped by SIGTERM' }, 143) }));
 
-  const out = await localTestsRunPhase(ctx, w.deps);
+  const res = await runApprovedTests(approved(iid), w.deps);
 
-  assert.equal(out.ok, false);
+  assert.equal(res.kind, 'error');
   assert.equal(readArtifact<LocalTestsRun>(iid, 'local-tests-run.json')?.status, 'error');
 });
 
 test('a run past its deadline has its whole process group killed, and is recorded as not run', async () => {
-  const { iid, ctx } = setup();
+  const iid = freshIid();
   const w = world({ deadlineMs: () => 30 });
 
-  const out = await localTestsRunPhase(ctx, w.deps);
+  const res = await runApprovedTests(approved(iid), w.deps);
 
   assert.deepEqual(w.cli.kills[0], [-4242, 'SIGTERM'], 'the group, not the node at its top');
-  assert.equal(out.ok, false);
-  assert.ok(!out.park && !out.block, 'a setup failure warns: it costs the ticket its local run, not its MR');
+  assert.equal(res.kind, 'error');
   const run = readArtifact<LocalTestsRun>(iid, 'local-tests-run.json');
   assert.equal(run?.status, 'error');
   assert.match(run?.reason ?? '', /E_DEADLINE/);
-  assert.deepEqual(w.released, [ctx.runId]);
+  assert.deepEqual(w.released, [`l-${iid}`]);
   assert.equal(w.cli.calls.filter((c) => c.args[0] === 'gc').length, 1, 'what it left behind is cleared now');
-  assert.equal(codePhaseStatus({ name: 'local-tests-run', n: 7.6, kind: 'code', timeoutMin: 120, onFail: 'warn' }, out), 'warned');
 });
 
 test('the conductor\'s own deadline is the script\'s plus a grace, never under the phase\'s timeoutMin', () => {
@@ -384,64 +428,32 @@ test('a group that ignores SIGTERM gets SIGKILL, and the caller is never held fo
 });
 
 test('a stop the conductor asks for kills the run and records nothing', async () => {
-  const { iid, ctx } = setup();
+  const iid = freshIid();
   const aborter = new AbortController();
   const w = world({}, fakeCli({ run: () => { setTimeout(() => aborter.abort(), 5); } }));
 
-  const out = await localTestsRunPhase({ ...ctx, signal: aborter.signal }, w.deps);
+  const res = await runApprovedTests(approved(iid, { signal: aborter.signal }), w.deps);
 
-  assert.equal(out.ok, false);
-  assert.match(out.error ?? '', /asked this run to stop/);
+  assert.equal(res.kind, 'stopped');
+  assert.match(res.kind === 'stopped' ? res.why : '', /asked this run to stop/);
   assert.deepEqual(w.cli.kills[0], [-4242, 'SIGTERM']);
   assert.equal(readArtifact(iid, 'local-tests-run.json'), null, 'the next pass runs it again');
-  assert.deepEqual(w.released, [ctx.runId]);
+  assert.deepEqual(w.released, [`l-${iid}`]);
 });
 
-test('a setup error is recorded in the script\'s own words, and warns', async () => {
-  const { iid, ctx } = setup();
+test('a setup error is recorded in the script\'s own words', async () => {
+  const iid = freshIid();
   const w = world({}, fakeCli({
     run: (_a, c) => reply(c, { code: 'E_MIGRATE_FAILED', message: 'leaves.0042 failed', hint: 'see the log' }, 3),
   }));
 
-  const out = await localTestsRunPhase(ctx, w.deps);
+  const res = await runApprovedTests(approved(iid), w.deps);
 
-  assert.equal(out.ok, false);
-  assert.ok(!out.park && !out.block);
+  assert.equal(res.kind, 'error');
   const run = readArtifact<LocalTestsRun>(iid, 'local-tests-run.json');
   assert.equal(run?.status, 'error');
   assert.equal(run?.reason, 'E_MIGRATE_FAILED: leaves.0042 failed (see the log)');
-  assert.ok(!published(iid).includes('local-tests-run'), 'the ticket is told why nothing ran');
-  assert.match(out.error ?? '', /E_MIGRATE_FAILED/);
-});
-
-test('a setup error that would only repeat is reused on the next pass, not run again', async () => {
-  const { iid, ctx } = setup();
-  const w = world({}, fakeCli({ run: (_a, c) => reply(c, { code: 'E_MIGRATE_FAILED', message: 'leaves.0042 failed' }, 3) }));
-
-  await localTestsRunPhase(ctx, w.deps);
-  const before = readFileSync(join(runDir(iid), 'local-tests-run.json'), 'utf8');
-  const again = await localTestsRunPhase({ ...ctx, journal: readJournal(iid)! }, w.deps);
-
-  assert.equal(again.ok, false, 'still a warning');
-  assert.ok(!again.park);
-  assert.match(again.error ?? '', /E_MIGRATE_FAILED/);
-  assert.equal(w.cli.calls.filter((c) => c.args[0] === 'run').length, 1, 'one run for one cache key');
-  assert.equal(w.acquired.length, 1, 'the desk was not asked for again');
-  assert.equal(readFileSync(join(runDir(iid), 'local-tests-run.json'), 'utf8'), before, 'nothing rewritten or re-posted');
-});
-
-test('a saved error that only said the desk was busy, or that the script was stopped, is run again', async () => {
-  for (const reason of ['E_PORT_BUSY: port 8030 (Django) is held by pid 7', 'E_ABORTED: stopped by SIGTERM']) {
-    const { iid, ctx } = setup();
-    writeArtifact(iid, 'local-tests-run.json', runAnswer({ status: 'error', reason, cacheKey: keyOf() }));
-    const w = world({}, fakeCli({ run: (_a, c) => reply(c, runAnswer({ status: 'passed' })) }));
-
-    const out = await localTestsRunPhase(ctx, w.deps);
-
-    assert.equal(out.ok, true, reason);
-    assert.equal(w.cli.calls.filter((c) => c.args[0] === 'run').length, 1, reason);
-    assert.equal(readArtifact<LocalTestsRun>(iid, 'local-tests-run.json')?.status, 'passed');
-  }
+  assert.equal(run?.cacheKey, keyOf());
 });
 
 test('a script that finds the desk busy parks the run: nothing recorded, the lease back, the next tick tries again', async () => {
@@ -451,30 +463,28 @@ test('a script that finds the desk busy parks the run: nothing recorded, the lea
     { code: 'E_PORT_BUSY', message: `port 8030 (Django) is held by pid 77 running from ${join(RUNS, '990001', 'erp-base-lt')}` },
   ];
   for (const answer of busy) {
-    const { iid, ctx } = setup();
+    const iid = freshIid();
     const w = world({}, fakeCli({ run: (_a, c) => reply(c, answer, 3) }));
 
-    const out = await localTestsRunPhase(ctx, w.deps);
+    const res = await runApprovedTests(approved(iid), w.deps);
 
-    assert.equal(out.park, true, answer.code);
-    assert.equal(out.ok, false);
-    assert.match(out.error ?? '', new RegExp(answer.code));
+    assert.equal(res.kind, 'park', answer.code);
+    assert.match(res.kind === 'park' ? res.why : '', new RegExp(answer.code));
     assert.equal(readArtifact(iid, 'local-tests-run.json'), null, `${answer.code}: no result recorded`);
-    assert.deepEqual(w.released, [ctx.runId]);
+    assert.deepEqual(w.released, [`l-${iid}`]);
     assert.equal(w.cli.calls.filter((c) => c.args[0] === 'gc').length, 0, 'the script cleaned up before it answered');
-    assert.equal(codePhaseStatus({ name: 'local-tests-run', n: 7.6, kind: 'code', timeoutMin: 120, onFail: 'warn' }, out), 'parked');
   }
 });
 
 test('the ports held by something that is not a local-tests run are a person\'s to clear, and recorded', async () => {
-  const { iid, ctx } = setup();
+  const iid = freshIid();
   const w = world({}, fakeCli({
     run: (_a, c) => reply(c, { code: 'E_PORT_BUSY', message: 'port 8030 (Django) is held by pid 77 running from /Users/dev/erp' }, 3),
   }));
 
-  const out = await localTestsRunPhase(ctx, w.deps);
+  const res = await runApprovedTests(approved(iid), w.deps);
 
-  assert.ok(!out.park);
+  assert.equal(res.kind, 'error');
   assert.equal(readArtifact<LocalTestsRun>(iid, 'local-tests-run.json')?.status, 'error');
 });
 
@@ -490,85 +500,9 @@ test('a busy desk is told apart from a held port by the holder\'s directory', ()
   assert.equal(deskBusy({ code: 'E_MIGRATE_FAILED', message: `in ${join(RUNS, '1', 'erp-lt')}` }), false);
 });
 
-test('past mr, nothing new starts: the saved result stands, and the desk is not asked for', async () => {
-  const { iid, ctx } = setup();
-  // Results for an older commit, then mr opened the MR.
-  writeArtifact(iid, 'local-tests-run.json', runAnswer({ status: 'passed', cacheKey: 'an-older-commit' }));
-  withRecords(iid, rec('local-tests-run', 'ok'), rec('mr', 'ok'), rec('merge', 'parked'));
-  const w = world({}, fakeCli({ run: (_a, c) => reply(c, runAnswer()) }));
-
-  const out = await localTestsRunPhase({ ...ctx, journal: readJournal(iid)! }, w.deps);
-
-  assert.equal(out.ok, true);
-  assert.equal((out.data as unknown as LocalTestsRun).cacheKey, 'an-older-commit');
-  assert.deepEqual(w.cli.calls, [], 'no Cypress for an MR that is already open');
-  assert.deepEqual(w.acquired, []);
-  assert.deepEqual(w.posted, []);
-});
-
-test('past mr with nothing ever recorded: one quiet line in the artifact, none on the ticket', async () => {
-  const { iid, ctx } = setup();
-  withRecords(iid, rec('mr', 'ok'));
-  const w = world();
-
-  const out = await localTestsRunPhase({ ...ctx, journal: readJournal(iid)! }, w.deps);
-
-  assert.equal(out.ok, true);
-  const run = readArtifact<LocalTestsRun>(iid, 'local-tests-run.json');
-  assert.equal(run?.status, 'skipped');
-  assert.match(run?.reason ?? '', /MR step has already run/);
-  assert.ok(published(iid).includes('local-tests-run'), 'quiet');
-  assert.deepEqual(w.cli.calls, []);
-});
-
-test('an MR review round re-plans after mr, and its plan runs', async () => {
-  const { iid, ctx } = setup();
-  writeArtifact(iid, 'local-tests-run.json', runAnswer({ status: 'passed', cacheKey: 'an-older-commit' }));
-  withRecords(iid, rec('local-tests-run', 'ok'), rec('mr', 'ok'), rec('implement', 'ok'), rec('local-tests-scope', 'ok'));
-  const w = world({}, fakeCli({ run: (_a, c) => reply(c, runAnswer()) }));
-
-  await localTestsRunPhase({ ...ctx, journal: readJournal(iid)! }, w.deps);
-
-  assert.equal(w.cli.calls.filter((c) => c.args[0] === 'run').length, 1);
-  assert.equal(readArtifact<LocalTestsRun>(iid, 'local-tests-run.json')?.cacheKey, keyOf());
-});
-
-test('which runs may start a new local run, judged from the journal alone', () => {
-  const j = (...phases: Array<RunJournal['phases'][number]>): Pick<RunJournal, 'phases'> => ({ phases });
-  assert.equal(noNewRunReason(j(rec('local-tests-scope', 'ok'))), null, 'before mr');
-  assert.match(noNewRunReason(j(rec('local-tests-scope', 'ok'), rec('mr', 'ok'))) ?? '', /no new local run/);
-  assert.equal(noNewRunReason(j(rec('local-tests-scope', 'ok'), rec('mr', 'failed'))), null, 'mr never settled');
-  assert.equal(noNewRunReason(j(rec('mr', 'ok'), rec('local-tests-scope', 'warned'))), null, 're-planned since');
-  assert.match(noNewRunReason(j(rec('mr', 'ok'), rec('local-tests-scope', 'skipped'))) ?? '', /no new local run/,
-    'a skip is not a plan');
-  assert.match(noNewRunReason(j(rec('mr', 'ok'), rec('local-tests-scope', 'ok'), rec('mr', 'ok'))) ?? '', /no new local run/,
-    'the round\'s own mr has run since');
-});
-
-test('a run the step was switched on under skips both phases, quietly, unless the scope ever ran', async () => {
-  const j = (...phases: Array<RunJournal['phases'][number]>): Pick<RunJournal, 'phases'> => ({ phases });
-  assert.equal(lateForLocalTests(j(rec('implement', 'ok'))), null, 'mr has not run: the step applies');
-  assert.match(lateForLocalTests(j(rec('mr', 'ok'), rec('merge', 'parked'))) ?? '', /switched on/);
-  assert.match(lateForLocalTests(j(rec('mr', 'ok'), rec('local-tests-scope', 'skipped'))) ?? '', /switched on/,
-    'the skip the runner recorded is not a run');
-  assert.equal(lateForLocalTests(j(rec('local-tests-scope', 'ok'), rec('mr', 'ok'))), null);
-  assert.equal(lateForLocalTests(j(rec('mr', 'ok'), rec('local-tests-scope', 'warned'))), null, 'an MR review round ran it');
-
+test('the script\'s notes and a flaky pass are kept, so the results note can show them', async () => {
   const iid = freshIid();
-  const journal = { ...journalFor(iid), phases: [rec('mr', 'ok'), rec('merge', 'parked')] } as RunJournal;
-  writeJournal(journal);
-  const w = world();
-  const out = await localTestsRunPhase({ iid, runId: journal.runId, journal, prior: {} }, w.deps);
-  assert.equal(out.ok, true);
-  assert.equal(readArtifact<LocalTestsRun>(iid, 'local-tests-run.json')?.status, 'skipped');
-  assert.ok(published(iid).includes('local-tests-run'), 'no line on a ticket whose MR is already open');
-  assert.deepEqual(w.cli.calls, []);
-  assert.deepEqual(w.acquired, []);
-});
-
-test('the script\'s notes and a flaky pass are kept, so the ticket and the dev gate can show them', async () => {
-  const { iid, ctx } = setup();
-  const notes = ['the failures were not re-run on origin/dev: E_APP_FAILED: webpack exited 1'];
+  const notes = ['the failures were not re-run on bbbbbbb: E_APP_FAILED: webpack exited 1'];
   const answer = runAnswer({
     results: [
       { spec: SPECS[0]!.file, title: 'applies a leave', state: 'passed', durationMs: 1000, flaky: true },
@@ -577,15 +511,12 @@ test('the script\'s notes and a flaky pass are kept, so the ticket and the dev g
   });
   const w = world({}, fakeCli({ run: (_a, c) => reply(c, { ...answer, notes }) }));
 
-  await localTestsRunPhase(ctx, w.deps);
+  await runApprovedTests(approved(iid), w.deps);
 
   const run = readArtifact<LocalTestsRun & { notes?: string[] }>(iid, 'local-tests-run.json');
   assert.deepEqual(run?.notes, notes);
   assert.equal((run?.results[0] as { flaky?: boolean }).flaky, true);
   assert.equal('flaky' in run!.results[1]!, false, 'only a pass on the retry is flaky');
-  const subject = localResultsSubject(run as unknown as Record<string, unknown>) as { results: Array<Record<string, unknown>> };
-  assert.equal(subject.results[0]!.flaky, true, 'a pass that needed the retry is its own outcome to sign');
-  assert.equal('flaky' in subject.results[1]!, false, 'a subject from before the flag still matches');
 });
 
 test('normaliseRun drops what is not the contract, and redacts credentials from free text', () => {
@@ -617,19 +548,19 @@ test('a crash the conductor words itself from stderr never carries a credential'
 
 test('specs a local machine cannot run are handed to the script beside the list, and change the key', async () => {
   const notRunnable = [{ spec: SPECS[1]!.file, why: 'needs the mailbox' }, { spec: SPECS[1]!.file, why: 'dup' }, { why: 'no spec' }];
-  const scope = scopeWith({ notRunnable });
-  assert.deepEqual(notRunnableOf(scope), [{ spec: SPECS[1]!.file, why: 'needs the mailbox' }]);
-  assert.equal(cacheKey(scopeWith({ notRunnable: [] }), TICKET_SHA, AUTO_SHA, PATCH_SHA, CFG), keyOf(),
-    'a plan without the list keeps the key it always had');
-  assert.notEqual(keyOf(scope), keyOf());
+  assert.deepEqual(notRunnableOf(scopeWith({ notRunnable })), [{ spec: SPECS[1]!.file, why: 'needs the mailbox' }]);
+  assert.equal(cacheKey(scopeWith({ notRunnable: [] }), MERGE_SHA, AUTO_SHA, PATCH_SHA, CFG),
+    cacheKey(scopeWith(), MERGE_SHA, AUTO_SHA, PATCH_SHA, CFG), 'a list without them keeps the key it always had');
 
-  const { ctx } = setup(scope);
+  const iid = freshIid();
+  const nr = [{ spec: SPECS[1]!.file, why: 'needs the mailbox' }];
   const w = world({}, fakeCli({ run: (_a, c) => reply(c, runAnswer({ status: 'passed' })) }));
-  await localTestsRunPhase(ctx, w.deps);
+  await runApprovedTests(approved(iid, { specs: [SPECS[0]!.file], notRunnable: nr, tests: 6 }), w.deps);
 
   const call = w.cli.calls.find((c) => c.args[0] === 'run')!;
   const file = JSON.parse(readFileSync(call.args[call.args.indexOf('--specs-file') + 1]!, 'utf8')) as Record<string, unknown>;
-  assert.deepEqual(file, { specs: SPECS.map((s) => s.file), notRunnable: [{ spec: SPECS[1]!.file, why: 'needs the mailbox' }] });
+  assert.deepEqual(file, { specs: [SPECS[0]!.file], notRunnable: nr });
+  assert.equal(readArtifact<LocalTestsRun>(iid, 'local-tests-run.json')?.cacheKey, keyOf([SPECS[0]!.file], PATCH_SHA, nr));
   assert.match(w.posted[0] ?? '', /6 tests/, 'the start note counts only what will run');
 });
 
@@ -659,256 +590,129 @@ test('a script that says nothing usable is named as such, not trusted', async ()
   assert.equal(crashed.ok ? '' : crashed.error.code, 'E_CLI');
   assert.match(crashed.ok ? '' : crashed.error.message, /Cannot find module pg/);
 
-  const { ctx } = setup();
   const w = world({}, fakeCli({ run: (_a, c) => reply(c, { status: 'green' }) }));
-  const out = await localTestsRunPhase(ctx, w.deps);
-  assert.match(out.error ?? '', /E_BAD_OUTPUT/, 'an unknown status is not a run');
+  const res = await runApprovedTests(approved(freshIid()), w.deps);
+  assert.match(res.kind === 'error' ? res.run.reason ?? '' : '', /E_BAD_OUTPUT/, 'an unknown status is not a run');
 });
 
-test('an unexpected throw inside the run is recorded, never left to escape the run loop', async () => {
-  const { iid, ctx } = setup();
+test('an unexpected throw inside the run is recorded, and the lease still goes back', async () => {
+  const iid = freshIid();
   const w = world({ notes: { list: async () => { throw new Error('socket hang up'); }, add: async () => true } });
 
-  const out = await localTestsRunPhase(ctx, w.deps);
+  const res = await runApprovedTests(approved(iid), w.deps);
 
-  assert.equal(out.ok, false);
+  assert.equal(res.kind, 'error');
   assert.match(readArtifact<LocalTestsRun>(iid, 'local-tests-run.json')?.reason ?? '', /socket hang up/);
-  assert.deepEqual(w.released, [ctx.runId], 'the lease still goes back');
+  assert.deepEqual(w.released, [`l-${iid}`]);
 });
 
-test('failing tests stop the run only when the team says they must', async () => {
-  const { ctx } = setup();
-  const strict = { ...CFG, failuresBlock: true };
-  const w = world({ config: () => strict }, fakeCli({ run: (_a, c) => reply(c, runAnswer()) }));
-
-  const out = await localTestsRunPhase(ctx, w.deps);
-
-  assert.equal(out.block, true);
-  assert.equal(out.ok, false);
-  assert.match(out.error ?? '', /1 local automation test\(s\) failed/);
-  assert.equal(codePhaseStatus({ name: 'local-tests-run', n: 7.6, kind: 'code', timeoutMin: 120, onFail: 'warn' }, out), 'failed',
-    'recorded failed, so finish() names this phase as where the run stopped');
-
-  const passing = setup();
-  const w2 = world({ config: () => strict }, fakeCli({ run: (_a, c) => reply(c, runAnswer({ status: 'passed' })) }));
-  assert.equal((await localTestsRunPhase(passing.ctx, w2.deps)).ok, true);
-});
-
-test('not applicable: skipped quietly, nothing started, and neither gate arms', async () => {
-  const scope = scopeWith({ applicable: false, reason: 'only a management command changed', specs: [], capture: undefined });
-  const { iid, ctx } = setup(scope);
+test('no merge commit or no first parent is a setup error, before the desk is asked for', async () => {
   const w = world();
-
-  const out = await localTestsRunPhase(ctx, w.deps);
-
-  assert.equal(out.ok, true);
-  const run = readArtifact<LocalTestsRun>(iid, 'local-tests-run.json');
-  assert.equal(run?.status, 'skipped');
-  assert.match(run?.reason ?? '', /only a management command changed/);
-  assert.ok(published(iid).includes('local-tests-run'), 'the scope\'s own line already said it — no second line');
-  assert.deepEqual(w.cli.calls, []);
+  const res = await runApprovedTests(approved(freshIid(), { base: '' }), w.deps);
+  assert.equal(res.kind, 'error');
   assert.deepEqual(w.acquired, []);
-  assert.equal(localSpecsGate(readJournal(iid), scope, localSpecsGateReason), null);
-  assert.equal(localResultsSubject(run as unknown as Record<string, unknown>), null);
-
-  // Every later pass is the same answer: nothing rewritten, nothing re-posted.
-  const before = readFileSync(join(runDir(iid), 'local-tests-run.json'), 'utf8');
-  await localTestsRunPhase({ ...ctx, journal: readJournal(iid)! }, w.deps);
-  assert.equal(readFileSync(join(runDir(iid), 'local-tests-run.json'), 'utf8'), before);
-});
-
-test('a scope that did not finish skips the run, and the ticket is told why', async () => {
-  const iid = freshIid();
-  const journal = journalFor(iid, 'warned', 'could not prepare the automation worktree — E_NO_REF: origin/master');
-  const w = world();
-
-  const out = await localTestsRunPhase({ iid, runId: journal.runId, journal, prior: {} }, w.deps);
-
-  assert.equal(out.ok, true);
-  const run = readArtifact<LocalTestsRun>(iid, 'local-tests-run.json');
-  assert.equal(run?.status, 'skipped');
-  assert.match(run?.reason ?? '', /E_NO_REF/);
-  assert.ok(!published(iid).includes('local-tests-run'), 'unlike "not needed", this is news to the ticket');
-});
-
-test('the reasons a plan runs nothing are told apart', () => {
-  const ok = journalFor(freshIid());
-  assert.equal(runSkipReason(ok, scopeWith()), null);
-  assert.match(runSkipReason(ok, scopeWith({ capture: undefined }))?.reason ?? '', /never saved/);
-  assert.equal(runSkipReason(ok, scopeWith({ specs: [] }))?.quiet, true);
-  assert.equal(runSkipReason(ok, scopeWith({ blocked: 'E_NO_MAP' }))?.quiet, false);
-  assert.match(runSkipReason({ phases: [] }, scopeWith())?.reason ?? '', /has not run/);
-  assert.equal(runSkipReason(ok, null)?.quiet, false);
-});
-
-// --------------------------------------------------- the localSpecs gate
-
-test('the localSpecs gate arms only for a proposal or a weakened test', () => {
-  const journal = journalFor(freshIid());
-  const capture = (over: Record<string, unknown>): Record<string, unknown> =>
-    ({ ...captureAnswer(over), automationSha: AUTO_SHA, base: BASE_SHA, head: TICKET_SHA });
-
-  assert.equal(localSpecsGate(journal, scopeWith(), localSpecsGateReason), null,
-    'specs chosen and run as they are need nobody\'s sign-off');
-
-  const proposed = localSpecsGate(journal, scopeWith({
-    proposals: [{ action: 'add', title: 'Verify that a half day can be cancelled', why: 'no spec covers it' }],
-  }), localSpecsGateReason);
-  assert.match(proposed?.why ?? '', /proposes a change/);
-
-  const weakened = localSpecsGate(journal, scopeWith({ capture: capture({ weakened: ['cypress/e2e/leaves/half_day.cy.ts'] }) }),
-    localSpecsGateReason);
-  assert.match(weakened?.why ?? '', /half_day\.cy\.ts/);
-
-  const outside = localSpecsGate(journal, scopeWith({ capture: capture({ outsideAllowed: ['cypress.config.ts'] }) }),
-    localSpecsGateReason);
-  assert.match(outside?.why ?? '', /cypress\.config\.ts/, 'a change where none was allowed counts as weakened');
-
-  const notFinished = journalFor(freshIid(), 'warned', 'refused');
-  assert.equal(localSpecsGate(notFinished, scopeWith({
-    proposals: [{ action: 'remove', title: 'Trim to fit the limits: x', why: 'over' }],
-  }), localSpecsGateReason), null, 'a plan that will not run asks nobody anything');
-});
-
-test('the localSpecs sign-off covers the list, the proposals and the patch it was given', () => {
-  const journal = journalFor(freshIid());
-  const proposals = [{ action: 'add', title: 'Verify that a half day can be cancelled', why: 'gap' }];
-  const subject = (over: Record<string, unknown>): unknown =>
-    localSpecsGate(journal, scopeWith({ proposals, ...over }), localSpecsGateReason)?.subject;
-
-  assert.deepEqual(subject({ specs: [...SPECS].reverse() }), subject({}), 'order is not a change to the list');
-  assert.notDeepEqual(subject({ specs: SPECS.slice(0, 1) }), subject({}));
-  assert.notDeepEqual(subject({ capture: { ...captureAnswer({ patchSha: 'f'.repeat(40) }), automationSha: AUTO_SHA } }), subject({}));
-  assert.notDeepEqual(subject({ proposals: [{ action: 'remove', title: 'x', why: 'y' }] }), subject({}));
-});
-
-test('the results gate judges results only, keyed to the code they ran against', () => {
-  assert.equal(localResultsSubject(runAnswer({ status: 'skipped' }) as unknown as Record<string, unknown>), null);
-  assert.equal(localResultsSubject(runAnswer({ status: 'error' }) as unknown as Record<string, unknown>), null);
-  const a = localResultsSubject(runAnswer({ cacheKey: 'k1' }) as unknown as Record<string, unknown>);
-  const b = localResultsSubject(runAnswer({ cacheKey: 'k1', startedAt: 'later', endedAt: 'later' }) as unknown as Record<string, unknown>);
-  const c = localResultsSubject(runAnswer({ cacheKey: 'k2' }) as unknown as Record<string, unknown>);
-  assert.deepEqual(a, b, 'the clock is not part of what was approved');
-  assert.notDeepEqual(a, c);
 });
 
 // ------------------------------------------------------- the scope session
 
 const INPUTS: ScopeInputs = {
-  wsa: '/runs/x/wsa', automationSha: AUTO_SHA, base: BASE_SHA, head: TICKET_SHA, patchFile: '/runs/x/patch',
+  wsa: '/runs/x/wsa', automationSha: AUTO_SHA, base: BASE_SHA, head: MERGE_SHA, patchFile: '/runs/x/patch',
 };
 
-test('a plan with specs keeps its capture and labels the ticket', async () => {
+test('preparing the scope checks out the automation worktree for the merge commit\'s range, and records nothing', async () => {
   const iid = freshIid();
-  journalFor(iid);
   const w = world();
-  const session = scopeWith({ capture: undefined });
 
-  const after = await afterScopeSession(iid, { ok: true, data: session }, INPUTS, w.deps);
+  const prep = await prepareScopeAt(iid, { base: BASE_SHA, head: MERGE_SHA }, w.deps);
+
+  assert.ok(prep.ok);
+  assert.deepEqual(prep.ok && prep.data, {
+    wsa: '/runs/x/wsa', automationSha: AUTO_SHA, base: BASE_SHA, head: MERGE_SHA, patchFile: localTestsPatchFile(iid),
+  });
+  assert.deepEqual(w.cli.calls[0]?.args, ['prepare-scope', '--iid', String(iid), '--automation-ref', 'origin/master']);
+  assert.equal(readJournal(iid), null, 'the mode records what it holds in its own journal');
+
+  const none = world();
+  const failed = await prepareScopeAt(iid, { base: '', head: MERGE_SHA }, none.deps);
+  assert.equal(failed.ok ? '' : failed.error.code, 'E_GIT');
+  assert.deepEqual(none.cli.calls, [], 'nothing checked out that would then need cleaning up');
+});
+
+test('a list with specs keeps its capture, with why each flagged file was flagged', async () => {
+  const iid = freshIid();
+  const flagged = { file: 'cypress/e2e/leaves/apply_leave.cy.ts', why: 'adds cy.exec(' };
+  const w = world({}, fakeCli({
+    capture: (_a, c) => reply(c, captureAnswer({
+      weakened: [flagged.file], weakenedDetail: [flagged, { why: 'no file' }, 'junk'],
+    })),
+  }));
+
+  const after = await captureScopeSession(iid, { ok: true, data: scopeWith({ capture: undefined }) }, INPUTS, w.deps);
 
   assert.equal(after.refusal, null);
   assert.deepEqual(w.cli.calls.map((c) => c.args), [['capture', '--iid', String(iid)]]);
   const onDisk = readArtifact<Record<string, unknown>>(iid, 'local-tests-scope.json');
-  assert.deepEqual(captureOf(onDisk), { ...captureAnswer(), automationSha: AUTO_SHA, base: BASE_SHA, head: TICKET_SHA });
+  assert.deepEqual(captureOf(onDisk), {
+    ...captureAnswer({ weakened: [flagged.file], weakenedDetail: [flagged] }),
+    automationSha: AUTO_SHA, base: BASE_SHA, head: MERGE_SHA,
+  }, 'the found note reads the reasons from here');
   assert.deepEqual(after.data, onDisk);
-  assert.deepEqual(w.labels, ['TestCase Run Locally']);
-  assert.equal(readJournal(iid)?.localTests, undefined, 'the worktree is gone, and the journal says so');
+  assert.equal(readJournal(iid), null);
 });
 
-test('a plan that lists no specs is written back as not applicable, keeping what it suggested', async () => {
+test('a list of nothing comes back as it is — the "no test found" answer, with its suggestion', async () => {
   const iid = freshIid();
-  journalFor(iid);
   const w = world();
   const session = scopeWith({
-    capture: undefined, specs: [], reason: 'the banner has no spec yet.',
-    proposals: [{ action: 'add', title: 'Verify that the banner can be dismissed for a week.', why: 'gap' }],
+    capture: undefined, specs: [], reason: 'the banner has no spec yet',
+    proposals: [{ action: 'add', title: 'Verify that the banner can be dismissed for a week', why: 'gap' }],
   });
 
-  const after = await afterScopeSession(iid, { ok: true, data: session }, INPUTS, w.deps);
+  const after = await captureScopeSession(iid, { ok: true, data: session }, INPUTS, w.deps);
 
   assert.equal(after.refusal, null);
-  assert.equal(after.data?.applicable, false);
-  assert.match(String(after.data?.reason), /the banner has no spec yet, but no spec was chosen to run\./);
-  assert.match(String(after.data?.reason), /Verify that the banner can be dismissed for a week/);
-  assert.equal(readArtifact<Record<string, unknown>>(iid, 'local-tests-scope.json')?.applicable, false);
-  assert.deepEqual(w.labels, [], 'no local tests ran, so the ticket is not marked as having had them');
+  assert.deepEqual(after.data, session, 'nothing rewritten: the mode posts the not-found note from it');
   assert.equal(w.cli.calls.length, 1, 'the throwaway worktree is still captured and removed');
 });
 
 test('a scope that made no edits is captured as no patch, and still runs', async () => {
   const iid = freshIid();
-  journalFor(iid);
   // What capture prints when the worktree is clean, and the commit it was cut against.
   const w = world({}, fakeCli({
     capture: (_a, c) => reply(c, captureAnswer({ patchFile: null, patchSha: null, changedFiles: [], automationSha: 'f'.repeat(40) })),
   }));
 
-  const after = await afterScopeSession(iid, { ok: true, data: scopeWith({ capture: undefined }) }, INPUTS, w.deps);
+  const after = await captureScopeSession(iid, { ok: true, data: scopeWith({ capture: undefined }) }, INPUTS, w.deps);
 
   assert.equal(after.refusal, null);
   const capture = captureOf(after.data);
   assert.equal(capture?.patchSha, null);
   assert.equal(capture?.patchFile, '');
   assert.equal(capture?.automationSha, 'f'.repeat(40), 'the commit capture names wins over prepare-scope\'s');
-  assert.equal(runSkipReason(readJournal(iid), after.data), null, 'nothing about no edits stops the run');
 });
 
-test('edits that could not be saved refuse the plan, rather than run specs without them', async () => {
+test('edits that could not be saved refuse the list, rather than run specs without them', async () => {
   const iid = freshIid();
-  journalFor(iid);
   const w = world({}, fakeCli({ capture: (_a, c) => reply(c, { code: 'E_PATCH', message: 'git diff failed' }, 2) }));
 
-  const after = await afterScopeSession(iid, { ok: true, data: scopeWith({ capture: undefined }) }, INPUTS, w.deps);
+  const after = await captureScopeSession(iid, { ok: true, data: scopeWith({ capture: undefined }) }, INPUTS, w.deps);
 
   assert.match(after.refusal ?? '', /E_PATCH: git diff failed/);
-  assert.deepEqual(w.labels, []);
 });
 
-test('a blocked scope is still captured, and its own block stands', async () => {
+test('a blocked or failed scope is still captured, and its own failure stands', async () => {
   const iid = freshIid();
-  journalFor(iid);
   const w = world();
 
-  const after = await afterScopeSession(iid, { ok: false, data: scopeWith({ blocked: 'E_NO_MAP: modules map missing' }) }, INPUTS, w.deps);
+  const after = await captureScopeSession(iid, { ok: false, data: scopeWith({ blocked: 'E_NO_MAP: modules map missing' }) }, INPUTS, w.deps);
 
   assert.equal(after.refusal, null);
   assert.equal(w.cli.calls.length, 1, 'captured, so nothing is left on the desk');
-  assert.deepEqual(w.labels, []);
-});
-
-test('nothing prepared, nothing captured', async () => {
-  const iid = freshIid();
-  const w = world();
-  const after = await afterScopeSession(iid, { ok: true, data: scopeWith() }, undefined, w.deps);
-  assert.equal(after.refusal, null);
-  assert.deepEqual(w.cli.calls, []);
-});
-
-test('preparing the scope reads the ticket\'s commits first, then checks out the worktree and records it', async () => {
-  const iid = freshIid();
-  journalFor(iid);
-  const gitCalls: string[][] = [];
-  const w = world({ git: async (args) => { gitCalls.push(args); return args[0] === 'rev-parse' ? TICKET_SHA : BASE_SHA; } });
-
-  const prep = await prepareScopeSession(iid, '/nowhere/erp-wt', w.deps);
-
-  assert.ok(prep.ok);
-  assert.deepEqual(prep.ok && prep.data, {
-    wsa: '/runs/x/wsa', automationSha: AUTO_SHA, base: BASE_SHA, head: TICKET_SHA, patchFile: localTestsPatchFile(iid),
-  });
-  assert.deepEqual(gitCalls, [['rev-parse', 'HEAD'], ['merge-base', 'HEAD', 'origin/dev']]);
-  assert.deepEqual(w.cli.calls[0]?.args, ['prepare-scope', '--iid', String(iid), '--automation-ref', 'origin/master']);
-  assert.equal(readJournal(iid)?.localTests?.wt, '/runs/x/wsa');
-
-  const broken = world({ git: async () => { throw new Error('not a git repository'); } });
-  const failed = await prepareScopeSession(iid, '/nowhere/erp-wt', broken.deps);
-  assert.equal(failed.ok ? '' : failed.error.code, 'E_GIT');
-  assert.deepEqual(broken.cli.calls, [], 'nothing checked out that would then need cleaning up');
 });
 
 // ------------------------------------------------------------ the rest
 
-test('gc keeps every run in flight, and does nothing on a desk where the step is off', async () => {
+test('gc keeps every ticket in use, and does nothing on a desk where the step is off or in a dry run', async () => {
   const w = world();
   const out = await gcLocalTests([990003, 990001, 990003], w.deps);
   assert.deepEqual(out, { dropped: [], removed: [], killed: [] });
@@ -945,13 +749,13 @@ test('gc keeps every run in flight, and does nothing on a desk where the step is
 });
 
 test('the cache key is what ran, not how the list was written down', () => {
-  const k = keyOf();
-  assert.equal(cacheKey(scopeWith({ specs: [...SPECS].reverse() }), TICKET_SHA, AUTO_SHA, PATCH_SHA, CFG), k);
+  const k = cacheKey(scopeWith(), MERGE_SHA, AUTO_SHA, PATCH_SHA, CFG);
+  assert.equal(cacheKey(scopeWith({ specs: [...SPECS].reverse() }), MERGE_SHA, AUTO_SHA, PATCH_SHA, CFG), k);
   assert.notEqual(cacheKey(scopeWith(), 'e'.repeat(40), AUTO_SHA, PATCH_SHA, CFG), k);
-  assert.notEqual(cacheKey(scopeWith(), TICKET_SHA, 'e'.repeat(40), PATCH_SHA, CFG), k);
-  assert.notEqual(cacheKey(scopeWith(), TICKET_SHA, AUTO_SHA, null, CFG), k);
-  assert.notEqual(cacheKey(scopeWith(), TICKET_SHA, AUTO_SHA, PATCH_SHA, { ...CFG, baselineDb: 'other_baseline' }), k);
-  assert.notEqual(cacheKey(scopeWith({ specs: SPECS.slice(1) }), TICKET_SHA, AUTO_SHA, PATCH_SHA, CFG), k);
+  assert.notEqual(cacheKey(scopeWith(), MERGE_SHA, 'e'.repeat(40), PATCH_SHA, CFG), k);
+  assert.notEqual(cacheKey(scopeWith(), MERGE_SHA, AUTO_SHA, null, CFG), k);
+  assert.notEqual(cacheKey(scopeWith(), MERGE_SHA, AUTO_SHA, PATCH_SHA, { ...CFG, baselineDb: 'other_baseline' }), k);
+  assert.notEqual(cacheKey(scopeWith({ specs: SPECS.slice(1) }), MERGE_SHA, AUTO_SHA, PATCH_SHA, CFG), k);
 });
 
 test('the script\'s answer is read past any stray line printed before it', () => {
@@ -966,25 +770,23 @@ test('the plan helpers read only what is there', () => {
   assert.deepEqual(specFiles(null), []);
   assert.equal(captureOf({ capture: { patchFile: 'p' } }), null, 'no automation commit, no capture to run from');
   assert.deepEqual(weakenedFiles(null), []);
+  assert.deepEqual(weakenedFiles(captureOf(scopeWith({
+    capture: { ...captureAnswer({ weakened: ['a.ts'], outsideAllowed: ['cypress.config.ts', 'a.ts'] }), automationSha: AUTO_SHA },
+  }))), ['a.ts', 'cypress.config.ts']);
 });
 
-test('both phases are configured as the pipeline expects', async () => {
+test('both phases are on demand: the Loop never schedules them, the post-merge mode runs the scope', () => {
   const raw = JSON.parse(readFileSync(new URL('../../config/phases.json', import.meta.url), 'utf8')) as { phases: PhaseConfig[] };
   const byName = (n: string): PhaseConfig => raw.phases.find((p) => p.name === n)!;
   const scope = byName('local-tests-scope');
   const run = byName('local-tests-run');
-  assert.ok(byName('ui-evidence').n < scope.n && scope.n < run.n && run.n < byName('mr').n);
+  assert.equal(scope.onDemand, true);
+  assert.equal(run.onDemand, true);
   assert.equal(scope.kind, 'session');
-  assert.equal(scope.cwd, 'worktree');
-  assert.deepEqual(scope.writes, ['run'], 'the throwaway worktree is inside the run directory, so this is enough');
-  assert.equal(scope.onFail, 'warn');
+  assert.equal(scope.cwd, 'worktree', 'it reads the ERP checkout at the merge commit');
+  assert.deepEqual(scope.writes, ['run'], 'the throwaway automation worktree is inside state/runs/<iid>, so this is enough');
   assert.deepEqual(scope.skills, ['local-tests-impact']);
-  assert.equal(scope.group, undefined);
-  assert.equal(run.kind, 'code');
-  assert.equal(run.onFail, 'warn');
   assert.deepEqual(scope.targets, ['erp']);
-  assert.deepEqual(run.targets, ['erp']);
+  assert.equal(run.kind, 'code');
   assert.ok(existsSync(new URL('../../skills/local-tests-impact/SKILL.md', import.meta.url)));
-  const { CODE_PHASES } = await import('./runner.js');
-  assert.ok(CODE_PHASES['local-tests-run'], 'registered, or the run would stop at it');
 });

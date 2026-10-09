@@ -69,6 +69,15 @@ export interface PromptCtx {
 }
 
 /**
+ * What the local automation tests mode (src/localtests) hands the scope
+ * session, defined once beside prepareScopeSession, which fills most of it:
+ * the throwaway automation worktree, `head` the merge commit of the ticket's
+ * MR and `base` its first parent, plus what QA last asked (`request`,
+ * `feedback`). Re-exported so a caller building a PromptCtx needs one import.
+ */
+export type { ScopeInputs };
+
+/**
  * Skills are an upgrade, never a dependency.
  *
  * They resolve from the working directory, so which ones a phase actually gets
@@ -461,7 +470,8 @@ const REPRODUCTION_SKILL = 'bug-reproduction';
  * How many module specs local-tests-scope adds beyond the precise set, as a health check of
  * the module. A dry run on ERP #8800 showed why it is a cap and not the limits: with no spec
  * reaching the change, filling toward maxSpecs picked 40 unrelated specs (~37 min) that could
- * not see the banner the ticket added.
+ * not see the banner the ticket added. For the same reason an empty precise set gets none:
+ * a list of health checks alone would run without testing the ticket at all.
  */
 const SMOKE_SPECS = 5;
 
@@ -733,28 +743,61 @@ function designTokensPath(ctx: PromptCtx): string {
 }
 
 /**
- * A redo of the local test list after QA's `disapproved:`: their bullets, what
- * the previous round ran, and how to keep its edits — the worktree this round
- * is handed is fresh, and the previous edits survive only as the patch.
+ * What QA's last reply asks of this round of the local test list, when it is
+ * something only the scope session can do. The other answers (`approved`,
+ * check again, added files) the local automation tests mode handles in code.
+ *
+ * `write-temporary` lifts the default that a change no test reaches gets a
+ * suggested test and nothing written. `feedback` carries QA's text, what the
+ * previous round listed (the mode passes it as the prior artifact) and how to
+ * keep its edits: the worktree this round is handed is fresh, and the previous
+ * edits survive only as the patch.
  */
-function localSpecsFeedbackBlock(ctx: PromptCtx, wsa: string, patchFile: string): string {
-  const rounds = ctx.journal.localSpecsApproval?.feedback;
-  if (!rounds?.length) return '';
-  const earlier = artifact<{ specs: Array<{ file?: string }>; edits: Array<{ file?: string }> }>(ctx, 'local-tests-scope');
-  const specs = (earlier.specs ?? []).map((s) => s.file).filter(Boolean);
-  const edits = (earlier.edits ?? []).map((e) => e.file).filter(Boolean);
+function localTestsRequestBlock(ctx: PromptCtx, wsa: string, patchFile: string): string {
+  const inputs = ctx.localTests;
+  if (inputs?.request === 'write-temporary') {
+    return `
+## QA asked for a temporary test
+The previous round found no automation test that reaches this change, and a QA reviewer replied
+\`disapproved: write a temporary test\`. So this round, if still no spec reaches the change, write one
+for this run only (step 3, last bullet). It is never committed, and QA approves the list with it in
+before anything runs.
+`;
+  }
+  const text = inputs?.request === 'feedback' ? inputs.feedback?.trim() : '';
+  if (!text) return '';
+  const earlier = ctx.prior['local-tests-scope']
+    ? artifact<{ specs: Array<{ file?: string }>; edits: Array<{ file?: string }> }>(ctx, 'local-tests-scope')
+    : null;
+  const specs = (earlier?.specs ?? []).map((s) => s.file).filter(Boolean);
+  const edits = (earlier?.edits ?? []).map((e) => e.file).filter(Boolean);
+  const keep = `The automation worktree you have now is FRESH, so to keep them run \`git -C ${wsa} apply ${patchFile}\`
+first (a plain apply only changes files, which the git guard allows), then adjust. If it does not
+apply, make the edits again by hand.`;
+  const previous = !earlier
+    ? `The previous list is not in your inputs: build it again from step 1, then apply their changes. If
+${patchFile} exists, it holds the previous round's temporary edits. ${keep}`
+    : `The previous list ran ${specs.length} spec file(s)${specs.length ? `: ${specs.map((f) => `\`${f}\``).join(', ')}` : ''}.
+${edits.length ? `Its temporary edits (${edits.map((f) => `\`${f}\``).join(', ')}) are saved at ${patchFile}. ${keep}`
+    : 'It made no temporary edits.'}`;
   return `
 ## QA asked for changes to an earlier version of this list
 A QA reviewer read the previous list on the ticket and replied \`disapproved:\` instead of approving
-it. Apply every bullet, then return the WHOLE list again: it goes back to them for approval.
+it. Their reply:
 
-${rounds.map((f, i) => `### Round ${i + 1}\n${f}`).join('\n\n')}
+${text}
 
-The previous list ran ${specs.length} spec file(s)${specs.length ? `: ${specs.map((f) => `\`${f}\``).join(', ')}` : ''}.
-${edits.length ? `Its temporary edits (${edits.map((f) => `\`${f}\``).join(', ')}) are saved at ${patchFile}. The automation
-worktree you have now is FRESH, so to keep any of them run \`git -C ${wsa} apply ${patchFile}\` first (a
-plain apply only changes files, which the git guard allows), then adjust. If it does not apply, make
-the edits again by hand.` : 'It made no temporary edits.'}
+Apply all of it, then return the WHOLE list again: it goes back to them for approval.
+- A spec they ask to add goes in \`specs\` even when the analysis did not reach it, and its \`why\` says
+  QA asked for it. They may name it by file, or by a case id such as \`LV_23\`: find the spec file in
+  the automation worktree whose name or \`it\` titles carry it. One you cannot find is named in
+  \`summary\`, never guessed.
+- A spec they ask to remove leaves \`specs\`, with no \`remove\` proposal: the decision is already theirs.
+- A new test they ask for is written for this run only, following step 3's rules for a new spec, and
+  goes in \`specs\` and \`edits\` with an \`add\` proposal for the suite.
+- \`summary\` opens with what changed from the previous list, in one line ("Added …; removed …").
+
+${previous}
 `;
 }
 
@@ -2105,28 +2148,59 @@ saying why, not a block — ship the pack you have and name the gap in \`summary
     const inputs = ctx.localTests;
     const wt = ctx.worktree ?? '(none leased)';
     const wsa = inputs?.wsa ?? localTestsWorktree(iid);
-    const base = inputs?.base ?? `origin/${baseBranch()}`;
-    const head = inputs?.head ?? 'HEAD';
+    // After the merge the change under test is the MR's merge commit, and the
+    // base is its first parent: the base branch exactly as it was before it.
+    const merge = inputs?.mergeSha?.trim() ?? '';
+    const base = inputs?.base ?? (merge ? `${merge}^1` : `origin/${baseBranch()}`);
+    const head = inputs?.head ?? (merge || 'HEAD');
+    const mr = inputs?.mrIid ? `MR !${inputs.mrIid}` : 'the ticket\'s MR';
     const patchFile = inputs?.patchFile ?? localTestsPatchFile(iid);
+    const writeTemporary = inputs?.request === 'write-temporary';
+    const automationRef = lt.automationRef.replace(/^origin\//, '') || 'master';
     // Absolute, from this checkout: under DRY_RUN $ONESHOT_HOME is state-dry,
     // which has no skills/ to resolve against.
     const index = join(ROOT, 'skills', 'local-tests-impact', 'scripts', 'index.cjs');
     const allowed = lt.allowedPaths.map((p) => `\`${p}\``).join(', ') || '(none configured — make no edits)';
     const mins = budgetMin('local-tests-scope', 30);
     const turnsFor = budgetTurns('local-tests-scope');
+    const commits = merge
+      ? `    base                  ${base}   (first parent of the merge commit: ${baseBranch()} just before this change)
+    head                  ${head}   (the merge commit of ${mr}: the change as it landed on ${baseBranch()})`
+      : `    base                  ${base}   (merge-base of HEAD with origin/${baseBranch()})
+    head                  ${head}`;
+    // The default is a suggestion, not a spec: QA decide whether a test this
+    // change lacks is written, and ask for a temporary one when they want it.
+    const uncovered = writeTemporary
+      ? `- No spec reaches the change (an \`addedTestidUnused\` value, an \`uncovered\` area, a changed screen no
+  candidate opens)? QA asked for a temporary test this round, so **write the missing spec** in the
+  automation worktree — a temporary \`add\` (step 4) — list it in \`specs\` and \`edits\`, and propose the
+  \`add\` for the suite, titled the way QA would name it ("Verify that …"). It is then the precise set,
+  so health checks may follow it (item 2). The automation worktree is a fresh checkout, so make sure
+  first that no spec reaches the change now: a test QA added to the suite since the last round is in
+  it, and then you write nothing. Plan your turns: finish choosing by about turn ${Math.round(turnsFor * 0.5)} of
+  ${turnsFor}, so writing and re-checking it fits. Leave it unwritten ONLY when the screen cannot be
+  reached with data the module's specs already create; then say exactly why in \`summary\`, and return
+  the \`add\` proposal alone with \`specs\` empty.`
+      : `- No spec reaches the change (an \`addedTestidUnused\` value, an \`uncovered\` area, a changed screen no
+  candidate opens)? Then **do not write one.** Return \`specs: []\` (no health checks either, item 2), no
+  \`add\` edit, and one \`add\` proposal per missing test: \`title\` the way QA would name it ("Verify that
+  …"), \`file\` where it would live (\`cypress/e2e/<module>/…\`), and \`why\` naming the gap (the testid no
+  page object selects, the screen no spec opens). Oneshot posts it as the suggested test and QA decide:
+  add one to the suite, or ask for a temporary one, which a later round writes. Temporary UPDATES of
+  existing specs (step 4) are not this: those stay yours to make, unasked.`;
 
     return `${ticketHead(ctx.ticket)}
-${localSpecsFeedbackBlock(ctx, wsa, patchFile)}
+${localTestsRequestBlock(ctx, wsa, patchFile)}
 ## What this phase decides
-Which workstream-automation (Cypress) specs this ticket's change can break, and the smallest
-temporary spec edits an INTENDED UI change needs for them to test the new screen. \`local-tests-run\`
-comes after you as conductor code: it runs exactly the files you list in \`specs\`, against this
-branch, on a private copy of the automation database. You choose and prepare. You never run anything.
+Which workstream-automation (Cypress) specs can see this ticket's change, now merged into
+${baseBranch()}, and the smallest temporary spec edits an INTENDED UI change needs for them to test the
+new screen. Your list goes on the ticket and a QA reviewer approves it before anything runs; then
+conductor code (\`local-tests-run\`) runs exactly the files you list in \`specs\`, against the merge
+commit, on a private copy of the automation database. You choose and prepare. You never run anything.
 
 ## Your inputs
-    ERP worktree          ${wt}
-    base                  ${base}   (merge-base of HEAD with origin/${baseBranch()})
-    head                  ${head}
+    ERP worktree          ${wt}${merge ? '   (at the merge commit)' : ''}
+${commits}
     run directory         ${runDir(iid)}
     automation worktree   ${wsa}   (throwaway, checked out by the conductor at ${inputs?.automationSha ?? 'the policy ref'})
     limits                maxSpecs ${lt.maxSpecs} · maxRunMinutes ${lt.maxRunMinutes}
@@ -2156,27 +2230,31 @@ named failure: put the code and message in \`blocked\` and stop. Never build a s
 ## 2. Applicable or not
 \`applicable: false\`, with the reason, when nothing a spec could observe changed: every area is
 \`ignored\` or \`other\`, or the only change is a backend path no screen reaches. \`specs\`, \`edits\` and
-\`proposals\` are then empty. That is a correct answer, not a failure: the ticket gets one line and the
-run carries on to the MR.
+\`proposals\` are then empty. That is a correct answer, not a failure.
 
-A plan with no spec in \`specs\` is posted the same way even if you say \`applicable: true\`: one "not
-needed" line, no label, and nobody is asked anything. Any \`proposals\` it carries are shown on that
-line as suggestions for the suite, not put to QA. So a gap you can only describe (step 3, last bullet)
-is a suggestion; to have QA look at it, write the spec (a temporary \`add\`) and list it in \`specs\`.
+Whatever you return goes on the ticket for QA, who approve every local run before it starts. A list
+with specs in it is posted as the tests Oneshot found. A list with no spec in \`specs\` is posted as
+"Oneshot found no automation test for this ticket", with your \`add\` proposals as the suggested tests,
+and QA decide what happens next: check again once a test is on ${automationRef}, name a test file they
+added, ask for a temporary test, or go on without local tests.
 
-## 3. Choose the specs: the precise set, a few smoke specs, never padding
+## 3. Choose the specs: the precise set, a few health checks, never padding
 1. **The precise set is the floor.** Every candidate the analysis reached through something the diff
    changed rather than through its folder alone — a \`reasons\` entry other than \`module …\` (a page
    object selecting a testid the diff changed or touched, a changed screen or API) — plus every spec
    under \`removedTestidStillUsed\`. These are the specs that can see this change, so the limits never
    remove one.
-2. **Then at most ${SMOKE_SPECS} module specs, as a health check, not as coverage.** From the candidates
-   whose only reason is \`module …\`, take the affected modules' \`smoke\`-tagged specs first, then ones
-   that open the changed screen's own page or sidebar group, up to ${SMOKE_SPECS} in all. NEVER fill the
-   list toward ${lt.maxSpecs} specs or ${lt.maxRunMinutes} minutes with module specs that cannot see the
-   change: a long list of unrelated tests costs the run its time and tells the developer nothing about
-   this ticket. The limits are a ceiling for the precise set, not a target. Count the module specs you
-   left out in \`summary\` in one line (how many, which modules).
+2. **Then at most ${SMOKE_SPECS} module specs, as a health check, not as coverage, and only when the
+   precise set is not empty.** From the candidates whose only reason is \`module …\`, take the affected
+   modules' \`smoke\`-tagged specs first, then ones that open the changed screen's own page or sidebar
+   group, up to ${SMOKE_SPECS} in all. Start each one's \`why\` with \`Health check:\` ("Health check: opens the
+   leave dashboard"), so the ticket shows it apart from the specs that check the change. With an empty
+   precise set there are no health checks either: they cannot see the change, so a list of them alone
+   would run without testing this ticket. NEVER fill the list toward ${lt.maxSpecs} specs or
+   ${lt.maxRunMinutes} minutes with module specs that cannot see the change: a long list of unrelated
+   tests costs the run its time and tells nobody anything about this ticket. The limits are a ceiling
+   for the precise set, not a target. Count the module specs you left out in \`summary\` in one line (how
+   many, which modules).
    The one exception is a diff that changes code EVERY screen of a module runs through (its routing, a
    layout or container all its pages share, a module-wide API): then more of the module may go in,
    within the limits, and \`summary\` names the shared file that justifies it.
@@ -2191,21 +2269,16 @@ is a suggestion; to have QA look at it, write the spec (a temporary \`add\`) and
 - A spec that reaches the change but cannot run on a local machine — it needs something a desk does not
   have: Odoo (payroll sync), a real mailbox, a third-party service — goes in \`notRunnable\` with \`why\`
   (citing the spec line that shows it), NOT in \`specs\`, and out of \`estimate\`. That is not a drop and
-  needs no proposal: the report names it, so a missing result is never read as a pass.
-- No spec reaches the change (an \`addedTestidUnused\` value, an \`uncovered\` area, a changed screen no
-  candidate opens)? Then the run would not test this ticket at all, so **write the missing spec** in
-  the automation worktree — a temporary \`add\` (step 4) — list it in \`specs\` and \`edits\`, and propose
-  the \`add\` for the suite, titled the way QA would name it ("Verify that …"). QA approves it before
-  anything runs. Plan your turns for it: finish choosing by about turn ${Math.round(turnsFor * 0.5)} of
-  ${turnsFor}, so writing and re-checking it fits. Leave it unwritten ONLY when the screen cannot be
-  reached with data the module's specs already create; then say exactly why in \`summary\`, and the
-  \`add\` alone is a suggestion on the "not needed" line (step 2), not a QA question.
-- A new spec follows its neighbours: a page object extending \`PageElementReadiness\` that selects with a
-  literal \`[data-testid="…"]\`, the spec wrapped in \`TestFilters(['regression'], …)\`, \`loginWith('<KEY>_CREDENTIALS')\`
-  with an account the module's own specs already use for that screen's sidebar group (never invent
-  one), reaching the screen through \`SidePanel\` like they do, and a \`LOCAL\` marker in place of the case
-  number in its name (\`TR_LOCAL_<what>.ts\`). Assert what the ticket asks for, each behaviour in its own
-  \`it\`.
+  needs no proposal: the ticket names it, so a missing result is never read as a pass.
+- Every other spec's \`why\` is one short line on what it checks in this change, built from its
+  \`reasons\`. The ticket shows it clipped to about 120 characters.
+${uncovered}
+- A new spec, written only when QA asked for one, follows its neighbours: a page object extending
+  \`PageElementReadiness\` that selects with a literal \`[data-testid="…"]\`, the spec wrapped in
+  \`TestFilters(['regression'], …)\`, \`loginWith('<KEY>_CREDENTIALS')\` with an account the module's own
+  specs already use for that screen's sidebar group (never invent one), reaching the screen through
+  \`SidePanel\` like they do, and a \`LOCAL\` marker in place of the case number in its name
+  (\`TR_LOCAL_<what>.ts\`). Assert what the ticket asks for, each behaviour in its own \`it\`.
 
 ## 4. Temporary edits: follow an intended change, never excuse a broken one
 A spec failing because the ticket MEANT to rename a testid or relabel a control is out of date:
@@ -2233,15 +2306,18 @@ something is the finding this phase exists for: leave it exactly as it is.
   Read-only git there is fine.
 - Open, cat or grep any \`cypress.env.json\`, or the desk's Cypress credentials file. They hold the test
   accounts' passwords; the secret guard refuses them.
-- Edit the ERP worktree. A spec this branch breaks is a finding for the developer, not yours to fix.
-
+- Edit the ERP worktree. A spec this change breaks is a finding for the developer, not yours to fix.
+${writeTemporary ? '' : `- Write a new spec QA did not ask for. With no spec reaching the change, the \`add\` proposal is your
+  answer (step 3).
+`}
 ## What you return
 The \`LocalTestsScope\` object: \`applicable\`, \`reason\`, \`modules\`, \`specs\`, \`edits\`, \`proposals\`,
 \`notRunnable\`, \`estimatedMinutes\`, \`summary\`, \`blocked\`.
 - \`specs[].file\` is the path from the automation root (\`cypress/e2e/…\`); \`cases\` is the analysis's
-  \`its\`, \`ciSeconds\` its timing (omit it for a new spec).
-- \`proposals\` stays empty unless you propose adding or dropping a test. Empty means QA is not asked;
-  with \`specs\` empty, QA is not asked either (step 2).
+  \`its\`, \`ciSeconds\` its timing (omit it for a new spec); \`why\` is one short line, starting
+  \`Health check:\` for a health check.
+- \`proposals\`: an \`add\` per missing test when no spec reaches the change (QA are shown it as the
+  suggested test), a \`remove\` for a spec you drop or a trim (step 3). Otherwise empty.
 - \`notRunnable\`: \`{ spec, why }\` per spec kept out for needing what a local machine lacks. Empty
   when there is none.
 - \`summary\` is for QA and the developer, numbers first: specs, cases and minutes; what you left out and

@@ -243,13 +243,6 @@ interface Spec {
    * MR has not been opened is simply skipped and reconsidered next pass.
    */
   needsMr?: boolean;
-  /**
-   * False while the artifact is on disk but not yet worth publishing — the same
-   * "not yet, ask again next pass" that `needsMr` gives, for a reason only the
-   * artifact can show. A blocked phase still writes its artifact, and building
-   * from that would retire the key on a note about work that was never done.
-   */
-  ready?: (data: Record<string, unknown>) => boolean;
   build: (data: Record<string, unknown>, ctx: PublishCtx) => Publication | null;
 }
 
@@ -294,6 +287,12 @@ export function baseShotsFor(results: CaseResult[], check: BaseCheck | null): Ca
 
 // ---------------------------------------------------------------- local tests
 
+/*
+ * The local automation tests mode's renderers. That mode runs after the merge
+ * (src/localtests) and posts its own notes, so none of these is in SPECS below:
+ * publishPending serves the Loop, and the Loop no longer runs local tests.
+ */
+
 /**
  * Model or tool prose for one line of a note: escaped like every other field
  * here, and folded onto one line so a stray newline cannot end a list item or
@@ -328,9 +327,9 @@ function notRunnableItems(v: unknown): string[] {
 }
 
 /**
- * A scope that reports itself blocked is not published yet: the run stops on
- * it, and a plan note — or a "not needed" line — about a scope that never
- * finished would retire the key before the real one exists.
+ * Whether a scope is worth a note: one that reports itself blocked never
+ * finished, and a plan — or a "not needed" line — about it would be a note
+ * about work that was never done.
  */
 export function localTestsScopeReady(data: Record<string, unknown>): boolean {
   return !(typeof data.blocked === 'string' && data.blocked.trim());
@@ -432,9 +431,9 @@ export function localTestsPlanNote(data: Record<string, unknown>, ctx: PublishCt
 }
 
 /**
- * Whether a failed local test fails on dev too, in the words the developer at
- * the localResults gate needs. Shared with that gate's request so the report
- * and the ask never word one answer two ways.
+ * Whether a failed local test fails on dev too, in the words the reader of the
+ * results needs: is this the ticket's change? Exported so every note that
+ * names a failure words one answer the same way.
  */
 export function failingOnDevText(v: boolean | null | undefined): string {
   if (v === true) return 'yes — not caused by this ticket';
@@ -468,7 +467,7 @@ const MAX_RESULT_ROWS = 60;
 /** At most this many of the script's notes are listed; past that they are noise, not explanation. */
 const MAX_RUN_NOTES = 15;
 
-/** What a test that failed once and passed on its retry is called, in the report and the gate alike. */
+/** What a test that failed once and passed on its retry is called, in every note that names one. */
 export const FLAKY_TEXT = 'passed on retry — flaky';
 
 /** The run's notes as one-line strings, from an artifact nothing has validated. */
@@ -483,8 +482,8 @@ export function runNotes(run: { notes?: unknown } | null | undefined): string[] 
  * One row per test that needs a look — failed, then passed only on a retry,
  * then skipped — and one row per spec for what passed cleanly, so forty green
  * tests do not bury the red one. Each failure says whether it also fails on
- * dev, because that is the question the developer on the results gate is
- * actually answering: is this mine? A test that passed only on its retry is
+ * dev, because that is the question whoever reads the results is actually
+ * answering: is this the ticket's change? A test that passed only on its retry is
  * its own row, not a green count: it is a flaky test, or a change that made
  * one flaky, and either way somebody should know.
  *
@@ -726,23 +725,6 @@ const SPECS: Spec[] = [
     },
   },
   {
-    // On the ticket, where QA already answers: a proposal in this note is
-    // what the localSpecs gate asks them to approve.
-    key: 'local-tests-scope',
-    artifact: 'local-tests-scope.json',
-    target: 'ticket',
-    ready: localTestsScopeReady,
-    build: (data, ctx) => localTestsPlanNote(data, ctx),
-  },
-  {
-    // On the ticket, not the MR: it is read before the MR exists, by the
-    // developer deciding at the localResults gate whether one should.
-    key: 'local-tests-run',
-    artifact: 'local-tests-run.json',
-    target: 'ticket',
-    build: (data, ctx) => localTestsReportNote(data, ctx),
-  },
-  {
     /*
      * The one note in this file that asks for something rather than reporting
      * something, and the only one that @mentions a person.
@@ -853,7 +835,6 @@ export async function publishPending(ctx: PublishCtx): Promise<void> {
 
       const data = readArtifact<Record<string, unknown>>(ctx.iid, spec.artifact);
       if (!data) continue;
-      if (spec.ready && !spec.ready(data)) continue;
 
       const pub = spec.build(data, ctx);
       if (!pub) {

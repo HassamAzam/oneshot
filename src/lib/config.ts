@@ -131,12 +131,17 @@ export interface ProjectConfig {
      */
     inReview?: string;
     /**
-     * Added by conductor code when local-tests-scope says the ticket has
-     * workstream-automation specs worth running locally. A board marker only:
-     * never removed, never gates anything. Required only while
-     * `localTestsConfig().enabled`. Unset disables it.
+     * The local automation tests mode (src/localtests), which runs after the
+     * merge and never inside the Loop. `localTestsTrigger` is put on a ticket
+     * by a person and starts the mode once the ticket's change is merged;
+     * `localTestsRunning` replaces it while an approved list runs;
+     * `localTestsDone` replaces either when the run is over, passed or failed.
+     * Read through `localTestsConfig().labels`, which turns the mode off while
+     * any of the three is unset, and required only while that mode is on.
      */
-    localTests?: string;
+    localTestsTrigger?: string;
+    localTestsRunning?: string;
+    localTestsDone?: string;
   };
   /**
    * Reproduce a reported bug on the base branch during `research` before any
@@ -188,9 +193,10 @@ export interface ProjectConfig {
    */
   automation?: AutomationConfig;
   /**
-   * The local automation tests step's team policy. Read through
-   * `localTestsConfig()`, which merges it with this desk's .env and checks it,
-   * never directly.
+   * The local automation tests mode's team policy (src/localtests, after the
+   * merge). Read through `localTestsConfig()`, which merges it with this
+   * desk's .env and the three `labels.localTests*` and checks it, never
+   * directly.
    */
   localTests?: LocalTestsPolicy;
   concurrency: number;
@@ -215,14 +221,19 @@ export interface LocalTestsPolicy {
   allowedPaths: string[];
   maxSpecs: number;
   maxRunMinutes: number;
-  /** 'all' is read but not enforced: the localResults gate resolves on the first approval. */
+  /**
+   * Unused since the step left the Loop, where a developer signed off the
+   * results; still checked, because scripts/localtests.cjs mirrors this block
+   * field for field (its `_why` says so).
+   */
   devApproval: 'any' | 'all';
+  /** Unused for the same reason: a finished run is marked done, passed or failed. */
   failuresBlock: boolean;
 }
 
 /**
- * The policy merged with this desk's .env: what the local-tests phases and
- * scripts/localtests.cjs act on.
+ * The policy merged with this desk's .env: what the local automation tests
+ * mode, its two on-demand phases and scripts/localtests.cjs act on.
  */
 export interface LocalTestsConfig {
   /** True only when `off` is null. */
@@ -242,6 +253,12 @@ export interface LocalTestsConfig {
   maxRunMinutes: number;
   devApproval: 'any' | 'all';
   failuresBlock: boolean;
+  /**
+   * config/project.json `labels.localTestsTrigger` / `localTestsRunning` /
+   * `localTestsDone`: what starts the mode, what a running list carries, and
+   * what a finished one is marked. '' when unset, which turns the mode off.
+   */
+  labels: { trigger: string; running: string; done: string };
 }
 
 /**
@@ -491,13 +508,6 @@ export function phasesOutsideTarget(): Array<{ name: string; targets: string[] }
     .map((p) => ({ name: p.name, targets: p.targets ?? [] }));
 }
 
-/**
- * The local automation tests step's phases. Both leave the list together on a
- * desk where `localTestsConfig()` is off, so that desk runs exactly the
- * sequence it ran before they existed.
- */
-export const LOCAL_TESTS_PHASES: readonly string[] = ['local-tests-scope', 'local-tests-run'];
-
 let _phases: PhaseConfig[] | null = null;
 export function phases(): PhaseConfig[] {
   if (!_phases) {
@@ -506,17 +516,12 @@ export function phases(): PhaseConfig[] {
     );
     const all = loadJson<{ phases: PhaseConfig[] }>('phases.json').phases;
     all.forEach(assertTargets);
-    // Dropped here rather than in the runner's list, so the card, remediation's
-    // resumable names and every other reader of the list agree with the run:
-    // a step this desk cannot run is not a 'pending' line on every card.
-    const localTestsOn = localTestsConfig().enabled;
     _phases = all
       .filter((p) => !skip.has(p.name))
       // A phase that names targets belongs to those targets only. An empty
       // array is read the same as naming none of them: the phase never runs,
       // which is a switched-off phase rather than an unrestricted one.
       .filter((p) => runsForTarget(p, PROJECT_TARGET))
-      .filter((p) => localTestsOn || !LOCAL_TESTS_PHASES.includes(p.name))
       .sort((a, b) => a.n - b.n);
   }
   return _phases;
@@ -536,11 +541,12 @@ export interface RequiredLabel { name: string; why: string }
  * exist, never that the right ones were collected. An optional label that is
  * unset is not required — an empty string is "this gate is off", not a label
  * called "". `notABug` is required only while reproduction is on, for the same
- * reason, and `localTests` only while the local-tests step is on.
+ * reason, and the three local-tests labels only while the local automation
+ * tests mode is on: on any other desk nothing ever reads or writes them.
  *
- * `localTests` defaults to whether THIS desk has that step on, so doctor checks
- * the label exactly where it will be written. A test passes it, so the answer
- * does not depend on the machine's .env.
+ * `localTests` defaults to whether THIS desk has that mode on, so doctor checks
+ * the labels exactly where they will be read and written. A test passes it, so
+ * the answer does not depend on the machine's .env.
  */
 export function requiredLabels(
   labels: ProjectConfig['labels'],
@@ -560,7 +566,11 @@ export function requiredLabels(
   need(labels.designReview, 'design gate');
   need(labels.inReview, 'in-review marker');
   if (bugReproduction) need(labels.notABug, 'bug reproduction verdict');
-  if (localTests) need(labels.localTests, 'local automation tests marker');
+  if (localTests) {
+    need(labels.localTestsTrigger, 'local automation tests trigger — the mode never starts without it');
+    need(labels.localTestsRunning, 'local automation tests running marker');
+    need(labels.localTestsDone, 'local automation tests done — set when a local run finishes');
+  }
   for (const ph of phaseList) {
     // Before the routing loop, so a label doing both jobs reports under the
     // worse consequence: a missing routing key loses a skill, a missing gate
@@ -772,14 +782,17 @@ export function googleServiceAccountFile(): string {
 const PG_IDENT_RE = /^[a-z_][a-z0-9_]{0,62}$/;
 
 /**
- * The local automation tests step for THIS desk: config/project.json
- * `localTests` (the team's policy) merged with .env (where this desk's clone,
+ * The local automation tests mode for THIS desk: config/project.json
+ * `localTests` (the team's policy) and `labels.localTests*` (the three labels
+ * the mode reads and writes) merged with .env (where this desk's clone,
  * credentials and Postgres are).
  *
- * Never throws, because the conductor asks on every run and doctor asks while
- * listing labels. Anything that would make the step misbehave turns it OFF and
+ * Never throws, because the conductor asks on every tick and doctor asks while
+ * listing labels. Anything that would make the mode misbehave turns it OFF and
  * `off` says which field or variable to fix — the block missing, `enabled` not
- * true, ONESHOT_LOCAL_TESTS_REPO unset, or a field of the wrong shape. Checked
+ * true, ONESHOT_LOCAL_TESTS_REPO unset, a field of the wrong shape, or one of
+ * the three labels unset (a mode with no trigger label has nothing to pick up,
+ * and one with no done label could never finish a ticket). Checked
  * field by field rather than cast for the reason automationConfig() gives: the
  * database names are written into SQL, and a non-numeric cap is a run that is
  * never stopped. Not cached. `cfg` and `env` are for tests.
@@ -789,7 +802,7 @@ const PG_IDENT_RE = /^[a-z_][a-z0-9_]{0,62}$/;
  * at cleanup, and they reach no phase session.
  */
 export function localTestsConfig(
-  cfg: Pick<ProjectConfig, 'localTests'> = projectConfig(),
+  cfg: Pick<ProjectConfig, 'localTests'> & Partial<Pick<ProjectConfig, 'labels'>> = projectConfig(),
   env: Record<string, string | undefined> = process.env,
 ): LocalTestsConfig {
   const block = cfg.localTests as unknown;
@@ -830,6 +843,8 @@ export function localTestsConfig(
     && allowed.every((a) => typeof a === 'string' && a.trim() !== '')
     ? (allowed as string[]).map((a) => a.trim())
     : reject<string[]>('localTests.allowedPaths must be a non-empty list of repo-relative paths', []);
+  const names = (cfg.labels ?? {}) as Record<string, unknown>;
+  const label = (field: string): string => text({ v: names[field], name: `labels.${field}` });
 
   const out: Omit<LocalTestsConfig, 'enabled' | 'off'> = {
     repo: expandPath(readEnv(env, 'ONESHOT_LOCAL_TESTS_REPO')),
@@ -851,6 +866,11 @@ export function localTestsConfig(
     failuresBlock: typeof p.failuresBlock === 'boolean'
       ? p.failuresBlock
       : reject('localTests.failuresBlock must be true or false', false),
+    labels: {
+      trigger: label('localTestsTrigger'),
+      running: label('localTestsRunning'),
+      done: label('localTestsDone'),
+    },
   };
 
   // Most specific first: a desk that never set the repo is told that, not

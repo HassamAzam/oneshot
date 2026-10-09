@@ -95,26 +95,45 @@ test('a phase with no labelSkills contributes nothing', () => {
   );
 });
 
-test('the local-tests label is required only where the step is on', () => {
-  // Conductor code adds it on a desk running local tests; on any other desk it
-  // is never written, and a missing label there is nobody's problem.
-  const l = labels({ localTests: 'TestCase Run Locally' });
-  assert.ok(names(requiredLabels(l, [], false, true)).includes('TestCase Run Locally'));
-  assert.ok(!names(requiredLabels(l, [], false, false)).includes('TestCase Run Locally'));
+const LT_LABELS = {
+  localTestsTrigger: 'Ready for Automation Testing',
+  localTestsRunning: 'Running TestCases Locally',
+  localTestsDone: 'Automation Testing Done',
+};
+
+test('the three local-tests labels are required only where the mode is on', () => {
+  // The mode reads and writes them on a desk running local tests; on any other
+  // desk nothing touches them, and a missing label there is nobody's problem.
+  const l = labels(LT_LABELS);
+  const on = names(requiredLabels(l, [], false, true));
+  for (const name of Object.values(LT_LABELS)) assert.ok(on.includes(name), `${name} is required`);
+  const off = names(requiredLabels(l, [], false, false));
+  for (const name of Object.values(LT_LABELS)) assert.ok(!off.includes(name), `${name} is not required`);
   assert.ok(!names(requiredLabels(labels(), [], false, true)).includes(''), 'an unset label is not required');
+});
+
+test('the retired TestCase Run Locally marker is not configured any more', () => {
+  // Renamed on the project to Running TestCases Locally (1352); a stale name
+  // here would be a label doctor demands and no run ever writes.
+  const configured = projectConfig().labels as Record<string, unknown>;
+  assert.equal(configured.localTests, undefined);
+  assert.ok(!Object.values(configured).includes('TestCase Run Locally'));
 });
 
 // ------------------------------------------------------------- localTestsConfig
 
 type Policy = NonNullable<Parameters<typeof localTestsConfig>[0]>['localTests'];
 
-const policy = (over: Record<string, unknown> = {}): { localTests: Policy } => ({
+const policy = (
+  over: Record<string, unknown> = {}, labelsOver: Record<string, unknown> = {},
+): { localTests: Policy; labels: Labels } => ({
   localTests: {
     enabled: true, baselineDb: 'hrdb_automation_baseline_20261002', pgHost: '127.0.0.1', pgPort: 5432, pgUser: '',
     dbPrefix: 'oneshot_lt_', automationRef: 'origin/master',
     allowedPaths: ['cypress/Pages/', 'cypress/fixtures/', 'cypress/e2e/'],
     maxSpecs: 40, maxRunMinutes: 45, devApproval: 'any', failuresBlock: false, ...over,
   } as Policy,
+  labels: labels({ ...LT_LABELS, ...labelsOver }),
 });
 
 const DESK = { ONESHOT_LOCAL_TESTS_REPO: '~/wsa' };
@@ -133,6 +152,23 @@ test('the shipped policy is usable as it stands', () => {
     },
   );
   assert.deepEqual([c.maxSpecs, c.maxRunMinutes, c.devApproval, c.failuresBlock], [40, 45, 'any', false]);
+  assert.deepEqual(c.labels, {
+    trigger: 'Ready for Automation Testing', running: 'Running TestCases Locally', done: 'Automation Testing Done',
+  });
+});
+
+test('a local-tests label left unset turns the mode off and is named', () => {
+  // A mode with no trigger has nothing to pick up, and one with no done label
+  // could never finish a ticket: off, with the field to fix, rather than
+  // searching GitLab for a label called "".
+  const c = localTestsConfig(policy({}, { localTestsTrigger: '', localTestsDone: undefined }), DESK);
+  assert.equal(c.enabled, false);
+  assert.ok((c.off ?? '').includes('labels.localTestsTrigger'), c.off ?? '');
+  assert.ok((c.off ?? '').includes('labels.localTestsDone'), c.off ?? '');
+  assert.ok(!(c.off ?? '').includes('labels.localTestsRunning'), 'a label that is set is not named');
+  assert.deepEqual(c.labels, { trigger: '', running: 'Running TestCases Locally', done: '' });
+  // Still the desk's own answer first: a desk with no clone is told that.
+  assert.match(localTestsConfig(policy({}, { localTestsTrigger: '' }), {}).off ?? '', /ONESHOT_LOCAL_TESTS_REPO/);
 });
 
 test('a desk without ONESHOT_LOCAL_TESTS_REPO has the step off, and is told why', () => {
