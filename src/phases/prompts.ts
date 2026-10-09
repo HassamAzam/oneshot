@@ -2055,6 +2055,75 @@ This phase is warn-on-fail. A screen you could not reach is a missing screenshot
 saying why, not a block — ship the pack you have and name the gap in \`summary\`.`;
   },
 
+  'demo-recording': (ctx) => {
+    const v = artifact<{ results: CaseResult[] }>(ctx, 'verify');
+    const passedIds = new Set((v.results ?? []).filter((x) => x.result === 'pass').map((x) => x.id));
+    const passed = testCases(ctx).filter((c) => passedIds.has(c.id));
+    const ac = artifact<{ acceptanceCriteria: string[] }>(ctx, 'research').acceptanceCriteria ?? [];
+    const mins = budgetMin('demo-recording', 40);
+
+    return `${ticketHead(ctx.ticket)}
+
+## Your app instance
+Worktree: ${ctx.worktree ?? '(none leased)'}
+Port:     ${ctx.port ?? '(none leased)'}   (also in $ONESHOT_PORT)
+Ticket:   ${ctx.ticket.iid}   (also in $ONESHOT_TICKET — this is where the demo gets posted)
+
+The app is already leased for you. \`verify\` and \`ui-evidence\` drove it just before you on this
+same worktree and port. Do not start anything by hand — run the one command they ran:
+
+\`\`\`
+node $ONESHOT_HOME/scripts/app.cjs ensure
+\`\`\`
+
+It returns the running app in ~3s (or rebuilds if it died) and writes the \`app-env.json\` with the
+\`baseUrl\`. Never \`npm ci\`: node_modules is a shared symlink. There is no browser tool here — you
+drive Playwright from Bash with \`node\`, exactly as verify did.
+
+## What to record: ONE journey, the one that passed
+Record a short annotated walkthrough of this feature WORKING — one user journey, 5–8 steps, for a
+stakeholder who has not read the ticket. Not a regression sweep; that was verify's job.
+
+Acceptance criteria (the oracle for what the journey must show):
+${ac.length ? ac.map((a) => `  - ${a}`).join('\n') : '  (research recorded none — derive the journey from the ticket body above)'}
+
+Cases that PASSED in verify — follow the primary happy-path one end to end:
+${caseList(passed, { steps: true })}
+
+If no happy-path case passed, there is NO working feature to demo: do not stage one. Post the
+reason to the ticket (below) and stop.
+
+## Record it with the skill's helper
+The \`demo-recording\` skill is loaded. Its \`scripts/record.cjs\` owns the mechanics that cost a run
+to get right — a video context, the FRESH-login dance (a stale session renders /home but ERR_ABORTs
+every nav), the caption/ring overlay, and flushing the webm. You own the FLOW: the clicks and the
+words. Record into \`${artifactDir(ctx.ticket.iid)}/demo/\`, drive the journey with one caption per
+step written for someone who has not read the ticket, and \`finishRecording\` to get the webm path.
+
+This is NOT a ui-evidence pack, and the one rule inverts: a demo REQUIRES the caption chrome —
+it is narration drawn to read as demo furniture, never a control faked into the app. Record REAL
+data and the real journey; never stage a state by hand and narrate it as the feature, and never
+caption a broken flow as a success.
+
+## Post the webm to the ticket
+The webm goes on the ticket (issue ${ctx.ticket.iid}) as a note — GitLab renders an uploaded .webm
+as an inline player. \`upload_markdown\` rejects absolute paths and anything outside the project
+dir, so: copy the webm into a directory INSIDE the worktree, pass the RELATIVE path to
+\`mcp__gitlab__upload_markdown\`, post the note with \`mcp__gitlab__create_issue_note\` embedding what
+it returned plus one line of context, then DELETE the copy so it never reaches the MR diff.
+
+## Re-run once, then warn with a reason
+This phase is warn-on-fail: a failed demo must never block a change that is already verified and
+reviewed. So on a flaky step or a failed upload, retry the capture ONCE. If it still fails, post a
+short note to the ticket saying why there is no demo (what step failed, what you saw) and finish.
+
+${artifactsBlock(ctx)}
+
+Write \`demo.json\`: on success \`{ "status": "ok", "journey": "<one line>", "ticketNoteUrl": "<url>",
+"webm": "<bare filename under artifacts/demo/>" }\`; on failure \`{ "status": "failed", "reason":
+"<what broke>", "attempts": <n> }\`. Budget: ~${mins} min.`;
+  },
+
   mr: (ctx) => {
     const r = artifact<{ understanding: string; module: string; blastRadius: string[] }>(ctx, 'research');
     const p = artifact<{ approach: string; risks: string[] }>(ctx, 'plan');

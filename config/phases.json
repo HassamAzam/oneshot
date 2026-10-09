@@ -277,6 +277,30 @@
       "artifact": "mr.json"
     },
     {
+      "name": "demo-recording",
+      "n": 8.5,
+      "kind": "session",
+      "tier": "standard",
+      "cwd": "worktree",
+      "maxTurns": 90,
+      "timeoutMin": 40,
+      "writes": [
+        "run",
+        "artifacts"
+      ],
+      "onFail": "warn",
+      "needsPort": true,
+      "labelGated": "Demo",
+      "skills": [
+        "demo-recording"
+      ],
+      "artifact": "demo.json",
+      "_why": "Records a short annotated walkthrough of the merged-ready feature working in the real app and posts the webm to the ticket, so a stakeholder sees the change move without checking out the branch. It sits AFTER `ui-evidence` (7) and `mr` (8) and before `merge` (9): the feature is implemented, verified, evidenced and the MR carries its real description, so the journey the demo drives is the one that actually passed, not a draft `mr-open` left of an unverified branch. SESSION, not code: the walkthrough is ticket-specific judgement — which single user journey tells the story, sourced from the acceptance criteria and verify's happy-path cases — and only a model can author that from the ticket. needsPort because it drives the leased app through Playwright, cwd 'worktree' so it reads this run's verify.json / testcases.json and the real routes, writes 'run'+'artifacts' (the webm lands in state/runs/<iid>/artifacts/, never on the branch, the same reason `design` and `ui-evidence` keep their media out of the diff) which also grants the GitLab posting tools the ticket note needs. This is a DIFFERENT artefact from `ui-evidence`, and the one rule they invert: evidence forbids any DOM overlay because a screenshot must be the untouched app, while a demo REQUIRES caption chrome — the overlay is narration, drawn to read as demo furniture and never as the app's own UI; the skill owns that line.",
+      "_why_gating": "labelGated 'Demo', and no `targets` — exactly `design`'s shape ('Design', untargeted). It is OPT-IN: a human tags the ticket, so it never fires on a backend-only change where a browser walkthrough shows nothing, and it changes no conductor's pipeline SHAPE on pull, because a labelGated phase only runs where the label is carried. That is the difference from `mr-open`, the one phase that IS target-scoped: mr-open reorders the MR against the gates for everyone on the project the moment they pull, so it had to be fenced to erp (phase-targets.test.ts guards that it is the only one). This phase reorders nothing and appears only when someone asks for it, so a target gate would buy nothing and would weaken that canary.",
+      "_why_fail": "onFail 'warn', not 'retry'. A demo is a courtesy artefact: a capture that fails must never block a change that is already verified, reviewed and evidenced from merging — the same call `ui-evidence` and `mr-open` make. The single re-run the recording deserves lives INSIDE the session (the skill attempts the walkthrough once, retries the capture once on a flaky step or a failed upload), because the runner's `onFail: retry` BLOCKS once its retries are spent (afterFailure in src/conductor/runner.ts), which is exactly the block this phase must not produce. On a final failure the session posts a short note to the ticket with the reason there is no demo, so the gap is recorded where a person will see it rather than swallowed; a hard session death still degrades to 'warned' and the run proceeds to merge.",
+      "_why_turns": "90 / 40m is an ESTIMATE, correct it from real runs. Shaped from `ui-evidence` (80/40, the nearest phase: one leased app, Playwright, a GitLab upload) plus headroom for the single in-session re-run and the one video encode. The app is already warm from the lease, so bring-up is reuse-cheap; the cost is driving one journey of ~5-8 steps, not verify's whole case list, which is why it is well under verify's cap."
+    },
+    {
       "name": "merge",
       "n": 9,
       "kind": "code",
