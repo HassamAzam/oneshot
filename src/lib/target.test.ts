@@ -148,9 +148,16 @@ test('the base config is the ERP one: its labels, its base branch', async () => 
     assert.equal(labels.exit, 'Merged');
     assert.equal(labels.blocked, 'Needs Human');
     assert.equal(labels.inReview, 'In Review');
-    // Optional labels the project does not have are off, not pointing at a name
-    // that does not exist there.
-    for (const off of ['review', 'testcaseReview', 'notABug', 'designReview']) {
+    // On, and spelled exactly as the project spells it: 'TestCase Review' exists
+    // there (id 1342, created after the move to ERP), and the board-only marker
+    // for the testcases gate is a no-op while this is empty — `boardLabel` maps
+    // '' to null, which silently disables BOTH the add and the remove.
+    assert.equal(labels.testcaseReview, 'TestCase Review');
+    // The rest are off, rather than pointing at a name the project does not have.
+    // 'Review' does exist on ERP, but it is deliberately left off: unlike the
+    // board markers it adds three human sign-off pauses, so switching it on is a
+    // behaviour change and not a labelling one.
+    for (const off of ['review', 'notABug', 'designReview']) {
       assert.equal(labels[off], '', off);
     }
     assert.equal(branches.base, 'dev');
