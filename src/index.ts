@@ -32,8 +32,8 @@ import { join } from 'node:path';
 import {
   CONTEXT_REPO, DRY_RUN, FOLLOW_TICK_MS, GITLAB_USERNAME, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT,
   PROJECT_TARGET, TICK_MS, WORK_REPO, WT_ROOT,
-  auditAuth, automationConfig, automationEnabled, automationTriggerLabel, envOr, pathSources, phases, portPool,
-  projectConfig,
+  auditAuth, automationConfig, automationEnabled, automationTriggerLabel, envOr, localTestsConfig, pathSources,
+  phases, portPool, projectConfig,
   repoIdentity, seedFrom, slackConfig,
 } from './lib/config.js';
 import {
@@ -48,6 +48,7 @@ import { budgetConfig } from './lib/config.js';
 import { iidFlag } from './lib/cliargs.js';
 import { describe, scan } from './conductor/watcher.js';
 import { refusalIsFinal, runTicket, type RunOutcome } from './conductor/runner.js';
+import { gcLocalTests, killLiveLocalTests } from './conductor/localtests.js';
 import { automationPreflight, automationTick, outcomeLine, runAutomationOnce } from './automation/runner.js';
 import {
   deregister, heartbeat, liveConductorIds, liveConductors, peersEverSeen, register,
@@ -141,6 +142,22 @@ let stopping = false;
 
 /** Set while the tick loop is asleep, so a signal does not wait out the tick. */
 let wake: (() => void) | null = null;
+
+/**
+ * Whether this process clears what local-tests runs leave behind: a Loop
+ * conductor (not --watch-only, which changes nothing, nor --automation) on a
+ * desk where the step is on. Decided once at boot, like the rest of the config.
+ */
+let localTestsGc = false;
+
+/**
+ * Every run in flight on this desk: the fleet's rows, which cover the other
+ * conductors, and this process's own map, which covers a dispatch that has not
+ * written its row yet. gc keeps whatever belongs to one of these.
+ */
+function activeIids(): number[] {
+  return [...new Set([...activeRunsFleet().map((r) => r.iid), ...running.keys()])];
+}
 
 function nap(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -537,6 +554,13 @@ async function tick(): Promise<void> {
     logEvent('network_state', { state: outcome.state });
   }
 
+  // Database copies, throwaway automation worktrees and browsers that no run
+  // in flight is holding — what a killed conductor or a crashed run left. Ahead
+  // of the pause check, because a paused desk still has leftovers to clear, and
+  // AWAITED ahead of the scan, so nothing this tick dispatches can be in the
+  // middle of making something gc would take for a leftover.
+  if (localTestsGc) await gcLocalTests(activeIids());
+
   if (existsSync(PAUSE)) {
     say.warn('paused (state/PAUSE) — not claiming');
     return;
@@ -710,6 +734,11 @@ async function main(): Promise<void> {
       'their tickets are claimable again and resume from their journals');
   }
 
+  // After the reconcile, so the runs it just buried no longer count as in
+  // flight and what they left on the desk goes with them.
+  localTestsGc = !watchOnly && automationArg === null && localTestsConfig().enabled;
+  if (localTestsGc) await gcLocalTests(activeIids());
+
   // Conductor-cwd phases (recall, remediate) run
   // here rather than in a worktree, so without this they resolve no skills at
   // all — the worktree seed is the only other place `.claude` gets built.
@@ -768,6 +797,16 @@ async function main(): Promise<void> {
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  // A local-tests script is detached, so it would outlive a hard exit and hold
+  // the desk's ports and database copy for hours with nobody to read its
+  // results. Every exit path ends here; after an orderly drain there is
+  // nothing left to kill.
+  process.on('exit', () => {
+    try {
+      const killed = killLiveLocalTests();
+      if (killed.length) log.warn(`stopped ${killed.length} local-tests script group(s) left running`, { pids: killed });
+    } catch { /* exiting anyway */ }
+  });
 
   for (;;) {
     try {

@@ -130,6 +130,13 @@ export interface ProjectConfig {
      * waiting on a reviewer. Unset disables it.
      */
     inReview?: string;
+    /**
+     * Added by conductor code when local-tests-scope says the ticket has
+     * workstream-automation specs worth running locally. A board marker only:
+     * never removed, never gates anything. Required only while
+     * `localTestsConfig().enabled`. Unset disables it.
+     */
+    localTests?: string;
   };
   /**
    * Reproduce a reported bug on the base branch during `research` before any
@@ -180,7 +187,61 @@ export interface ProjectConfig {
    * `automationTriggerLabel()`, to leave those tickets to the mode.
    */
   automation?: AutomationConfig;
+  /**
+   * The local automation tests step's team policy. Read through
+   * `localTestsConfig()`, which merges it with this desk's .env and checks it,
+   * never directly.
+   */
+  localTests?: LocalTestsPolicy;
   concurrency: number;
+}
+
+/**
+ * config/project.json `localTests`, as written. The `_why` keys beside each
+ * field say what it is for.
+ */
+export interface LocalTestsPolicy {
+  enabled: boolean;
+  /** Every run copies this database (CREATE DATABASE … TEMPLATE); none writes to it. */
+  baselineDb: string;
+  pgHost: string;
+  pgPort: number;
+  /** '' = the libpq default, the OS user. */
+  pgUser: string;
+  /** Per-run copies are `<dbPrefix><iid>_<n>`, which is what cleanup matches on. */
+  dbPrefix: string;
+  automationRef: string;
+  /** Repo-relative prefixes the scope session may change in the throwaway worktree. */
+  allowedPaths: string[];
+  maxSpecs: number;
+  maxRunMinutes: number;
+  /** 'all' is read but not enforced: the localResults gate resolves on the first approval. */
+  devApproval: 'any' | 'all';
+  failuresBlock: boolean;
+}
+
+/**
+ * The policy merged with this desk's .env: what the local-tests phases and
+ * scripts/localtests.cjs act on.
+ */
+export interface LocalTestsConfig {
+  /** True only when `off` is null. */
+  enabled: boolean;
+  /** Why the step is off on this desk, naming the field or variable to fix. Null when it is on. */
+  off: string | null;
+  /** The workstream-automation clone (ONESHOT_LOCAL_TESTS_REPO). '' when unset. */
+  repo: string;
+  /** JSON with the keys of workstream-automation's cypress.env.json (ONESHOT_LOCAL_TESTS_CREDS). */
+  credsFile: string;
+  baselineDb: string;
+  pg: { host: string; port: number; user: string };
+  dbPrefix: string;
+  automationRef: string;
+  allowedPaths: string[];
+  maxSpecs: number;
+  maxRunMinutes: number;
+  devApproval: 'any' | 'all';
+  failuresBlock: boolean;
 }
 
 /**
@@ -430,6 +491,13 @@ export function phasesOutsideTarget(): Array<{ name: string; targets: string[] }
     .map((p) => ({ name: p.name, targets: p.targets ?? [] }));
 }
 
+/**
+ * The local automation tests step's phases. Both leave the list together on a
+ * desk where `localTestsConfig()` is off, so that desk runs exactly the
+ * sequence it ran before they existed.
+ */
+export const LOCAL_TESTS_PHASES: readonly string[] = ['local-tests-scope', 'local-tests-run'];
+
 let _phases: PhaseConfig[] | null = null;
 export function phases(): PhaseConfig[] {
   if (!_phases) {
@@ -438,12 +506,17 @@ export function phases(): PhaseConfig[] {
     );
     const all = loadJson<{ phases: PhaseConfig[] }>('phases.json').phases;
     all.forEach(assertTargets);
+    // Dropped here rather than in the runner's list, so the card, remediation's
+    // resumable names and every other reader of the list agree with the run:
+    // a step this desk cannot run is not a 'pending' line on every card.
+    const localTestsOn = localTestsConfig().enabled;
     _phases = all
       .filter((p) => !skip.has(p.name))
       // A phase that names targets belongs to those targets only. An empty
       // array is read the same as naming none of them: the phase never runs,
       // which is a switched-off phase rather than an unrestricted one.
       .filter((p) => runsForTarget(p, PROJECT_TARGET))
+      .filter((p) => localTestsOn || !LOCAL_TESTS_PHASES.includes(p.name))
       .sort((a, b) => a.n - b.n);
   }
   return _phases;
@@ -463,12 +536,17 @@ export interface RequiredLabel { name: string; why: string }
  * exist, never that the right ones were collected. An optional label that is
  * unset is not required — an empty string is "this gate is off", not a label
  * called "". `notABug` is required only while reproduction is on, for the same
- * reason.
+ * reason, and `localTests` only while the local-tests step is on.
+ *
+ * `localTests` defaults to whether THIS desk has that step on, so doctor checks
+ * the label exactly where it will be written. A test passes it, so the answer
+ * does not depend on the machine's .env.
  */
 export function requiredLabels(
   labels: ProjectConfig['labels'],
   phaseList: Pick<PhaseConfig, 'name' | 'labelSkills' | 'labelGated'>[],
   bugReproduction: boolean,
+  localTests: boolean = localTestsConfig().enabled,
 ): RequiredLabel[] {
   const out = new Map<string, string>();
   const need = (name: string | undefined, why: string): void => {
@@ -482,6 +560,7 @@ export function requiredLabels(
   need(labels.designReview, 'design gate');
   need(labels.inReview, 'in-review marker');
   if (bugReproduction) need(labels.notABug, 'bug reproduction verdict');
+  if (localTests) need(labels.localTests, 'local automation tests marker');
   for (const ph of phaseList) {
     // Before the routing loop, so a label doing both jobs reports under the
     // worse consequence: a missing routing key loses a skill, a missing gate
@@ -683,6 +762,105 @@ export function automationEnabled(): boolean {
  */
 export function googleServiceAccountFile(): string {
   return expandPath(envOr('ONESHOT_GOOGLE_SA_FILE', '~/.claude/google-service-account.json'));
+}
+
+/**
+ * A database name this file is willing to have written into SQL: lower-case,
+ * unquoted, within Postgres's 63-byte limit. Anything else would need quoting,
+ * and a name that needs quoting is a name nobody meant.
+ */
+const PG_IDENT_RE = /^[a-z_][a-z0-9_]{0,62}$/;
+
+/**
+ * The local automation tests step for THIS desk: config/project.json
+ * `localTests` (the team's policy) merged with .env (where this desk's clone,
+ * credentials and Postgres are).
+ *
+ * Never throws, because the conductor asks on every run and doctor asks while
+ * listing labels. Anything that would make the step misbehave turns it OFF and
+ * `off` says which field or variable to fix — the block missing, `enabled` not
+ * true, ONESHOT_LOCAL_TESTS_REPO unset, or a field of the wrong shape. Checked
+ * field by field rather than cast for the reason automationConfig() gives: the
+ * database names are written into SQL, and a non-numeric cap is a run that is
+ * never stopped. Not cached. `cfg` and `env` are for tests.
+ *
+ * Credentials are a PATH here, never a value: the run merges them into a mode-600
+ * cypress.env.json inside the throwaway state/runs/<iid>/wsa-run worktree, removed
+ * at cleanup, and they reach no phase session.
+ */
+export function localTestsConfig(
+  cfg: Pick<ProjectConfig, 'localTests'> = projectConfig(),
+  env: Record<string, string | undefined> = process.env,
+): LocalTestsConfig {
+  const block = cfg.localTests as unknown;
+  const p = (block && typeof block === 'object' ? block : {}) as Record<string, unknown>;
+  const problems: string[] = [];
+  const reject = <T>(what: string, fallback: T): T => {
+    problems.push(what);
+    return fallback;
+  };
+
+  /** A policy field, or this desk's .env override of it — named either way, so the message says what to edit. */
+  type Source = { v: unknown; name: string };
+  const policy = (field: string): Source => ({ v: p[field], name: `localTests.${field}` });
+  const merged = (envName: string, field: string): Source => {
+    const e = readEnv(env, envName);
+    return e ? { v: e, name: envName } : policy(field);
+  };
+  const ident = ({ v, name }: Source): string =>
+    (typeof v === 'string' && PG_IDENT_RE.test(v) ? v : reject(`${name} must be a lower-case Postgres name`, ''));
+  const text = ({ v, name }: Source, emptyOk = false): string =>
+    (typeof v === 'string' && (emptyOk || v.trim() !== '')
+      ? v.trim()
+      : reject(`${name} must be ${emptyOk ? 'a string' : 'a non-empty string'}`, ''));
+  const whole = ({ v, name }: Source, max?: number): number => {
+    const n = typeof v === 'string' ? Number(v) : v;
+    return typeof n === 'number' && Number.isInteger(n) && n > 0 && (max === undefined || n <= max)
+      ? n
+      : reject(`${name} must be a whole number above 0${max === undefined ? '' : ` and at most ${max}`}`, 0);
+  };
+
+  const baselineDb = ident(merged('ONESHOT_LOCAL_TESTS_BASELINE_DB', 'baselineDb'));
+  const dbPrefix = ident(policy('dbPrefix'));
+  if (baselineDb && dbPrefix && baselineDb.startsWith(dbPrefix)) {
+    reject('localTests.dbPrefix is the start of the baseline database name, so cleanup would match the baseline', null);
+  }
+  const allowed = p.allowedPaths;
+  const allowedPaths = Array.isArray(allowed) && allowed.length > 0
+    && allowed.every((a) => typeof a === 'string' && a.trim() !== '')
+    ? (allowed as string[]).map((a) => a.trim())
+    : reject<string[]>('localTests.allowedPaths must be a non-empty list of repo-relative paths', []);
+
+  const out: Omit<LocalTestsConfig, 'enabled' | 'off'> = {
+    repo: expandPath(readEnv(env, 'ONESHOT_LOCAL_TESTS_REPO')),
+    credsFile: expandPath(readEnv(env, 'ONESHOT_LOCAL_TESTS_CREDS', '~/.config/oneshot/cypress-env.json')),
+    baselineDb,
+    pg: {
+      host: text(merged('ONESHOT_LOCAL_TESTS_PG_HOST', 'pgHost')),
+      port: whole(merged('ONESHOT_LOCAL_TESTS_PG_PORT', 'pgPort'), 65535),
+      user: text(merged('ONESHOT_LOCAL_TESTS_PG_USER', 'pgUser'), true),
+    },
+    dbPrefix,
+    automationRef: text(policy('automationRef')),
+    allowedPaths,
+    maxSpecs: whole(policy('maxSpecs')),
+    maxRunMinutes: whole(policy('maxRunMinutes')),
+    devApproval: p.devApproval === 'any' || p.devApproval === 'all'
+      ? p.devApproval
+      : reject("localTests.devApproval must be 'any' or 'all'", 'any'),
+    failuresBlock: typeof p.failuresBlock === 'boolean'
+      ? p.failuresBlock
+      : reject('localTests.failuresBlock must be true or false', false),
+  };
+
+  // Most specific first: a desk that never set the repo is told that, not
+  // about a policy field it has no reason to care about yet.
+  let off: string | null = null;
+  if (!block || typeof block !== 'object') off = 'config/project.json has no `localTests` block';
+  else if (p.enabled !== true) off = 'switched off in config/project.json (`localTests.enabled`)';
+  else if (!out.repo) off = 'ONESHOT_LOCAL_TESTS_REPO is not set on this desk';
+  else if (problems.length) off = `\`localTests\` is not usable: ${problems.join('; ')}`;
+  return { enabled: off === null, off, ...out };
 }
 
 let _mrFeedback: MrFeedbackConfig | null = null;
@@ -904,6 +1082,21 @@ export function projectSessionEnv(): Record<string, string> {
 
 export function runDir(iid: number): string { return join(RUNS, String(iid)); }
 export function artifactDir(iid: number): string { return join(runDir(iid), 'artifacts'); }
+
+/**
+ * The throwaway workstream-automation worktree a local-tests run checks out.
+ * Never committed to, and removed when the run cleans up.
+ */
+export function localTestsWorktree(iid: number): string { return join(runDir(iid), 'wsa'); }
+
+/**
+ * The temporary spec, page-object and fixture changes the scope session made,
+ * as a patch: the one copy of them that outlives the worktree, applied to a
+ * fresh one for every run and attached to the plan note on the ticket.
+ */
+export function localTestsPatchFile(iid: number): string {
+  return join(artifactDir(iid), 'local-tests', 'temporary-changes.patch');
+}
 
 export function portPool(): number[] {
   return envOr('PORT_POOL', '8000,8001,8002')

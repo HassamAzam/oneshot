@@ -164,6 +164,96 @@ export interface Screenshot {
   caseId: string;
 }
 
+/**
+ * local-tests-scope.json: which workstream-automation (Cypress) specs this
+ * ticket's diff affects, and any temporary changes made to run them.
+ */
+export interface LocalTestsScope {
+  /**
+   * False when nothing in the automation suite covers what the diff touches.
+   * The run then carries on to `mr`, says so in one line on the ticket, and
+   * nobody is asked anything — the same as a design that turns out to have no UI.
+   */
+  applicable: boolean;
+  reason: string;
+  modules: string[];
+  /** Spec files to run, repo-relative to workstream-automation. */
+  specs: Array<{ file: string; module: string; cases: number; ciSeconds?: number; why: string }>;
+  /**
+   * Temporary changes made in the throwaway worktree, never committed. `update`
+   * edits an existing spec, page object or fixture; `add` creates one.
+   * `erpEvidence` is the ERP file:line that makes the change necessary.
+   */
+  edits: Array<{ file: string; kind: 'update' | 'add'; why: string; erpEvidence: string }>;
+  /**
+   * Changes to the team's test list. QA signs them off (the localSpecs gate)
+   * only when `specs` has something to run: a plan with no spec to run is
+   * posted as not needed, and its proposals become suggestions on that line.
+   */
+  proposals: Array<{ action: 'add' | 'remove'; title: string; file?: string; why: string }>;
+  /**
+   * Specs that reach the change but cannot run on a local machine — they need
+   * something a desk does not have (Odoo payroll, a real mailbox, a third-party
+   * service) — each with why. Kept out of `specs`; the report names them so a
+   * missing result is not read as a pass.
+   */
+  notRunnable?: Array<{ spec: string; why: string }>;
+  estimatedMinutes: number;
+  summary: string;
+  blocked?: string;
+}
+
+/** local-tests-run.json: what the local Cypress run did. Written by code, not a session. */
+export interface LocalTestsRun {
+  status: 'passed' | 'failed' | 'skipped' | 'error';
+  /**
+   * Why the run was skipped or errored — or, on a run that finished, what cut
+   * it short (Cypress stopped at its deadline), which the report and the
+   * localResults ask both show.
+   */
+  reason?: string;
+  /**
+   * What the script noticed on the way that a reader needs to trust the
+   * results: why the base re-run did not happen (so `failingOnDev` is
+   * unknown), a test that passed only on its retry, a video too large to
+   * keep, cleanup left incomplete. Already redacted.
+   */
+  notes?: string[];
+  /** Identifies what ran — the ticket's code, the automation code and the patch — so a repeat can be recognised. */
+  cacheKey: string;
+  ticketSha: string;
+  automationSha: string;
+  /** Null when the scope made no temporary changes. */
+  patchSha: string | null;
+  /** The per-run database copy, dropped when the run cleans up. */
+  db: string;
+  totals: { specs: number; tests: number; passed: number; failed: number; skipped: number };
+  results: Array<{
+    spec: string;
+    title: string;
+    state: 'passed' | 'failed' | 'skipped';
+    durationMs: number;
+    error?: string;
+    /** The spec's recording: a path under the run's artifact dir, or an absolute one. */
+    video?: string;
+    /** Whether the same test also fails on dev without this ticket. Null when that was not checked. */
+    failingOnDev?: boolean | null;
+    /**
+     * True when the test failed on the ticket's code, then passed when re-run
+     * once on the same code: state is 'passed', and it is never sent to the
+     * base re-run. `error` may still carry the first attempt's assertion.
+     */
+    flaky?: boolean;
+  }>;
+  /** Specs that need something a local machine does not have (email, a third-party service, …). */
+  notRunnable: Array<{ spec: string; why: string }>;
+  /** Tests that exist only for this run, added by the scope's temporary changes. */
+  newTests: string[];
+  /** ISO timestamps. */
+  startedAt: string;
+  endedAt: string;
+}
+
 export function GITLAB_PROJECT_URL(): string {
   return projectConfig().gitlab.webUrl;
 }
