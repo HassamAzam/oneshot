@@ -212,7 +212,8 @@ export interface RunJournal {
   /**
    * 'parked' is an opt-in-only, human-caused wait — the Review label's three
    * pause points (plan approval, test-case approval, merge), the Design
-   * label's design-approval pause, and nothing else ever produces it. Unlike 'blocked' it swaps no label and alerts
+   * label's design-approval pause, the local-tests list and results sign-offs,
+   * and nothing else ever produces it. Unlike 'blocked' it swaps no label and alerts
    * nobody: the ticket keeps carrying the entry label throughout, so the next
    * tick's scan re-claims it and re-checks for a reply exactly like an
    * ordinary resumption. See src/conductor/reviewgate.ts.
@@ -246,6 +247,22 @@ export interface RunJournal {
    * other reply is fed back into a fresh `research` that reproduces again.
    */
   notABugApproval?: ReviewGateState;
+  /**
+   * Local test list gate state (QA, between `local-tests-scope` and
+   * `local-tests-run`). Armed only when the scope proposes adding or removing
+   * a test, or the conductor flags an existing test as weakened by the run's
+   * temporary changes.
+   */
+  localSpecsApproval?: ReviewGateState;
+  /** Local test results gate state (dev, between `local-tests-run` and `mr`). */
+  localResultsApproval?: ReviewGateState;
+  /**
+   * What a local-tests run is holding on this machine, recorded as each is
+   * taken so a crashed or killed run can still be cleaned up: the per-run
+   * database copy, the throwaway automation worktree, the processes it
+   * started, and when. Cleared when the run cleans up after itself.
+   */
+  localTests?: { db?: string; wt?: string; pids?: number[]; startedAt?: number };
   /**
    * When the `merge` phase last asked GitLab whether a human has merged the
    * MR. A Review-labelled ticket is never merged by Oneshot, so this phase is

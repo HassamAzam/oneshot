@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-09",
+  "source": {
+    "erp": "frontend/src/components/* and apps/* at origin/dev",
+    "automation": "cypress/e2e/* and cypress/Pages/* at origin/master",
+    "repoNote": "Provenance only; nothing reads this block. Every folder named below was checked against both trees on the date above; `node index.cjs check-map` re-checks them against whatever checkout it is pointed at."
+  },
+  "_why": "Which automation folders a changed ERP folder reaches is a fact about two repositories, not a judgement, so it is written down once instead of re-derived by a session on every ticket. `e2e` names cypress/e2e module folders: every spec in them becomes a candidate. `pages` names cypress/Pages folders (prefixes, so `teamManagement/jobRequisition` is one subfolder): they scope a GENERIC testid - one that page objects in three or more Pages folders select, like `submit-button`, or that the testIds files of two or more ERP folders define, like `add-task-button` (project_logs and the old kanban_board) - to the screens this area actually renders, so a rewards change that touches a submit button does not pull every forms and leaves spec in with it. A SPECIFIC testid matches page objects anywhere, which is how a change in a folder with no module of its own (settings/emailTemplates) still finds the two podA specs that drive it.",
+  "_why_keys": "Frontend keys are paths under frontend/src/components, backend keys are app names under apps/. The longest key that prefixes a changed path wins, so `management/competency` and `management/leaves` split a folder whose halves belong to different modules.",
+  "frontend": {
+    "Forms": { "e2e": ["formsA", "formsB"], "pages": ["forms"] },
+    "allowance": { "e2e": ["allowance"], "pages": ["allowance"] },
+    "competencies": { "e2e": ["competency"], "pages": ["competency"] },
+    "costing": { "e2e": ["costing"], "pages": ["costing"] },
+    "expenses": { "e2e": ["expenses"], "pages": ["expenseClaims"] },
+    "header": { "e2e": [], "pages": ["topNavBar"], "_why": "The top bar every screen carries. No module owns it; profileA/profileB and home reach it through topNavBar page objects, which a testid match finds without pulling a module in." },
+    "home": { "e2e": ["home"], "pages": ["home"] },
+    "invoices": { "e2e": ["invoices"], "pages": ["invoices"] },
+    "job_requisition": { "e2e": ["jobRequisition"], "pages": ["teamManagement/jobRequisition", "pod/jobRequisitions"], "_why": "jobRequisition specs import their page objects from teamManagement/jobRequisition and pod/jobRequisitions; there is no Pages/jobRequisition." },
+    "leaves": { "e2e": ["leaves"], "pages": ["leave"] },
+    "login": { "e2e": ["login"], "pages": ["loginManager"] },
+    "management/competency": { "e2e": ["competency"], "pages": ["competency"] },
+    "management/leaves": { "e2e": ["leaves"], "pages": ["leave"] },
+    "organogram": { "e2e": ["organogram"], "pages": ["organogram"] },
+    "payroll": { "e2e": ["payroll", "finalSettlement"], "pages": ["payroll", "finalSettlement"] },
+    "pod_view": { "e2e": ["podA", "podB"], "pages": ["pod"] },
+    "profile": { "e2e": ["profileA", "profileB"], "pages": ["profile"] },
+    "project_logs": { "e2e": ["projectLogs"], "pages": ["projectLogs"] },
+    "project_logs_v2": { "e2e": ["projectLogs"], "pages": ["projectLogs"] },
+    "reports": { "e2e": ["reports"], "pages": ["reports"] },
+    "rewards": { "e2e": ["teamReviewA", "teamReviewB"], "pages": ["teamReview"] },
+    "team_management": { "e2e": ["teamManagement", "organogram"], "pages": ["teamManagement"] },
+    "training": { "e2e": ["trainings"], "pages": ["training"] }
+  },
+  "backend": {
+    "advisory": { "e2e": ["teamReviewA", "teamReviewB"], "pages": ["teamReview"], "_why": "Architecture and progress advisory render inside Team Review (Pages/teamReview/advisory_*)." },
+    "auth": { "e2e": ["login"], "pages": ["loginManager"] },
+    "competencies": { "e2e": ["competency"], "pages": ["competency"] },
+    "costing": { "e2e": ["costing"], "pages": ["costing"] },
+    "expenses": { "e2e": ["expenses"], "pages": ["expenseClaims"] },
+    "forms": { "e2e": ["formsA", "formsB"], "pages": ["forms"] },
+    "invoices": { "e2e": ["invoices"], "pages": ["invoices"] },
+    "job_requisitions": { "e2e": ["jobRequisition"], "pages": ["teamManagement/jobRequisition", "pod/jobRequisitions"] },
+    "leaves": { "e2e": ["leaves"], "pages": ["leave"] },
+    "payroll": { "e2e": ["payroll", "finalSettlement", "allowance"], "pages": ["payroll", "finalSettlement", "allowance"], "_why": "The allowance models live in apps/payroll/models.py; there is no apps/allowance." },
+    "project_logs": { "e2e": ["projectLogs"], "pages": ["projectLogs"] },
+    "rewards": { "e2e": ["teamReviewA", "teamReviewB"], "pages": ["teamReview"] },
+    "teams": { "e2e": ["teamManagement", "organogram"], "pages": ["teamManagement", "organogram"] },
+    "training": { "e2e": ["trainings"], "pages": ["training"] }
+  },
+  "shared": {
+    "frontend": ["shared", "utils", "errorPages"],
+    "backend": ["core", "shared", "users", "mail", "sockets"],
+    "_why": "Code every module renders or imports. A change here maps to no module - mapping it to all of them would be the whole 800-spec suite - so specs come from testid matches alone, and a generic testid is allowed to match anywhere because a shared component really is on every screen. apps/core holds the person, increment and final-settlement code, apps/users holds resignations and mood: a backend change there needs the session to name the module from the diff. Files outside frontend/src/components (common/, jss/, routes.js) and files directly under it (App.js) are shared the same way without being listed."
+  },
+  "uncovered": {
+    "frontend": ["analytics", "announcements", "contact_us", "event_widget", "helpdesk", "home_page", "settings", "static", "stocks"],
+    "backend": ["google_calendar", "helpdesk", "hirestream", "integrations", "kanban_board", "odoo", "seating", "stocks", "webshell"],
+    "_why": "No cypress/e2e module drives these. Pages/analytics exists but no spec imports it; announcements and event_widget are the app-level banner and countdown, not Home's Announcements card (Pages/home/announcements.ts selects home's own testids). A change here is a coverage gap unless a specific testid match finds a spec anyway - settings/emailTemplates is reached by two podA specs exactly that way."
+  },
+  "ignore": [
+    "(^|/)(tests|__tests__)/",
+    "\\.test\\.[jt]sx?$",
+    "(^|/)test_[^/]*\\.py$",
+    "_test\\.py$"
+  ],
+  "_why_ignore": "Unit tests change no screen. apps/expenses/tests/* in a backend fix still leaves apps/expenses mapped through the code beside it; a diff of tests alone maps to nothing, which is the right answer."
+}

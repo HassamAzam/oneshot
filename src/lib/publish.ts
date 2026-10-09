@@ -23,15 +23,15 @@
  *    between the upload and the note re-posts at most one note.
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { extname, join } from 'node:path';
-import { artifactDir, reviewersConfig } from './config.js';
+import { basename, extname, isAbsolute, join } from 'node:path';
+import { artifactDir, localTestsPatchFile, reviewersConfig } from './config.js';
 import { readArtifact, updateJournal, type RunJournal } from './artifacts.js';
 import {
   addIssueNote, addMergeRequestNote, mergeRequestUrl, uploadFile, type Upload,
 } from './gitlab.js';
 import { log } from './log.js';
-import { mdText, tableCell } from './gitlabmd.js';
-import type { BaseCheck } from '../phases/types.js';
+import { codeSpan, mdText, tableCell } from './gitlabmd.js';
+import type { BaseCheck, LocalTestsRun, LocalTestsScope } from '../phases/types.js';
 
 /** GitLab rejects very large attachments; skip them with a note rather than failing. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -49,6 +49,7 @@ const MIME: Record<string, string> = {
   '.csv': 'text/csv',
   '.json': 'application/json',
   '.txt': 'text/plain',
+  '.patch': 'text/x-diff',
 };
 
 export function mimeFor(name: string): string {
@@ -242,6 +243,13 @@ interface Spec {
    * MR has not been opened is simply skipped and reconsidered next pass.
    */
   needsMr?: boolean;
+  /**
+   * False while the artifact is on disk but not yet worth publishing — the same
+   * "not yet, ask again next pass" that `needsMr` gives, for a reason only the
+   * artifact can show. A blocked phase still writes its artifact, and building
+   * from that would retire the key on a note about work that was never done.
+   */
+  ready?: (data: Record<string, unknown>) => boolean;
   build: (data: Record<string, unknown>, ctx: PublishCtx) => Publication | null;
 }
 
@@ -282,6 +290,338 @@ export function baseShotsFor(results: CaseResult[], check: BaseCheck | null): Ca
     if (shot) shots.push({ id: r.id, result: r.result, evidence: '', screenshot: shot });
   }
   return shots;
+}
+
+// ---------------------------------------------------------------- local tests
+
+/**
+ * Model or tool prose for one line of a note: escaped like every other field
+ * here, and folded onto one line so a stray newline cannot end a list item or
+ * a table row early.
+ */
+function oneLine(v: unknown): string {
+  return mdText(String(v ?? '')).replace(/\s*\n\s*/g, ' ').trim();
+}
+
+/** `oneLine` without the full stop the note adds itself, so a sentence never ends `..`. */
+function clause(v: unknown): string {
+  return oneLine(v).replace(/[.\s]+$/, '');
+}
+
+/** Inside `*…*`, where a stray asterisk would end the emphasis early. */
+function italic(v: unknown): string {
+  return `*${clause(v).replace(/\*/g, '\\*')}*`;
+}
+
+const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+
+/** A list of a scope's specs or edits, from an artifact nothing has validated. */
+function listOf<T>(v: unknown): T[] {
+  return Array.isArray(v) ? (v.filter((x) => x && typeof x === 'object') as T[]) : [];
+}
+
+/** `notRunnable` entries as "`spec` (why)", one string each. */
+function notRunnableItems(v: unknown): string[] {
+  return listOf<{ spec?: unknown; why?: unknown }>(v)
+    .filter((n) => String(n.spec ?? '').trim())
+    .map((n) => `${codeSpan(String(n.spec).trim())}${clause(n.why) ? ` (${clause(n.why)})` : ''}`);
+}
+
+/**
+ * A scope that reports itself blocked is not published yet: the run stops on
+ * it, and a plan note — or a "not needed" line — about a scope that never
+ * finished would retire the key before the real one exists.
+ */
+export function localTestsScopeReady(data: Record<string, unknown>): boolean {
+  return !(typeof data.blocked === 'string' && data.blocked.trim());
+}
+
+/**
+ * The local-tests plan on the ticket (`local-tests-scope`).
+ *
+ * Written for the QA and the developer who will read it, not for whoever
+ * built the pipeline: what will run, why, and anything about the team's tests
+ * that changes. A ticket with nothing to run gets one line rather than an
+ * empty plan, so nobody wonders whether the step was skipped.
+ *
+ * The proposals are the part QA has to act on, so each says which way it goes
+ * in capitals. The patch of temporary changes is attached because "we edited
+ * a spec to match" is a claim, and the diff is the evidence.
+ *
+ * Specs that reach the change but cannot run on a desk (`notRunnable`) are
+ * named on both shapes of the note, the one-line one included: "not needed"
+ * alone would read as "nothing covers this" when something does, elsewhere.
+ */
+export function localTestsPlanNote(data: Record<string, unknown>, ctx: PublishCtx): Publication {
+  const scope = data as Partial<LocalTestsScope>;
+  const notRunnable = notRunnableItems(scope.notRunnable);
+  if (scope.applicable !== true) {
+    return {
+      body: `**Local automation tests:** not needed for this ticket — ${
+        clause(scope.reason) || 'no automation test covers what it changes'}.${
+        notRunnable.length ? ` Tests that reach it but can't run on a local machine: ${notRunnable.join('; ')}.` : ''}`,
+      attachments: [],
+    };
+  }
+
+  const specs = listOf<LocalTestsScope['specs'][number]>(scope.specs);
+  const edits = listOf<LocalTestsScope['edits'][number]>(scope.edits);
+  const proposals = listOf<LocalTestsScope['proposals'][number]>(scope.proposals);
+  const modules = (Array.isArray(scope.modules) ? scope.modules : []).map(oneLine).filter(Boolean);
+  const cases = specs.reduce((n, s) => n + (Number(s.cases) || 0), 0);
+  const est = Number(scope.estimatedMinutes);
+
+  // A plan is read on the ticket, often by QA deciding whether to approve it: the
+  // first PLAN_TABLE_ROWS specs are the table, and any beyond that stay one click
+  // away in a collapsed list rather than turning the note into a wall of rows.
+  const row = (s: LocalTestsScope['specs'][number]): string =>
+    `| ${tableCell(codeSpan(String(s.file ?? '')))} | ${tableCell(s.module)} | ${tableCell(s.why)} |`;
+  const rest = specs.slice(PLAN_TABLE_ROWS);
+  const summary = oneLine(scope.summary);
+  const parts = [
+    '**Local automation tests — plan**',
+    summary.length > PLAN_SUMMARY_CHARS ? `${summary.slice(0, PLAN_SUMMARY_CHARS).trimEnd()}…` : summary,
+    [
+      `**Modules:** ${modules.join(', ') || '—'}`,
+      `**Tests:** ${plural(specs.length, 'spec file')}, ${plural(cases, 'test case')}`,
+      ...(Number.isFinite(est) && est > 0 ? [`**About ${Math.max(1, Math.round(est))} min**`] : []),
+    ].join(' · '),
+    ['| Spec file | Module | Why |', '|---|---|---|', ...specs.slice(0, PLAN_TABLE_ROWS).map(row)].join('\n'),
+    ...(rest.length
+      ? [`<details><summary>…and ${plural(rest.length, 'more spec file')}</summary>\n\n${
+        ['| Spec file | Module | Why |', '|---|---|---|', ...rest.map(row)].join('\n')}\n\n</details>`]
+      : []),
+  ];
+  if (proposals.length) {
+    parts.push(`**Proposed change to the test list (QA approval needed):**\n${proposals.map((p) => {
+      if (p.action === 'remove') {
+        // A remove names the file, and the test when it is one case inside
+        // it: "REMOVE: leaves.cy.ts" alone would read as the whole file going.
+        const file = String(p.file ?? '').trim();
+        const what = file
+          ? `${codeSpan(file)}${clause(p.title) ? ` — ${clause(p.title)}` : ''}`
+          : clause(p.title);
+        return `- REMOVE: ${what}. ${italic(`Why: ${clause(p.why)}`)}`;
+      }
+      return `- ADD a new test: ${clause(p.title)}. ${italic(`Why: ${clause(p.why)}`)}`;
+    }).join('\n')}`);
+  }
+  // Split by kind: a file the scope created is not an existing test that was
+  // changed, and saying so would hide that the run covers something new.
+  const bullets = (kind: 'update' | 'add'): string => edits.filter((e) => e.kind === kind)
+    .map((e) => `- ${codeSpan(String(e.file ?? ''))} — ${clause(e.why)}`).join('\n');
+  const changed = bullets('update');
+  const added = bullets('add');
+  if (changed) parts.push(`**Existing tests changed for this run (temporary, not committed):**\n${changed}`);
+  if (added) parts.push(`**New tests added for this run (temporary, not committed):**\n${added}`);
+  if (notRunnable.length) {
+    parts.push(`**Tests that can't run on a local machine (not run):**\n${notRunnable.map((n) => `- ${n}`).join('\n')}`);
+  }
+
+  const attachments: Attachment[] = [];
+  const patch = localTestsPatchFile(ctx.iid);
+  if (existsSync(patch)) {
+    const content = readFileSync(patch);
+    if (content.length > MAX_UPLOAD_BYTES) {
+      parts.push('_The patch of temporary changes is over 25 MB, so it is not attached._');
+    } else {
+      attachments.push({ name: basename(patch), content, mime: mimeFor(patch) });
+    }
+  }
+  return { body: parts.filter(Boolean).join('\n\n'), attachments };
+}
+
+/**
+ * Whether a failed local test fails on dev too, in the words the developer at
+ * the localResults gate needs. Shared with that gate's request so the report
+ * and the ask never word one answer two ways.
+ */
+export function failingOnDevText(v: boolean | null | undefined): string {
+  if (v === true) return 'yes — not caused by this ticket';
+  if (v === false) return 'no — likely caused by this ticket';
+  return 'unknown';
+}
+
+/** The first line of a Cypress error, which is the assertion; the rest is a stack. */
+function firstLine(v: unknown): string {
+  const line = String(v ?? '').split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  return line.length > 220 ? `${line.slice(0, 219)}…` : line;
+}
+
+/** Minutes between two ISO stamps, or across the tests when a stamp is unreadable. */
+function runMinutes(run: Partial<LocalTestsRun>, results: LocalTestsRun['results']): string {
+  const span = Date.parse(String(run.endedAt)) - Date.parse(String(run.startedAt));
+  const ms = Number.isFinite(span) && span >= 0
+    ? span : results.reduce((n, r) => n + (Number(r.durationMs) || 0), 0);
+  return ms > 0 && ms < 60_000 ? '<1' : String(Math.round(ms / 60_000));
+}
+
+/** Specs shown in the plan's table; the rest of the list sits in a collapsed block under it. */
+const PLAN_TABLE_ROWS = 10;
+
+/** The plan's opening summary is clipped here: the table, not the paragraph, is what QA approves. */
+const PLAN_SUMMARY_CHARS = 400;
+
+/** At most this many table rows; a run with more failures than this has a bigger problem than the table. */
+const MAX_RESULT_ROWS = 60;
+
+/** At most this many of the script's notes are listed; past that they are noise, not explanation. */
+const MAX_RUN_NOTES = 15;
+
+/** What a test that failed once and passed on its retry is called, in the report and the gate alike. */
+export const FLAKY_TEXT = 'passed on retry — flaky';
+
+/** The run's notes as one-line strings, from an artifact nothing has validated. */
+export function runNotes(run: { notes?: unknown } | null | undefined): string[] {
+  const notes = Array.isArray(run?.notes) ? run.notes : [];
+  return notes.map((n) => (typeof n === 'string' ? oneLine(n) : '')).filter(Boolean);
+}
+
+/**
+ * The local-tests report on the ticket (`local-tests-run`).
+ *
+ * One row per test that needs a look — failed, then passed only on a retry,
+ * then skipped — and one row per spec for what passed cleanly, so forty green
+ * tests do not bury the red one. Each failure says whether it also fails on
+ * dev, because that is the question the developer on the results gate is
+ * actually answering: is this mine? A test that passed only on its retry is
+ * its own row, not a green count: it is a flaky test, or a change that made
+ * one flaky, and either way somebody should know.
+ *
+ * Whatever cut the run short (`reason`, e.g. Cypress stopped at its deadline)
+ * is in the header line, and the script's notes close the note — the one
+ * place that says why "failing on dev too?" reads unknown.
+ *
+ * The videos of failed specs are attached under the note (they render as
+ * players on GitLab), which puts them after the closing lines rather than
+ * beside their rows; any too large to upload is named instead.
+ */
+export function localTestsReportNote(data: Record<string, unknown>, ctx: PublishCtx): Publication | null {
+  const run = data as Partial<LocalTestsRun>;
+  if (run.status === 'skipped') {
+    const notRunnable = notRunnableItems(run.notRunnable);
+    return {
+      body: `**Local automation tests:** skipped — ${clause(run.reason) || 'no reason was recorded'}.${
+        notRunnable.length ? ` Tests that can't run on a local machine: ${notRunnable.join('; ')}.` : ''}`,
+      attachments: [],
+    };
+  }
+  if (run.status === 'error') {
+    return {
+      body: `**Local automation tests:** could not be run — ${
+        clause(run.reason) || 'no reason was recorded'}. No results were recorded.`,
+      attachments: [],
+    };
+  }
+  if (run.status !== 'passed' && run.status !== 'failed') return null;
+
+  const results = listOf<LocalTestsRun['results'][number]>(run.results);
+  const count = (state: string): number => results.filter((r) => r.state === state).length;
+  const totals = run.totals ?? {
+    specs: new Set(results.map((r) => r.spec)).size,
+    tests: results.length, passed: count('passed'), failed: count('failed'), skipped: count('skipped'),
+  };
+
+  const testRow = (r: LocalTestsRun['results'][number], result: string, devToo: string): string =>
+    `| ${tableCell(codeSpan(String(r.spec ?? '')))}<br>${tableCell(r.title)} | ${result} | ${devToo} | `
+    + `${tableCell(firstLine(r.error))} |`;
+  const flaky = results.filter((r) => r.state === 'passed' && r.flaky === true);
+  const passedBySpec = new Map<string, number>();
+  for (const r of results.filter((x) => x.state === 'passed' && x.flaky !== true)) {
+    const spec = String(r.spec ?? '');
+    passedBySpec.set(spec, (passedBySpec.get(spec) ?? 0) + 1);
+  }
+  const rows = [
+    ...results.filter((r) => r.state === 'failed')
+      .map((r) => testRow(r, ':x: failed', failingOnDevText(r.failingOnDev))),
+    ...flaky.map((r) => testRow(r, `:warning: ${FLAKY_TEXT}`, '—')),
+    ...results.filter((r) => r.state === 'skipped').map((r) => testRow(r, ':heavy_minus_sign: skipped', '—')),
+    ...[...passedBySpec].map(([spec, n]) =>
+      `| ${tableCell(codeSpan(spec))} | :white_check_mark: passed (${plural(n, 'test')}) | — |  |`),
+  ];
+
+  const cutShort = clause(run.reason);
+  const parts = [
+    `**Local automation results** — ${totals.passed} passed${
+      flaky.length ? ` (${flaky.length} only on a retry)` : ''}, ${totals.failed} failed (${
+      plural(totals.tests, 'test')}, ${runMinutes(run, results)} min)${cutShort ? `. ${cutShort}.` : ''}`,
+  ];
+  if (rows.length) {
+    parts.push(['| Spec | Result | Failing on dev too? | Reason |', '|---|---|---|---|',
+      ...rows.slice(0, MAX_RESULT_ROWS)].join('\n')
+      + (rows.length > MAX_RESULT_ROWS ? `\n\n_…and ${rows.length - MAX_RESULT_ROWS} more rows not shown._` : ''));
+  }
+
+  const scope = readArtifact<Partial<LocalTestsScope>>(ctx.iid, 'local-tests-scope.json');
+  // The run echoes the list it was handed; the plan is the fallback for a run
+  // recorded before it carried one.
+  const fromRun = notRunnableItems(run.notRunnable);
+  const notRunnable = fromRun.length ? fromRun : notRunnableItems(scope?.notRunnable);
+  const changed = listOf<LocalTestsScope['edits'][number]>(scope?.edits)
+    .filter((e) => e.kind === 'update').map((e) => codeSpan(String(e.file ?? '')));
+  const added = (Array.isArray(run.newTests) ? run.newTests : []).map(clause).filter(Boolean);
+  parts.push(`**Tests that can't run on a local machine:** ${notRunnable.join('; ') || 'none'}`);
+  parts.push(`**Existing tests changed for this run:** ${changed.join(', ') || 'none'}`);
+  parts.push(`**New tests added for this run:** ${added.join('; ') || 'none'}`);
+  const notes = runNotes(run);
+  if (notes.length) {
+    parts.push(`**Notes from the run:**\n${notes.slice(0, MAX_RUN_NOTES).map((n) => `- ${n}`).join('\n')}${
+      notes.length > MAX_RUN_NOTES ? `\n- …and ${notes.length - MAX_RUN_NOTES} more` : ''}`);
+  }
+
+  // Videos of the failed specs, once per file, named apart when two specs'
+  // recordings share a file name.
+  const dir = artifactDir(ctx.iid);
+  const attachments: Attachment[] = [];
+  const tooLarge: string[] = [];
+  const seen = new Set<string>();
+  const names = new Set<string>();
+  for (const r of results) {
+    const rel = r.state === 'failed' && typeof r.video === 'string' ? r.video.trim() : '';
+    if (!rel || seen.has(rel)) continue;
+    seen.add(rel);
+    const full = isAbsolute(rel) ? rel : join(dir, rel);
+    if (!existsSync(full)) continue;
+    const content = readFileSync(full);
+    const short = basename(rel);
+    if (content.length > MAX_UPLOAD_BYTES) {
+      tooLarge.push(codeSpan(short));
+      continue;
+    }
+    const name = names.has(short) ? rel.replace(/^\/+/, '').replace(/\//g, '-') : short;
+    names.add(name);
+    attachments.push({ name, content, mime: mimeFor(rel) });
+  }
+  if (tooLarge.length) parts.push(`**Videos too large to attach (over 25 MB):** ${tooLarge.join(', ')}`);
+  if (attachments.length) parts.push('**Videos of the failed specs:**');
+  return { body: parts.join('\n\n'), attachments };
+}
+
+/** What the local-tests start note says. */
+export interface LocalTestsStart {
+  tests: number;
+  minutes: number;
+  branch: string;
+  ticketSha: string;
+  automationRef: string;
+  automationSha: string;
+}
+
+/**
+ * Posted on the ticket as a local run begins, by the code that starts it — a
+ * forty-minute run with nothing on the ticket looks exactly like a stuck one.
+ * It names both commits, so the results that follow can be tied to exactly the
+ * code they ran against. Carries its own marker, because it is posted outside
+ * `publishPending` and the gates must never read it as a person speaking.
+ */
+export function localTestsStartNote(s: LocalTestsStart): string {
+  const sha7 = (sha: string): string => codeSpan(String(sha ?? '').slice(0, 7));
+  return `**Local automation run started** — ${plural(s.tests, 'test')}, about ${
+    Math.max(1, Math.round(Number(s.minutes) || 0))} min. `
+    + `Ticket code: ${codeSpan(s.branch)} @ ${sha7(s.ticketSha)}. `
+    + `Automation repo: ${codeSpan(s.automationRef)} @ ${sha7(s.automationSha)}. `
+    + 'Database: fresh copy of the automation baseline. Results will be posted here.'
+    + '\n\n<!-- oneshot:local-tests-start -->';
 }
 
 const SPECS: Spec[] = [
@@ -384,6 +724,23 @@ const SPECS: Spec[] = [
       if (conformance.length) parts.push(conformanceTable(conformance));
       return { body: parts.join('\n\n'), attachments };
     },
+  },
+  {
+    // On the ticket, where QA already answers: a proposal in this note is
+    // what the localSpecs gate asks them to approve.
+    key: 'local-tests-scope',
+    artifact: 'local-tests-scope.json',
+    target: 'ticket',
+    ready: localTestsScopeReady,
+    build: (data, ctx) => localTestsPlanNote(data, ctx),
+  },
+  {
+    // On the ticket, not the MR: it is read before the MR exists, by the
+    // developer deciding at the localResults gate whether one should.
+    key: 'local-tests-run',
+    artifact: 'local-tests-run.json',
+    target: 'ticket',
+    build: (data, ctx) => localTestsReportNote(data, ctx),
   },
   {
     /*
@@ -496,6 +853,7 @@ export async function publishPending(ctx: PublishCtx): Promise<void> {
 
       const data = readArtifact<Record<string, unknown>>(ctx.iid, spec.artifact);
       if (!data) continue;
+      if (spec.ready && !spec.ready(data)) continue;
 
       const pub = spec.build(data, ctx);
       if (!pub) {

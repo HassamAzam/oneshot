@@ -39,7 +39,9 @@
  * feedback round and the audit record now all live on the ticket, in order.
  *
  * WHO may approve is per-gate, not global: `plan` is a dev sign-off,
- * `testcases` a QA sign-off and `design` a design sign-off (GATE_ROLE below).
+ * `testcases` a QA sign-off and `design` a design sign-off; of the two local
+ * automation test gates, `localSpecs` is QA's and `localResults` dev's
+ * (GATE_ROLE below).
  * A comment from outside the relevant group is not an approval AND is not
  * gating feedback — it is logged and ignored, so ordinary ticket chatter
  * cannot knock a run into a revision cycle.
@@ -77,14 +79,14 @@ import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/sl
 import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
 import { codeSpan, mdText, tableCell } from '../lib/gitlabmd.js';
-import type { DesignArtifact, TestCase } from '../phases/types.js';
+import type { DesignArtifact, LocalTestsRun, LocalTestsScope, TestCase } from '../phases/types.js';
 import { parseEdgeCases } from './edgecases.js';
-import { MAX_UPLOAD_BYTES, mimeFor } from '../lib/publish.js';
+import { FLAKY_TEXT, MAX_UPLOAD_BYTES, failingOnDevText, mimeFor, runNotes } from '../lib/publish.js';
 import { artifactDir } from '../lib/config.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
-export type Gate = 'plan' | 'testcases' | 'design' | 'notABug';
+export type Gate = 'plan' | 'testcases' | 'design' | 'notABug' | 'localSpecs' | 'localResults';
 export type GateVerdict = 'approved' | 'feedback' | 'pending' | 'unavailable';
 
 export interface GateResult {
@@ -213,7 +215,15 @@ export type ReviewRole = 'dev' | 'qa' | 'design';
 // `notABug` is QA's: whether a reported defect really does not happen is a
 // testing judgement, and the people who own the case list are the ones who
 // know which data, role or environment the reproduction may have missed.
-const GATE_ROLE: Record<Gate, ReviewRole> = { plan: 'dev', testcases: 'qa', design: 'design', notABug: 'qa' };
+//
+// The local automation test gates split the same way `testcases` and `plan`
+// do. `localSpecs` decides what the team's test list is, which is QA's call;
+// `localResults` decides whether this change goes on to an MR given what
+// those tests did to it, which is the developers'. Either group's ANY one
+// member resolves the gate, like every other gate here.
+const GATE_ROLE: Record<Gate, ReviewRole> = {
+  plan: 'dev', testcases: 'qa', design: 'design', notABug: 'qa', localSpecs: 'qa', localResults: 'dev',
+};
 
 /**
  * Does the DESIGN gate apply to this run?
@@ -338,11 +348,14 @@ function blankState(): ReviewGateState {
 }
 
 const GATE_STATE: Record<Gate, keyof Pick<RunJournal,
-  'planApproval' | 'testcasesApproval' | 'designApproval' | 'notABugApproval'>> = {
+  'planApproval' | 'testcasesApproval' | 'designApproval' | 'notABugApproval'
+  | 'localSpecsApproval' | 'localResultsApproval'>> = {
   plan: 'planApproval',
   testcases: 'testcasesApproval',
   design: 'designApproval',
   notABug: 'notABugApproval',
+  localSpecs: 'localSpecsApproval',
+  localResults: 'localResultsApproval',
 };
 
 function stateOf(j: RunJournal, gate: Gate): ReviewGateState {
@@ -745,6 +758,22 @@ const ASK_WORDS: Record<Gate, { what: string; next: string; other: string }> = {
     next: '*Not a Bug* — the ticket is labelled and the run stops',
     other: 'what was missed (data, role, steps, environment) to have it reproduced again',
   },
+  localSpecs: {
+    what: 'the list of local automation tests',
+    next: 'the local test run',
+    other: '`disapproved:` with one bullet per change',
+  },
+  localResults: {
+    what: 'the local automation test results',
+    next: 'the MR step',
+    other: 'feedback instead',
+  },
+};
+
+/** How the resolution message names a gate whose key is not already a word a reader would use. */
+const GATE_NAME: Partial<Record<Gate, string>> = {
+  localSpecs: 'Local test list',
+  localResults: 'Local test results',
 };
 
 export function gateAskText(
@@ -783,7 +812,7 @@ export function gateApprovedText(journal: RunJournal, gate: Gate, approver: stri
   if (gate === 'notABug') {
     return `:white_check_mark: *Not a Bug confirmed* by ${approver} on ${link} — the run stops.`;
   }
-  return `:white_check_mark: *${gate} approved* by ${approver} on ${link} — the run continues.`;
+  return `:white_check_mark: *${GATE_NAME[gate] ?? gate} approved* by ${approver} on ${link} — the run continues.`;
 }
 
 // -------------------------------------------------------------- plan gate
@@ -1208,4 +1237,171 @@ export function designApprovedRecordBody(design: Record<string, unknown> | null)
   return 'Oneshot record: the design above was approved on this ticket — proceeding to `plan`.'
     + `${names ? `\n\nApproved screens: ${names}.` : ''}`
     + `${d.newPatterns.length ? `\n\nApproved as new to the design system:\n${d.newPatterns.map((x) => `- ${mdText(x)}`).join('\n')}` : ''}`;
+}
+
+// ------------------------------------------------------ local tests gates
+
+/**
+ * Every note these two gates post carries a marker. A desk's token is often a
+ * person on config/reviewers.json, QA approvers included, so a note without
+ * one reads, to the next gate polling the ticket, as that reviewer speaking —
+ * the run-29 failure recorded in claims.ts. The request itself is never re-read
+ * (replies are strictly after it), but the record lands after it and before
+ * the next gate's replies, and the marker is what keeps it out of them.
+ */
+const gateMarker = (gate: Gate, what = 'request'): string => `<!-- oneshot:gate:${gate}:${what} -->`;
+
+/** The scope artifact, read as the fields these renderers want — same defensive coercion as `designOf`. */
+function scopeOf(
+  scope: Record<string, unknown> | null,
+): Required<Pick<LocalTestsScope, 'applicable' | 'specs' | 'edits' | 'proposals' | 'notRunnable'>> {
+  const s = (scope ?? {}) as Partial<LocalTestsScope>;
+  const list = <T>(v: unknown): T[] => (Array.isArray(v) ? v.filter((x) => x && typeof x === 'object') as T[] : []);
+  return {
+    applicable: s.applicable === true,
+    specs: list(s.specs),
+    edits: list(s.edits),
+    proposals: list(s.proposals),
+    notRunnable: list<{ spec: string; why: string }>(s.notRunnable).filter((n) => text(n.spec).trim()),
+  };
+}
+
+/** One field as one sentence fragment: escaped, single-line, without the full stop the caller adds. */
+const sentence = (v: unknown): string => mdText(text(v)).replace(/\s*\n\s*/g, ' ').replace(/[.\s]+$/, '');
+
+/** `*Why: …*`, with any asterisk in the reason kept from ending the emphasis early. */
+const whyLine = (v: unknown): string => `*Why: ${sentence(v).replace(/\*/g, '\\*')}*`;
+
+/**
+ * Why the localSpecs gate arms, or null when it does not.
+ *
+ * Two things change what QA's test list means, and only those two: the plan
+ * proposes adding or removing a test, or the conductor finds that a temporary
+ * change made an existing test easier to pass (`weakened`, the files it
+ * flagged). Anything else — specs simply chosen and run as they are — needs
+ * nobody's sign-off, and asking anyway would teach QA to approve without
+ * reading.
+ */
+export function localSpecsGateReason(scope: Record<string, unknown> | null, weakened: string[] = []): string | null {
+  const s = scopeOf(scope);
+  if (!s.applicable) return null;
+  const why: string[] = [];
+  const n = s.proposals.length;
+  if (n) why.push(`the plan proposes ${n === 1 ? 'a change' : `${n} changes`} to the team's test list`);
+  // A file the scope created cannot have made an existing test easier to pass; what the
+  // check found in it is a shortcut in the new test itself (force: true, a wait, a raised
+  // timeout), which is worth QA's eye for its own reason. Said apart so neither reads as
+  // the other.
+  const created = new Set(s.edits.filter((e) => e.kind === 'add').map((e) => text(e.file)));
+  const existing = weakened.filter((f) => !created.has(f));
+  const fresh = weakened.filter((f) => created.has(f));
+  if (existing.length) {
+    why.push(`a temporary change made ${existing.length === 1 ? 'an existing test' : `${existing.length} existing tests`} `
+      + `easier to pass (${existing.map(codeSpan).join(', ')})`);
+  }
+  if (fresh.length) {
+    why.push(`${fresh.length === 1 ? 'a new test uses' : `${fresh.length} new test files use`} a shortcut that can `
+      + `hide a real failure, such as \`force: true\`, an added wait or a raised timeout (${fresh.map(codeSpan).join(', ')})`);
+  }
+  if (!why.length) return null;
+  const line = why.join(', and ');
+  return `${line[0]!.toUpperCase()}${line.slice(1)}, so QA signs off on the list before it runs.`;
+}
+
+/**
+ * Posted as a ticket comment when the localSpecs gate first arms, or re-arms
+ * after a `disapproved:` round. Self-contained rather than pointing at the
+ * plan note, which a failed upload or a later revision can leave out of step.
+ */
+export function localSpecsApprovalRequestBody(scope: Record<string, unknown> | null, why: string): string {
+  const s = scopeOf(scope);
+  const cases = s.specs.reduce((n, x) => n + (Number(x.cases) || 0), 0);
+  const specs = s.specs.map((x) => `- ${codeSpan(text(x.file))} — ${sentence(x.why)}`).join('\n');
+  const proposals = s.proposals.map((p) => (p.action === 'remove'
+    ? `- REMOVE: ${p.file ? `${codeSpan(text(p.file))} — ` : ''}${sentence(p.title)}. ${whyLine(p.why)}`
+    : `- ADD a new test: ${sentence(p.title)}. ${whyLine(p.why)}`)).join('\n');
+  const changed = s.edits
+    .map((e) => `- ${codeSpan(text(e.file))} (${e.kind === 'add' ? 'new' : 'changed'}) — ${sentence(e.why)}`)
+    .join('\n');
+  const notRunnable = s.notRunnable.map((n) => `- ${codeSpan(text(n.spec))} — ${sentence(n.why)}`).join('\n');
+  return `**Oneshot pauses here** — ${why}\n\n`
+    + `${proposals ? `**Proposed change to the test list**\n${proposals}\n\n` : ''}`
+    + `**Tests that will run** (${s.specs.length} spec file(s), ${cases} test case(s))\n${specs || '_(none)_'}\n\n`
+    + `${notRunnable ? `**Tests that reach this change but can't run on a local machine** (not run)\n${notRunnable}\n\n` : ''}`
+    + `${changed ? `**Temporary changes for this run** (never committed)\n${changed}\n\n` : ''}`
+    + `---\n\n${approverLine('localSpecs')} One approval from any of them is enough.\n\n`
+    + '**What to do:** reply `approved` to run with this list, or `disapproved:` with one bullet per change, '
+    + 'for example:\n\n'
+    + '```\ndisapproved:\n- keep the half-day leave test, it still applies\n'
+    + '- also add a test that a manager can reject the request\n```\n\n'
+    + 'The list is then redone with your bullets and you are asked again, with no limit on rounds. '
+    + 'Comments from anyone else are ignored by this gate.'
+    + `\n\n${gateMarker('localSpecs')}`;
+}
+
+/** The ticket's record that the local test list was approved — audit only, posted after the decision. */
+export function localSpecsApprovedRecordBody(scope: Record<string, unknown> | null): string {
+  const s = scopeOf(scope);
+  const agreed = s.proposals
+    .map((p) => `- ${p.action === 'remove' ? 'REMOVE' : 'ADD'}: `
+      + `${p.file ? `${codeSpan(text(p.file))} — ` : ''}${sentence(p.title)}`)
+    .join('\n');
+  return 'Oneshot record: the local automation test list above was approved on this ticket — '
+    + 'running it locally next.'
+    + `${agreed ? `\n\nApproved changes to the test list:\n${agreed}` : ''}`
+    + `\n\n${gateMarker('localSpecs', 'approved')}`;
+}
+
+/** At most this many failures are listed in the ask; the full table is in the results note. */
+const MAX_ASK_FAILURES = 15;
+
+/**
+ * Posted as a ticket comment when the localResults gate first arms, or re-arms
+ * after feedback. Carries the numbers and the failures, so a developer can
+ * answer from the comment that notified them.
+ *
+ * Also carries what the numbers alone would hide: a run cut short (`reason`,
+ * e.g. Cypress stopped at its deadline, so "0 failed" is not "all passed"),
+ * the tests that passed only on a retry, and — when a failure's "failing on
+ * dev too?" is unknown — the script's notes, which are where it says why.
+ */
+export function localResultsApprovalRequestBody(run: Record<string, unknown> | null): string {
+  const r = (run ?? {}) as Partial<LocalTestsRun>;
+  const results = Array.isArray(r.results) ? r.results.filter((x) => x && typeof x === 'object') : [];
+  const failed = results.filter((x) => x.state === 'failed');
+  const flaky = results.filter((x) => x.state === 'passed' && x.flaky === true);
+  const t = r.totals;
+  const cutShort = sentence(r.reason);
+  const outcome = r.status === 'skipped' || r.status === 'error'
+    ? `the run ${r.status === 'skipped' ? 'was skipped' : 'could not be completed'} — `
+      + `${cutShort || 'no reason was recorded'}.`
+    : `${t?.passed ?? results.length - failed.length} passed, ${t?.failed ?? failed.length} failed, `
+      + `of ${t?.tests ?? results.length} test(s).${cutShort ? ` ${cutShort}.` : ''}`;
+  const failures = failed.slice(0, MAX_ASK_FAILURES)
+    .map((x) => `- ${codeSpan(text(x.spec))} — ${sentence(x.title)}. `
+      + `Failing on dev too? ${failingOnDevText(x.failingOnDev)}`)
+    .join('\n');
+  const more = failed.length > MAX_ASK_FAILURES
+    ? `\n- …and ${failed.length - MAX_ASK_FAILURES} more in the results note` : '';
+  const retried = flaky.slice(0, MAX_ASK_FAILURES)
+    .map((x) => `- ${codeSpan(text(x.spec))} — ${sentence(x.title)}`).join('\n')
+    + (flaky.length > MAX_ASK_FAILURES ? `\n- …and ${flaky.length - MAX_ASK_FAILURES} more in the results note` : '');
+  const notes = failed.some((x) => x.failingOnDev == null) ? runNotes(r).slice(0, MAX_ASK_FAILURES) : [];
+  return '**Oneshot pauses here** — the local automation test results need a developer\'s sign-off '
+    + 'before the MR is opened.\n\n'
+    + `**Results:** ${outcome}\n\n`
+    + `${failures ? `**Failed**\n${failures}${more}\n\n` : ''}`
+    + `${flaky.length ? `**Failed once, then ${FLAKY_TEXT}**\n${retried}\n\n` : ''}`
+    + `${notes.length ? `**Notes from the run**\n${notes.map((n) => `- ${n}`).join('\n')}\n\n` : ''}`
+    + `---\n\n${approverLine('localResults')} One approval from any of them is enough.\n\n`
+    + '**What to do:** reply `approved` to continue to the MR step. Any other comment from those accounts '
+    + 'is taken as feedback instead of a sign-off. Comments from anyone else are ignored by this gate.'
+    + `\n\n${gateMarker('localResults')}`;
+}
+
+/** The ticket's record that the local results were accepted — audit only, posted after the decision. */
+export function localResultsApprovedRecordBody(): string {
+  return 'Oneshot record: the local automation test results above were accepted on this ticket — '
+    + 'continuing to the MR step.'
+    + `\n\n${gateMarker('localResults', 'approved')}`;
 }

@@ -23,15 +23,19 @@
  * "this would only surface as a confusing failure three phases in".
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { connect } from 'node:net';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import {
-  PAUSE, PROJECT_TARGET, ROOT, WORK_REPO, WT_ROOT,
-  budgetConfig, envOr, pathSources, phaseByName, portPool, repoIdentity, seedFrom,
+  PAUSE, PROJECT_TARGET, ROOT, RUNS, WORK_REPO, WT_ROOT,
+  budgetConfig, envOr, localTestsConfig, pathSources, phaseByName, portPool, projectConfig,
+  repoIdentity, runDir, seedFrom, type LocalTestsConfig,
 } from '../src/lib/config.js';
+import { cypressLeaseHolder } from '../src/lib/cypresslease.js';
 import { db, reconcileForeignRuns } from '../src/lib/db.js';
 import { anyLive, liveConductors } from '../src/lib/fleet.js';
+import { pidAlive } from '../src/lib/singleton.js';
 import { ping } from '../src/lib/gitlab.js';
 import { accountWindowPct, checkQuota, dayUsage, windowUsage } from '../src/lib/quota.js';
 import {
@@ -433,6 +437,201 @@ function checkDependencies(): void {
   verifierPasses('hooks:verify');
 }
 
+// ----------------------------------------------------------------- local tests
+
+/**
+ * One query against the desk's Postgres, as `psql -XAtqw`: no psqlrc, bare
+ * rows, never a password prompt.
+ *
+ * Always through the `postgres` maintenance database. Connecting to the
+ * baseline to ask about it would put a session on it, which is the one thing
+ * that makes Postgres refuse to copy it.
+ */
+function psql(pg: LocalTestsConfig['pg'], sql: string): { ok: boolean; out: string; error: string } {
+  const res = spawnSync('psql', [
+    '-h', pg.host, '-p', String(pg.port), ...(pg.user ? ['-U', pg.user] : []),
+    '-d', 'postgres', '-XAtqw', '-c', sql,
+  ], { encoding: 'utf8', timeout: 15_000, env: { ...process.env, PGCONNECT_TIMEOUT: '5' } });
+  if (res.error) {
+    const missing = (res.error as NodeJS.ErrnoException).code === 'ENOENT';
+    return { ok: false, out: '', error: missing ? 'psql is not on PATH (brew install libpq)' : res.error.message };
+  }
+  const error = (res.stderr ?? '').split('\n').map((l) => l.trim()).find(Boolean)?.slice(0, 160) ?? '';
+  return { ok: res.status === 0, out: (res.stdout ?? '').trim(), error };
+}
+
+/** `node scripts/localtests.cjs gc`, with the --keep a live fleet needs. */
+function gcHint(): string {
+  return anyLive()
+    ? 'a conductor is live, so some may be in use — `node scripts/localtests.cjs gc --dry-run --keep <iid,…>` ' +
+      'with the tickets in flight, then without --dry-run'
+    : '`node scripts/localtests.cjs gc --dry-run` to see what goes, then without --dry-run';
+}
+
+/**
+ * Every package the base branch's package.json names that the seed's
+ * node_modules does not have.
+ *
+ * Found by the pilot: worktrees borrow node_modules from the seed checkout, so
+ * when the base branch adds a dependency (posthog-js) and nobody re-installs
+ * the seed, every app a run starts — verify's and the local-tests run's alike
+ * — dies in webpack with "Unable to resolve module", which reads like the
+ * ticket broke the build. Read from origin/<base> as of the last fetch, with
+ * `git show`, so nothing is fetched or checked out here.
+ */
+function checkNodeModulesDrift(): void {
+  const base = projectConfig().branches.base;
+  const seed = seedFrom();
+  if (!seed || !existsSync(join(seed, 'node_modules'))) {
+    skip('node_modules drift not checked', seed
+      ? `${seed} has no node_modules — see doctor's seed repo check`
+      : 'no seed repo configured (ONESHOT_SEED_FROM) — see doctor');
+    return;
+  }
+  const shown = spawnSync('git', ['-C', WORK_REPO, 'show', `origin/${base}:package.json`], {
+    encoding: 'utf8', timeout: 20_000,
+  });
+  let names: string[] = [];
+  try {
+    const pkg = JSON.parse(shown.stdout ?? '') as
+      { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    names = [...new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})])];
+  } catch {
+    warn('node_modules drift not checked', `could not read origin/${base}:package.json in ${WORK_REPO}`);
+    return;
+  }
+  const missing = names.filter((n) => !existsSync(join(seed, 'node_modules', n, 'package.json'))).sort();
+  if (!missing.length) {
+    pass('seed node_modules has every base-branch dependency', `${names.length} in origin/${base}:package.json`);
+    return;
+  }
+  fail(`seed node_modules is behind origin/${base}: ${missing.length} package(s) missing`,
+    `${missing.join(', ')} — webpack stops with "Unable to resolve module". ` +
+    `Run npm ci in the seed ERP checkout (${seed}) on the base branch (${base})`);
+}
+
+/**
+ * Can a local-tests run start cleanly right now?
+ *
+ * Doctor has already said whether this desk is set up for the step; this is
+ * the part that changes between runs. Reported, never repaired: a leftover
+ * database or worktree may belong to a run a live conductor is in the middle
+ * of, and `scripts/localtests.cjs gc` is the one place that knows how to tell.
+ */
+function checkLocalTests(): void {
+  section('Local tests');
+  const lt = localTestsConfig();
+  if (!lt.enabled) {
+    if (lt.repo) warn('local tests: off', lt.off ?? '');
+    else skip('local tests: off', lt.off ?? '');
+    return;
+  }
+
+  const holder = cypressLeaseHolder();
+  if (holder) {
+    const age = `${Math.round((Date.now() - holder.acquiredAt) / 60_000)}m`;
+    if (pidAlive(holder.pid)) {
+      pass('Cypress is in use', `${holder.runId} (pid ${holder.pid}) for ${age} — the next run waits its turn`);
+    } else {
+      warn('Cypress lease held by a process that is gone',
+        `${holder.runId} (pid ${holder.pid}), ${age} ago — the next run reclaims it`);
+    }
+  }
+
+  const where = `${lt.pg.user ? `${lt.pg.user}@` : ''}${lt.pg.host}:${lt.pg.port}`;
+  const up = psql(lt.pg, 'SELECT 1');
+  if (!up.ok) {
+    fail('Postgres not reachable with psql', `${where} — ${up.error || 'no answer'}; every local-tests run copies its database there`);
+  } else {
+    // Both names are checked lower-case identifiers (localTestsConfig), so they are safe as literals.
+    const baseline = psql(lt.pg, `SELECT 1 FROM pg_database WHERE datname = '${lt.baselineDb}'`);
+    if (baseline.out !== '1') {
+      fail('baseline database missing', `${lt.baselineDb} on ${where} — restore the automation dump into it (docs/LOCAL-TESTS.md)`);
+    } else {
+      // Who is on it, by application name (or role), so the operator knows what to close.
+      const sessions = psql(lt.pg,
+        "SELECT count(*), coalesce(string_agg(DISTINCT coalesce(nullif(application_name, ''), usename), ', '), '') "
+        + `FROM pg_stat_activity WHERE datname = '${lt.baselineDb}'`);
+      const [count = '', apps = ''] = sessions.out.split('|');
+      if (!sessions.ok) warn('baseline sessions not checked', sessions.error);
+      else if (Number(count) === 0) pass('baseline is free to copy', `${lt.baselineDb}, no sessions`);
+      else {
+        warn(`${count} session(s) connected to the baseline`,
+          `${lt.baselineDb} (${apps || 'unnamed'}) — Postgres refuses to copy a database anything is connected to; ` +
+          'close them before a run (a psql, pgAdmin, a Django shell pointed at it)');
+      }
+    }
+
+    const copies = psql(lt.pg,
+      `SELECT datname FROM pg_database WHERE left(datname, ${lt.dbPrefix.length}) = '${lt.dbPrefix}' ORDER BY 1`);
+    const dbs = copies.out ? copies.out.split('\n') : [];
+    if (!copies.ok) warn('leftover run databases not checked', copies.error);
+    else if (dbs.length) warn(`${dbs.length} run database(s) left behind`, `${dbs.join(', ')} — ${gcHint()}`);
+    else pass('no leftover run databases', `nothing named ${lt.dbPrefix}*`);
+  }
+
+  checkLocalTestsLeftovers();
+  checkNodeModulesDrift();
+}
+
+/**
+ * The throwaway worktrees a local-tests run may own under state/runs/<iid>/,
+ * from the runner itself so this list cannot fall behind it: the scope's
+ * `wsa`, and the run's `wsa-run` (which holds the merged credentials file),
+ * `erp-lt` and `erp-base-lt`.
+ */
+const LT_WORKTREES: readonly string[] =
+  (createRequire(import.meta.url)('./localtests.cjs') as { WT_NAMES: string[] }).WT_NAMES;
+
+/** The run's record of everything it created, written before each thing is. */
+const RESOURCES_FILE = 'local-tests-resources.json';
+
+/** A pid that is alive AND is a localtests process — a recycled pid is not a run. */
+function liveLocalTests(pid: unknown): boolean {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0 || !pidAlive(pid)) return false;
+  const ps = spawnSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 5_000 });
+  return /localtests/.test(ps.stdout ?? '');
+}
+
+/**
+ * What a crashed run leaves on disk: any of its four worktrees, and a
+ * resources file whose process is gone. cleanup() drops the database before it
+ * removes the worktrees, so a run killed between the two leaves `wsa-run` and
+ * `erp-lt` with no database — checking only for `wsa` passed that desk clean.
+ * A ticket whose resources file names a live localtests process is in use, not
+ * left behind, and is reported as such.
+ */
+function checkLocalTestsLeftovers(): void {
+  const iids = existsSync(RUNS) ? readdirSync(RUNS).filter((d) => /^\d+$/.test(d)).map(Number) : [];
+  const live = new Set<number>();
+  const stale: string[] = [];
+  for (const iid of iids) {
+    const file = join(runDir(iid), RESOURCES_FILE);
+    if (!existsSync(file)) continue;
+    let pid: unknown = null;
+    try { pid = (JSON.parse(readFileSync(file, 'utf8')) as { pid?: unknown }).pid; } catch { /* unreadable = stale */ }
+    if (liveLocalTests(pid)) live.add(iid);
+    else stale.push(`state/runs/${iid}/${RESOURCES_FILE}`);
+  }
+  if (live.size) {
+    pass('local-tests run in progress', `ticket(s) ${[...live].join(', ')} — their worktrees are in use, not leftovers`);
+  }
+
+  const worktrees = iids.filter((iid) => !live.has(iid)).flatMap((iid) => LT_WORKTREES
+    .filter((name) => existsSync(join(runDir(iid), name))).map((name) => `state/runs/${iid}/${name}`));
+  if (worktrees.length) {
+    warn(`${worktrees.length} local-tests worktree(s) left behind`, `${worktrees.join(', ')} — ${gcHint()}`);
+  } else {
+    pass('no leftover local-tests worktrees', `none of ${LT_WORKTREES.join(', ')} under state/runs/*`);
+  }
+  if (stale.length) {
+    warn(`${stale.length} stale local-tests resources file(s)`,
+      `${stale.join(', ')} — the run that wrote it is gone, and what it names may still be held; ${gcHint()}`);
+  } else {
+    pass('no stale local-tests resources files', `no ${RESOURCES_FILE} without its run`);
+  }
+}
+
 // ----------------------------------------------------------------------- quota
 
 function millions(n: number): string { return `${(n / 1e6).toFixed(2)}M`; }
@@ -519,6 +718,7 @@ async function main(): Promise<void> {
   repairStaleState();
   await checkCredentials();
   checkDependencies();
+  checkLocalTests();
   checkQuotaHeadroom();
 
   const verdict = fails

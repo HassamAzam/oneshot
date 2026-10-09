@@ -47,7 +47,7 @@ import { existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, modelFor,
+  DRY_RUN, LOCAL_TESTS_PHASES, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -80,7 +80,7 @@ import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
 import { checkQuota, quotaParked } from '../lib/quota.js';
 import { checkTestLogin } from '../lib/testlogin.js';
 import {
-  claimOwnership, claimTicket, getRun, logEvent, phaseEnd, phaseStart, updateRun,
+  activeRunsFleet, claimOwnership, claimTicket, getRun, logEvent, phaseEnd, phaseStart, updateRun,
 } from '../lib/db.js';
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
 import {
@@ -97,9 +97,15 @@ import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
+  afterScopeSession, cliErrorText, gcLocalTests, lateForLocalTests, localResultsSubject, localSpecsGate,
+  localTestsRunPhase, prepareScopeSession, type ScopeInputs,
+} from './localtests.js';
+import {
   appendEdgeCases, checkApprovalGate, declaredFiles, designApprovalRequestBody,
   rearmGate,
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
+  localResultsApprovalRequestBody, localResultsApprovedRecordBody, localSpecsApprovalRequestBody,
+  localSpecsApprovedRecordBody, localSpecsGateReason,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
@@ -139,6 +145,18 @@ const GATE_UNAVAILABLE =
   'this ticket carries the Review label, but Slack is not configured (token + channel), so its '
   + 'approval gates have nowhere to ask — configure Slack, or remove the Review label to run '
   + 'this ticket in the ordinary full-auto mode';
+
+/**
+ * The two local automation test gates' own `unavailable`. Like the Not a Bug
+ * gate's, what is missing is a list of people to ask, not Slack — and these
+ * gates arm on a desk switch, not on a label a person could remove.
+ */
+const LOCAL_SPECS_UNAVAILABLE =
+  'local-tests-scope proposed a change to the team\'s automation test list (or a temporary change weakened a '
+  + 'test), but config/reviewers.json names no QA reviewer to approve it — add one there and unblock';
+const LOCAL_RESULTS_UNAVAILABLE =
+  'the local automation tests ran, but config/reviewers.json names no dev reviewer to approve the results '
+  + 'before the MR — add one there and unblock';
 
 /**
  * How long a block is respected before a re-claim is allowed.
@@ -208,6 +226,38 @@ export interface CodePhaseCtx {
   runId: string;
   journal: RunJournal;
   prior: Record<string, Record<string, unknown> | null>;
+  /**
+   * The run's abort signal. Read only by `local-tests-run`, the one code phase
+   * that can run for most of an hour: a conductor asked to stop kills the
+   * Cypress run rather than waiting it out.
+   */
+  signal?: AbortSignal;
+}
+
+export interface CodePhaseResult {
+  ok: boolean; error?: string; data?: Record<string, unknown>;
+  /**
+   * "Not ready yet, try again" rather than an ordinary failure: `merge`'s
+   * Review-gate pre-check, and `local-tests-run` finding the desk busy — the
+   * Cypress lease held by another run, or the script reporting another run's
+   * app on its ports, this ticket's script still alive, or sessions on the
+   * baseline database (deskBusy in src/conductor/localtests.ts). Distinguished from `!ok` alone so the run can PARK
+   * (auto-resumed by the next tick, no label change, no BLOCKED alert) instead
+   * of following the phase's onFail policy, which for `merge` is 'blocked' —
+   * i.e. Needs Human, which a missing approval or a still-running pipeline is
+   * not.
+   */
+  park?: boolean;
+  /** Set only by `merge`: new MR review threads for the runner to triage. */
+  feedback?: MrFeedbackSignal;
+  /**
+   * A verdict for a person, so the run stops BLOCKED whatever the phase's
+   * onFail says, and remediation is not offered it. Set only by
+   * `local-tests-run` when tests failed and `localTests.failuresBlock` is on:
+   * that phase is warn-on-fail because a broken desk must not cost a ticket its
+   * MR, and the policy saying failing tests must is the team's, not the phase's.
+   */
+  block?: boolean;
 }
 
 /**
@@ -220,27 +270,13 @@ export interface CodePhaseCtx {
  * These run on EVERY pass, including a resume and every cycle lap — they are
  * never skipped by the succeeded-already check. GitLab is the source of truth
  * for whether an MR is merged, and a journal that says "merged" while GitLab
- * says "opened" must lose. Both are therefore idempotent by recheck rather than
- * by memory, and both are cheap when there is nothing left to do.
+ * says "opened" must lose. All are therefore idempotent by recheck rather than
+ * by memory, and all are cheap when there is nothing left to do —
+ * `local-tests-run` by its cache key (src/conductor/localtests.ts).
  */
-export const CODE_PHASES: Record<
-  string,
-  ((ctx: CodePhaseCtx) => Promise<{
-    ok: boolean; error?: string; data?: Record<string, unknown>;
-    /**
-     * Set only by `merge`'s Review-gate pre-check: "not ready yet, try again"
-     * rather than an ordinary failure. Distinguished from `!ok` alone so the
-     * run can PARK (auto-resumed by the next tick, no label change, no
-     * BLOCKED alert) instead of following the phase's onFail policy, which
-     * for `merge` is 'blocked' — i.e. Needs Human, which a missing approval
-     * or a still-running pipeline is not.
-     */
-    park?: boolean;
-    /** Set only by `merge`: new MR review threads for the runner to triage. */
-    feedback?: MrFeedbackSignal;
-  }>) | undefined
-> = {
+export const CODE_PHASES: Record<string, ((ctx: CodePhaseCtx) => Promise<CodePhaseResult>) | undefined> = {
   'mr-open': mrOpenPhase,
+  'local-tests-run': (ctx) => localTestsRunPhase(ctx),
   merge: mergePhase,
 };
 
@@ -430,10 +466,14 @@ export function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['st
  * real refusals and disagreeing with the `In Review` label on the ticket.
  */
 export function codePhaseStatus(
-  p: PhaseConfig, done: { ok: boolean; park?: boolean },
+  p: PhaseConfig, done: { ok: boolean; park?: boolean; block?: boolean },
 ): PhaseRecord['status'] {
   if (done.ok) return 'ok';
   if (done.park) return 'parked';
+  // A `block` stops the run whatever onFail says (CodePhaseResult), so its
+  // record must not read 'warned' — finish() names the stopped phase from the
+  // last record that is not a success.
+  if (done.block) return 'failed';
   return statusForFailure(p);
 }
 
@@ -921,6 +961,12 @@ interface PhaseResult {
    * will help and a human (or the operator) has to look.
    */
   hardStop?: string;
+  /**
+   * `local-tests-scope` only: the throwaway automation worktree prepared for
+   * the session, which has to be captured (saved and removed) once it ends.
+   * Absent when none was prepared — then there is nothing to capture.
+   */
+  localTests?: ScopeInputs;
 }
 
 /**
@@ -936,7 +982,10 @@ export async function runTicket(
   // Label-gated phases are FILTERED OUT, not skipped in place. A phase skipped
   // in place still occupies an index, and `nextIndex`, `cycleTo` and the group
   // batching all do arithmetic on those — so a phase nobody is running must
-  // not be in the list they walk. See `labelGated` in src/lib/config.ts.
+  // not be in the list they walk. See `labelGated` in src/lib/config.ts. The
+  // local-tests phases are filtered the same way one level down, by phases()
+  // itself, on a desk where that step is off (LOCAL_TESTS_PHASES) — which is
+  // also what lets ui-evidence and mr batch together there exactly as before.
   const carried = new Set(issue.labels.map((l) => l.toLowerCase()));
   const list = phases().filter((p) => !p.labelGated || carried.has(p.labelGated.toLowerCase()));
   const owner = opts.conductor;
@@ -1348,6 +1397,91 @@ export async function runTicket(
       }
     }
 
+    // The local-tests step switched on under a run that is already past mr
+    // (src/conductor/localtests.ts, lateForLocalTests). Both phases are
+    // recorded 'skipped' with the reason, once, and stepped over on every
+    // later pass — ahead of the scope's session, the localSpecs gate and the
+    // run's code-phase dispatch, so a run waiting at merge never spends a
+    // session, a Cypress run or a QA ask on an MR that is already open, and
+    // keeps reaching merge to notice a person's merge. An MR review round
+    // forces the scope, and then both run like they would before mr.
+    if (LOCAL_TESTS_PHASES.includes(phase.name) && !forced.has('local-tests-scope')) {
+      const current = readJournal(iid) ?? j;
+      const late = lateForLocalTests(current);
+      if (late) {
+        const last = [...current.phases].reverse().find((r) => r.phase === phase.name);
+        if (last?.status !== 'skipped') {
+          const at = Date.now();
+          const lap = lapsOf(iid, phase.name);
+          const rowId = phaseStart(runId, phase.name, lap, phase.kind === 'code' ? 'code' : modelFor(phase));
+          phaseEnd(rowId, 'skipped', { detail: late });
+          recordPhase(iid, { phase: phase.name, lap, status: 'skipped', startedAt: at, endedAt: at, error: late });
+          j = readJournal(iid) ?? j;
+          log.info(`skip ${phase.name} — ${late}`);
+        }
+        i += 1;
+        continue;
+      }
+    }
+
+    // The local test list gate (QA) — between `local-tests-scope` and
+    // `local-tests-run`.
+    //
+    // Here, ahead of the code-phase dispatch below, because local-tests-run is
+    // a code phase and the dispatch would start it: the park has to come before
+    // the run takes the desk's Cypress lease or copies a database, so a list
+    // waiting on QA holds nothing. It arms only when the plan changes what the
+    // team's test list means — a proposal to add or drop a test, or a
+    // temporary edit that weakened one (src/conductor/localtests.ts,
+    // localSpecsGate) — and is re-checked on every pass, because this phase is
+    // re-entered on every pass: an approval covers the list, the proposals and
+    // the patch it was given, and a redo of any of them asks again.
+    //
+    // A `disapproved:` round re-runs the scope with QA's bullets in its prompt,
+    // the way the test-case gate re-runs `testcases`.
+    if (phase.name === 'local-tests-run') {
+      const scope = prior['local-tests-scope'] ?? readArtifact<Record<string, unknown>>(iid, 'local-tests-scope.json');
+      const ask = localSpecsGate(j, scope, localSpecsGateReason);
+      const stale = ask !== null && !approvalCovers(j.localSpecsApproval, ask.subject);
+      if (ask && (!j.localSpecsApproval?.approved || stale)) {
+        if (stale) {
+          log.warn(`the local test list changed since QA approved it on #${iid} — asking again`);
+          j = rearmGate(iid, 'localSpecs') ?? j;
+        }
+        const gate = await checkApprovalGate({
+          iid,
+          gate: 'localSpecs',
+          requestBody: localSpecsApprovalRequestBody(scope, ask.why),
+          subject: ask.subject,
+          onApproved: async () => { await addIssueNote(iid, localSpecsApprovedRecordBody(scope)); },
+        });
+        j = readJournal(iid) ?? j;
+        if (gate.verdict === 'unavailable') return finish(j, 'blocked', LOCAL_SPECS_UNAVAILABLE);
+        if (gate.verdict === 'pending') {
+          return finish(j, 'parked',
+            'awaiting QA sign-off on the local automation test list — a QA reviewer comments `approved` on the '
+            + 'ticket to run it, or `disapproved:` with one bullet per change to have it redone');
+        }
+        if (gate.verdict === 'feedback') {
+          const scopeIdx = list.findIndex((p) => p.name === 'local-tests-scope');
+          if (scopeIdx === -1) {
+            return finish(j, 'parked',
+              'QA asked for changes to the local automation test list, and no local-tests-scope phase is '
+              + 'configured to redo it — the list does not run until a person resolves it');
+          }
+          forced.add('local-tests-scope');
+          // The redone plan has to reach the ticket: the first one already
+          // holds the key in `published`. Same two lines as the plan and
+          // test-case gates.
+          const withoutScope = (j.published ?? []).filter((k) => k !== 'local-tests-scope');
+          j = updateJournal(iid, { published: withoutScope }) ?? j;
+          i = scopeIdx;
+          continue;
+        }
+        // 'approved' — fall through into local-tests-run below.
+      }
+    }
+
     if (CODE_PHASES[phase.name]) {
       const control = await runCodePhase(phase, i);
       if (control.kind === 'stop') {
@@ -1551,6 +1685,53 @@ export async function runTicket(
           'continue to `review`, or comments changes to have the list revised');
       }
       // gate.verdict === 'approved' — fall through into 'review' below.
+    }
+
+    // The local test results gate (dev) — between `local-tests-run` and `mr`.
+    //
+    // Only for results there are: a run that was skipped, or could not be run,
+    // has nothing for a developer to judge, and its one line on the ticket says
+    // so. The subject is each test's outcome against exactly this code, so a
+    // later run — after an MR review round's fix, say — asks again. Results
+    // can only change after mr inside such a round (noNewRunReason), and the
+    // round forces mr, so they always pass through here.
+    //
+    // A reply that is not `approved` stops the run BLOCKED rather than cycling
+    // anything (v1): what to do about a failing automation test is a person's
+    // call — fix the code, fix the spec, or accept it — and the reply stays on
+    // the ticket for whoever picks it up. Unblocking re-asks on fresh results.
+    if (phase.name === 'mr' && list.some((p) => p.name === 'local-tests-run')) {
+      const run = prior['local-tests-run'] ?? readArtifact<Record<string, unknown>>(iid, 'local-tests-run.json');
+      const subject = localResultsSubject(run);
+      const stale = subject !== null && !approvalCovers(j.localResultsApproval, subject);
+      if (subject && (!j.localResultsApproval?.approved || stale)) {
+        if (stale) {
+          log.warn(`the local test results changed since a dev approved them on #${iid} — asking again`);
+          j = rearmGate(iid, 'localResults') ?? j;
+        }
+        const gate = await checkApprovalGate({
+          iid,
+          gate: 'localResults',
+          requestBody: localResultsApprovalRequestBody(run),
+          subject,
+          onApproved: async () => { await addIssueNote(iid, localResultsApprovedRecordBody()); },
+        });
+        j = readJournal(iid) ?? j;
+        if (gate.verdict === 'unavailable') return finish(j, 'blocked', LOCAL_RESULTS_UNAVAILABLE);
+        if (gate.verdict === 'pending') {
+          return finish(j, 'parked',
+            'awaiting a developer\'s sign-off on the local automation test results — a dev reviewer comments '
+            + '`approved` on the ticket to continue to the MR, or replies there with what is wrong');
+        }
+        if (gate.verdict === 'feedback') {
+          const said = (gate.feedback ?? '').split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+          return finish(j, 'blocked',
+            'a developer replied to the local automation test results instead of approving them, so the run '
+            + `stops before the MR for a person to decide${said ? ` — "${said.slice(0, 200)}"` : ''}. `
+            + 'Their reply is on the ticket; unblocking asks again on the current results');
+        }
+        // 'approved' — fall through into 'mr' below.
+      }
     }
 
     // A group is the maximal run of CONSECUTIVE phases with the same marker
@@ -1859,6 +2040,26 @@ export async function runTicket(
           log.warn(`review salvaged from partial findings — ${salvaged.findings.length} recorded`);
         }
       }
+
+      // The scope session is over, whatever it concluded, so its throwaway
+      // automation worktree is captured now: the edits saved as the patch the
+      // run applies and the plan note attaches (which is why this is before
+      // publishPending below), checked against allowedPaths, and the worktree
+      // removed. A plan with specs to run gets the capture written into its
+      // artifact and the ticket gets the local-tests label; a plan with none is
+      // written back as not applicable. A plan whose edits could not be saved
+      // is refused — warn-on-fail, so the run carries on to mr and
+      // local-tests-run says why nothing ran. See afterScopeSession.
+      if (r.cfg.name === 'local-tests-scope' && r.localTests) {
+        const after = await afterScopeSession(iid, r.out, r.localTests);
+        r.out.data = after.data;
+        if (after.refusal) {
+          r.out.ok = false;
+          r.out.error = after.refusal;
+          overruled.add(r);
+          log.warn(`local-tests-scope refused — ${after.refusal}`);
+        }
+      }
     }
 
     // Reconciled strictly in phase order, whatever order they finished in:
@@ -2161,7 +2362,35 @@ export async function runTicket(
     // on that variable's ABSENCE — passing it everywhere would disarm the rule
     // for exactly the phases it exists to confine.
     const wt = p.cwd === 'worktree' ? worktree : undefined;
-    const ctx: PromptCtx = { ticket, runId, lap, branch, worktree: wt, port, prior, journal: j };
+
+    // `local-tests-scope` edits specs in a throwaway automation worktree that
+    // only the conductor may check out (git-guard refuses git that changes
+    // that repo from any session). Checked out here, before the session, and
+    // captured once it ends, in the reconcile below. A desk that cannot check
+    // it out spends no session finding that out: the phase warns, and
+    // local-tests-run records why nothing ran.
+    let localTests: ScopeInputs | undefined;
+    if (p.name === 'local-tests-scope') {
+      const prep = wt
+        ? await prepareScopeSession(iid, wt)
+        : { ok: false as const, error: { code: 'E_NO_WORKTREE', message: 'the run holds no ERP worktree to scope' } };
+      if (!prep.ok) {
+        // One ledger row for the lap, as a session would have left.
+        const error = `could not prepare the automation worktree — ${cliErrorText(prep.error)}`;
+        const rowId = phaseStart(runId, p.name, lap, modelFor(p));
+        phaseEnd(rowId, statusForFailure(p), { detail: error });
+        log.warn(`local-tests-scope not started — ${error}`);
+        return {
+          cfg: p, index, lap, startedAt, endedAt: Date.now(), rowId,
+          out: {
+            ok: false, data: null, blocked: null, summary: '', turns: 0, weighted: 0, sessionId: '',
+            rateLimited: false, error,
+          },
+        };
+      }
+      localTests = prep.data;
+    }
+    const ctx: PromptCtx = { ticket, runId, lap, branch, worktree: wt, port, prior, journal: j, localTests };
 
     // Hand `design` its palette rather than making it go and distil one. The
     // phase budgets ~10 of its 115 turns for this (config/phases.json), and the
@@ -2193,7 +2422,7 @@ export async function runTicket(
       detail: out.error ?? out.blocked ?? undefined,
     });
 
-    return { cfg: p, index, lap, startedAt, endedAt: Date.now(), rowId, out };
+    return { cfg: p, index, lap, startedAt, endedAt: Date.now(), rowId, out, localTests };
   }
 
   async function runCodePhase(p: PhaseConfig, index: number): Promise<Control> {
@@ -2216,7 +2445,7 @@ export async function runTicket(
     updateRun(runId, { phase: p.name, status: 'running', owner_seen_at: Date.now() });
 
     const rowId = phaseStart(runId, p.name, lap, 'code');
-    const done = await CODE_PHASES[p.name]!({ iid, runId, journal: j, prior });
+    const done = await CODE_PHASES[p.name]!({ iid, runId, journal: j, prior, signal: opts.signal });
     const status = codePhaseStatus(p, done);
     phaseEnd(rowId, status, { detail: done.error });
 
@@ -2264,6 +2493,11 @@ export async function runTicket(
     // nor something remediation should touch.
     if (done.park) {
       return { kind: 'stop', status: 'parked', reason: done.error ?? `${p.name}: parked` };
+    }
+    // A verdict for a person (failing local tests under localTests.failuresBlock),
+    // not an environment fault: no remediation, and not the phase's warn policy.
+    if (done.block) {
+      return { kind: 'stop', status: 'blocked', reason: done.error ?? `${p.name}: blocked`, noRemediation: true };
     }
     return afterFailure(p, index, done.error ?? 'phase failed');
   }
@@ -2930,6 +3164,12 @@ export async function runTicket(
     reapPortServer(journal.port);
     releasePort(journal.runId);
     releasePromotion(journal.runId);
+    // And whatever the local-tests step left on this desk for this run — a
+    // throwaway automation worktree a killed scope session never captured, a
+    // database copy or a browser a killed run never dropped. Every OTHER run
+    // in flight is kept: gc drops whatever is not on its --keep list. A no-op
+    // on a desk where the step is off, and in a dry run.
+    await gcLocalTests(activeRunsFleet().map((r) => r.iid).filter((n) => n !== journal.iid));
 
     await updateCard(journal.slackTs ?? '', cardState(journal));
 
