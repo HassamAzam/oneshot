@@ -877,14 +877,25 @@ test('without the conductor\'s facts the scope prompt falls back to refs it can 
   assert.ok(p.includes(localTestsPatchFile(990902)));
 });
 
-test('the scope starts from the precise set and fills from the modules only within the limits', () => {
+test('the scope starts from the precise set and adds at most a few module specs, never padding', () => {
   const p = scopePrompt();
   assert.match(p, /The precise set is the floor/);
   assert.match(p, /limits never\s+remove one/);
-  assert.match(p, /only while the list fits/);
+  assert.match(p, /at most 5 module specs, as a health check, not as coverage/);
+  assert.match(p, /NEVER fill the\s+list toward/, 'module specs that cannot see the change are not added to reach the limits');
+  assert.match(p, /a ceiling for the precise set, not a target/);
   assert.match(p, /If the precise set alone is over either limit, keep all of it/);
   assert.match(p, /`Trim to fit the limits:`/, 'the over-limit case becomes a QA proposal, not a silent cut');
   assert.match(p, /There is no silent trim/);
+});
+
+test('an uncovered change gets a written temporary spec, not only a suggestion', () => {
+  const p = scopePrompt();
+  assert.match(p, /\*\*write the missing spec\*\*/);
+  assert.match(p, /list it in `specs` and `edits`, and propose\s+the `add`/);
+  assert.match(p, /Leave it unwritten ONLY when the screen cannot be\s+reached/);
+  assert.match(p, /finish choosing by about turn \d+ of\s+\d+/, 'the session keeps turns for writing the spec');
+  assert.match(p, /`TR_LOCAL_<what>\.ts`/);
 });
 
 test('the scope never runs Cypress, never commits, never opens the credentials', () => {

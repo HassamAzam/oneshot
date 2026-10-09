@@ -1288,9 +1288,20 @@ export function localSpecsGateReason(scope: Record<string, unknown> | null, weak
   const why: string[] = [];
   const n = s.proposals.length;
   if (n) why.push(`the plan proposes ${n === 1 ? 'a change' : `${n} changes`} to the team's test list`);
-  if (weakened.length) {
-    why.push(`a temporary change made ${weakened.length === 1 ? 'an existing test' : `${weakened.length} existing tests`} `
-      + `easier to pass (${weakened.map(codeSpan).join(', ')})`);
+  // A file the scope created cannot have made an existing test easier to pass; what the
+  // check found in it is a shortcut in the new test itself (force: true, a wait, a raised
+  // timeout), which is worth QA's eye for its own reason. Said apart so neither reads as
+  // the other.
+  const created = new Set(s.edits.filter((e) => e.kind === 'add').map((e) => text(e.file)));
+  const existing = weakened.filter((f) => !created.has(f));
+  const fresh = weakened.filter((f) => created.has(f));
+  if (existing.length) {
+    why.push(`a temporary change made ${existing.length === 1 ? 'an existing test' : `${existing.length} existing tests`} `
+      + `easier to pass (${existing.map(codeSpan).join(', ')})`);
+  }
+  if (fresh.length) {
+    why.push(`${fresh.length === 1 ? 'a new test uses' : `${fresh.length} new test files use`} a shortcut that can `
+      + `hide a real failure, such as \`force: true\`, an added wait or a raised timeout (${fresh.map(codeSpan).join(', ')})`);
   }
   if (!why.length) return null;
   const line = why.join(', and ');

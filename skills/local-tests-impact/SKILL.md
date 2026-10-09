@@ -74,11 +74,11 @@ the suite, not put to QA. So when no existing spec reaches the change and you ca
 
 ## 3. Choose the specs
 
-**Start from the precise set, then fill from the affected modules while the budget allows.**
+**The precise set, then at most 5 module specs as a health check. Never pad the list.**
 The prompt carries `maxSpecs` and `maxRunMinutes` from `config/project.json` (`localTests`);
-price every list you consider with `estimate` (below), never by hand. They are a selection
-budget, not a cut: nothing trims your list after you return it. A list over them runs in full
-unless QA trims it (item 3), and every Cypress run is stopped at `maxRunMinutes`.
+price every list you consider with `estimate` (below), never by hand. They are a ceiling for
+the precise set, not a target: nothing trims your list after you return it. A list over them
+runs in full unless QA trims it (item 3), and every Cypress run is stopped at `maxRunMinutes`.
 
 1. **The precise set is the floor.** It is every candidate `index.cjs` reached through
    something the diff changed rather than through its folder alone: each spec with a `reasons`
@@ -86,12 +86,16 @@ unless QA trims it (item 3), and every Cypress run is stopped at `maxRunMinutes`
    testid the diff changed or touched; a reason `index.cjs` gives for a changed screen or API
    counts the same), plus every spec listed under `removedTestidStillUsed`. Those are the specs
    that can see this change, so the budget never removes one.
-2. **Then add the rest of the affected module folders, only within both limits.** The candidates
-   whose only reason is `module …` go in one at a time - the module's `smoke`-tagged specs
-   first, then specs whose names and imports are the changed screen, then the rest - and you
-   stop at the first one that would take the list past `maxSpecs` or `maxRunMinutes`. A module
-   spec left out for the budget is not a drop and needs no proposal: count it in `summary`
-   (how many, from which modules, and the minutes they would have added).
+2. **Then at most 5 module specs, as a health check, not as coverage.** From the candidates
+   whose only reason is `module …`, take the module's `smoke`-tagged specs first, then specs
+   that open the changed screen's own page or sidebar group, up to 5 in all. Never fill the
+   list toward `maxSpecs` or `maxRunMinutes` with module specs that cannot see the change: a
+   dry run on ERP #8800 did exactly that, 40 unrelated specs and about 37 minutes, none of
+   which opened the banner the ticket added. Count the module specs you left out in `summary`
+   in one line (how many, which modules). The one exception is a diff that changes code every
+   screen of a module runs through (its routing, a layout or container all its pages share, a
+   module-wide API): then more of the module may go in, within the limits, and `summary` names
+   the shared file that justifies it.
 3. **If the precise set alone is over either limit, keep all of it and propose a trim.** Add no
    module specs, leave the whole precise set in `specs`, and add ONE `remove` proposal with
    `file` omitted and a `title` that starts `Trim to fit the limits:` and names the specs you
@@ -149,19 +153,24 @@ Every edited file is one `edits` entry: `kind: 'update'`, `why`, `erpEvidence`. 
 step 1: it reads the throwaway as it now is, so a value you followed should be gone from
 `removedTestidStillUsed`. If it is not, the edit missed.
 
-## 5. When no spec reaches the change, propose one
+## 5. When no spec reaches the change, write one
 
 `addedTestidUnused`, an `uncovered` area, or a changed screen no candidate opens is a coverage
-gap. Propose an `add` with a `title` QA would recognise ("Verify that the evidence notice
-banner can be dismissed for a week") and a `why` that names the gap.
-
-You MAY write that spec, and its page object, in the throwaway so the run exercises it. It is
-temporary like any other edit (`kind: 'add'`) and goes in `specs` with its module. Follow the
-repo's own conventions, copied from the specs beside it:
+gap, and a run without a spec for it does not test this ticket at all. So **write that spec**,
+and its page object, in the throwaway so the run exercises it, and also propose it for the
+suite: an `add` with a `title` QA would recognise ("Verify that the evidence notice banner can
+be dismissed for a week") and a `why` that names the gap. QA approves it before anything runs.
+It is temporary like any other edit (`kind: 'add'`) and goes in `specs` with its module. Keep
+turns for it: finish choosing by about half your turn budget. Follow the repo's own
+conventions, copied from the specs beside it:
 
 - A page object extends `PageElementReadiness`, returns its root from `pageElement`, and
   selects through `getElement({ selector: '[data-testid="<literal value>"] ' })` - a literal
   value, never one built from a variable, so `index.cjs` can see it.
+- **The no-weakening rules of step 4 apply to new code too.** No `click({ force: true })`, no
+  `cy.wait`, no raised timeout: a control that only works forced is covered or hidden, which
+  is a finding, not something to click past. The ERP #8800 dry run wrote a forced dismiss
+  click, and the check flagged it to QA.
 - The spec is wrapped in `TestFilters(['regression'], () => { describe(...) })` from
   `support/filter_tests`, logs in with `loginWith('<KEY>_CREDENTIALS')` in `before`, and
   reaches the screen through `SidePanel` the way its neighbours do.

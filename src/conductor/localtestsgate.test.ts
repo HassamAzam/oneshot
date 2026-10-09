@@ -211,6 +211,17 @@ test('the localSpecs gate arms only for a change to the test list or a weakened 
     /^A temporary change made an existing test easier to pass \(`cypress\/e2e\/leaves\/approve\.cy\.ts`\)/);
 });
 
+test('a shortcut in a file the scope created is named as a new test, not as a weakened existing one', () => {
+  const created = 'cypress/Pages/teamReview/team_checklist.ts';
+  const s = scope({ proposals: [], edits: [{ file: created, kind: 'add', why: 'new page object', erpEvidence: 'x' }] });
+  const why = localSpecsGateReason(s, [created]) ?? '';
+  assert.match(why, /^A new test uses a shortcut that can hide a real failure, such as `force: true`/);
+  assert.ok(why.includes(`(\`${created}\`)`));
+  assert.doesNotMatch(why, /existing test/);
+  const both = localSpecsGateReason(s, [created, 'cypress/e2e/leaves/approve.cy.ts']) ?? '';
+  assert.match(both, /^A temporary change made an existing test easier to pass \(`cypress\/e2e\/leaves\/approve\.cy\.ts`\), and a new test uses a shortcut/);
+});
+
 test('the results ask says when Cypress was cut off, so "0 failed" is not read as "all passed"', () => {
   const body = localResultsApprovalRequestBody({
     status: 'failed',

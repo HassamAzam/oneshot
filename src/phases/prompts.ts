@@ -458,6 +458,14 @@ tests run: ${i.testsRun || '(none)'}`;
 const REPRODUCTION_SKILL = 'bug-reproduction';
 
 /**
+ * How many module specs local-tests-scope adds beyond the precise set, as a health check of
+ * the module. A dry run on ERP #8800 showed why it is a cap and not the limits: with no spec
+ * reaching the change, filling toward maxSpecs picked 40 unrelated specs (~37 min) that could
+ * not see the banner the ticket added.
+ */
+const SMOKE_SPECS = 5;
+
+/**
  * The label that asks for a reproduction, per config/phases.json.
  *
  * Read back out of the config rather than written here, so the sentence the
@@ -2105,6 +2113,7 @@ saying why, not a block — ship the pack you have and name the gap in \`summary
     const index = join(ROOT, 'skills', 'local-tests-impact', 'scripts', 'index.cjs');
     const allowed = lt.allowedPaths.map((p) => `\`${p}\``).join(', ') || '(none configured — make no edits)';
     const mins = budgetMin('local-tests-scope', 30);
+    const turnsFor = budgetTurns('local-tests-scope');
 
     return `${ticketHead(ctx.ticket)}
 ${localSpecsFeedbackBlock(ctx, wsa, patchFile)}
@@ -2155,18 +2164,22 @@ needed" line, no label, and nobody is asked anything. Any \`proposals\` it carri
 line as suggestions for the suite, not put to QA. So a gap you can only describe (step 3, last bullet)
 is a suggestion; to have QA look at it, write the spec (a temporary \`add\`) and list it in \`specs\`.
 
-## 3. Choose the specs: start from the precise set, fill within the limits
+## 3. Choose the specs: the precise set, a few smoke specs, never padding
 1. **The precise set is the floor.** Every candidate the analysis reached through something the diff
    changed rather than through its folder alone — a \`reasons\` entry other than \`module …\` (a page
    object selecting a testid the diff changed or touched, a changed screen or API) — plus every spec
    under \`removedTestidStillUsed\`. These are the specs that can see this change, so the limits never
    remove one.
-2. **Then the rest of the affected modules, only while the list fits.** Candidates whose only reason is
-   \`module …\` go in one at a time — the module's smoke specs first, then the ones named after the
-   changed screen, then the rest — and you stop at the first that would take the list past
-   ${lt.maxSpecs} specs or ${lt.maxRunMinutes} minutes, priced with \`estimate\`. A module spec left out for
-   the limits is not a drop and needs no proposal: count it in \`summary\` (how many, which modules, the
-   minutes they would have added).
+2. **Then at most ${SMOKE_SPECS} module specs, as a health check, not as coverage.** From the candidates
+   whose only reason is \`module …\`, take the affected modules' \`smoke\`-tagged specs first, then ones
+   that open the changed screen's own page or sidebar group, up to ${SMOKE_SPECS} in all. NEVER fill the
+   list toward ${lt.maxSpecs} specs or ${lt.maxRunMinutes} minutes with module specs that cannot see the
+   change: a long list of unrelated tests costs the run its time and tells the developer nothing about
+   this ticket. The limits are a ceiling for the precise set, not a target. Count the module specs you
+   left out in \`summary\` in one line (how many, which modules).
+   The one exception is a diff that changes code EVERY screen of a module runs through (its routing, a
+   layout or container all its pages share, a module-wide API): then more of the module may go in,
+   within the limits, and \`summary\` names the shared file that justifies it.
 3. **If the precise set alone is over either limit, keep all of it** and add no module specs. Add ONE
    \`remove\` proposal with \`file\` omitted and a \`title\` starting \`Trim to fit the limits:\` that names
    the specs you would take out first, least likely to catch this change first, and the minutes that
@@ -2180,8 +2193,19 @@ is a suggestion; to have QA look at it, write the spec (a temporary \`add\`) and
   (citing the spec line that shows it), NOT in \`specs\`, and out of \`estimate\`. That is not a drop and
   needs no proposal: the report names it, so a missing result is never read as a pass.
 - No spec reaches the change (an \`addedTestidUnused\` value, an \`uncovered\` area, a changed screen no
-  candidate opens)? Propose an \`add\`, titled the way QA would name it ("Verify that …"). If nothing
-  else is in \`specs\`, that \`add\` is a suggestion on the "not needed" line (step 2), not a QA question.
+  candidate opens)? Then the run would not test this ticket at all, so **write the missing spec** in
+  the automation worktree — a temporary \`add\` (step 4) — list it in \`specs\` and \`edits\`, and propose
+  the \`add\` for the suite, titled the way QA would name it ("Verify that …"). QA approves it before
+  anything runs. Plan your turns for it: finish choosing by about turn ${Math.round(turnsFor * 0.5)} of
+  ${turnsFor}, so writing and re-checking it fits. Leave it unwritten ONLY when the screen cannot be
+  reached with data the module's specs already create; then say exactly why in \`summary\`, and the
+  \`add\` alone is a suggestion on the "not needed" line (step 2), not a QA question.
+- A new spec follows its neighbours: a page object extending \`PageElementReadiness\` that selects with a
+  literal \`[data-testid="…"]\`, the spec wrapped in \`TestFilters(['regression'], …)\`, \`loginWith('<KEY>_CREDENTIALS')\`
+  with an account the module's own specs already use for that screen's sidebar group (never invent
+  one), reaching the screen through \`SidePanel\` like they do, and a \`LOCAL\` marker in place of the case
+  number in its name (\`TR_LOCAL_<what>.ts\`). Assert what the ticket asks for, each behaviour in its own
+  \`it\`.
 
 ## 4. Temporary edits: follow an intended change, never excuse a broken one
 A spec failing because the ticket MEANT to rename a testid or relabel a control is out of date:
@@ -2193,6 +2217,9 @@ something is the finding this phase exists for: leave it exactly as it is.
 - Never weaken a test: no removed assertion or \`it\` block, no \`.skip\` or \`.only\`, no \`force: true\`,
   no raised timeout, no added \`cy.wait\`. Oneshot checks the saved diff and puts a weakened test, or a
   file outside the paths above, in front of QA before anything runs.
+- The same holds for every NEW spec and page object you write: no \`force: true\` (a click that only works
+  forced is a covered or hidden control, which is a finding), no \`cy.wait\`, no raised timeout. If a
+  control seems to need one, assert why it is not clickable instead.
 - Leave edits as working-tree changes. Oneshot saves them as ${patchFile} the moment you finish and
   removes the worktree. Revert any experiment you do not want run.
 - One \`edits\` entry per file you changed or created. Then run step 1 again: a value you followed should
