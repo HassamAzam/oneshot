@@ -80,6 +80,26 @@ const scope = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+test('a long plan shows ten specs in the table and folds the rest, and clips a long summary', () => {
+  const specs = Array.from({ length: 14 }, (_, i) => (
+    { file: `cypress/e2e/leaves/spec_${String(i).padStart(2, '0')}.cy.ts`, module: 'Leaves', cases: 1, why: `reason ${i}` }));
+  const { body } = localTestsPlanNote(scope({ specs, summary: 'word '.repeat(200) }), ltCtx);
+  const [table = '', folded] = body.split('<details>');
+  assert.equal((table.match(/^\| `cypress\/e2e\/leaves\/spec_/gm) ?? []).length, 10, 'ten rows in the visible table');
+  assert.ok(folded, 'the remaining specs are in a collapsed block');
+  assert.match(folded, /<summary>…and 4 more spec files<\/summary>/);
+  assert.equal((folded.match(/^\| `cypress\/e2e\/leaves\/spec_/gm) ?? []).length, 4, 'every spec is still listed');
+  assert.ok(folded.includes('spec_13.cy.ts'));
+  assert.match(folded, /<\/details>/);
+  const summaryLine = body.split('\n\n')[1] ?? '';
+  assert.ok(summaryLine.length <= 401 && summaryLine.endsWith('…'), 'the summary is clipped with an ellipsis');
+});
+
+test('a short plan has no folded block', () => {
+  const { body } = localTestsPlanNote(scope(), ltCtx);
+  assert.ok(!body.includes('<details>'));
+});
+
 test('a scope that applies is posted as a plan: summary, counts, then one row per spec', () => {
   const { body, attachments } = localTestsPlanNote(scope(), ltCtx);
   const parts = body.split('\n\n');

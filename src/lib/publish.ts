@@ -371,17 +371,26 @@ export function localTestsPlanNote(data: Record<string, unknown>, ctx: PublishCt
   const cases = specs.reduce((n, s) => n + (Number(s.cases) || 0), 0);
   const est = Number(scope.estimatedMinutes);
 
+  // A plan is read on the ticket, often by QA deciding whether to approve it: the
+  // first PLAN_TABLE_ROWS specs are the table, and any beyond that stay one click
+  // away in a collapsed list rather than turning the note into a wall of rows.
+  const row = (s: LocalTestsScope['specs'][number]): string =>
+    `| ${tableCell(codeSpan(String(s.file ?? '')))} | ${tableCell(s.module)} | ${tableCell(s.why)} |`;
+  const rest = specs.slice(PLAN_TABLE_ROWS);
+  const summary = oneLine(scope.summary);
   const parts = [
     '**Local automation tests — plan**',
-    oneLine(scope.summary),
+    summary.length > PLAN_SUMMARY_CHARS ? `${summary.slice(0, PLAN_SUMMARY_CHARS).trimEnd()}…` : summary,
     [
       `**Modules:** ${modules.join(', ') || '—'}`,
       `**Tests:** ${plural(specs.length, 'spec file')}, ${plural(cases, 'test case')}`,
       ...(Number.isFinite(est) && est > 0 ? [`**About ${Math.max(1, Math.round(est))} min**`] : []),
     ].join(' · '),
-    ['| Spec file | Module | Why |', '|---|---|---|',
-      ...specs.map((s) => `| ${tableCell(codeSpan(String(s.file ?? '')))} | ${tableCell(s.module)} | ${tableCell(s.why)} |`),
-    ].join('\n'),
+    ['| Spec file | Module | Why |', '|---|---|---|', ...specs.slice(0, PLAN_TABLE_ROWS).map(row)].join('\n'),
+    ...(rest.length
+      ? [`<details><summary>…and ${plural(rest.length, 'more spec file')}</summary>\n\n${
+        ['| Spec file | Module | Why |', '|---|---|---|', ...rest.map(row)].join('\n')}\n\n</details>`]
+      : []),
   ];
   if (proposals.length) {
     parts.push(`**Proposed change to the test list (QA approval needed):**\n${proposals.map((p) => {
@@ -446,6 +455,12 @@ function runMinutes(run: Partial<LocalTestsRun>, results: LocalTestsRun['results
     ? span : results.reduce((n, r) => n + (Number(r.durationMs) || 0), 0);
   return ms > 0 && ms < 60_000 ? '<1' : String(Math.round(ms / 60_000));
 }
+
+/** Specs shown in the plan's table; the rest of the list sits in a collapsed block under it. */
+const PLAN_TABLE_ROWS = 10;
+
+/** The plan's opening summary is clipped here: the table, not the paragraph, is what QA approves. */
+const PLAN_SUMMARY_CHARS = 400;
 
 /** At most this many table rows; a run with more failures than this has a bigger problem than the table. */
 const MAX_RESULT_ROWS = 60;
