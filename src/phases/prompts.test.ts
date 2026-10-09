@@ -3,7 +3,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { labelledLayers, mrOpenNote, promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
 import { gateSubjectDigest } from '../lib/artifacts.js';
-import { ROOT, phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
+import {
+  ROOT, localTestsConfig, localTestsPatchFile, localTestsWorktree, phaseByName, runDir, type PhaseConfig,
+} from '../lib/config.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -798,4 +800,133 @@ test('the design prompt reports renders as design/<file>, not the bare filename 
   const prompt = promptFor(cfg('design'), ctx(ticket({ iid: 424244, labels: ['Design'] })));
   assert.ok(prompt.includes('design/<filename>'), 'design names mockupHtml/screenshot/before as design/<file>');
   assert.doesNotMatch(prompt, /BARE FILENAME/, 'the generic bare-filename instruction contradicts design/ outputs');
+});
+
+// ------------------------------------------------------ local-tests-scope
+
+/**
+ * Read from config/phases.json itself rather than phaseByName(): phases() drops
+ * both local-tests phases on a desk where the step is off, and this desk's
+ * .env must not decide whether the prompt is tested.
+ */
+const shippedPhase = (name: string): PhaseConfig => {
+  const raw = JSON.parse(readFileSync(join(ROOT, 'config', 'phases.json'), 'utf8')) as { phases: PhaseConfig[] };
+  const p = raw.phases.find((x) => x.name === name);
+  assert.ok(p, `phase ${name} is in config/phases.json`);
+  return p;
+};
+
+const SCOPE_INPUTS = {
+  wsa: '/oneshot/state/runs/990901/wsa', automationSha: 'c0ffee1234567890', base: 'bbbb1111', head: 'aaaa2222',
+  patchFile: '/oneshot/state/runs/990901/artifacts/local-tests/temporary-changes.patch',
+};
+
+const scopePrompt = (over: Partial<PromptCtx> = {}): string => promptFor(shippedPhase('local-tests-scope'), {
+  ...ctx(ticket({ iid: 990901 })), worktree: '/wt/ticket-990901', localTests: SCOPE_INPUTS, ...over,
+});
+
+test('the scope session is handed the conductor\'s facts: worktree, commits, automation worktree, limits', () => {
+  const p = scopePrompt();
+  const lt = localTestsConfig();
+  const index = join(ROOT, 'skills', 'local-tests-impact', 'scripts', 'index.cjs');
+  assert.ok(p.includes(`node ${index} --erp /wt/ticket-990901 `
+    + '--base bbbb1111 --head aaaa2222 --automation /oneshot/state/runs/990901/wsa --json'));
+  assert.ok(p.includes('index.cjs estimate --automation /oneshot/state/runs/990901/wsa'));
+  assert.ok(p.includes('c0ffee1234567890'), 'the automation commit the patch will be cut against');
+  assert.ok(p.includes(runDir(990901)));
+  assert.ok(p.includes(`maxSpecs ${lt.maxSpecs} · maxRunMinutes ${lt.maxRunMinutes}`));
+  for (const path of lt.allowedPaths) assert.ok(p.includes(`\`${path}\``), `allowed path ${path} is named`);
+  assert.ok(p.includes(SCOPE_INPUTS.patchFile), 'told where its edits are saved');
+});
+
+test('the analysis script is named by an absolute path that exists, never through $ONESHOT_HOME', () => {
+  // Under DRY_RUN $ONESHOT_HOME is state-dry, which has no skills/: a path built
+  // from it fails with module-not-found instead of a named JSON code.
+  const p = scopePrompt();
+  const index = join(ROOT, 'skills', 'local-tests-impact', 'scripts', 'index.cjs');
+  assert.ok(existsSync(index));
+  assert.ok(p.includes(`analysis script       ${index}`));
+  assert.doesNotMatch(p, /\$ONESHOT_HOME\/skills/);
+});
+
+test('the limits are a selection budget, each Cypress run has its own deadline', () => {
+  const p = scopePrompt();
+  const lt = localTestsConfig();
+  assert.match(p, /The limits are a selection budget, not a cut/);
+  assert.ok(p.includes(`every Cypress run is stopped at\n${lt.maxRunMinutes} minutes`));
+});
+
+test('a plan with nothing to run is a "not needed" line, and its proposals are suggestions', () => {
+  const p = scopePrompt();
+  assert.match(p, /A plan with no spec in `specs` is posted the same way even if you say `applicable: true`/);
+  assert.match(p, /shown on that\s+line as suggestions for the suite, not put to QA/);
+  assert.doesNotMatch(p, /including when no existing spec reaches the change/);
+});
+
+test('specs that cannot run on a desk are listed apart, with why, and not run', () => {
+  const p = scopePrompt();
+  assert.match(p, /goes in `notRunnable` with `why`/);
+  assert.match(p, /NOT in `specs`/);
+  assert.match(p, /`notRunnable`, `estimatedMinutes`, `summary`, `blocked`/);
+});
+
+test('without the conductor\'s facts the scope prompt falls back to refs it can name', () => {
+  const p = promptFor(shippedPhase('local-tests-scope'), { ...ctx(ticket({ iid: 990902 })), worktree: '/wt/x' });
+  assert.ok(p.includes('--base origin/dev --head HEAD'));
+  assert.ok(p.includes(localTestsWorktree(990902)));
+  assert.ok(p.includes(localTestsPatchFile(990902)));
+});
+
+test('the scope starts from the precise set and fills from the modules only within the limits', () => {
+  const p = scopePrompt();
+  assert.match(p, /The precise set is the floor/);
+  assert.match(p, /limits never\s+remove one/);
+  assert.match(p, /only while the list fits/);
+  assert.match(p, /If the precise set alone is over either limit, keep all of it/);
+  assert.match(p, /`Trim to fit the limits:`/, 'the over-limit case becomes a QA proposal, not a silent cut');
+  assert.match(p, /There is no silent trim/);
+});
+
+test('the scope never runs Cypress, never commits, never opens the credentials', () => {
+  const p = scopePrompt();
+  assert.match(p, /Run Cypress/);
+  assert.match(p, /`scripts\/localtests\.cjs`/);
+  assert.match(p, /Commit, push, stash, reset, clean or check anything out in the automation worktree/);
+  assert.match(p, /`cypress\.env\.json`/);
+  assert.match(p, /Never weaken a test/);
+});
+
+test('the scope prompt carries the method itself, and declares the skill that has the rest', () => {
+  assert.deepEqual(shippedPhase('local-tests-scope').skills, ['local-tests-impact']);
+  assert.ok(existsSync(join(ROOT, 'skills', 'local-tests-impact', 'SKILL.md')));
+  const sys = systemPromptFor(shippedPhase('local-tests-scope'), ctx(ticket({ iid: 990901 })));
+  assert.ok(names(sys).includes('local-tests-impact'));
+  assert.match(scopePrompt(), /The steps below are enough without it/);
+});
+
+test('the scope session is told it may edit the automation worktree, and only read the ERP one', () => {
+  const sys = systemPromptFor(shippedPhase('local-tests-scope'),
+    { ...ctx(ticket({ iid: 990901 })), worktree: '/wt/ticket-990901', localTests: SCOPE_INPUTS });
+  assert.ok(sys.includes('Your ERP worktree is /wt/ticket-990901: read it, never edit it.'));
+  assert.ok(sys.includes(`throwaway automation worktree ${SCOPE_INPUTS.wsa}`));
+  assert.doesNotMatch(sys, /Everything you touch lives inside it/);
+  // Every other worktree phase keeps the line it had.
+  const other = systemPromptFor(cfg('verify'), { ...ctx(ticket()), worktree: '/wt/x' });
+  assert.match(other, /Your worktree is \/wt\/x\. Everything you touch lives inside it\./);
+});
+
+test('a redo after QA\'s disapproval carries their bullets and how to keep the previous edits', () => {
+  const journal = { localSpecsApproval: { requestTs: null, requestNoteId: null, approved: false,
+    feedback: ['disapproved:\n- keep the half-day leave test, it still applies'] } };
+  const prior = { 'local-tests-scope': {
+    specs: [{ file: 'cypress/e2e/leaves/apply_leave.cy.ts' }],
+    edits: [{ file: 'cypress/Pages/LeavePage.ts' }],
+  } };
+  const p = scopePrompt({ journal: journal as unknown as PromptCtx['journal'], prior });
+  assert.match(p, /## QA asked for changes to an earlier version of this list/);
+  assert.match(p, /keep the half-day leave test, it still applies/);
+  assert.ok(p.includes('`cypress/e2e/leaves/apply_leave.cy.ts`'));
+  assert.ok(p.includes(`git -C ${SCOPE_INPUTS.wsa} apply ${SCOPE_INPUTS.patchFile}`));
+
+  assert.doesNotMatch(scopePrompt(), /QA asked for changes/, 'a first round has no feedback block');
 });

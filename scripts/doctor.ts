@@ -4,13 +4,15 @@
  * Checks are ordered cheapest-first and each is independent, so a failure
  * early does not hide the rest. Exit 1 on any FAIL; WARN never fails the run.
  */
-import { existsSync, statSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from 'node:fs';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   CONTEXT_REPO, PROJECT_TARGET, SKILLS_ROOT, WORK_REPO, WT_ROOT, pathSources, seedFrom,
-  auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, phases, phasesOutsideTarget, portPool,
-  projectConfig, repoIdentity, requiredLabels, reviewersConfig, slackConfig,
+  auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, localTestsConfig, phases,
+  phasesOutsideTarget, portPool, projectConfig, repoIdentity, requiredLabels, reviewersConfig, slackConfig,
+  type LocalTestsConfig,
 } from '../src/lib/config.js';
 import { ping, getBranch, listLabels } from '../src/lib/gitlab.js';
 import {
@@ -44,6 +46,312 @@ function report(f: Finding): void {
   else pass(f.label, f.detail);
 }
 
+// ----------------------------------------------------------- local tests
+
+/**
+ * `git -C <dir> …`, read-only and never prompting: a probe that waits on an
+ * ssh passphrase is a doctor that hangs instead of answering.
+ */
+function gitIn(dir: string, args: string[], timeout = 20_000): SpawnSyncReturns<string> {
+  return spawnSync('git', ['-C', dir, ...args], {
+    encoding: 'utf8', timeout,
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND || 'ssh -o BatchMode=yes -o ConnectTimeout=10',
+    },
+  });
+}
+
+/** The first line of a failed command, for a FAIL detail. */
+function firstLine(out: string | null | undefined): string {
+  return (out ?? '').split('\n').map((l) => l.trim()).find(Boolean)?.slice(0, 160) ?? '';
+}
+
+/**
+ * One query against the desk's Postgres, as `psql -XAtqw`: no psqlrc, bare
+ * rows, never a password prompt.
+ *
+ * Always through the `postgres` maintenance database, never the baseline. A
+ * connection to the baseline is exactly what makes Postgres refuse to copy it,
+ * so a doctor that checked the baseline by connecting to it would cause the
+ * failure it exists to warn about.
+ */
+function psql(pg: LocalTestsConfig['pg'], sql: string): { ok: boolean; out: string; error: string } {
+  const res = spawnSync('psql', [
+    '-h', pg.host, '-p', String(pg.port), ...(pg.user ? ['-U', pg.user] : []),
+    '-d', 'postgres', '-XAtqw', '-c', sql,
+  ], { encoding: 'utf8', timeout: 15_000, env: { ...process.env, PGCONNECT_TIMEOUT: '5' } });
+  if (res.error) {
+    const missing = (res.error as NodeJS.ErrnoException).code === 'ENOENT';
+    return { ok: false, out: '', error: missing ? 'psql is not on PATH (brew install libpq)' : res.error.message };
+  }
+  return { ok: res.status === 0, out: (res.stdout ?? '').trim(), error: firstLine(res.stderr) };
+}
+
+/**
+ * Does `installed` satisfy package.json's `wanted`? Exact pins, `^` and `~` —
+ * the forms a lockfile-pinned repo writes. Anything else answers null and is
+ * reported as not compared rather than guessed at.
+ */
+function satisfies(installed: string, wanted: string): boolean | null {
+  const parse = (v: string): [number, number, number] | null => {
+    const m = v.trim().replace(/^[=v]+/, '').match(/^(\d+)\.(\d+)\.(\d+)$/);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const range = wanted.trim();
+  const op = range.startsWith('^') || range.startsWith('~') ? range.slice(0, 1) : '';
+  const have = parse(installed);
+  const want = parse(range.slice(op.length));
+  if (!have || !want) return null;
+  const [hMaj, hMin, hPatch] = have;
+  const [wMaj, wMin, wPatch] = want;
+  const cmp = hMaj - wMaj || hMin - wMin || hPatch - wPatch;
+  if (!op) return cmp === 0;
+  if (cmp < 0) return false;
+  if (op === '~') return hMaj === wMaj && hMin === wMin;
+  return wMaj === 0 ? hMaj === 0 && hMin === wMin : hMaj === wMaj;
+}
+
+/** Where Cypress keeps its binaries: CYPRESS_CACHE_FOLDER, else the platform default. */
+function cypressCaches(): string[] {
+  return [
+    process.env.CYPRESS_CACHE_FOLDER ?? '',
+    join(homedir(), 'Library', 'Caches', 'Cypress'),
+    join(homedir(), '.cache', 'Cypress'),
+  ].filter(Boolean);
+}
+
+/** Every file under `dir` with one of `exts`, skipping dependencies and run output. */
+function sourceFiles(dir: string, exts: RegExp, out: string[] = []): string[] {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (e.isDirectory()) {
+      if (!['node_modules', 'downloads', 'screenshots', 'videos', 'results'].includes(e.name)) {
+        sourceFiles(join(dir, e.name), exts, out);
+      }
+    } else if (exts.test(e.name)) {
+      out.push(join(dir, e.name));
+    }
+  }
+  return out;
+}
+
+/** The keys of a JSON object, or null for anything that is not one. Values are never returned. */
+function jsonKeys(text: string): string[] | null {
+  try {
+    const v = JSON.parse(text) as unknown;
+    return v && typeof v === 'object' && !Array.isArray(v) ? Object.keys(v) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** An account the specs log in as, by name: `loginWith('HR_CREDENTIALS')`, `Cypress.env('HR_TOKEN')`. */
+const CREDENTIAL_NAME = /['"`]([A-Z][A-Z0-9_]*_(?:CREDENTIALS|TOKEN))['"`]/g;
+
+/**
+ * The credentials file, by key NAME. Nothing here prints, logs or compares a
+ * value: what drifts is which accounts the file covers, and a missing key is a
+ * spec that fails at its login, which reads on the ticket like a regression.
+ *
+ * The committed cypress.env.json is the baseline, not the requirement. Each
+ * run writes the committed copy with the credentials file merged over it into
+ * a mode-600 cypress.env.json in its throwaway worktree
+ * (state/runs/<iid>/wsa-run), before the app build, and removes it with that
+ * worktree at cleanup — and what workstream-automation commits is
+ * configuration (tags, emails, endpoints), with the accounts left out on
+ * purpose. So what the file has to supply is every account the specs log in
+ * as that the committed copy does not carry. Other keys a spec reads
+ * (`Cypress.env('tags')`) are not judged: several are set per run on the
+ * command line, and a standing warning nobody can clear is one everybody
+ * learns to skip.
+ *
+ * A file others can read is a WARN, not a FAIL: the run uses it all the same
+ * (it only logs the same advice), so it stops nothing — but the test
+ * accounts' passwords are then readable by every user on this machine.
+ */
+function checkLocalTestsCreds(lt: LocalTestsConfig): void {
+  const file = lt.credsFile;
+  if (!existsSync(file)) {
+    fail('local tests credentials file missing',
+      `${file} — create it with the keys of your ${join(lt.repo, 'cypress.env.json')}, chmod 600, ` +
+      'or point ONESHOT_LOCAL_TESTS_CREDS at yours');
+    return;
+  }
+  const mode = statSync(file).mode & 0o777;
+  if (mode & 0o077) {
+    warn('local tests credentials file is readable by group or others',
+      `${file} is mode ${mode.toString(8)} — runs still use it, but anyone on this machine can read the ` +
+      `test accounts' passwords; chmod 600 ${file}`);
+  }
+  const have = jsonKeys(readFileSync(file, 'utf8'));
+  if (!have) {
+    fail('local tests credentials file is not a JSON object', `${file} — same shape as cypress.env.json`);
+    return;
+  }
+
+  // As committed at the ref every run checks out: the clone's own copy is
+  // usually a person's, with their accounts added to it.
+  const shown = gitIn(lt.repo, ['show', `${lt.automationRef}:cypress.env.json`]);
+  const committed = new Set(shown.status === 0 ? jsonKeys(shown.stdout) ?? [] : []);
+  const accounts = new Set<string>();
+  for (const f of sourceFiles(join(lt.repo, 'cypress'), /\.(?:[cm]?[jt]sx?)$/)) {
+    for (const [, name] of readFileSync(f, 'utf8').matchAll(CREDENTIAL_NAME)) if (name) accounts.add(name);
+  }
+
+  const held = new Set(have);
+  const missing = [...accounts].filter((k) => !held.has(k) && !committed.has(k)).sort();
+  if (missing.length) {
+    fail(`local tests credentials file lacks ${missing.length} account(s) the specs log in as`,
+      `${missing.join(', ')} — add them to ${file}`);
+  } else {
+    pass('local tests credentials', `${file}, ${have.length} keys — has every one of the ${accounts.size} ` +
+      'accounts the specs log in as (checked by name only)');
+  }
+}
+
+/**
+ * Has someone added accounts to the clone's own cypress.env.json?
+ *
+ * Runs never read that copy — each one checks out the committed file at
+ * automationRef and merges the credentials file over it — so local changes
+ * there buy nothing. What they cost: the passwords then sit in a tracked file,
+ * where `git diff`, `git stash show -p` or a `git status` followed by a diff in
+ * that clone prints them. Asked with `git status --porcelain`, which names the
+ * path and never shows a line of its content, and with --no-optional-locks so
+ * not even the index is rewritten.
+ */
+function checkCloneEnvFile(lt: LocalTestsConfig): void {
+  const st = gitIn(lt.repo,
+    ['--no-optional-locks', 'status', '--porcelain=v1', '--untracked-files=no', '--', 'cypress.env.json']);
+  if (st.status !== 0) {
+    warn('automation clone cypress.env.json not checked', firstLine(st.stderr) || 'git status failed');
+    return;
+  }
+  if (!st.stdout.trim()) {
+    pass('automation clone cypress.env.json', 'same as HEAD');
+    return;
+  }
+  warn('automation clone cypress.env.json differs from HEAD',
+    `${join(lt.repo, 'cypress.env.json')} has local changes — runs never read it (they use the committed copy plus ` +
+    `${lt.credsFile}), but a git diff in the clone prints whatever was added, often real passwords. ` +
+    `Move any accounts you added into ${lt.credsFile}, then git -C ${lt.repo} checkout -- cypress.env.json`);
+}
+
+/** The installed Cypress package against package.json, and its binary in the cache. */
+function checkCypress(repo: string): void {
+  let wanted = '';
+  try {
+    const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8')) as
+      { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    wanted = pkg.devDependencies?.cypress ?? pkg.dependencies?.cypress ?? '';
+  } catch { /* reported below */ }
+  if (!wanted) {
+    fail('Cypress version unknown', `${join(repo, 'package.json')} does not declare cypress`);
+    return;
+  }
+
+  let installed = '';
+  try {
+    installed = (JSON.parse(readFileSync(join(repo, 'node_modules', 'cypress', 'package.json'), 'utf8')) as
+      { version?: string }).version ?? '';
+  } catch { /* reported below */ }
+  if (!installed) {
+    fail('Cypress is not installed in the automation clone', `package.json wants ${wanted} — run npm ci in ${repo}`);
+    return;
+  }
+  const ok = satisfies(installed, wanted);
+  if (ok === false) {
+    fail('Cypress in node_modules does not match package.json',
+      `installed ${installed}, package.json wants ${wanted} — run npm ci in ${repo}`);
+    return;
+  }
+
+  // The npm package is a launcher; the browser runner is a separate download
+  // per version, and a missing one fails the run before any spec.
+  const cache = cypressCaches().find((c) => existsSync(join(c, installed)));
+  if (cache) {
+    pass('Cypress', `${installed}${ok === null ? ` (package.json says ${wanted}, not compared)` : ''}, ` +
+      `binary in ${join(cache, installed)}`);
+  } else {
+    fail(`Cypress ${installed} binary is not installed`,
+      `not under ${cypressCaches().join(' or ')} — run npx cypress install in ${repo}`);
+  }
+}
+
+/**
+ * Is this desk set up for the local automation tests step?
+ *
+ * Read-only, every line of it: nothing here fetches, installs, connects to the
+ * baseline or creates a database. What is true only at this instant — sessions
+ * on the baseline, leftover copies and worktrees, node_modules behind the base
+ * branch — is preflight's.
+ */
+function checkLocalTests(lt: LocalTestsConfig): void {
+  section('Local tests');
+  if (!lt.enabled) {
+    // Off is the ordinary answer on a desk that never set the clone. A desk
+    // that did and is still off has a policy field to fix, and should hear so.
+    if (lt.repo) warn('local tests: off', lt.off ?? '');
+    else pass('local tests: off', lt.off ?? '');
+    return;
+  }
+
+  // The clone every run cuts its throwaway worktree from.
+  const repo = lt.repo;
+  if (!existsSync(repo)) {
+    fail('automation clone missing', `${repo} — clone workstream-automation there, or fix ONESHOT_LOCAL_TESTS_REPO`);
+  } else if (gitIn(repo, ['rev-parse', '--is-inside-work-tree']).stdout.trim() !== 'true') {
+    fail('automation clone is not a git checkout', `${repo} — ONESHOT_LOCAL_TESTS_REPO must name a clone`);
+  } else {
+    const origin = gitIn(repo, ['remote', 'get-url', 'origin']);
+    if (origin.status !== 0) {
+      fail('automation clone has no origin', `${repo} — ${lt.automationRef} is fetched from it`);
+    } else {
+      const remote = gitIn(repo, ['ls-remote', '--exit-code', 'origin', 'HEAD'], 30_000);
+      if (remote.status === 0) pass('automation clone', `${repo}, origin reachable`);
+      else warn('automation origin unreachable', `${firstLine(remote.stderr) || 'no answer'} — VPN? runs use the last fetch`);
+    }
+    const ref = gitIn(repo, ['rev-parse', '--verify', '--quiet', `${lt.automationRef}^{commit}`]);
+    if (ref.status === 0) pass('automation ref', `${lt.automationRef} at ${ref.stdout.trim().slice(0, 10)}`);
+    else fail('automation ref does not resolve', `${lt.automationRef} in ${repo} — git -C ${repo} fetch origin`);
+
+    checkLocalTestsCreds(lt);
+    checkCloneEnvFile(lt);
+    checkCypress(repo);
+  }
+
+  // The node the run step spawns is the one on PATH, not the one running this.
+  const node = spawnSync('node', ['--version'], { encoding: 'utf8' });
+  const major = Number((node.stdout ?? '').trim().replace(/^v/, '').split('.')[0]);
+  if (major === 22) pass('node on PATH', (node.stdout ?? '').trim());
+  else if (major > 22) warn('node on PATH is not 22', `${(node.stdout ?? '').trim()} — the step was proven on Node 22`);
+  else fail('node on PATH is not 22', `${(node.stdout ?? '').trim() || 'none'} — put Node 22 first on PATH (nvm use 22)`);
+
+  // Postgres: reachable, the baseline there, and a role that may copy it.
+  const where = `${lt.pg.user ? `${lt.pg.user}@` : ''}${lt.pg.host}:${lt.pg.port}`;
+  const up = psql(lt.pg, 'SELECT 1');
+  if (!up.ok) {
+    fail('Postgres not reachable with psql', `${where} — ${up.error || 'no answer'}`);
+    return;
+  }
+  pass('Postgres reachable', where);
+  // baselineDb is a checked lower-case identifier (localTestsConfig), so it is safe as a literal.
+  const base = psql(lt.pg, `SELECT 1 FROM pg_database WHERE datname = '${lt.baselineDb}'`);
+  if (base.out === '1') pass('baseline database', lt.baselineDb);
+  else fail('baseline database missing', `${lt.baselineDb} on ${where} — restore the automation dump into it (docs/LOCAL-TESTS.md)`);
+  const role = psql(lt.pg, 'SELECT rolcreatedb OR rolsuper FROM pg_roles WHERE rolname = current_user');
+  if (role.out !== 't') {
+    fail('Postgres role cannot create databases', `${where} — every run copies ${lt.baselineDb} with CREATE DATABASE`);
+  }
+}
+
 async function main(): Promise<void> {
   console.log('\nOneshot doctor');
 
@@ -71,6 +379,8 @@ async function main(): Promise<void> {
   for (const f of relaxRepoChecks(identityFindings())) report(f);
   const repo = repoIdentity().repo;
   const cfg = projectConfig();
+  // Read once, so the label list below and the Local tests section judge the same answer.
+  const localTests = localTestsConfig();
   pass('labels', `"${cfg.labels.entry}" -> "${cfg.labels.exit}", blocked "${cfg.labels.blocked}", ` +
     (cfg.labels.review
       ? `optional review gate "${cfg.labels.review}" (off unless a ticket carries it too)`
@@ -263,7 +573,7 @@ async function main(): Promise<void> {
         warn('labels not verified', `could not list project labels (${lb.kind} HTTP ${lb.status})`);
       } else {
         const defined = new Set(lb.data.map((l) => l.name));
-        const needed = requiredLabels(cfg.labels, phases(), bugReproductionEnabled());
+        const needed = requiredLabels(cfg.labels, phases(), bugReproductionEnabled(), localTests.enabled);
         const absent = needed.filter((l) => !defined.has(l.name));
         if (!absent.length) pass('every configured label exists on the project', `${needed.length} checked`);
         for (const { name, why } of absent) {
@@ -384,6 +694,8 @@ async function main(): Promise<void> {
       }
     }
   }
+
+  checkLocalTests(localTests);
 
   // -------------------------------------------------------------- verdict
   console.log(`\n${fails ? R : G}${fails} failed${X}, ${Y}${warns} warnings${X}\n`);

@@ -12,21 +12,29 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const VAR = 'GITLAB_REPO_URL';
+/** The desk switch for the local-tests phases, which phases() also filters on. */
+const LT_VAR = 'ONESHOT_LOCAL_TESTS_REPO';
 
 /**
  * The target is the last path segment of GITLAB_REPO_URL. The empty string for
  * no target, never `delete` — dotenv fills a missing key (see target.test.ts).
+ * The local-tests step is OFF unless `localTestsRepo` is given, whatever this
+ * desk's .env says, so these assertions mean the same on every desk.
  */
-async function phasesWith(value: string): Promise<Array<{ name: string; targets?: string[] }>> {
-  const had = Object.prototype.hasOwnProperty.call(process.env, VAR);
-  const before = process.env[VAR];
+async function phasesWith(
+  value: string, localTestsRepo = '',
+): Promise<Array<{ name: string; targets?: string[] }>> {
+  const saved = [VAR, LT_VAR].map((k) => [k, Object.prototype.hasOwnProperty.call(process.env, k), process.env[k]] as const);
   process.env[VAR] = value ? `https://gitlab.example.com/acme/${value}` : '';
+  process.env[LT_VAR] = localTestsRepo;
   try {
-    const m = await import(`./config.js?phases=${encodeURIComponent(value)}-${Date.now()}`);
+    const m = await import(`./config.js?phases=${encodeURIComponent(value)}-${localTestsRepo ? 'lt' : ''}-${Date.now()}`);
     return (m.phases as () => Array<{ name: string; targets?: string[] }>)();
   } finally {
-    if (had) process.env[VAR] = before;
-    else delete process.env[VAR];
+    for (const [k, had, before] of saved) {
+      if (had) process.env[k] = before;
+      else delete process.env[k];
+    }
   }
 }
 
@@ -49,6 +57,24 @@ test('adding the target gate adds exactly one phase and removes none', async () 
   const on = (await phasesWith('erp')).map((p) => p.name);
   assert.deepEqual(on.filter((n) => !off.includes(n)), ['mr-open']);
   assert.deepEqual(off.filter((n) => !on.includes(n)), []);
+});
+
+test('a desk without the automation clone runs neither local-tests phase, and ui-evidence still pairs with mr', async () => {
+  const names = (await phasesWith('erp')).map((p) => p.name);
+  assert.ok(!names.includes('local-tests-scope'), names.join(', '));
+  assert.ok(!names.includes('local-tests-run'), names.join(', '));
+  assert.equal(names[names.indexOf('ui-evidence') + 1], 'mr', 'the two batch together exactly as before');
+});
+
+test('a desk with the clone runs both local-tests phases between ui-evidence and mr, on erp only', async () => {
+  const on = (await phasesWith('erp', '/nowhere/workstream-automation')).map((p) => p.name);
+  assert.deepEqual(on.slice(on.indexOf('ui-evidence'), on.indexOf('mr') + 1),
+    ['ui-evidence', 'local-tests-scope', 'local-tests-run', 'mr']);
+  const off = (await phasesWith('erp')).map((p) => p.name);
+  assert.deepEqual(on.filter((n) => !off.includes(n)), ['local-tests-scope', 'local-tests-run']);
+  // The automation suite is the erp target's; another project never gets them.
+  const elsewhere = (await phasesWith('', '/nowhere/workstream-automation')).map((p) => p.name);
+  assert.ok(!elsewhere.includes('local-tests-scope') && !elsewhere.includes('local-tests-run'));
 });
 
 test('an untargeted phase runs under every target', async () => {

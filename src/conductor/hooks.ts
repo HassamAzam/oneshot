@@ -165,7 +165,12 @@ const BASH = '^Bash$';
  */
 const WRITE_TOOLS_OR_BASH = '^(Write|Edit|NotebookEdit|Bash)$';
 const MR_TOOLS = '^mcp__gitlab__(create|update)_merge_request$';
-const READ_OR_BASH = '^(Read|NotebookRead|Grep|Bash)$';
+/**
+ * secret-guard's surfaces. Glob is on the list because the guard judges it too:
+ * a pattern that hunts for a cypress.env.json by name is how a session finds a
+ * credentials file it was never told the path of (docs/HOOKS.md, local tests).
+ */
+const READ_OR_BASH = '^(Read|NotebookRead|Grep|Glob|Bash)$';
 
 /**
  * Build the hook set for one phase.

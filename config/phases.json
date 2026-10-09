@@ -251,10 +251,50 @@
       "onFail": "warn",
       "needsPort": true,
       "group": "package",
+      "_why_group": "Paired with mr (mr's _why_group says why) only while the two are ADJACENT, because a group is a run of consecutive phases. On a desk where the local-tests step is on, local-tests-scope and local-tests-run sit between them, so ui-evidence runs alone and mr runs later, after a developer has approved the local results. Nothing in code says so; the ordering does. On every other desk those two phases are dropped from the list and the pair runs together exactly as before.",
       "skills": [
         "ui-evidence-pack"
       ],
       "artifact": "ui-evidence.json"
+    },
+    {
+      "name": "local-tests-scope",
+      "n": 7.3,
+      "kind": "session",
+      "tier": "standard",
+      "cwd": "worktree",
+      "maxTurns": 80,
+      "timeoutMin": 30,
+      "writes": [
+        "run"
+      ],
+      "onFail": "warn",
+      "skills": [
+        "local-tests-impact"
+      ],
+      "targets": [
+        "erp"
+      ],
+      "artifact": "local-tests-scope.json",
+      "_why": "Picks the workstream-automation (Cypress) specs this ticket's diff can break, and prepares them, so local-tests-run has an exact list to run before any MR exists. A session because one part of it is a judgement a script cannot make: whether a renamed testid was MEANT (follow it with a temporary spec edit) or is a regression (leave the spec to fail), and which module specs earn a place inside the limits. The counting is not a judgement, so it is not left to the session: skills/local-tests-impact/scripts/index.cjs maps the diff, counts the cases and prices the list, and the prompt tells the session to believe it. After ui-evidence because the change is verified and evidenced by then, and before mr so a developer can approve what the suite did to it while there is still nothing to merge. 7.3 rather than an integer for the reason design's _why_n gives.",
+      "_why_writes": "'run' and nothing wider, and it is enough: the throwaway automation worktree the conductor checks out before this session (prepare-scope) is state/runs/<iid>/wsa, inside the run directory, so the session can edit specs, page objects and fixtures there and cannot touch the ERP worktree. git-guard keeps git from changing that repo at all, and the conductor saves the edits as artifacts/local-tests/temporary-changes.patch and removes the worktree the moment the session ends (capture), checking every changed file against localTests.allowedPaths.",
+      "_why_onFail": "warn. A scope that could not be made costs this ticket its local run, never its MR: local-tests-run records 'skipped' with the reason, nobody is asked anything, and the run carries on to mr. That is also the answer for a ticket nothing in the suite can see (`applicable: false`) and for a scope that lists no specs.",
+      "_why_budget": "standard tier and 80 turns / 30 min, like ui-evidence, and an ESTIMATE: index.cjs answers in about a second, so the budget is for reading the diff, pricing one or two candidate lists and a handful of one-line selector edits. Correct it from real runs.",
+      "_why_targets": "Scoped to the erp target, whose automation suite this is, and dropped from the list entirely on a desk where localTestsConfig() is off (no ONESHOT_LOCAL_TESTS_REPO, or localTests.enabled false): such a desk has no clone to scope against, so it runs exactly the sequence it ran before this phase existed."
+    },
+    {
+      "name": "local-tests-run",
+      "n": 7.6,
+      "kind": "code",
+      "timeoutMin": 120,
+      "onFail": "warn",
+      "targets": [
+        "erp"
+      ],
+      "artifact": "local-tests-run.json",
+      "_why": "Code, not a session. Copying the baseline database, applying the scope's patch to a fresh automation worktree, running Cypress and reading its results is deterministic, and no model should hold the automation credentials or a database it could write to. src/conductor/localtests.ts drives scripts/localtests.cjs. Like every code phase it runs on EVERY pass, so it is idempotent by cache key: the specs, the ticket's commit, the automation commit and the patch. A resume or a re-walk with none of those changed returns the saved local-tests-run.json instead of starting another run. One Cypress run per desk (src/lib/cypresslease.ts): a busy desk PARKS the run, the way a merge waiting on a person does, rather than failing it, and the next tick tries again. The same target scope and desk switch as local-tests-scope.",
+      "_why_onFail": "warn. A setup failure (no baseline database, a patch that no longer applies, a script that died) is the desk's problem: it costs the ticket its local run, not its MR, and the ticket says why. Failing TESTS are not a phase failure at all: the developer on the localResults gate reads them and decides. localTests.failuresBlock true is the one exception, and it blocks the run before mr whatever this says.",
+      "_why_timeoutMin": "The FLOOR of the conductor's own kill, and the one place this code phase reads its timeoutMin. The script holds each Cypress run to localTests.maxRunMinutes, but around that it copies the database, migrates, builds the ticket's app (25 minutes allowed cold) and, when tests failed, builds the base app and re-runs the failures to say whether they fail on dev too. So the conductor kills the script's whole process group at the LATER of maxRunMinutes + 15 and this: the first alone (60 minutes today) would cut exactly the runs that needed the most building, usually in the middle of the base re-run. 120 is an ESTIMATE of a cold build, a full Cypress run and a base re-run; correct it from real runs (runDeadlineMs in src/conductor/localtests.ts)."
     },
     {
       "name": "mr",
@@ -269,7 +309,7 @@
       ],
       "onFail": "abort",
       "group": "package",
-      "_why_group": "ui-evidence drives the browser on the leased port while mr pushes the branch and writes the MR \u2014 disjoint tools, disjoint writes, both read-only on the diff. Running them together hides the screenshot pass inside the MR pass's wall clock.",
+      "_why_group": "ui-evidence drives the browser on the leased port while mr pushes the branch and writes the MR \u2014 disjoint tools, disjoint writes, both read-only on the diff. Running them together hides the screenshot pass inside the MR pass's wall clock. Only where the two are adjacent: on a desk with the local-tests step on, mr waits for local-tests-run and the localResults gate and runs on its own (see ui-evidence's _why_group).",
       "skills": [
         "mr-metadata",
         "mr-change-logger"

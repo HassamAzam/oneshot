@@ -18,9 +18,11 @@
     "testcaseReview": "",
     "designReview": "",
     "notABug": "",
-    "inReview": "In Review"
+    "inReview": "In Review",
+    "localTests": "TestCase Run Locally"
   },
   "_comment_inReview": "Added while a ticket's MR waits for a person to merge it, removed when the run finishes (merged) or blocks. Not the same as `review`, which is what makes a ticket need human sign-off. Empty or absent disables it.",
+  "_comment_localTests": "Added by conductor code when the local-tests-scope phase says this ticket's change has workstream-automation (Cypress) specs worth running locally, so the board shows which tickets had them run. Never removed by Oneshot and never gates anything: the localSpecs and localResults review gates are what pause the run. Required (doctor) only on a desk where localTests is on, see the localTests block. Exists on arbisoft/erp as label 1352. Empty or absent disables it.",
   "_comment_designReview": "A SIXTH, OPTIONAL, board-only label, EMPTY (off) by default \u2014 set it to an existing project label to switch it on. Exactly the testcaseReview mechanism, for the design gate: added when that gate first posts its request, removed when it resolves, gating nothing itself. It is empty rather than pre-filled because a swap naming a label that is not on the project is silently dropped \u2014 so a default of 'Design Review' would look configured and do nothing. Note it is NOT the 'Design' label: that one is what puts a ticket through the design phase at all and is listed under preserveLabels.",
   "_comment_testcaseReview": "A FIFTH, OPTIONAL, board-only label, EMPTY (off) by default. swapLabel adds it the moment the testcases gate first posts its request comment (a QA sign-off is now pending) and removes it the moment that gate is approved -- see src/conductor/reviewgate.ts. It never gates anything itself and is never required alongside 'Loop'; its only job is letting a board view tell 'parked at testcases QA review' apart from every other parked/blocked reason. Empty string turns it off, same as leaving 'review' unset. Must exist on the project before relying on it, same rule as every other label here.",
   "_comment_reviewAllRuns": "TRUE = the review gates apply to EVERY run, not only tickets carrying the Review label or touching highScrutinyPaths. This is a deliberate change of posture: with it on, every run pauses after `plan` and after `testcases` for a human, and never merges its own MR. The path list still works and is still worth keeping \u2014 it is what makes a gate survive this being switched back off. The label trigger works only once labels.review names a label that exists on the project; it is empty in this config, so no ticket is gated by a label. Requires channels:history (or groups:history) on the Slack bot token; without it every gate sits 'pending' forever and every run parks, which is why doctor FAILS rather than warns while this is true.",
@@ -79,6 +81,33 @@
     },
     "_why_recheckMinutes": "A not-ready ticket is re-checked when it changes, and otherwise at this interval. Merging an MR does not touch the ticket's updated_at, so waiting for a change alone would miss the most common fix.",
     "recheckMinutes": 30
+  },
+  "localTests": {
+    "_why": "The local automation tests step. After ui-evidence and before mr, the local-tests-scope session picks the workstream-automation (Cypress) specs this ticket's diff affects, and local-tests-run (plain code, no model) runs them on this desk against the ticket's code on a throwaway copy of the automation database, then posts the results on the ticket. Two people gates ride on it: localSpecs (QA) before the run, armed only when the scope proposes adding or removing a test or Oneshot flags an existing test as weakened, and localResults (dev) before mr. This block is the team POLICY. A desk switches the step on by pointing ONESHOT_LOCAL_TESTS_REPO in .env at its workstream-automation clone; left empty, the step stays off on that desk whatever this says. `enabled: false` here switches it off on every desk. Read through localTestsConfig() (src/lib/config.ts), which treats any unusable field as off and says which one. The Cypress credentials never come from here: the run merges the desk's credentials file (ONESHOT_LOCAL_TESTS_CREDS) over the committed cypress.env.json into a mode-600 cypress.env.json in its throwaway state/runs/<iid>/wsa-run worktree, written before the app build and removed with that worktree at cleanup.",
+    "enabled": true,
+    "_why_baselineDb": "The Postgres database every run copies from (CREATE DATABASE <dbPrefix><iid>_<n> TEMPLATE <baselineDb>). No run ever writes to it. It must already exist on the desk with the automation data restored into it, and nothing may be connected to it while a copy is taken, because Postgres refuses a template that has sessions. A desk whose baseline has another name sets ONESHOT_LOCAL_TESTS_BASELINE_DB rather than editing this. A plain lower-case identifier only, because it is written into SQL.",
+    "baselineDb": "hrdb_automation_baseline_20261002",
+    "_why_pg": "Where that Postgres listens. The per-run copies are created and dropped on this server, so it is the desk's own. pgUser empty means the libpq default (the OS user). ONESHOT_LOCAL_TESTS_PG_HOST, ONESHOT_LOCAL_TESTS_PG_PORT and ONESHOT_LOCAL_TESTS_PG_USER override these per desk.",
+    "pgHost": "127.0.0.1",
+    "pgPort": 5432,
+    "pgUser": "",
+    "_why_dbPrefix": "Every per-run copy is named <dbPrefix><iid>_<n>, so cleanup can find and drop leftovers by this prefix without touching any other database. A plain lower-case identifier, and never the start of baselineDb, or cleanup would match the baseline.",
+    "dbPrefix": "oneshot_lt_",
+    "_why_automationRef": "The workstream-automation commit both throwaway worktrees are checked out at: the scope session's state/runs/<iid>/wsa, where the temporary changes are made, and the run's state/runs/<iid>/wsa-run, where they are applied again before Cypress runs.",
+    "automationRef": "origin/master",
+    "_why_allowedPaths": "The only places in workstream-automation the scope session may change for a run: specs, page objects and fixtures. Changes are temporary. They are saved as artifacts/local-tests/temporary-changes.patch, applied to a fresh worktree and never committed.",
+    "allowedPaths": [
+      "cypress/Pages/",
+      "cypress/fixtures/",
+      "cypress/e2e/"
+    ],
+    "_why_limits": "A selection budget, not a hard cap. The scope session fills its list from the affected modules only while it stays within maxSpecs spec files and maxRunMinutes minutes. The specs that can see the change are never cut for the budget: when they alone are over it, the whole list stays and the plan carries a 'Trim to fit the limits' proposal for QA, and the list runs in full if QA approves it. maxRunMinutes is also the deadline of EACH Cypress run (the ticket run, the retry of its failures, the re-run on the base code), so a list over it may not finish; unfinished specs are reported as not finished.",
+    "maxSpecs": 40,
+    "maxRunMinutes": 45,
+    "_why_devApproval": "How many developers (config/reviewers.json dev) must reply `approved` on the localResults gate. 'any' = one of them is enough. That is the only rule the gate implements today: 'all' is read but not enforced yet.",
+    "devApproval": "any",
+    "_why_failuresBlock": "FALSE = failing local tests are reported, and the developer on the localResults gate decides whether the run goes on to mr. TRUE = a failing local test (one that failed twice on the ticket's code) blocks the run before mr. A run cut off at the Cypress deadline with no failing test is reported, deadline and unfinished specs included, and goes to the developer's gate; it does not block. A test that passed on its retry is reported as flaky and never blocks.",
+    "failuresBlock": false
   },
   "_comment_concurrency": "In-flight TICKET cap. The old MUST-STAY-1 constraint is now carried by the promotion mutex (src/lib/promotion.ts): the deploy script ships the TIP of dev, so exactly one run may occupy the merge\u2192deploy\u2192qa window at a time \u2014 that is where attribution lives, and the mutex enforces it while every other phase pipelines freely. Residual cap reasons: worktrees symlink ONE shared node_modules/venv (a second webpack build during another run's verify contends on the babel cache), and the port pool (PORT_POOL, default 3) bounds server-holding phases. Raise toward the pool size once shared-cache contention is observed to be tolerable. Set to 1 deliberately: the operator runs one ticket per loop and scales by starting more conductors, so the fleet-wide ceiling is PORT_POOL and each process holds exactly one run \u2014 which also keeps the shared node_modules/venv contention this comment warns about at one build per conductor.",
   "concurrency": 1
