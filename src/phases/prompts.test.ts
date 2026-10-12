@@ -538,6 +538,19 @@ test('both skills these phases declare actually ship in this repo', () => {
   assert.ok(existsSync(join(ROOT, 'skills', 'change-scoping', 'SKILL.md')));
 });
 
+test('plan declares the superpowers planning skill alongside change-scoping', () => {
+  // change-scoping decides WHAT is in scope and WHERE it goes; the superpowers
+  // planning discipline decides HOW each step is written so implement executes
+  // it without re-deriving. They complement, so both are declared.
+  const got = names(systemPromptFor(cfg('plan'), ctx(ticket())));
+  assert.ok(got.includes('superpowers-planning'));
+  assert.ok(got.includes('change-scoping'));
+});
+
+test('the superpowers planning skill ships in this repo', () => {
+  assert.ok(existsSync(join(ROOT, 'skills', 'superpowers-planning', 'SKILL.md')));
+});
+
 test('the research prompt still stands alone if the skill does not resolve', () => {
   // Skills are an upgrade, never a dependency (see SKILL_LINE). The parts that
   // must survive are the three the measurement showed were load-bearing.
