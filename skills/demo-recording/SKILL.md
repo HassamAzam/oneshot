@@ -78,6 +78,12 @@ const webm = await rec.finishRecording(r, 'demo.webm');  // closes context, retu
 - Record real data and the real journey. Intercepting `**/api/v1/**` is only for a
   state real data cannot reach, and then say so in the caption — a demo of a
   mocked state that claims to be live is the one thing that destroys the artefact.
+- **Admin-only features** (the change lives in the Django admin, with no React
+  screen) record with `startRecording({ ..., admin: true })` and `rec.gotoAdmin(r,
+  '/admin/<app>/<model>/')` instead of `gotoModule`. Admin mode authenticates
+  against the Django admin and needs only Django on `$ONESHOT_PORT` — never the
+  webpack bundle — so it still works when the SPA is down. The journey is the same:
+  one caption per step, ring the control, drive it.
 
 ## Attach the webm to the ticket
 
