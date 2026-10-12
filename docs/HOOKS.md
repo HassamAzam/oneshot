@@ -90,6 +90,8 @@ that needed it.
 |---|---|---|
 | `budget-gate` | Refuses the session if the phase's or the run's weighted-token ceiling is blown. **Per-phase ceilings now, not per-loop** — an `implement` that burned 3 laps is refused a 4th before the model starts. Four Opus phases per ticket makes this load-bearing. | **P0** |
 | `run-context` | Injects immutable run facts as `additionalContext`: run id, iid, leased branch, worktree path, port, lap number, outstanding findings. Uniform across all phases and present even if prompt assembly has a bug. | **P1 (M1)** |
+| `traps-brief` | Self-gates to `testcases` and injects `erp-ticket-test-plan`'s `refs/traps.md` as `additionalContext`. The skill already says to read it; an instruction to read a file is a request, and a phase under turn pressure drops reads first. | **P1** |
+| `repro-conditions` | Self-gates to `research` (and to `bugReproduction !== false`) and injects `bug-reproduction`'s `refs/why-it-did-not-reproduce.md`. Lands before the account is chosen and the options enumerated, which is the only point at which two of those conditions can still change the run. | **P1** |
 
 ### Not a hook: `automation-ready`
 

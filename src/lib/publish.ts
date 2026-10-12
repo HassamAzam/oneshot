@@ -25,7 +25,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { artifactDir, reviewersConfig } from './config.js';
-import { readArtifact, updateJournal, type RunJournal } from './artifacts.js';
+import { readArtifact, readJournal, updateJournal, type RunJournal } from './artifacts.js';
 import {
   addIssueNote, addMergeRequestNote, mergeRequestUrl, uploadFile, type Upload,
 } from './gitlab.js';
@@ -334,6 +334,15 @@ const SPECS: Spec[] = [
       const baseShotOf = new Map(baseShots.map((s) => [s.id, s.screenshot]));
       const baseNote = (id: string): string =>
         baseShotOf.has(id) ? ` (base: ${mdText(baseShotOf.get(id) ?? '')})` : '';
+      // Cases a QA reviewer ruled on at the verify-case gate (after two laps
+      // through `implement` still failed). Listed for the reviewer because the
+      // run completed verify on a human decision rather than on a clean pass.
+      const qaDecisions = readJournal(ctx.iid)?.verifyCaseDecisions ?? [];
+      const verdictWord: Record<string, string> = {
+        skip: 'skipped', invalid: 'invalid — dropped',
+        expected: 'expected behaviour — accepted as a pass', 'pre-existing': 'pre-existing',
+        'missing-steps': "re-run with QA's corrected steps",
+      };
       return {
         body: `**Local verification** — ${tally(results)}.\n\n${resultTable(results)}\n\n` +
           (regressions.length
@@ -344,6 +353,12 @@ const SPECS: Spec[] = [
               + 'These fail on the base branch too, so they did not hold this MR. Please confirm '
               + 'each one is genuinely not this diff, and raise a ticket for it.\n'
               + `${preExisting.map((r) => `- ${r.id}: ${mdText(r.evidence ?? '').replace(/\s*\n\s*/g, ' ')}${baseNote(r.id)}`).join('\n')}\n\n`
+            : '') +
+          (qaDecisions.length
+            ? '**QA decisions on still-failing cases**\n'
+              + 'After two laps through `implement` these case(s) still failed, and a QA reviewer '
+              + 'ruled on each so this MR could proceed:\n'
+              + `${qaDecisions.map((d) => `- ${d.caseId}: ${verdictWord[d.verdict] ?? d.verdict} (QA: ${d.by})${d.issueIid ? ` → #${d.issueIid}` : ''}`).join('\n')}\n\n`
             : '') +
           `_Run ${ctx.runId} · executed in a real browser against the branch._`,
         // Base shots first, with room of their own, so verify's ten never crowd out the proof.

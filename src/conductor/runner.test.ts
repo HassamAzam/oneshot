@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyBaseCheck, baseCheckOutcome, codePhaseStatus, decideClaim, failedCases, mergePollWait,
-  nextIndex, refusalIsFinal, runTicket, salvagedReview, sharedDatabaseRefusal, statusForFailure,
-  testcaseGateRoute, ticketComments, uiEvidenceRefusal, verifyAfterBaseCheckDeath,
+  mergeScopedVerify, nextIndex, refusalIsFinal, runTicket, salvagedReview, sharedDatabaseRefusal,
+  statusForFailure, testcaseGateRoute, ticketComments, uiEvidenceRefusal, verifyAfterBaseCheckDeath,
 } from './runner.js';
 import type { PhaseOutput } from './phase.js';
 import type { Issue, IssueNote } from '../lib/gitlab.js';
@@ -660,4 +660,34 @@ test('a base check that kept dying of infrastructure stops the run instead of bu
   assert.equal(statusForFailure(phaseByName('verify')!, verify.infra), 'infra');
   assert.equal(verify.rateLimited, false);
   assert.equal(verify.accountAction, undefined);
+});
+
+// ------------------------------------------------ scoped verify re-run merge
+
+const cr = (id: string, result: string): CaseResult =>
+  ({ id, result, evidence: '', screenshot: '' } as unknown as CaseResult);
+
+test('mergeScopedVerify keeps every non-rescoped case when the re-run returned only one', () => {
+  // The bug: a scoped re-run of TC-14 returns [TC-14] only; merging over that
+  // would erase TC-01/TC-07. Merging over the pre-scope baseline must not.
+  const baseline = [cr('TC-01', 'pass'), cr('TC-07', 'fail'), cr('TC-14', 'fail')];
+  const fresh = [cr('TC-14', 'pass')];
+  const merged = mergeScopedVerify(baseline, fresh, new Set(['TC-14']));
+  assert.deepEqual(merged.map((c) => [c.id, c.result]), [
+    ['TC-01', 'pass'], ['TC-07', 'fail'], ['TC-14', 'pass'],
+  ]);
+});
+
+test('mergeScopedVerify only trusts fresh results for in-scope cases', () => {
+  // A scoped session that wrongly re-reports an out-of-scope case is ignored.
+  const baseline = [cr('TC-01', 'pass'), cr('TC-14', 'fail')];
+  const fresh = [cr('TC-14', 'pass'), cr('TC-01', 'fail')];
+  const merged = mergeScopedVerify(baseline, fresh, new Set(['TC-14']));
+  assert.deepEqual(merged.map((c) => [c.id, c.result]), [['TC-01', 'pass'], ['TC-14', 'pass']]);
+});
+
+test('mergeScopedVerify leaves a still-failing non-scoped case failing (no premature advance)', () => {
+  const baseline = [cr('TC-07', 'fail'), cr('TC-14', 'fail')];
+  const merged = mergeScopedVerify(baseline, [cr('TC-14', 'pass')], new Set(['TC-14']));
+  assert.ok(merged.some((c) => c.id === 'TC-07' && c.result === 'fail'));
 });
