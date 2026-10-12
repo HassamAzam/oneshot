@@ -129,7 +129,9 @@
         "backend-agent",
         "frontend-agent"
       ],
-      "artifact": "implement.json"
+      "artifact": "implement.json",
+      "_why_turns": "220 / 90m is the budget this phase was BORN with and, unlike research (60->120->180) and verify (200->300->450), it was never measured until a transcript audit of 46 captured implement laps: median ~$3.46 a lap at lap 0, ~$0.97 on a cycle lap, and the cap is the binding constraint on exactly ONE of the 46 (8768/lap0: 220 turns, $17.60). So 220 is KEPT -- the cost is per-lap burn, not the ceiling. The burn is exploration: ~65% of tool calls were reads, 8.2 reads per edit overall, split 53/47 between the parent session and the sub-agents it dispatches, both re-opening files research's codePath already traced; cycle laps ran 15 reads per edit for a median of 4 edits. The levers that followed targeted the re-exploration directly -- the implement prompt's trust-the-trace block (src/phases/prompts.ts) and the conditional reuse sweep in context/agents/backend-agent.md and frontend-agent.md -- NOT this number. Revisit the cap only with a measurement showing a trust-the-trace lap reaching it; the single lap that already did was a reuse-hunt this change removes.",
+      "_why_skills": "ponytail plus the layer standards and the two lint/migration gates. The reuse hunt these skills carry is now CONDITIONAL on the handed trace, not unconditional: research (prior-art-survey) and plan (change-scoping) already traced the code and issued the binding reuse verdicts, so implement and the agents it delegates to read the named files to EDIT them rather than re-discovering them. The audit above is why: 73 reuse greps and 21 Explore-agent dispatches across the laps were re-running phases 0-2's job. prompts.ts states this to the session; context/agents/*.md states it to the sub-agents, falling back to the full cold sweep only when no trace was provided."
     },
     {
       "name": "mr-open",

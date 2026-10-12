@@ -1454,7 +1454,10 @@ dispatch its agent for it rather than writing that layer yourself.`
       : '';
     const agentBlock = `Delegate implementation work to ${wanted.join(' and ')} for changes in `
       + `${wanted.length > 1 ? 'their layer' : 'that layer'}; they carry the standards this repo is
-reviewed against.${unplanned}`;
+reviewed against.${unplanned} When you dispatch one, hand it the \`codePath\` entries and \`reuse\`
+verdicts above that cover its layer, and tell it they are the pipeline's own trace — authoritative
+prior art to build on, not a lead to re-investigate. A sub-agent handed that trace opens the named
+files to edit them; it does not re-run the reuse hunt research and plan already finished.`;
 
     // A review lap and a retry lap are different jobs and must not read the
     // same: one has a defect list to close, the other has an unknown amount of
@@ -1557,6 +1560,11 @@ Write the code.
 - Apply the plan's \`reuse\` verdicts before writing anything new. A reuse, extend or collapse
   entry is binding. A rejected entry is a candidate the plan decided NOT to build on: do not
   reuse, extend or collapse onto it, for the reason on its line.
+- The \`codePath\` and \`reuse\` lists above are the prior-art trace phases 0–2 already produced;
+  reuse discovery is their job, not yours. Open the files they name to EDIT them. Do not re-trace a
+  module, re-run a reuse or prior-art search, or dispatch an \`Explore\` / \`general-purpose\` agent to
+  re-establish what the trace already records. If a step genuinely needs something the trace omits,
+  read the narrow thing that step touches and note the gap in \`summary\`; do not reopen the hunt.
 - Every acceptance criterion above must be met by the code you leave behind. The next phase
   writes the test cases that \`verify\` and \`qa\` will execute, and it writes them from those
   same criteria — so a criterion you quietly dropped becomes a failing case, not a saved step.

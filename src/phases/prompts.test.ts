@@ -736,6 +736,26 @@ test('implement is told a rejected reuse entry is a candidate not to build on', 
   assert.match(p, /A rejected entry is a candidate the plan decided NOT to build on/);
 });
 
+test('implement is told the codePath and reuse trace is authoritative, not a search to re-run', () => {
+  // Measured from captured implement transcripts: ~65% of tool calls were
+  // exploration, and the reuse hunt research/plan already did was re-run at
+  // implement (73 reuse greps, 21 Explore dispatches across the laps). The
+  // trace must read as prior art to build on, not a lead to re-investigate.
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
+  assert.match(p, /reuse\s+discovery is their job, not yours/);
+  assert.match(p, /Open the files they name to EDIT them/);
+  assert.match(p, /do not[\s\S]*?dispatch an `Explore` \/ `general-purpose` agent/);
+});
+
+test('implement tells the session to hand the trace to the agents it delegates to', () => {
+  // A cold sub-agent re-explores (measured 7.4 reads per edit) because its
+  // definition orders a reuse-first sweep. Forwarding the trace and marking it
+  // authoritative is what removes the reason to re-trace.
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
+  assert.match(p, /hand it the `codePath` entries and `reuse`/);
+  assert.match(p, /authoritative\s+prior art to build on, not a lead to re-investigate/);
+});
+
 test('review sees the plan\'s reuse verdicts one per line, under a heading that admits rejections', () => {
   // A comma-join lost the boundary between entries whose reasons carry commas,
   // and put the rejection under a bare `reuse:` label.
