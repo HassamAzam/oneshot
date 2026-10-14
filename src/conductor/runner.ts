@@ -1506,10 +1506,26 @@ export async function runTicket(
         j = updateJournal(iid, { reviewMode: true }) ?? j;
         log.warn('review gates armed by guarded paths, not by the label', { iid, hits: planGate.hits });
       }
+      // The gate note points at the plan note publish.ts posts. Arming before
+      // that note exists — a transient GitLab failure left `plan` unpublished —
+      // would post an approval ask pointing at nothing, and the plan would land
+      // BELOW it on the next tick's publish. Ensure the plan is published first;
+      // if it still is not, park and let the next tick retry rather than ask.
+      if (!(j.published ?? []).includes('plan')) {
+        await publishPending({ iid, runId, journal: j });
+        j = readJournal(iid) ?? j;
+        if (!(j.published ?? []).includes('plan')) {
+          return finish(j, 'parked', 'waiting to publish the plan to the ticket before asking for approval');
+        }
+      }
+      const planNoteId = j.publishedNotes?.plan;
       const gate = await checkApprovalGate({
         iid,
         gate: 'plan',
-        requestBody: planApprovalRequestBody(prior.plan ?? null, triggerLine(planGate)),
+        requestBody: planApprovalRequestBody(triggerLine(planGate), {
+          migrations: (prior.plan as { migrations?: unknown } | null)?.migrations === true,
+          planNoteUrl: planNoteId ? `${issueUrl(iid)}#note_${planNoteId}` : undefined,
+        }),
         trigger: planGate,
         onApproved: async () => { await addIssueNote(iid, planApprovedRecordBody()); },
       });
@@ -2259,7 +2275,7 @@ export async function runTicket(
       try {
         const lease = leaseWorktree(runId, branch, worktreeName(iid, runId), { withPort: false });
         worktree = lease.worktree;
-        j = updateJournal(iid, { worktree, branch: lease.branch }) ?? j;
+        j = updateJournal(iid, { worktree, branch: lease.branch, baseSha: lease.baseSha }) ?? j;
         updateRun(runId, { worktree, branch: lease.branch });
       } catch (err) {
         return `worktree: ${(err as Error).message}`;
