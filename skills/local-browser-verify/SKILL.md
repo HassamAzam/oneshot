@@ -42,10 +42,14 @@ What the harness knows, and why each fact cost a run to learn:
   webpack port is never navigated to; it only serves the bundle.
 - **Use the hostname `localhost`, never `127.0.0.1`.** `ALLOWED_HOSTS` does not
   carry the bare address, so the IP returns 400 from a perfectly healthy server.
-- **Readiness is `static/webpack-stats.dev.json` reaching `"status":"done"`**, not
-  a log line. That file is written once at the start of a compile and again at the
-  end, and Django raises a bare 500 on anything but `done`. A `Compiled
-  successfully` from an earlier build stays in the log forever.
+- **Readiness is the manifest Django reads, written by THIS webpack.** Current app
+  code writes `static/webpack-entrypoints.dev.json` (no status field, written even
+  when a compile fails), so ready means that file is newer than the webpack start
+  AND the latest result in the truncated log is `Compiled`; `Failed to compile` is
+  E_WEBPACK_DEAD with the error lines. Checkouts older than the app's 2026-09-23
+  chunk split write `static/webpack-stats.dev.json` instead, and are ready when it
+  says `"status":"done"`. A log line alone never counts — an earlier build's
+  `Compiled successfully` is history, not this build.
 - **Django runs `--noasgi`.** With Channels' ASGI dev server, a browser's
   keep-alive connections exhaust it and the process then keeps its pid and its
   socket while answering nothing at all.

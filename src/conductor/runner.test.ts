@@ -718,3 +718,21 @@ test('mergeScopedVerify leaves a still-failing non-scoped case failing (no prema
   const merged = mergeScopedVerify(baseline, [cr('TC-14', 'pass')], new Set(['TC-14']));
   assert.ok(merged.some((c) => c.id === 'TC-07' && c.result === 'fail'));
 });
+
+test('no Loop code path reaches the local automation tests', async () => {
+  // They run after the merge, in their own mode (src/localtests). A Loop run
+  // that imported the old step's wiring — the scope's prepare and capture, its
+  // gates, the run, its gc — could start a Cypress run or ask QA about an MR
+  // that is not merged yet. Read as source, because an unused import or a
+  // dead branch would pass every behavioural test here.
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('./runner.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /from '\.\/localtests\.js'/, 'runner.ts imports src/conductor/localtests.ts');
+  assert.doesNotMatch(src, /from '\.\.\/localtests\//, 'runner.ts imports the post-merge mode');
+  for (const name of [
+    'prepareScopeSession', 'afterScopeSession', 'localTestsRunPhase', 'gcLocalTests', 'lateForLocalTests',
+    'localSpecsGate', 'localResultsSubject', 'LOCAL_TESTS_PHASES', "'localSpecs'", "'localResults'",
+  ]) {
+    assert.ok(!src.includes(name), `runner.ts still names ${name}`);
+  }
+});
