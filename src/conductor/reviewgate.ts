@@ -77,6 +77,7 @@ import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/sl
 import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
 import { mdText, tableCell } from '../lib/gitlabmd.js';
+import { planFilePaths } from '../lib/planfiles.js';
 import type { DesignArtifact, TestCase } from '../phases/types.js';
 import { parseEdgeCases } from './edgecases.js';
 import { MAX_UPLOAD_BYTES, mimeFor } from '../lib/publish.js';
@@ -141,15 +142,22 @@ export function highScrutinyHits(files: string[]): string[] {
   return [...hit].sort();
 }
 
-/** Every file this run has said it will touch, or has touched. */
+/**
+ * Every file this run has said it will touch, or has touched.
+ *
+ * The plan names files in two places — `steps[].files` and `fileChanges` — and
+ * both count. They are meant to agree, but this list decides whether the
+ * guarded-path gate arms, and a file the planner put only in the table is
+ * still a file it said it would change. The paths are read raw, through
+ * `planFilePaths`, not as the table's validated rows: whether the gate arms
+ * must not depend on whether a row was fit to draw.
+ */
 export function declaredFiles(
   plan: Record<string, unknown> | null, implemented: Record<string, unknown> | null,
 ): string[] {
-  const steps = Array.isArray(plan?.steps) ? (plan.steps as Array<{ files?: unknown }>) : [];
-  const planned = steps.flatMap((s) => (Array.isArray(s.files) ? s.files.map(String) : []));
   const changed = Array.isArray(implemented?.filesChanged)
     ? (implemented.filesChanged as unknown[]).map(String) : [];
-  return [...planned, ...changed];
+  return [...planFilePaths(plan), ...changed];
 }
 
 export interface GateTrigger {

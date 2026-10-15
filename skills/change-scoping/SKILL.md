@@ -181,23 +181,27 @@ out-of-scope entry has to show for itself. Fill them from there.
 What a schema cannot tell you is who reads the field, and three readers decide
 between them whether this plan is actionable:
 
-- **The comment the approver answers does not render `reuse`.** It renders the
-  approach, open questions, steps, acceptance coverage, risks and out-of-scope.
-  The full plan is attached beside it, `reuse` included, but an attachment is
-  reference and the comment is the decision. So anything a person must be able
-  to *decline* cannot live in `reuse`: route it to `approach`, `openQuestions`,
-  `outOfScope`, or a step's `what`. Nor to `risks`, where a scope choice becomes
-  something they can only accept or reject whole.
+- **The approver reads the plan note, and answers on the gate comment that
+  points to it.** The note is the whole plan inline: the flow, the approach,
+  open questions, the What-changes tables, steps, acceptance coverage, `reuse`
+  (as prior art and verdicts), risks and out-of-scope. Rendered is not
+  answerable: `reuse` is a list of verdicts `implement` executes, not a
+  question. So anything a person must be able to *decline* cannot live in
+  `reuse`: route it to `approach`, `openQuestions`, `outOfScope`, or a step's
+  `what`. Nor to `risks`, where a scope choice becomes something they can only
+  accept or reject whole.
 - **`implement` reads `openQuestions` too, not just the approver.** So **say
   which step can be dropped**, as a question — they render *above* the steps,
   under "answer these in a comment, or the stated default is used", and **the
   default is that all steps ship**. Without that line `implement` may drop a
   step on its own authority.
-- **Code reads `steps[].files` and `steps[].layer`** — they are machinery, not
-  prose. `planForecast` in `src/phases/prompts.ts` reads them to decide which
-  coding standards `implement` loads, and `declaredFiles` in
-  `src/conductor/reviewgate.ts` uses them to scope the review gate. **A file
-  left off a step is a file nobody is scoped to.**
+- **Code reads `steps[].files`, `fileChanges[].path` and `steps[].layer`** —
+  they are machinery, not prose. `planFilePaths` in `src/lib/planfiles.ts`
+  merges the two path lists; `planForecast` in `src/phases/prompts.ts` reads
+  them, with the layers, to decide which coding standards `implement` loads, and
+  `declaredFiles` in `src/conductor/reviewgate.ts` uses them to scope the review
+  gate. **A file named in neither a step nor the What-changes table is a file
+  nobody is scoped to.**
 
 ## Turn economy
 

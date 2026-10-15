@@ -32,6 +32,8 @@ import {
 } from './gitlab.js';
 import { log } from './log.js';
 import { codeSpan, mdText, tableCell } from './gitlabmd.js';
+import { fileChangesSection, renderFileChanges } from './planfiles.js';
+import { flowSection, renderFlowMermaid } from './planflow.js';
 import type { BaseCheck, LocalTestsRun, LocalTestsScope } from '../phases/types.js';
 
 /** GitLab rejects very large attachments; skip them with a note rather than failing. */
@@ -75,6 +77,9 @@ interface PlanArtifact {
   outOfScope?: string[];
   acceptanceCoverage?: Array<{ criterion: string; coveredBy: string; status: string; note: string }>;
   feedbackResponse?: Array<{ point: string; response: string; where: string; note: string }>;
+  /** Unvalidated here: planfiles.ts and planflow.ts check them field by field, and old plans lack both. */
+  fileChanges?: unknown;
+  flow?: unknown;
   summary?: string;
 }
 
@@ -181,11 +186,16 @@ export function renderPlanMd(
     .map((c) => `| ${tableCell(c.criterion)} | ${c.status} | ${
       tableCell(c.coveredBy) || '—'} | ${tableCell(c.note)} |`)
     .join('\n');
+  // Same order as the approval comment: the picture before the prose, and the
+  // file tables directly above the steps they summarise.
+  const flow = flowSection(plan.flow);
+  const files = fileChangesSection(plan);
   return `# Implementation plan — #${iid} ${title}
 
-${answered ? `## Reviewer feedback, point by point\n| Point | Response | Where | Note |\n|---|---|---|---|\n${answered}\n\n` : ''}## Approach
+${answered ? `## Reviewer feedback, point by point\n| Point | Response | Where | Note |\n|---|---|---|---|\n${answered}\n\n` : ''}${
+  flow ? `## Flow — the runtime path this plan touches\n${flow}\n\n` : ''}## Approach
 ${plan.approach ? mdText(String(plan.approach)) : '(not recorded)'}
-${questions ? `\n## Open questions — answer these in a comment, or the stated default is used\n${questions}\n` : ''}
+${questions ? `\n## Open questions — answer these in a comment, or the stated default is used\n${questions}\n` : ''}${files ? `\n## What changes\n${files}\n` : ''}
 ## Steps
 | # | Layer | Change | Files |
 |---|---|---|---|
@@ -723,12 +733,27 @@ export function localTestsStartNote(s: LocalTestsStart): string {
     + '\n\n<!-- oneshot:local-tests-start -->';
 }
 
+/**
+ * What the flow and file-table renderers dropped or trimmed while drawing a
+ * plan. `renderPlanMd` keeps only the markdown, so the warnings are gathered
+ * here and logged once per published plan rather than once per rendering.
+ */
+export function planRenderWarnings(data: Record<string, unknown>): string[] {
+  return [...(renderFlowMermaid(data.flow)?.warnings ?? []), ...renderFileChanges(data).warnings];
+}
+
 const SPECS: Spec[] = [
   {
     key: 'plan',
     artifact: 'plan.json',
     target: 'ticket',
     build: (data, ctx) => {
+      const warnings = planRenderWarnings(data);
+      if (warnings.length) {
+        log.warn('publish: plan overview drew around bad or oversized entries', {
+          iid: ctx.iid, warnings: warnings.slice(0, 8),
+        });
+      }
       // The whole plan goes inline, where GitLab renders its headings and
       // tables — a note body is markdown, an uploaded .md is served raw and
       // reaches the reader as unrendered source. The same markdown is attached
