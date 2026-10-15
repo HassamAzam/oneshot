@@ -15,11 +15,12 @@
  *      promotion or a backmerge (a protected or release source branch, or a
  *      title like `stage -> dev` or `Backmerge …`). Of those, the ticket's OWN
  *      MRs are the ones that close it or name its number in their source
- *      branch or title, in any state. When it has any, only an own MR merged
- *      into the base proves the change: an own MR still open with another
- *      ticket's MR (one that only mentions this one) merged is `not-ready`.
- *      Only when no linked MR closes or names the ticket does any linked MR
- *      merged into the base stand in for it.
+ *      branch, in any state; a `#N` in a title is a mention, not ownership.
+ *      When it has any, only an own MR merged into the base proves the change:
+ *      an own MR still open with another ticket's MR (one that only mentions
+ *      this one) merged is `not-ready`. Only when no linked MR closes the
+ *      ticket or names it in its source branch does any linked MR merged into
+ *      the base stand in for it.
  * The latest such merge is the commit the tests run against (`mergedMr`); every
  * own MR merged into the base comes back too, oldest first, as `ranges` — the
  * commit before each change and the commit it left — so the scope can cover a
@@ -153,15 +154,15 @@ function mergeLinked(related, closing) {
 /**
  * Which linked MR is the change under test. Pure. Same project only; a
  * promotion never counts. The ticket's OWN MRs — the ones that close it, or
- * whose source branch or title names its number — are decided across every
- * state, because another ticket's MR that says "see also #N" is linked too and
- * may merge first: while the ticket has an own MR, only an own MR merged INTO
- * the base can be its change, and none merged yet is a wait, never a fallback.
- * Only a ticket with no own MR at all falls back to any linked MR merged into
- * the base (a branch named after something else, a title that never says the
- * number). The latest merge in the pool wins: it is the newest code. `ranged`
- * is what the runner scopes, oldest first: every own MR merged into the base,
- * or, in the fallback, the chosen MR alone.
+ * whose source branch names its number — are decided across every state,
+ * because another ticket's MR that says "see also #N" is linked too and may
+ * merge first, and it says so in its title as often as in its description:
+ * while the ticket has an own MR, only an own MR merged INTO the base can be
+ * its change, and none merged yet is a wait, never a fallback. Only a ticket
+ * with no own MR at all falls back to any linked MR merged into the base (a
+ * branch named after something else). The latest merge in the pool wins: it
+ * is the newest code. `ranged` is what the runner scopes, oldest first: every
+ * own MR merged into the base, or, in the fallback, the chosen MR alone.
  */
 function chooseMerged(f) {
   const { issue, base, protectedBranches, releaseBranch } = f;
@@ -175,7 +176,7 @@ function chooseMerged(f) {
   const elsewhere = real.filter((m) => m.state === 'merged' && m.target_branch !== base);
   const open = real.filter((m) => m.state === 'opened').sort((a, b) => a.iid - b.iid);
   const names = new RegExp(`(^|[^0-9])${Number(issue.iid)}([^0-9]|$)`);
-  const isOwn = (m) => m.closesIssue === true || names.test(`${m.source_branch || ''} ${m.title || ''}`);
+  const isOwn = (m) => m.closesIssue === true || names.test(m.source_branch || '');
   const own = real.filter(isOwn).sort((a, b) => a.iid - b.iid);
   const fallback = own.length === 0;
   const pool = fallback ? intoBase : intoBase.filter(isOwn);
@@ -255,7 +256,7 @@ function decideReadiness(f) {
     }
     const earlier = c.pool.filter((m) => m !== chosen);
     if (c.fallback) {
-      warnings.push(`nothing linked closes or names #${issue.iid}, so !${chosen.iid}, the latest linked merge into ${base}, `
+      warnings.push(`nothing linked closes #${issue.iid} or names it in its source branch, so !${chosen.iid}, the latest linked merge into ${base}, `
         + `is taken as its change${earlier.length ? ` (${listIids(earlier)} also merged into ${base})` : ''}`);
     } else {
       if (earlier.length) {

@@ -175,7 +175,24 @@ test('the ticket\'s own change wins over a later MR that only mentions it', () =
   const fb = hook.decideReadiness(facts({ mrs: [mention, other] }));
   assert.equal(fb.mergedMr?.iid, 351);
   assert.deepEqual(fb.mergedMr?.ranges, [{ mrIid: 351, base: null, head: SHA('7') }]);
-  assert.ok(fb.warnings.some((w) => /nothing linked closes or names #990601, so !351, the latest linked merge into dev, is taken as its change \(!353 also merged into dev\)/.test(w)));
+  assert.ok(fb.warnings.some((w) => /nothing linked closes #990601 or names it in its source branch, so !351, the latest linked merge into dev, is taken as its change \(!353 also merged into dev\)/.test(w)));
+});
+
+test('a #N in another MR\'s title is a mention, not the ticket\'s own change', () => {
+  // The ticket's own MR is still open; another ticket's MR whose title says
+  // "see also #990601" is merged. Read as own, its merge commit would be tested.
+  const ownOpen = fix({ iid: 5, source_branch: 'oneshot/ticket-990601-fix', state: 'opened', merged_at: null, merge_commit_sha: null });
+  const seeAlso = fix({ iid: 6, source_branch: 'fix/other', title: 'see also #990601', merge_commit_sha: SHA('f') });
+  const r = hook.decideReadiness(facts({ mrs: [ownOpen, seeAlso] }));
+  assert.equal(r.verdict, 'not-ready');
+  assert.equal(r.mergedMr, null);
+  assert.match(r.reason, /!5 is still open \(!6 is merged into dev but only mentions the ticket/);
+
+  // Once the own MR merges, the title mention is still not scoped.
+  const ownMerged = fix({ iid: 5, source_branch: 'oneshot/ticket-990601-fix', merged_at: '2026-10-08T09:00:00Z', merge_commit_sha: SHA('e') });
+  const later = hook.decideReadiness(facts({ mrs: [ownMerged, { ...seeAlso, merged_at: '2026-10-08T12:00:00Z' }] }));
+  assert.equal(later.mergedMr?.iid, 5);
+  assert.deepEqual(later.mergedMr?.ranges, [{ mrIid: 5, base: null, head: SHA('e') }]);
 });
 
 test('the ticket\'s own MR still open is a wait, even with another ticket\'s MR that mentions it merged', () => {

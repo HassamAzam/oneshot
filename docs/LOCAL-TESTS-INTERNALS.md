@@ -47,9 +47,9 @@ One ticket at a time, in this order. The mode keeps its own journal at
 
 1. **Ready?** `hooks/local-tests-ready.cjs`, run by the conductor (docs/HOOKS.md, "Not a hook:
    `local-tests-ready`"): the trigger label, and the ticket's own merge request (one that closes it,
-   or names its iid in the source branch or title) merged into `branches.base`, never a promotion or
-   a backmerge. Own MRs that are all still open mean not ready, quietly; only a ticket with no linked
-   MR that closes or names it falls back to any linked MR merged into the base. The latest own
+   or names its iid in the source branch; a title only mentions it) merged into `branches.base`, never
+   a promotion or a backmerge. Own MRs that are all still open mean not ready, quietly; only a ticket
+   with no linked MR that closes it or names it in its source branch falls back to any linked MR merged into the base. The latest own
    merged MR is the one tested: its merge (or squash) commit is `--ref`, and `mergedMr.base` is
    `--base` — `diff_refs.base_sha` for an MR merged with no merge commit, else the merge commit's
    first parent (`<mergeSha>^1` when the hook could not say). `mergedMr.ranges` lists every own MR

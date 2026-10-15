@@ -409,11 +409,11 @@ phase the Loop runs, so `ui-evidence` and `mr` still batch exactly as before.
 ```
 
 - **When it starts.** The ticket carries `Ready for Automation Testing` **and** the ticket's own MR
-  — one that closes it, or names its number in the source branch or title — is merged into
+  — one that closes it, or names its number in its source branch (a title only mentions it) — is merged into
   `branches.base`; a promotion or a backmerge (source `stage`/`master`/`main`/`dev`, or a title like
   `stage -> dev` or `Backmerge`) never counts. A ticket whose own MRs are all still open waits
   quietly, even when an MR that only mentions it is merged; only a ticket with no linked MR that
-  closes or names it falls back to any linked MR merged into the base.
+  closes it or names it in its source branch falls back to any linked MR merged into the base.
   `hooks/local-tests-ready.cjs` decides, run by the conductor before any session (it is not a
   session hook: [docs/HOOKS.md](docs/HOOKS.md)). The code under test is the latest own merged MR's
   merge (or squash) commit; the base is the commit before the change — the merge commit's first

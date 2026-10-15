@@ -60,8 +60,8 @@ export interface MergedMr {
   url: string;
   /**
    * Every one of the ticket's own MRs merged into the base, oldest first, the
-   * last being this one; just this one when nothing linked closes or names the
-   * ticket. Use mergedRanges(); optional for the same reason as `base`.
+   * last being this one; just this one when nothing linked closes the ticket
+   * or names it in its source branch. Use mergedRanges(); optional for the same reason as `base`.
    */
   ranges?: MergedRange[];
 }

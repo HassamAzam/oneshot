@@ -200,13 +200,13 @@ results comment ──▶ label "Running TestCases Locally" ──▶ "Automatio
    - the ticket carries **`Ready for Automation Testing`**, and
    - the ticket's own merge request is **merged into `dev`** (`branches.base`).
      Its own MR is one that closes the ticket, or has the ticket number in its
-     branch name or title. A promotion or backmerge (from `stage`, `master`,
+     branch name; a `#N` in another MR's title only mentions it. A promotion or backmerge (from `stage`, `master`,
      `main` or `dev`, or titled like `stage -> dev` or `Backmerge`) never counts.
 
    If the ticket has its own MR but it is not merged yet, Oneshot posts nothing
    and checks again on later passes — even when some other MR that only
-   mentions the ticket is merged. Only when no linked MR closes or names the
-   ticket does any linked MR merged into `dev` count.
+   mentions the ticket is merged. Only when no linked MR closes the ticket or
+   names it in its branch does any linked MR merged into `dev` count.
 
    Any assignee, on the one desk that runs this mode (see the note at the top;
    a desk also skips a ticket another desk has already posted a list for).
