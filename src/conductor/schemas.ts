@@ -561,6 +561,106 @@ export const UI_EVIDENCE_SCHEMA = phaseSchema({
   },
 }, ['screenshots', 'observations']);
 
+/**
+ * The local automation tests plan (skill: local-tests-impact), made for a
+ * merged ticket by the post-merge mode (src/localtests/runner.ts). Read by
+ * code, not by a later session: the ticket note is rendered from it, QA
+ * approves that list before every run, and the run executes `specs` as listed.
+ * So a spec missing from `specs` is a spec that does not run.
+ *
+ * An empty `specs` is posted as "Oneshot found no automation test for this
+ * ticket", with the `add` proposals as the suggested tests, and the mode waits
+ * for QA's reply. The descriptions below say so, so the session's picture of
+ * what happens next matches the mode's.
+ */
+export const LOCAL_TESTS_SCOPE_SCHEMA = phaseSchema({
+  applicable: {
+    type: 'boolean',
+    description:
+      'False when nothing a workstream-automation spec could observe changed (a backend path no screen ' +
+      'reaches, say). Say why in `reason` and send empty lists. True when the change is observable, even ' +
+      'if no existing spec reaches it: then `specs` is empty, `proposals` names the suggested test, and ' +
+      'the ticket is told "Oneshot found no automation test" and QA decides what happens next.',
+  },
+  reason: str('Why applicable is what it is, in one sentence a non-developer can read.'),
+  modules: strArr('The automation modules the chosen specs belong to, e.g. "Leaves", "Payroll".'),
+  specs: {
+    type: 'array',
+    description:
+      'Every spec file to run, repo-relative to workstream-automation (cypress/e2e/…). Only these ' +
+      'run. Empty when applicable is false.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        file: str('Spec path, e.g. cypress/e2e/leaves/apply_leave.cy.ts'),
+        module: str('Its module, one of `modules`'),
+        cases: { type: 'number', description: 'How many test cases (it blocks) the file holds.' },
+        ciSeconds: { type: 'number', description: 'Its last CI duration in seconds, when spec-timings.json records one.' },
+        why: str('What in the diff this spec exercises, in one plain line. Start a health-check spec with "Health check:"'),
+      },
+      required: ['file', 'module', 'cases', 'why'],
+    },
+  },
+  edits: {
+    type: 'array',
+    description:
+      'Every temporary change you made to a spec, page object or fixture in the throwaway worktree so ' +
+      'the suite matches what the ticket changed on purpose. Never committed. Empty when you changed nothing.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        file: str('Repo-relative path in workstream-automation'),
+        kind: { type: 'string', enum: ['update', 'add'], description: 'update: an existing file. add: a new one.' },
+        why: str('What the change does, in one plain line'),
+        erpEvidence: str('The ERP file:line in this diff that makes the change necessary'),
+      },
+      required: ['file', 'kind', 'why', 'erpEvidence'],
+    },
+  },
+  proposals: {
+    type: 'array',
+    description:
+      'Changes to the team\'s test list worth QA\'s attention: a new test worth adding, or an existing one ' +
+      'this ticket makes obsolete. QA approves every list before it runs, these included. When `specs` is ' +
+      'empty, the `add` entries here are the suggested tests on the "no automation test found" note. ' +
+      'Empty when the existing tests are enough.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['add', 'remove'] },
+        title: str('The test, as a QA would name it: "Verify that …"'),
+        file: str('The spec file it lives in, or would. Omit when not known.'),
+        why: str('Why, in one plain line'),
+      },
+      required: ['action', 'title', 'why'],
+    },
+  },
+  notRunnable: {
+    type: 'array',
+    description:
+      'Specs that reach this change but cannot run on a local machine, because they need something a desk ' +
+      'does not have: Odoo (payroll sync), a real mailbox, a third-party service. Keep each OUT of `specs` ' +
+      'and list it here with why, so the ticket says it was not run instead of the run reporting it as a ' +
+      'failure. Empty when every spec that reaches the change can run locally.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        spec: str('Spec path, e.g. cypress/e2e/payroll/run_payroll.cy.ts'),
+        why: str('What it needs that a local machine does not have, citing the spec line that shows it'),
+      },
+      required: ['spec', 'why'],
+    },
+  },
+  estimatedMinutes: {
+    type: 'number',
+    description: 'Expected wall-clock minutes for the run, from ciSeconds where known.',
+  },
+}, ['applicable', 'reason', 'modules', 'specs', 'edits', 'proposals', 'estimatedMinutes']);
+
 export const MR_SCHEMA = phaseSchema({
   mrIid: { type: 'number' },
   mrUrl: str('Full MR URL'),
@@ -708,6 +808,7 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   'base-check': BASE_CHECK_SCHEMA,
   'ui-evidence': UI_EVIDENCE_SCHEMA,
   'demo-recording': DEMO_SCHEMA,
+  'local-tests-scope': LOCAL_TESTS_SCOPE_SCHEMA,
   mr: MR_SCHEMA,
   remediate: REMEDIATE_SCHEMA,
   'mr-feedback': MR_FEEDBACK_SCHEMA,

@@ -57,6 +57,12 @@ const HOOK_TIMEOUT_MS = 15_000;
  * inputs is worse than no guard, because the pass it reports is indistinguish-
  * able from a real one.
  *
+ * eslint-guard is the same shape for the same reason: one measured file is ~2.3s,
+ * but that is a warm cache on a small component, and the airbnb + sonarjs +
+ * flowtype config it loads is large. It gets py-lint's 60s rather than a tighter
+ * bound tuned to one measurement, because the failure mode of being wrong is a
+ * guard that silently checks nothing.
+ *
  * automation-ready is the other, though it is no session's hook: the conductor
  * runs it through runGuard before it spends an automation session. It gives
  * up on GitLab at 20s and answers `unknown` with the reason (GitLab down, a
@@ -66,6 +72,7 @@ const HOOK_TIMEOUT_MS = 15_000;
  */
 const GUARD_TIMEOUT_MS = new Map<string, number>([
   ['py-lint.cjs', 60_000],
+  ['eslint-guard.cjs', 60_000],
   [AUTOMATION_READY, 30_000],
 ]);
 
@@ -165,7 +172,12 @@ const BASH = '^Bash$';
  */
 const WRITE_TOOLS_OR_BASH = '^(Write|Edit|NotebookEdit|Bash)$';
 const MR_TOOLS = '^mcp__gitlab__(create|update)_merge_request$';
-const READ_OR_BASH = '^(Read|NotebookRead|Grep|Bash)$';
+/**
+ * secret-guard's surfaces. Glob is on the list because the guard judges it too:
+ * a pattern that hunts for a cypress.env.json by name is how a session finds a
+ * credentials file it was never told the path of (docs/HOOKS.md, local tests).
+ */
+const READ_OR_BASH = '^(Read|NotebookRead|Grep|Glob|Bash)$';
 
 /**
  * Build the hook set for one phase.
@@ -183,8 +195,8 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
       { hooks: [guard('pause-check.cjs')], timeout: 15 },
       { matcher: WRITE_TOOLS, hooks: [guard('write-scope.cjs')], timeout: 15 },
       { matcher: WRITE_TOOLS_OR_BASH, hooks: [guard('artifact-guard.cjs')], timeout: 15 },
-      { matcher: WRITE_TOOLS, hooks: [guard('frontend-test-guard.cjs')], timeout: 15 },
       { matcher: BASH, hooks: [guard('git-guard.cjs')], timeout: 20 },
+      { matcher: BASH, hooks: [guard('install-guard.cjs')], timeout: 15 },
       { matcher: MR_TOOLS, hooks: [guard('mr-gate.cjs')], timeout: 15 },
       { matcher: READ_OR_BASH, hooks: [guard('secret-guard.cjs')], timeout: 15 },
       // log-event stays last so a denied call is still recorded.
@@ -195,6 +207,7 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
       { matcher: WRITE_TOOLS, hooks: [guard('script-standards.cjs')], timeout: 20 },
       { matcher: WRITE_TOOLS, hooks: [guard('py-lint.cjs')], timeout: 60 },
       { matcher: WRITE_TOOLS, hooks: [guard('js-standards.cjs')], timeout: 15 },
+      { matcher: WRITE_TOOLS, hooks: [guard('eslint-guard.cjs')], timeout: 60 },
       // log-event stays last so a blocked write is still recorded.
       { hooks: [guard('log-event.cjs')], timeout: 10 },
     ],

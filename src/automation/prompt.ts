@@ -38,6 +38,7 @@ export interface AutomationPromptInput {
   changes: MergedChange[];                          // context.ts fetchMergedChanges: the merged fix MRs, with diffs
   open: MrRef[];                                    // named only, to be ignored: never fetched
   modules: Array<{ tab: string; module: string }>;  // existing module tabs on the sheet
+  coverage?: string;                                // coverage.ts renderCoverage: what the suite and sheet already cover (WRITE only)
   previous?: { version: number; module: string; cases: AutomationCase[] };  // revise
   feedback?: Array<{ author: string; body: string }>;                       // revise
   ignoredApproval?: boolean;                                                 // revise
@@ -236,66 +237,80 @@ function whatToWrite(input: AutomationPromptInput): string {
   return `## What to write
 The method is the \`automation-testcases\` skill (Part 1 WRITE, Part 2 REVISE). In short:
 ${revising}
-Cover, with at least one case each:
+### Start from what already exists
+If a "What already exists" section is above, the conductor gathered it from the Cypress suite and
+the team sheet; it is authoritative and you cannot look anything up yourself. Before you write a
+case:
+- If a spec there already drives this behaviour AND re-reads the saved result, do not write that
+  case again — say in \`summary\` which spec covers it.
+- If a spec drives it but only checks the immediate response (a success toast, no reload), one
+  case that reloads and checks the stored result earns its place; say in \`summary\` it extends
+  that spec.
+- Write a NEW case only where nothing above covers the behaviour.
+When no such section is above, coverage could not be checked on this desk: write the list from the
+change alone, and the conductor tells QA it may repeat existing cases.
+
+### Size the list to the change
+- **A bug fix** (the diff repairs behaviour that already shipped): usually **1–4 cases** — the
+  original reproduction, with the state that triggered the bug in its \`precondition\`, plus at most
+  one guard for a closely related path the same fix touches. Do NOT write the control catalogue
+  (every option listed, the default state, "all options offered") for a bug fix: those cases pass
+  on the unfixed build, so they test nothing the fix changed.
+- **A new or reworked control or feature** (the change adds the behaviour): the fuller list, with
+  the catalogue cases below.
+- Either way, **every case must be able to fail on the unfixed build**: it goes through the changed
+  behaviour (for a save bug, it clicks Save). A case that only views or reloads data its
+  precondition set up passes on the broken build too — drop it. A lean list where every case
+  catches something the others do not is what QA approves; do not pad it to look thorough, and
+  never more than 60 cases.
+
+### Cover, with at least one case each (only what this change touches)
 - every acceptance criterion in the description AND the comments (criteria are often amended
   in a comment);
-- every behaviour the diff changes;
-- the happy path;
-- validation and negative input;
-- boundaries (limits, empty, maximum, dates at the edge);
-- roles and permissions, when the change is about who can do something;
-- persistence: the result survives the page re-reading the saved data (a fresh login reads it
-  the same way, so it is not a separate case);
-- neighbours the diff touched (regression);
-- for a bug ticket, the original reproduction as a case (one Save when it changes several controls).
-Not in the list: the Django admin, database rows or flags, emails and anything else only a
-developer can see. The suite drives the product's own screens.
+- every behaviour the diff changes that nothing above already covers;
+- the happy path, validation, boundaries and roles — each only when the change adds or reworks it;
+- for a bug ticket, the original reproduction as a case (one Save when it changes several controls);
+- a neighbour the diff touched, when a shared routine could have regressed it.
+Persistence (the result survives a re-read) is part of the case that makes the change, not a case
+of its own; a fresh login reads it the same way. Not in the list: the Django admin, database rows
+or flags, emails and anything else only a developer can see. The suite drives the product's own screens.
 
-Writing rules:
-- One behaviour per case. Usually 6–20 cases, never more than 60.
-- \`scenario\` starts with "Verify that".
+### Writing rules
+- One behaviour per case. \`scenario\` starts with "Verify that".
+- **Keep each case short.** Cases of the same kind share one precondition wording, each with only
+  its item changed. A precondition is at most two sentences, the steps are few, and \`expected\` is
+  one sentence. A case QA must read twice is too long.
 - Every case is a full flow, from login to the screen where the user sees the effect:
-  - \`precondition\` says in plain words what must already exist so the effect is visible BEFORE
-    the change ("A teammate joined today, and the employee and the teammate are active members of
-    the same team, so a joiner update shows on Home › Team Updates"), and pins down everything
-    \`expected\` depends on: the whole starting selection ("Nothing else is blocked"), the
-    relationship the screen really uses, dates inside the window it shows ("between today and
-    seven days from now", "a training that has not started yet"), what enables the controls
-    ("both consent checkboxes are ticked, so Save is enabled"), and for a default state an account
-    no other case logs in as. What must exist, never how to create it.
-    '' only when there truly is nothing to set up.
+  - \`precondition\` says in plain words what must already exist so the effect is visible BEFORE the
+    change, and pins down everything \`expected\` depends on: the whole starting selection ("Nothing
+    else is blocked"), the relationship the screen uses, dates inside its window ("between today and
+    seven days from now"), and what enables the controls the steps use ("both consent checkboxes are
+    ticked, so Save is enabled") — only in the cases that use it. For a bug, the triggering history
+    goes here ("blocked earlier, then removed and saved"); for a default, an account no other case
+    logs in as. What must exist, never how to create it. '' only when there is truly nothing to set up.
   - \`steps\` start with "Log in as <role>", open the screen where the effect shows and see the
-    precondition's item there, go to the page the change is on, make the change, save, and go
-    back. UI actions that name the control ("Click **Save** on the Profile tab"), one per
-    element, without numbering. After Save, make the page re-read what was stored before
-    checking (reload, or open another page from the menu and come back without reloading): the
-    save reply echoes what was sent. Every step ends in something \`expected\` checks.
-  - No API calls anywhere in a case: no "Via API", endpoints, scripts or seed steps in the
-    precondition or the steps. Creating test data is a separate job.
-  - \`expected\` is the effect where the user sees it ("no longer shown under Home › Team
-    Updates"), not only that a setting was saved. One observable result that decides pass or fail.
-    "Not shown" only after that section has finished loading. The app's exact message when it
-    has one. An option with no visible effect (it only stops an email) is checked on the control
-    after a re-read, never on an invented screen.
-- One case per option with a visible effect, each with its own precondition and check; then the
-  cases about the control itself (default on a fresh account; ALL options offered, starting with
-  nothing selected because selected options leave the open list, compared with surrounding
-  spaces ignored, labels quoted trimmed; several at once; cross icon removes; the Save message
-  goes into a case that already clicks Save). For a fix that turns something back on, also a
-  case that a choice removed in an earlier Save stays off when a different one is saved now.
-  State an enabling condition (e.g. consents so Save is enabled) only in cases that use it.
-- Every case must be able to fail on the unfixed build: it goes through the changed behaviour
-  (for a save bug, it clicks Save); a case that only views data its precondition set up is
-  dropped. The bug's own reproduction is written for every control the ticket names.
-- Cases of the same kind share the same precondition wording, each with its own date in the
-  screen's window. Cover keeping an existing choice while adding another in one Save. Check a
-  control's content only after it has finished loading.
-- Expected states a control's whole content ("shows only A and B", "exactly these six"). One
-  action per step, and say how ("click the cross icon on each selected option"); put waits in
-  the step ("Open **Home** and wait for **Team Updates** to finish loading"). Paths use "›".
-  No condition nobody stated (not "approved leave" unless the ticket or code says so).
+    precondition's item there, go to the page the change is on, make the change, save, and come
+    back. One UI action per step, naming the control ("Click **Save** on the Profile tab"),
+    unnumbered. After Save, make the page re-read what was stored before checking (reload, or leave
+    and come back without reloading). Every step ends in something \`expected\` checks.
+  - No API calls anywhere: no "Via API", endpoints, scripts or seed steps. Creating test data is a
+    separate job.
+  - \`expected\` is the effect where the user sees it ("no longer shown under Home › Team Updates"),
+    not only that a setting was saved. One observable result that decides pass or fail, stating a
+    control's whole content ("shows only A and B", "exactly these six"). The app's exact message
+    when it has one. "Not shown" only after that section has finished loading. An option with no
+    visible effect (it only stops an email) is checked on the control after a re-read, never on an
+    invented screen. Paths use "›".
+- **Only when the change is a new or reworked control** (never for a bug fix) also write the cases
+  about the control itself: the default (nothing selected) on a fresh account; ALL options offered,
+  named exactly and compared with surrounding spaces ignored, starting from nothing selected
+  because a selected option leaves the open list; several at once; keeping a choice while adding
+  another in one Save; removing one of two; clearing all; the cross icon; and the Save message,
+  folded into a case that already clicks Save. For a fix that turns something back on, also the
+  other side: a choice removed in an earlier Save stays off when a different one is saved now.
 - No duplicates: merge cases that differ only in how the page re-reads the data, and drop a case
-  another already covers. ${ids}
+  another already covers — or that a spec in "What already exists" already asserts after a re-read.
+  ${ids}
 - Never write a real password, token or key into a case: name the account ("log in as an HR
   admin"). Anything that looks like a credential is blanked before the list is posted.
 - Do not invent behaviour that is in neither the diff nor the ticket.
@@ -304,7 +319,7 @@ ${limitsBlock()}
 
 Return \`sources\` as the diffs your cases come from, e.g. "!501 apps/profile/views.py" (one entry
 per MR and file, as the headings above name them), and \`summary\` as one or two plain sentences
-for QA.`;
+for QA, naming any existing spec your cases extend or that already covers the change.`;
 }
 
 /** A case on one line, exactly as saved: the session copies unchanged cases from here, so nothing may be lost in rendering. */
@@ -365,10 +380,15 @@ export function automationPrompt(input: AutomationPromptInput): string {
   const parts = [
     ticketSection(input.ticket),
     changeBlock(input),
+  ];
+  // Right after the change, so the session reads what the suite and sheet
+  // already cover before it reads how to write — and writes fewer cases for it.
+  if (input.coverage) parts.push(input.coverage);
+  parts.push(
     `## Your task\n${task}`,
     modulesBlock(input.modules),
     whatToWrite(input),
-  ];
+  );
   if (input.mode === 'revise') parts.push(reviseBlock(input));
   parts.push(`## Budget
 You have ${input.maxTurns} turns, and everything you need is already above: there is nothing to

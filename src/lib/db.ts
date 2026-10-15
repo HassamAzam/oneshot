@@ -111,6 +111,14 @@ CREATE TABLE IF NOT EXISTS promotion_lock (
   owner       TEXT,
   acquired_at INTEGER NOT NULL
 );
+
+-- One Cypress run on this desk at a time: src/lib/cypresslease.ts.
+CREATE TABLE IF NOT EXISTS cypress_lease (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  run_id      TEXT NOT NULL,
+  pid         INTEGER NOT NULL,
+  acquired_at INTEGER NOT NULL
+);
 `);
 
 const now = (): number => Date.now();
@@ -329,11 +337,12 @@ function activeRowsFor(iid: number): ActiveRow[] {
  * 'aborted' rather than 'blocked': the journal on disk is untouched, so the
  * ticket is claimable again and resumes from the last phase that succeeded.
  *
- * The two DELETEs are what makes it a bury rather than a relabel. A run holds a
- * port out of a three-wide pool and, in its promotion window, the mutex that
- * serialises merge→deploy→qa across the whole machine. Freeing the ticket while
- * leaving either behind retires a port permanently and hands the next run a
- * window held by a process that no longer exists — so they go together, in
+ * The DELETEs are what makes it a bury rather than a relabel. A run holds a
+ * port out of a three-wide pool, in its promotion window the mutex that
+ * serialises merge→deploy→qa across the whole machine, and while its local
+ * tests run the desk's one Cypress lease. Freeing the ticket while leaving any
+ * of them behind retires a port permanently and hands the next run a window or
+ * a lease held by a process that no longer exists — so they go together, in
  * whatever transaction the caller has already opened, or not at all.
  */
 function buryRow(runId: string): void {
@@ -341,6 +350,7 @@ function buryRow(runId: string): void {
     .run(now(), runId);
   db.prepare('DELETE FROM port_leases WHERE run_id = ?').run(runId);
   db.prepare('DELETE FROM promotion_lock WHERE run_id = ?').run(runId);
+  db.prepare('DELETE FROM cypress_lease WHERE run_id = ?').run(runId);
 }
 
 export type ClaimResult = 'claimed' | 'taken';
@@ -418,8 +428,8 @@ export function claimOwnership(iid: number, runId: string, ownerId: string): boo
  * the first and a conductor briefly blocked inside a synchronous write is
  * protected by neither if the second stands alone.
  *
- * buryRow takes the run's port lease and promotion window with it, in this
- * transaction, so there is no window where the ticket is free and the resources
+ * buryRow takes the run's port lease, promotion window and Cypress lease with
+ * it, in this transaction, so there is no window where the ticket is free and the resources
  * it was holding are not.
  */
 export function reconcileForeignRuns(liveIds: string[]): number {
