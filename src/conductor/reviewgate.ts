@@ -385,9 +385,9 @@ export interface CheckGateOpts {
   gate: Gate;
   /**
    * Posted as a ticket comment the moment this gate first arms, or re-arms
-   * after a feedback round. Built fresh by the caller on every check (it
-   * embeds the current plan, or the current test-case list), never cached
-   * here.
+   * after a feedback round. Built fresh by the caller on every check — it
+   * carries the current test-case list, or for the plan gate a pointer to the
+   * already-published plan note — never cached here.
    */
   requestBody: string;
   /**
@@ -702,8 +702,8 @@ async function mentionOrName(username: string): Promise<string> {
 }
 
 /**
- * SLACK mrkdwn, not GitLab Markdown — the mirror of the warning on
- * `renderPlanForTicket`, and just as easy to get backwards. `**bold**` shows
+ * SLACK mrkdwn, not GitLab Markdown — the mirror of the warning on the ticket
+ * renderers below, and just as easy to get backwards. `**bold**` shows
  * its asterisks here, and a bare URL is written `<url|text>`.
  *
  * Deliberately short. The plan or the case list is already on the ticket in
@@ -1370,7 +1370,9 @@ export function designDeliverableRefusal(
 }
 
 /**
- * GitLab Markdown, not Slack mrkdwn — same warning as `renderPlanForTicket`.
+ * GitLab Markdown, not Slack mrkdwn — the ticket renders Markdown, so
+ * `**bold**` is bold and `:warning:` resolves (the inverse of the Slack
+ * mrkdwn warning earlier in this file).
  *
  * What a design reviewer is being asked is narrower than what a plan reviewer
  * is asked, so this leads with the two things that decide the answer: the

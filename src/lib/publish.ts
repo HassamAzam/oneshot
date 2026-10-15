@@ -123,14 +123,20 @@ function pathsAtRef(baseSha: string, paths: string[]): Set<string> {
  * Each path SEGMENT is URL-encoded: a space, `#`, `(` or `)` in a path
  * otherwise ends the CommonMark link destination early and spills the tail into
  * the cell as literal text. Encoding per segment keeps the `/` separators.
+ * `encodeURIComponent` leaves `(` and `)` alone, so they are encoded explicitly
+ * — an unbalanced paren in a path would otherwise still truncate the link.
  */
+function encodeSegment(seg: string): string {
+  return encodeURIComponent(seg).replace(/[()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
 function fileCell(file: string, blobBase?: string, exists?: (path: string) => boolean): string {
   const label = tableCell(file);
   if (!blobBase) return label;
   const m = /^(.+?):(\d+)(?:-(\d+))?$/.exec(file.trim());
   const path = m ? m[1]! : file.trim();
   if (exists && !exists(path)) return label;
-  const url = path.split('/').map(encodeURIComponent).join('/');
+  const url = path.split('/').map(encodeSegment).join('/');
   const anchor = m ? `#L${m[2]}${m[3] ? `-${m[3]}` : ''}` : '';
   return `[${label}](${blobBase}/${url}${anchor})`;
 }

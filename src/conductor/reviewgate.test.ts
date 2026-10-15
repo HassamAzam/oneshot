@@ -1,3 +1,4 @@
+import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -162,10 +163,18 @@ test('a planned file that does not exist at the base commit is not linked', () =
   assert.match(md, /apps\/x\/new_file\.py/);
 });
 
-test('plan markdown URL-encodes path segments so spaces do not break the link', () => {
-  const plan = { ...oldPlan, steps: [{ n: 1, what: 'edit', files: ['docs/Release Notes.md'], layer: 'config' }] };
+test('plan markdown URL-encodes path segments so spaces and parens do not break the link', () => {
+  const plan = {
+    ...oldPlan,
+    steps: [
+      { n: 1, what: 'edit', files: ['docs/Release Notes.md'], layer: 'config' },
+      { n: 2, what: 'edit', files: ['docs/sad).md'], layer: 'config' },
+    ],
+  };
   const md = renderPlanMd(1, 't', plan, 'abc123', allExist);
   assert.match(md, /\]\(\S+\/-\/blob\/abc123\/docs\/Release%20Notes\.md\)/);
+  // An unbalanced paren would otherwise end the CommonMark destination early.
+  assert.match(md, /\]\(\S+\/-\/blob\/abc123\/docs\/sad%29\.md\)/);
 });
 
 test('no base commit means no links', () => {
