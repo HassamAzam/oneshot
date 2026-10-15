@@ -334,10 +334,14 @@ export const TESTCASES_SCHEMA = phaseSchema({
       required: ['id', 'scenario', 'precondition', 'steps', 'expected', 'pass', 'blast'],
     },
   },
-  passesEmpty: strArr(
-    'Passes you ran that legitimately produced nothing. Recording this is what stops ' +
-    'a SKIPPED pass from looking identical to a clean one.',
-  ),
+  passesEmpty: {
+    type: 'array',
+    items: { type: 'string', enum: [...TEST_PASSES] },
+    description:
+      'Passes you ran that legitimately produced nothing. Recording this is what stops ' +
+      'a SKIPPED pass from looking identical to a clean one. Each entry is one of the ' +
+      'pass names above, so a reader can match it to a pass by name, not by prose.',
+  },
 }, ['module', 'lv', 'cases', 'passesEmpty']);
 
 export const IMPLEMENT_SCHEMA = phaseSchema({
