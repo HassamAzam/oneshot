@@ -55,10 +55,9 @@
  * alone. There is no legitimate command that writes one of them, so the cost of
  * the patterns it misses is a gap, never a false positive.
  *
- * The names are derived from config/phases.json rather than listed here, the
- * way frontend-test-guard derives Jest's collection rules from the app repo's
- * own package.json: a phase renamed or added in config cannot leave this guard
- * silently protecting a file that no longer exists.
+ * The names are derived from config/phases.json rather than listed here: a
+ * phase renamed or added in config cannot leave this guard silently protecting
+ * a file that no longer exists.
  *
  * Fail-open, like every guard here.
  */

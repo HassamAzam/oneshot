@@ -1312,11 +1312,12 @@ Produce an implementation plan an engineer could follow without re-deriving the 
 - Steps are ordered and each names the files it touches and its layer. \`files\` and \`layer\`
   are machinery, not prose: they decide which standards \`implement\` loads and what the review
   gate is scoped to, so a file left off a step is a file nobody is scoped to.
-- No step writes a Jest test, or any other frontend unit test. This repo's Jest toolchain has
-  rotted (Babel/enzyme/ESM drift) and CI never runs it, so such a step is unpassable by
-  construction -- \`testcases\` and \`verify\` are both already instructed to refuse it.
-  Frontend behaviour is covered by the Playwright cases \`testcases\` writes against the real
-  app; a plan step asking for one anyway spends \`implement\` on code nothing will ever run.
+- A step may order a Jest or other frontend unit test where unit-level coverage fits the
+  change — a pure helper, a transform, a hook, a component's branching. Point such a step at
+  the component's \`__tests__\` directory or a \`.test.\`/\`.spec.\` sibling under \`frontend/src\`.
+  Keep whole-flow and rendered-behaviour coverage on the Playwright cases \`testcases\` writes
+  against the real app; reach for a unit test when it isolates logic more cheaply than driving
+  the browser would.
 - Set \`migrations\` true if any model, field, constraint or relation changes. A schema change
   and a data change are SEPARATE migrations — say which you need and in which order. And a
   lookup inside a loop is an N+1: where the approach needs per-record data on a bulk path,
@@ -1455,12 +1456,14 @@ artifact is above, and its \`testsRun\` field records the commands that actually
 ran on this branch and what they returned. Read it before writing a case around
 any runner.
 
-- **Bad:** a case built on this repo's Jest — it has rotted (Babel/enzyme/ESM
-  drift) and CI never runs it, so the case is unpassable by construction. One
-  such case failed identically on three separate laps.
+- **Bad:** a case built on a runner \`testsRun\` shows failing to start, or on one
+  neither \`testsRun\` nor any later phase of this pipeline runs — it is unpassable
+  by construction and proves nothing about the change either way, however the
+  assertion is written. A fresh Jest test the ticket ships is not this: \`verify\`
+  runs it (below), so it is a runner this pipeline uses.
 - **Good:** assert through a runner \`testsRun\` shows working, or one this
-  pipeline itself uses — Playwright for the browser, pytest and flake8 for the
-  backend — and name it in \`steps\`.
+  pipeline itself uses — Jest for a frontend unit, Playwright for the browser,
+  pytest and flake8 for the backend — and name it in \`steps\`.
 
 ### 3. One case, one subject
 
@@ -1990,9 +1993,11 @@ a password or find an email.
 Drive the browser with Playwright, from Bash, with \`node\` — there is no browser tool in this
 session. Resolve \`playwright\` through the \`node_modules\` your worktree already has and
 through NODE_PATH; if neither resolves it, that is an environment fault worth \`blocked\`, not
-something to fix by installing into the shared tree. Never write or run a Jest test in this
-repo: the Jest toolchain is rotted and CI does not run it, and an hour repairing it is an hour
-not spent verifying anything.
+something to fix by installing into the shared tree. Rendered and whole-flow behaviour is
+verified here through the browser; a frontend unit test the change ships belongs to its own
+Jest runner, so run it non-interactively with \`CI=true npx jest --watchAll=false <path>\` —
+never bare \`npm test\`, which defaults to watch mode and wedges the phase until its timeout —
+rather than reasserting the same logic by hand.
 
 ## Test data — the method is a skill, the boundaries are here
 
