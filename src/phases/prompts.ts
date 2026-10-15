@@ -1559,12 +1559,47 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
 agent is not listed — but that is not a rule. If the change turns out to need that layer,
 dispatch its agent for it rather than writing that layer yourself.`
       : '';
+    // What makes the trace authoritative is a SURVEY: a kind-prefixed entry in
+    // codePath, or a verdict in the plan's reuse. codePath has no minItems and
+    // research is told to land the plane at ~70%, so a bare trace with neither is
+    // a real outcome — and then the reuse search is still implement's to run.
+    // Forbidding it there is how a helper already in common/ gets written twice.
+    const planReuse = ((ctx.prior.plan ?? {}) as { reuse?: string[] }).reuse ?? [];
+    const surveyed = planReuse.length > 0
+      || (r.codePath ?? []).some((c) => PRIOR_ART_KINDS.some((k) => String(c.role ?? '').trim().startsWith(k)));
+    const handOff = surveyed
+      ? ` When you dispatch one, hand it the \`codePath\` entries and \`reuse\` verdicts above that cover
+its layer, plus the plan steps it is building, verbatim, and tell it they are the pipeline's own
+trace — authoritative prior art to build on, not a lead to re-investigate. A sub-agent handed that
+trace opens the named files to edit them; it does not re-run the reuse hunt research and plan
+already finished.`
+      : ` When you dispatch one, hand it the plan steps it is building, verbatim, with the \`codePath\`
+entries that cover its layer, and tell it no reuse survey was done, so its own reuse-first search
+applies as normal.`;
     const agentBlock = `Delegate implementation work to ${wanted.join(' and ')} for changes in `
       + `${wanted.length > 1 ? 'their layer' : 'that layer'}; they carry the standards this repo is
-reviewed against.${unplanned} When you dispatch one, hand it the \`codePath\` entries and \`reuse\`
-verdicts above that cover its layer, and tell it they are the pipeline's own trace — authoritative
-prior art to build on, not a lead to re-investigate. A sub-agent handed that trace opens the named
-files to edit them; it does not re-run the reuse hunt research and plan already finished.`;
+reviewed against.${unplanned}${handOff}`;
+
+    // The ban on re-running the hunt holds only where a survey happened. Where
+    // it did, the skills implement loads still order their own search before
+    // writing, so the precedence between the two is stated rather than left
+    // for the session to guess; a surface the trace never reached keeps it.
+    const traceRule = surveyed
+      ? `- The \`codePath\` and \`reuse\` lists above are the prior-art trace phases 0–2 already produced;
+  reuse discovery is their job, not yours. Open the files they name to EDIT them. Do not re-trace a
+  module, re-run a reuse or prior-art search, or dispatch an \`Explore\` / \`general-purpose\` agent to
+  re-establish what the trace already records. If a step, a review finding or a verify
+  failure genuinely needs something the trace omits — on a fix lap the defect is often in a file
+  research never traced — read the narrow thing it touches and note the gap in \`summary\`; do not
+  reopen the hunt.
+- That trace takes precedence over the reuse searches your skills order before writing —
+  \`ponytail\`'s "already in this codebase?" and \`react-frontend-standards\`' shared-component
+  search — for the surfaces it names. A surface no phase surveyed still gets that skill's search: a
+  new UI primitive the trace never mentions is searched for exactly as the skill says.`
+      : `- No reuse survey reached this phase: \`codePath\` carries no prior-art entry and the plan's
+  \`reuse\` is empty. Use the trace for where the change goes, but the reuse-first search your
+  skills and agents describe applies as normal — run it before you write a new helper, component
+  or constant.`;
 
     // A review lap and a retry lap are different jobs and must not read the
     // same: one has a defect list to close, the other has an unknown amount of
@@ -1660,6 +1695,10 @@ Write the code.
   Work through the plan's steps in order and commit as you complete each coherent one — small
   commits are what let \`review\` and \`git bisect\` say anything useful. Never amend or rebase a
   commit from an earlier lap.
+- Each plan step is the specification for that step. Plan writes them with
+  \`superpowers-planning\`, which names the symbols, signatures and files a step adds or changes
+  so an executor with no context can build it: take a step's \`what\` as the spec, open its
+  \`files\` to EDIT them, and execute it as written rather than re-deriving its design from the code.
 - Follow the plan. If executing a step proves it wrong — the research missed something, the
   helper it names does not do what it claims — do the right thing instead and say so in
   \`summary\`. Do not silently implement a different design, and do not implement a design you
@@ -1667,11 +1706,7 @@ Write the code.
 - Apply the plan's \`reuse\` verdicts before writing anything new. A reuse, extend or collapse
   entry is binding. A rejected entry is a candidate the plan decided NOT to build on: do not
   reuse, extend or collapse onto it, for the reason on its line.
-- The \`codePath\` and \`reuse\` lists above are the prior-art trace phases 0–2 already produced;
-  reuse discovery is their job, not yours. Open the files they name to EDIT them. Do not re-trace a
-  module, re-run a reuse or prior-art search, or dispatch an \`Explore\` / \`general-purpose\` agent to
-  re-establish what the trace already records. If a step genuinely needs something the trace omits,
-  read the narrow thing that step touches and note the gap in \`summary\`; do not reopen the hunt.
+${traceRule}
 - Every acceptance criterion above must be met by the code you leave behind. The next phase
   writes the test cases that \`verify\` and \`qa\` will execute, and it writes them from those
   same criteria — so a criterion you quietly dropped becomes a failing case, not a saved step.

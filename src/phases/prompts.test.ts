@@ -782,6 +782,10 @@ test('the prior-art kinds are one set, in every place that names them', () => {
   }
 });
 
+/** The one prompt bullet containing `needle`, so a rule's two halves must sit together. */
+const bulletWith = (prompt: string, needle: string): string =>
+  prompt.split(/\n(?=- )/).find((b) => b.includes(needle)) ?? '';
+
 const PLAN_WITH_A_REJECTION = {
   approach: 'Count maternity days with the existing helper.',
   reuse: [
@@ -809,7 +813,11 @@ test('implement is told the codePath and reuse trace is authoritative, not a sea
   const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
   assert.match(p, /reuse\s+discovery is their job, not yours/);
   assert.match(p, /Open the files they name to EDIT them/);
-  assert.match(p, /do not[\s\S]*?dispatch an `Explore` \/ `general-purpose` agent/);
+  // Scoped to the one bullet, so a "do not" from any earlier sentence cannot
+  // satisfy it while the ban itself is gone.
+  const ban = bulletWith(p, 'reuse discovery is their job');
+  assert.match(ban, /Do not re-trace a\s+module/);
+  assert.match(ban, /dispatch an `Explore` \/ `general-purpose` agent/);
 });
 
 test('implement tells the session to hand the trace to the agents it delegates to', () => {
@@ -819,6 +827,73 @@ test('implement tells the session to hand the trace to the agents it delegates t
   const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
   assert.match(p, /hand it the `codePath` entries and `reuse`/);
   assert.match(p, /authoritative\s+prior art to build on, not a lead to re-investigate/);
+});
+
+test('with no reuse survey behind it, implement is told to search rather than to trust', () => {
+  // codePath has no minItems and research is told to land the plane at ~70%, so
+  // it can arrive empty or as a bare trace with no prior-art entry. Telling
+  // implement "reuse discovery is their job" then forbids the only search left,
+  // and the helper that already sits in common/ gets written a second time.
+  const empty = promptFor(cfg('implement'), ctx(ticket()));
+  const traceOnly = promptFor(cfg('implement'), ctx(ticket(), {
+    research: { codePath: [{ file: 'apps/leaves/views.py', line: 40, role: 'LeaveSummaryView.get reads the rows' }] },
+    plan: { ...PLAN_WITH_A_REJECTION, reuse: [] },
+  }));
+  for (const p of [empty, traceOnly]) {
+    assert.doesNotMatch(p, /reuse\s+discovery is their job, not yours/);
+    assert.match(p, /No reuse survey reached this phase/);
+    assert.match(p, /tell it no reuse survey was done/);
+  }
+});
+
+test('a prior-art entry in codePath counts as a survey even when the plan wrote no reuse verdict', () => {
+  const p = promptFor(cfg('implement'), ctx(ticket(), {
+    research: { codePath: [{ file: 'common/utils.py', line: 12, role: 'callable: leave_days() counts the days' }] },
+    plan: { ...PLAN_WITH_A_REJECTION, reuse: [] },
+  }));
+  assert.match(p, /reuse\s+discovery is their job, not yours/);
+});
+
+test('a fix lap may read past the trace for a finding or a verify failure, not only a step', () => {
+  // On a cycle lap the work is findings and verifyFailures, often in a file
+  // research never traced. An exception keyed on "a step" leaves the session
+  // arguing with the ban instead of reading the file the defect is in.
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
+  assert.match(bulletWith(p, 'reuse discovery is their job'), /a step, a review finding or a verify\s+failure/);
+});
+
+test('the trace outranks the reuse searches the loaded skills order, only for what it names', () => {
+  // ponytail and react-frontend-standards each order their own search before
+  // writing; without a stated precedence the session holds two contradictory
+  // instructions. The search survives for any surface the trace does not name.
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
+  const rule = bulletWith(p, 'takes precedence over');
+  assert.match(rule, /`ponytail`/);
+  assert.match(rule, /`react-frontend-standards`/);
+  assert.match(rule, /A surface no phase surveyed still gets/);
+});
+
+test('both delegate agents put the handed trace ahead of their skills\' searches, only for what it names', () => {
+  // The sub-agents never see the implement prompt; each reads its own definition,
+  // which tells it to read and follow the layer skills throughout.
+  for (const agent of ['backend-agent.md', 'frontend-agent.md']) {
+    const def = readFileSync(join(ROOT, 'context', 'agents', agent), 'utf8');
+    assert.match(def, /takes precedence over the reuse searches in the skills below/, agent);
+    assert.match(def, /a surface the trace does not name still gets that search/, agent);
+  }
+});
+
+test('implement executes the plan\'s steps as written, the way superpowers-planning wrote them', () => {
+  // plan loads superpowers-planning so each step names its symbols, signatures and
+  // files for an executor with no context. That only pays if implement takes the
+  // step as the spec instead of re-deriving it from the code.
+  assert.ok(cfg('plan').skills?.includes('superpowers-planning'), 'plan must still write its steps that way');
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
+  const steps = bulletWith(p, '`superpowers-planning`');
+  assert.match(steps, /execute it as written/);
+  assert.match(steps, /symbols, signatures and\s+files/);
+  // A sub-agent sees the step it is handed, not the plan, so it has to arrive whole.
+  assert.match(p, /the plan steps it is building, verbatim/);
 });
 
 test('review sees the plan\'s reuse verdicts one per line, under a heading that admits rejections', () => {
