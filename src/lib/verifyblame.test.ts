@@ -65,6 +65,20 @@ test('a happy-path case verify called pre-existing is dismissed even after the b
   assert.deepEqual(blame.ownCaseDismissed, ['TC-1']);
 });
 
+test('a failing case missing from testcases.json is a stale, orphaned fail', () => {
+  const blame = blameOf(
+    verify(['TC-1', 'fail'], ['TC-2', 'fail']),
+    { cases: [{ id: 'TC-1', pass: ['happy'] }] },
+  );
+  assert.deepEqual(blame.orphanedFailures, ['TC-2']);
+});
+
+test('no orphans are claimed when testcases.json is unavailable', () => {
+  assert.deepEqual(blameOf(verify(['TC-1', 'fail']), null).orphanedFailures, []);
+});
+
 test('no verify artifact means nothing to blame', () => {
-  assert.deepEqual(blameOf(null, null), { failing: [], failBlamedElsewhere: [], ownCaseDismissed: [] });
+  assert.deepEqual(blameOf(null, null), {
+    failing: [], failBlamedElsewhere: [], ownCaseDismissed: [], orphanedFailures: [],
+  });
 });

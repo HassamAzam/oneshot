@@ -25,6 +25,13 @@
  * grades those lists instead. Every run prints the change against the newest
  * saved scoring, or the one --vs names, and flags each edge that was covered
  * there and is missing now.
+ *
+ * Before the judge runs, a cheap structural check drops any list with no
+ * well-formed case (a case needs at least one step and an expected result that
+ * asserts something): such a list covers no edge, so paying a judge to confirm
+ * it wastes a call. Where a gold edge carries a `truth` of covered/none, the
+ * run also reports how often the judge matched it — the judge's own error rate,
+ * to weigh its unlabelled verdicts by.
  */
 import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
@@ -34,7 +41,7 @@ import { BASE_ENV, ROOT, STATE } from '../src/lib/config.js';
 import { transcriptResult } from '../src/lib/transcript.js';
 import { argValue, loadHistory, saveHistory, type Saved } from './evalhistory.js';
 
-interface Edge { id: string; source: 'bug' | 'ticket'; edge: string }
+interface Edge { id: string; source: 'bug' | 'ticket'; edge: string; truth?: 'covered' | 'none' }
 interface GoldFile { projects: Record<string, Record<string, Edge[]>> }
 interface Case { id: string; scenario: string; precondition: string; steps: string[]; expected: string }
 interface Verdict { edge: string; coveredBy: string; reason: string }
@@ -44,6 +51,18 @@ const IPV4_SHIM = join(ROOT, 'scripts', 'ipv4-dns.cjs');
 const JUDGE_TIER = 'standard';
 const JUDGE_MAX_TURNS = 3;
 const KIND = 'edge-coverage';
+
+const VACUOUS_EXPECTED = /^(|-|n\/?a|tbd|works?|should work|passes?|ok|no error)\.?$/i;
+
+/**
+ * A case the judge can reason about at all: it has at least one step and an
+ * expected result that asserts something. A list with no well-formed case is
+ * not judged — an empty or placeholder list covers no edge, and paying a judge
+ * to say so wastes a call.
+ */
+function wellFormed(c: Case): boolean {
+  return c.steps.some((s) => s.trim()) && !VACUOUS_EXPECTED.test(c.expected.trim());
+}
 
 const VERDICT_SCHEMA = {
   type: 'object',
@@ -127,6 +146,9 @@ async function judge(edges: Edge[], cases: Case[], model: string): Promise<Verdi
 
 interface TicketScore {
   repo: string; iid: number; covered: number; edges: number; bugCovered: number; bugEdges: number; missing: string[];
+  wellFormed: number; cases: number;
+  /** Edges whose gold truth is known, and how many the judge matched. */
+  truthChecked: number; truthAgreed: number;
 }
 interface EdgeScores { judge: string; tickets: TicketScore[] }
 
@@ -180,18 +202,28 @@ function liveCases(project: string, iid: string): Case[] | null {
 
 async function score(project: string, iid: string, edges: Edge[], cases: Case[], model: string): Promise<TicketScore> {
   const verdicts = new Map((await judge(edges, cases, model)).map((v) => [v.edge, v]));
-  const uncovered = edges.filter((e) => {
+  const coveredByJudge = (e: Edge): boolean => {
     const by = verdicts.get(e.id)?.coveredBy ?? 'none';
-    return by === 'none' || !cases.some((c) => c.id === by);
-  });
+    return by !== 'none' && cases.some((c) => c.id === by);
+  };
+  const uncovered = edges.filter((e) => !coveredByJudge(e));
   for (const e of uncovered) {
     console.log(`  ${repoName(project)}#${iid} ${e.id} [${e.source}] missing: ${e.edge}\n      judge: ${verdicts.get(e.id)?.reason ?? 'no verdict'}`);
+  }
+  const labelled = edges.filter((e) => e.truth !== undefined);
+  const agreed = labelled.filter((e) => (coveredByJudge(e) ? 'covered' : 'none') === e.truth);
+  for (const e of labelled) {
+    if (!agreed.includes(e)) {
+      console.log(`  ${repoName(project)}#${iid} ${e.id} judge disagreed with gold truth '${e.truth}': ${verdicts.get(e.id)?.reason ?? 'no verdict'}`);
+    }
   }
   const bugEdges = edges.filter((e) => e.source === 'bug').length;
   return {
     repo: repoName(project), iid: Number(iid), covered: edges.length - uncovered.length, edges: edges.length,
     bugCovered: bugEdges - uncovered.filter((e) => e.source === 'bug').length, bugEdges,
     missing: uncovered.map((e) => e.id),
+    wellFormed: cases.filter(wellFormed).length, cases: cases.length,
+    truthChecked: labelled.length, truthAgreed: agreed.length,
   };
 }
 
@@ -205,10 +237,16 @@ function report(now: TicketScore[], base: Saved<EdgeScores> | null): void {
   console.table(now.map((t) => ({
     repo: t.repo, iid: t.iid,
     covered: `${t.covered}/${t.edges}`, bugCovered: `${t.bugCovered}/${t.bugEdges}`,
+    wellFormed: `${t.wellFormed}/${t.cases}`,
     ...(base ? { [`was (${base.label})`]: was(t) ? `${was(t)!.covered}/${was(t)!.edges}, bug ${was(t)!.bugCovered}/${was(t)!.bugEdges}` : '—' } : {}),
   })));
   const n = totals(now);
   console.log(`now:  ${n.covered}/${n.edges} edges, ${n.bugCovered}/${n.bugEdges} bug edges`);
+  const checked = now.reduce((a, t) => a + t.truthChecked, 0);
+  if (checked) {
+    const agreed = now.reduce((a, t) => a + t.truthAgreed, 0);
+    console.log(`judge accuracy: ${agreed}/${checked} edges matched gold truth (${checked - agreed} disagreement(s)) — the judge's own error rate, to weigh its verdicts by.`);
+  }
   if (!base) return;
   const both = now.filter(was);
   const b = totals(both.map((t) => was(t)!));
@@ -244,6 +282,10 @@ async function main(): Promise<void> {
     const cases = lists[i];
     if (!cases?.length) {
       console.log(`${repoName(t.project)}#${t.iid}: no test list to grade, skipped`);
+      return null;
+    }
+    if (!cases.some(wellFormed)) {
+      console.log(`${repoName(t.project)}#${t.iid}: ${cases.length} case(s) but none have steps and a concrete expected result, so none can cover any edge; judge skipped`);
       return null;
     }
     return score(t.project, t.iid, t.edges, cases, model);

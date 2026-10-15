@@ -36,6 +36,20 @@ export interface Blame {
    * verify gave, not the 'fail' the case was rescored to.
    */
   ownCaseDismissed: string[];
+  /**
+   * Failing verdicts for cases that no longer exist in testcases.json. A case
+   * dropped from the list (descoped, or rewritten under a new id) can survive
+   * in a salvaged verify.json and keep blocking the run, so the fail is stale
+   * by construction. Empty when testcases.json is unavailable, since absence
+   * cannot be told from a missing file.
+   */
+  orphanedFailures: string[];
+}
+
+function caseIds(testcases: TestcasesArtifact | null): Set<string> | null {
+  const cases = testcases?.cases;
+  if (!cases) return null;
+  return new Set(cases.map((c) => (typeof c.id === 'string' ? c.id : '?')));
 }
 
 /**
@@ -52,6 +66,7 @@ export function blameOf(verify: VerifyArtifact | null, testcases: TestcasesArtif
   const results = verify?.results ?? [];
   const idOf = (c: CaseVerdict): string => c.id ?? '?';
   const ownCases = ticketScopeIds(testcases?.cases ?? []);
+  const present = caseIds(testcases);
   return {
     failing: results.filter(countsAsFailure).map(idOf),
     failBlamedElsewhere: results
@@ -60,5 +75,7 @@ export function blameOf(verify: VerifyArtifact | null, testcases: TestcasesArtif
     ownCaseDismissed: results
       .filter((c) => verifyLabel(c) === 'pre-existing' && ownCases.has(idOf(c)))
       .map(idOf),
+    orphanedFailures: present === null ? []
+      : results.filter(countsAsFailure).map(idOf).filter((id) => !present.has(id)),
   };
 }

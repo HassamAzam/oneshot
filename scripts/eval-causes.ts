@@ -33,6 +33,8 @@ interface CauseScore {
   repo: string; iid: number; right: number; total: number; missed: number; wrongBlame: number; wrong: string[];
   /** Verify's own labels that read as mislabels, with no gold needed. */
   failBlamedElsewhere?: string[]; ownCaseDismissed?: string[];
+  /** Failing verdicts for cases absent from testcases.json, with no gold needed. */
+  orphanedFailures?: string[];
 }
 interface CauseScores { tickets: CauseScore[] }
 
@@ -71,6 +73,7 @@ function score(repo: string, iid: number, labels: Labels, dir: string): CauseSco
   const s: CauseScore = {
     repo, iid, right: 0, total: 0, missed: 0, wrongBlame: 0, wrong: [],
     failBlamedElsewhere: blame.failBlamedElsewhere, ownCaseDismissed: blame.ownCaseDismissed,
+    orphanedFailures: blame.orphanedFailures,
   };
   for (const [id, { cause }] of Object.entries(labels)) {
     s.total++;
@@ -89,11 +92,13 @@ function report(now: CauseScore[], base: Saved<CauseScores> | null): void {
     repo: s.repo, iid: s.iid, right: `${s.right}/${s.total}`, score: pct(s.right, s.total),
     missed: s.missed, wrongBlame: s.wrongBlame,
     blamedElsewhere: s.failBlamedElsewhere?.length ?? 0, ownDismissed: s.ownCaseDismissed?.length ?? 0,
+    orphaned: s.orphanedFailures?.length ?? 0,
     ...(base ? { [`was (${base.label})`]: was(s) ? `${was(s)!.right}/${was(s)!.total}, wrongBlame ${was(s)!.wrongBlame}` : '—' } : {}),
   })));
   console.log('missed: a real failure of this change that verify did not call a fail (worst).');
   console.log('wrongBlame: verify called it a fail of this change when it was not (costs an implement lap).');
-  console.log('blamedElsewhere / ownDismissed: read from verify\'s own evidence and labels, no gold needed.');
+  console.log('blamedElsewhere / ownDismissed / orphaned: read from verify\'s own evidence and labels, no gold needed.');
+  for (const s of now) for (const id of s.orphanedFailures ?? []) console.log(`  ${s.repo}#${s.iid} ${id}: fails in verify.json but is not in testcases.json (stale, salvaged fail).`);
   for (const s of now) for (const w of s.wrong) console.log(`  ${s.repo}#${s.iid} ${w}`);
   const sum = (xs: CauseScore[], k: 'right' | 'total' | 'missed' | 'wrongBlame'): number => xs.reduce((a, x) => a + x[k], 0);
   console.log(`now:  ${sum(now, 'right')}/${sum(now, 'total')} right, ${sum(now, 'missed')} missed, ${sum(now, 'wrongBlame')} wrongBlame`);
