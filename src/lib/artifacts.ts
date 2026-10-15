@@ -289,6 +289,14 @@ export interface RunJournal {
    */
   humanMergeCheckAt?: number;
   branch?: string;
+  /**
+   * The immutable fork-point commit the run branched from (merge-base with the
+   * base branch). `publish` pins the plan's file links to this SHA so they show
+   * the exact code the plan was written against and never drift as the branch
+   * moves. Absent on journals written before it existed, and on resumed runs
+   * whose worktree predates it — the plan then renders file paths without links.
+   */
+  baseSha?: string;
   worktree?: string;
   port?: number;
   mrIid?: number;
@@ -324,6 +332,12 @@ export interface RunJournal {
   claimNoteId?: number;
   /** Publication keys already posted to GitLab — see lib/publish.ts. */
   published?: string[];
+  /**
+   * Note id GitLab assigned each published key, so a later note can link the
+   * exact comment (e.g. the plan gate linking the plan note) rather than a
+   * fragile "see the comment above". Absent for keys posted under DRY_RUN.
+   */
+  publishedNotes?: Record<string, number>;
   slackTs?: string;
   phases: PhaseRecord[];
   /** Blocks this run diagnosed and tried to clear by itself, oldest first. */
