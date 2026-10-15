@@ -22,12 +22,13 @@
  *    the feature did not exist. Idempotency is the same property, so a crash
  *    between the upload and the note re-posts at most one note.
  */
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, extname, isAbsolute, join } from 'node:path';
-import { artifactDir, localTestsPatchFile, reviewersConfig } from './config.js';
+import { artifactDir, localTestsPatchFile, reviewersConfig, WORK_REPO } from './config.js';
 import { readArtifact, readJournal, updateJournal, type RunJournal } from './artifacts.js';
 import {
-  addIssueNote, addMergeRequestNote, mergeRequestUrl, uploadFile, type Upload,
+  addIssueNote, addMergeRequestNote, mergeRequestUrl, projectUrl, uploadFile, type Upload,
 } from './gitlab.js';
 import { log } from './log.js';
 import { codeSpan, mdText, tableCell } from './gitlabmd.js';
@@ -77,17 +78,101 @@ interface PlanArtifact {
   summary?: string;
 }
 
-export function renderPlanMd(iid: number, title: string, plan: PlanArtifact): string {
+/** A `files` entry's path, with any trailing `:<line>`(`-<end>`) stripped off. */
+function refPath(file: string): string {
+  const m = /^(.+?):(\d+)(?:-(\d+))?$/.exec(file.trim());
+  return m ? m[1]! : file.trim();
+}
+
+/**
+ * Which of `paths` exist in the work repo at `baseSha`.
+ *
+ * A plan routinely names files it is about to CREATE. Those do not exist at the
+ * fork point, so a blob link to them 404s and must render as plain text. Checked
+ * against the local clone in one `git cat-file` batch. Any failure — missing
+ * clone, unknown sha, or the 10s timeout that stops an unresponsive `WORK_REPO`
+ * mount from holding the event loop on this synchronous phase-advance call —
+ * yields an empty set, and the caller then links nothing: a missing link is
+ * always safer than a dead one.
+ */
+function pathsAtRef(baseSha: string, paths: string[]): Set<string> {
+  const present = new Set<string>();
+  if (!paths.length) return present;
+  try {
+    const input = `${paths.map((p) => `${baseSha}:${p}`).join('\n')}\n`;
+    const out = execFileSync(
+      'git', ['-C', WORK_REPO, 'cat-file', '--batch-check=%(objecttype)'],
+      { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], timeout: 10_000 },
+    ).split('\n');
+    paths.forEach((p, i) => { if (out[i] === 'blob') present.add(p); });
+  } catch {
+    // Leave empty: caller renders every path plain rather than risk a dead link.
+  }
+  return present;
+}
+
+/**
+ * A step's file path as a GitLab blob link, pinned to the plan's base commit.
+ *
+ * `blobBase` is `<projectUrl>/-/blob/<baseSha>`, so the link always resolves to
+ * the code the plan was written against and never drifts as the branch moves.
+ * An optional trailing `:<line>` (or `:<start>-<end>`) becomes a `#L` anchor.
+ * `exists` guards against dead links: a path that is not a blob at the base
+ * commit (a file the plan will create) renders as plain text. Without `blobBase`
+ * — an old run with no stored SHA — every path renders as escaped text.
+ *
+ * Each path SEGMENT is URL-encoded: a space, `#`, `(` or `)` in a path
+ * otherwise ends the CommonMark link destination early and spills the tail into
+ * the cell as literal text. Encoding per segment keeps the `/` separators.
+ * `encodeURIComponent` leaves `(` and `)` alone, so they are encoded explicitly
+ * — an unbalanced paren in a path would otherwise still truncate the link.
+ */
+function encodeSegment(seg: string): string {
+  return encodeURIComponent(seg).replace(/[()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function fileCell(file: string, blobBase?: string, exists?: (path: string) => boolean): string {
+  const label = tableCell(file);
+  if (!blobBase) return label;
+  const m = /^(.+?):(\d+)(?:-(\d+))?$/.exec(file.trim());
+  const path = m ? m[1]! : file.trim();
+  if (exists && !exists(path)) return label;
+  const url = path.split('/').map(encodeSegment).join('/');
+  const anchor = m ? `#L${m[2]}${m[3] ? `-${m[3]}` : ''}` : '';
+  return `[${label}](${blobBase}/${url}${anchor})`;
+}
+
+export function renderPlanMd(
+  iid: number, title: string, plan: PlanArtifact, baseSha?: string,
+  existsAt?: (path: string) => boolean,
+): string {
   // Every cell holding model prose goes through `tableCell`; `layer` and
   // `status` are schema enums and `n` is a number, so they cannot break a row.
   // `files` are paths joined with `<br>` — that is a rendering choice for an
   // array, not an escape, which is why the path itself still needs one.
+  const blobBase = baseSha ? `${projectUrl()}/-/blob/${baseSha}` : undefined;
+  // `existsAt` overrides the default existence check, which tests use to drive
+  // link rendering without a real repo. The default resolves existence once per
+  // render, not per file: a plan touches a handful of paths and one
+  // `git cat-file` batch against the work repo answers for all of them.
+  let exists: ((path: string) => boolean) | undefined;
+  if (baseSha) {
+    const present = existsAt
+      ? null
+      : pathsAtRef(baseSha, [...new Set((plan.steps ?? []).flatMap((s) => (s.files ?? []).map(refPath)))]);
+    exists = existsAt ?? ((p: string) => present!.has(p));
+  }
   const steps = (plan.steps ?? [])
     .map((s) => `| ${s.n} | ${s.layer} | ${tableCell(s.what)} | ${
-      (s.files ?? []).map(tableCell).join('<br>') || '—'} |`)
+      (s.files ?? []).map((f) => fileCell(f, blobBase, exists)).join('<br>') || '—'} |`)
     .join('\n');
-  const questions = (plan.openQuestions ?? []).map((q) => `- ${q}`).join('\n');
-  const outOfScope = (plan.outOfScope ?? []).map((o) => `- ${o}`).join('\n');
+  // Prose is interpolated into a RENDERED note body now, not a raw-served
+  // attachment, so every free-text field goes through `mdText`: a risk reading
+  // `<title> is not refreshed` would otherwise open an HTML block and GitLab's
+  // sanitiser would eat the tag and the rest of the block. Table cells already
+  // escape via `tableCell`; these bullets and the approach did not.
+  const questions = (plan.openQuestions ?? []).map((q) => `- ${mdText(String(q))}`).join('\n');
+  const outOfScope = (plan.outOfScope ?? []).map((o) => `- ${mdText(String(o))}`).join('\n');
   const answered = (plan.feedbackResponse ?? [])
     .map((f) => `| ${tableCell(f.point)} | ${tableCell(f.response)} | ${
       tableCell(f.where) || '—'} | ${tableCell(f.note)} |`)
@@ -99,18 +184,18 @@ export function renderPlanMd(iid: number, title: string, plan: PlanArtifact): st
   return `# Implementation plan — #${iid} ${title}
 
 ${answered ? `## Reviewer feedback, point by point\n| Point | Response | Where | Note |\n|---|---|---|---|\n${answered}\n\n` : ''}## Approach
-${plan.approach ?? '(not recorded)'}
-${questions ? `\n## Open questions\n${questions}\n` : ''}
+${plan.approach ? mdText(String(plan.approach)) : '(not recorded)'}
+${questions ? `\n## Open questions — answer these in a comment, or the stated default is used\n${questions}\n` : ''}
 ## Steps
 | # | Layer | Change | Files |
 |---|---|---|---|
 ${steps || '| — | — | (none recorded) | — |'}
 ${coverage ? `\n## Acceptance coverage\n| Criterion | Status | Covered by | Note |\n|---|---|---|---|\n${coverage}\n` : ''}
 ## Prior art and verdicts
-${(plan.reuse ?? []).map((r) => `- ${r}`).join('\n') || '- (none identified)'}
+${(plan.reuse ?? []).map((r) => `- ${mdText(String(r))}`).join('\n') || '- (none identified)'}
 
 ## Risks
-${(plan.risks ?? []).map((r) => `- ${r}`).join('\n') || '- (none identified)'}
+${(plan.risks ?? []).map((r) => `- ${mdText(String(r))}`).join('\n') || '- (none identified)'}
 ${outOfScope ? `\n## Out of scope\n${outOfScope}\n` : ''}
 ## Migrations
 ${plan.migrations ? 'This change requires a database migration.' : 'No schema change.'}
@@ -643,17 +728,18 @@ const SPECS: Spec[] = [
     key: 'plan',
     artifact: 'plan.json',
     target: 'ticket',
-    build: (data, ctx) => ({
-      body: `**Plan** — how Oneshot intends to implement this.\n\n> ${
-        mdText((data.approach as string ?? '').slice(0, 400))}\n\n` +
-        `${(data.steps as unknown[] ?? []).length} step(s)${data.migrations ? ' · includes a migration' : ''}. ` +
-        'Full plan attached; implementation follows it unless a step proves wrong.',
-      attachments: [{
-        name: `plan-${ctx.iid}.md`,
-        content: renderPlanMd(ctx.iid, ctx.journal.title, data as PlanArtifact),
-        mime: 'text/markdown',
-      }],
-    }),
+    build: (data, ctx) => {
+      // The whole plan goes inline, where GitLab renders its headings and
+      // tables — a note body is markdown, an uploaded .md is served raw and
+      // reaches the reader as unrendered source. The same markdown is attached
+      // too, so a reviewer can download or link the plan as a file without
+      // re-deriving it from the comment.
+      const md = renderPlanMd(ctx.iid, ctx.journal.title, data as PlanArtifact, ctx.journal.baseSha);
+      return {
+        body: md,
+        attachments: [{ name: `plan-${ctx.iid}.md`, content: md, mime: 'text/markdown' }],
+      };
+    },
   },
   {
     key: 'testcases',
@@ -819,7 +905,7 @@ export interface PublishCtx {
   journal: RunJournal;
 }
 
-async function post(spec: Spec, pub: Publication, ctx: PublishCtx): Promise<boolean> {
+async function post(spec: Spec, pub: Publication, ctx: PublishCtx): Promise<{ ok: boolean; noteId?: number }> {
   const links: string[] = [];
   for (const a of pub.attachments) {
     const up = await uploadFile(a.name, a.content, a.mime);
@@ -843,10 +929,12 @@ async function post(spec: Spec, pub: Publication, ctx: PublishCtx): Promise<bool
 
   if (!res.ok) {
     log.warn(`publish: note failed for ${spec.key}`, { error: res.error?.slice(0, 120) });
-    return false;
+    return { ok: false };
   }
   log.ok(`published ${spec.key} → ${spec.target}`, { attachments: links.length });
-  return true;
+  // The note id lets the plan gate link its "see the plan above" note to the
+  // exact comment rather than a position (data is null under DRY_RUN).
+  return { ok: true, noteId: (res.data as { id: number } | null)?.id };
 }
 
 /**
@@ -859,6 +947,7 @@ async function post(spec: Spec, pub: Publication, ctx: PublishCtx): Promise<bool
 export async function publishPending(ctx: PublishCtx): Promise<void> {
   try {
     const done = new Set(ctx.journal.published ?? []);
+    const notes = { ...(ctx.journal.publishedNotes ?? {}) };
     for (const spec of SPECS) {
       if (done.has(spec.key)) continue;
       if ((spec.target === 'mr' || spec.needsMr) && !ctx.journal.mrIid) continue;
@@ -871,13 +960,18 @@ export async function publishPending(ctx: PublishCtx): Promise<void> {
         done.add(spec.key);
         continue;
       }
-      if (await post(spec, pub, ctx)) done.add(spec.key);
+      const res = await post(spec, pub, ctx);
+      if (res.ok) {
+        done.add(spec.key);
+        if (res.noteId !== undefined) notes[spec.key] = res.noteId;
+      }
     }
 
     const published = [...done];
-    if (published.length !== (ctx.journal.published ?? []).length) {
-      const updated = updateJournal(ctx.iid, { published });
-      if (updated) ctx.journal.published = published;
+    const notesChanged = JSON.stringify(notes) !== JSON.stringify(ctx.journal.publishedNotes ?? {});
+    if (published.length !== (ctx.journal.published ?? []).length || notesChanged) {
+      const updated = updateJournal(ctx.iid, { published, publishedNotes: notes });
+      if (updated) { ctx.journal.published = published; ctx.journal.publishedNotes = notes; }
     }
   } catch (err) {
     log.warn('publish pass failed', { error: (err as Error).message.slice(0, 160) });
