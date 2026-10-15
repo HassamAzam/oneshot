@@ -1402,9 +1402,9 @@ opposite ("cell must equal drill-down total") tests nothing about the ticket and
 implementation. Do not give that case a hard \`expected\`. Disagreeing with the plan's call is a
 \`review\` finding or an open question in the case's notes, never a pass/fail oracle you invented.
 
-This ONE list is executed three times: locally in a browser by the \`verify\` phase, for
-screenshots by \`ui-evidence\`, and against the deployed demo server by \`qa\`. If you write a
-thin list, all three are thin, and a green QA verdict will mean very little.
+This ONE list is executed by more than one phase: locally in a browser by the \`verify\` phase, for
+screenshots by \`ui-evidence\`, and — on a regression ticket — against the base branch by \`base-check\`. If you
+write a thin list, all of them are thin, and a green verdict will mean very little.
 
 Author the list by brainstorm passes, not as one checklist. Run every pass below, in order,
 and tag each case with the passes that produced it:
