@@ -68,11 +68,12 @@ import {
   type PhaseRecord, type Remediation, type RunJournal,
 } from '../lib/artifacts.js';
 import { branchFor, newRunId, worktreeName } from '../lib/ids.js';
+import { writeDesignTokens } from '../lib/designtokens.js';
 import {
   leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort, seedWorktree,
 } from '../lib/worktrees.js';
 import {
-  addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
+  addIssueNote, createIssue, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
   allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue, type IssueNote,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
@@ -84,7 +85,7 @@ import {
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
 import {
   declareNotABug, declareReproduced, notABugApprovalRequestBody, notABugDecision, reproAttachments,
-  reproductionOf,
+  reproductionOf, shotsIn,
 } from './reproduction.js';
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
@@ -96,14 +97,21 @@ import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
-  appendEdgeCases, checkApprovalGate, declaredFiles, designApprovalRequestBody,
+  appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
   rearmGate,
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
+import { automationOwns } from './watcher.js';
+import {
+  branchFiles, loadZoneMap, refusedTicket, zoneBlockReason, zoneCheckDue, zoneGuardApplies, zoneVerdict,
+  type ZoneVerdict,
+} from './zoneguard.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
-import type { Ticket, TestCase } from '../phases/types.js';
+import {
+  countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type Ticket, type TestCase,
+} from '../phases/types.js';
 import {
   activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
   roundsUsed, startRound,
@@ -131,6 +139,76 @@ const GATE_UNAVAILABLE =
   'this ticket carries the Review label, but Slack is not configured (token + channel), so its '
   + 'approval gates have nowhere to ask — configure Slack, or remove the Review label to run '
   + 'this ticket in the ordinary full-auto mode';
+
+/**
+ * The verify-case gate's own `unavailable`. Like Not a Bug, it arms on any run
+ * (no Review label needed), and what it is missing is a QA list to ask.
+ */
+const VERIFY_GATE_UNAVAILABLE =
+  'verify failed the same case(s) twice through implement and no code change fixed them, but '
+  + 'config/reviewers.json names no QA reviewer to decide what each one means — add one there and '
+  + 'unblock';
+
+/** The new issue opened when QA classifies a still-failing verify case as pre-existing. */
+function preExistingIssueBody(parentIid: number, title: string, c: CaseResult): string {
+  const ev = (c.evidence ?? '').trim();
+  return [
+    `Split from the verify run of #${parentIid} (${title}).`,
+    '',
+    `Verify case **${c.id}** failed, and a QA reviewer classified it **pre-existing** — a real `
+    + 'defect this change did not introduce, tracked separately so it does not hold the MR for '
+    + `#${parentIid}.`,
+    '',
+    '### What verify observed',
+    '',
+    ev || '_No evidence text was recorded on the case._',
+    '',
+    `_Opened by Oneshot from the verify-case QA gate on #${parentIid}._`,
+  ].join('\n');
+}
+
+/**
+ * Fold a scoped verify re-run's fresh results back over the full pre-scope list.
+ *
+ * `baseline` is the whole case list as it stood before the re-run; `fresh` is
+ * what the scoped session returned (only the rescoped cases are trusted, the
+ * rest of `fresh` is ignored). Every baseline case keeps its verdict unless the
+ * re-run produced a new one for it, so a one-case re-run cannot erase the cases
+ * it did not touch — the bug this exists to prevent. Pure, so it is unit-tested.
+ */
+export function mergeScopedVerify(
+  baseline: CaseResult[], fresh: CaseResult[], scope: Set<string>,
+): CaseResult[] {
+  const freshById = new Map(fresh.filter((c) => scope.has(c.id)).map((c) => [c.id, c]));
+  const merged = baseline.map((c) => freshById.get(c.id) ?? c);
+  for (const c of freshById.values()) if (!baseline.some((p) => p.id === c.id)) merged.push(c);
+  return merged;
+}
+
+/** The audit comment posted on the ticket when the verify-case gate resolves. */
+function verifyDecisionsAuditBody(
+  decisions: Array<{ caseId: string; verdict: string; by: string; issueIid?: number }>,
+): string {
+  const word: Record<string, string> = {
+    skip: 'skipped', invalid: 'invalid — dropped',
+    expected: 'expected behaviour — accepted as a pass', 'pre-existing': 'pre-existing',
+    'missing-steps': "re-run with QA's corrected steps",
+  };
+  const rows = decisions.map(
+    (d) => `- **${d.caseId}** — ${word[d.verdict] ?? d.verdict} (QA: ${d.by})${d.issueIid ? ` → #${d.issueIid}` : ''}`,
+  );
+  return [
+    '## Verify completed by QA decision',
+    '',
+    'After two laps through `implement` the case(s) below still failed, and QA ruled on each so the '
+    + 'run could continue to the MR:',
+    '',
+    ...rows,
+    '',
+    '_Recorded on the MR for the reviewer. `skip`/`invalid` dropped the case; `expected` accepted it '
+    + 'as a pass; `pre-existing` was split into its own bug._',
+  ].join('\n');
+}
 
 /**
  * How long a block is respected before a re-claim is allowed.
@@ -176,6 +254,23 @@ export interface RunOutcome {
    */
   status: 'done' | 'blocked' | 'aborted' | 'refused' | 'parked';
   reason?: string;
+  /**
+   * On a refusal: true when waiting cannot clear it, only a person changing
+   * the ticket can (today: it carries the automation mode's trigger label), so
+   * `--follow` stops instead of re-checking every few minutes forever.
+   */
+  final?: true;
+}
+
+/**
+ * Whether `--follow` should stop on this outcome's refusal rather than check
+ * again next tick: a refusal marked `final`, or one naming an assignee who is
+ * not this desk. A lost claim race or a block's cooldown clears by waiting.
+ */
+export function refusalIsFinal(o: RunOutcome): boolean {
+  if (o.status !== 'refused') return false;
+  if (o.final) return true;
+  return Boolean(o.reason?.includes('assigned to') || o.reason?.includes('GITLAB_USERNAME'));
 }
 
 export interface CodePhaseCtx {
@@ -390,7 +485,7 @@ function withInReview(cfg: ReturnType<typeof projectConfig>, labels: string[]): 
   return cfg.labels.inReview ? [...labels, cfg.labels.inReview] : labels;
 }
 
-function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] {
+export function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] {
   if (p.onFail === 'skip') return 'skipped';
   if (p.onFail === 'warn') return 'warned';
   // Recorded before the onFail policy is consulted, because the policy is about
@@ -538,16 +633,204 @@ export function salvagedReview(
  * stays where it is as a backstop: it re-derives the same fact deterministically
  * at the merge, and a check that only runs early is a check a resumed run skips.
  */
-function failedCases(name: string, data: Record<string, unknown> | null | undefined): string | null {
+export function failedCases(name: string, data: Record<string, unknown> | null | undefined): string | null {
   if (name !== 'verify') return null;
   const results = (data as { results?: Array<{ id?: string; result?: string }> } | null)?.results;
   if (!Array.isArray(results) || results.length === 0) return null;
-  const failed = results.filter((r) => r.result === 'fail');
+  const failed = results.filter(countsAsFailure);
   if (failed.length === 0) return null;
   const ids = failed.map((r) => r.id ?? '?').join(', ');
   const other = results.filter((r) => r.result === 'blocked' || r.result === 'skipped').length;
   const tail = other ? ` (${other} further case(s) blocked or never run)` : '';
   return `${name} recorded ${failed.length} failing case(s) of ${results.length}: ${ids}${tail}`;
+}
+
+/**
+ * Keep a 'pre-existing' label only where the base branch confirmed it.
+ *
+ * The label lets a failing case past both the verify cycle and the merge gate,
+ * and until now it rested on verify's word alone. `base-check` re-ran those
+ * cases on the base branch; a case keeps the label only if it failed there
+ * too AND the check judged it outside this ticket's scope. Everything else —
+ * it passed on the base, the check could not run it, no check ran at all
+ * (`check` null), or it covers what the ticket asked for — goes back to
+ * 'fail', which is exactly what it was before the label existed. Unproven is
+ * not proven.
+ *
+ * "Fails on the base" alone proves only half the claim. A case covering the
+ * ticket's own criteria, or the bug it reports, fails on the base by
+ * definition, so the base check confirmed exactly the mislabel it exists to
+ * catch: an implement lap that fixed the wrong path left the reported bug
+ * standing, verify cited a base line the diff really does not touch, the base
+ * failed the same way, and the merge gate opened on a non-fix. Scope is
+ * therefore judged twice, neither time by verify: deterministically, from the
+ * cases testcases tagged `happy` (`ownScope`, see ticketScopeIds), and by the
+ * check session from the ticket and its criteria (`inTicketScope`, which
+ * fails closed when missing).
+ *
+ * `unavailable` is why no trustworthy check could run, when the caller knows
+ * it; every label is then refused with that reason instead of a bare "no check
+ * ran".
+ *
+ * The evidence is rewritten either way, so the MR note and implement's fix
+ * list say what the base showed rather than what verify guessed.
+ */
+export function applyBaseCheck(
+  results: CaseResult[], check: BaseCheck | null, base: string,
+  opts: { ownScope?: ReadonlySet<string>; unavailable?: string } = {},
+): { results: CaseResult[]; confirmed: string[]; rejected: string[] } {
+  const confirmed: string[] = [];
+  const rejected: string[] = [];
+  const at = check?.baseCommit ? ` @ ${check.baseCommit.slice(0, 8)}` : '';
+  const out = results.map((r) => {
+    if (r.result !== 'pre-existing') return r;
+    const seen = (check?.results ?? []).find((c) => c.id === r.id);
+    const why = labelRefusal(r, seen, base, at, opts);
+    if (why === null) {
+      confirmed.push(r.id);
+      return { ...r, evidence: `confirmed on ${base}${at}: ${seen?.evidence ?? ''} — verify: ${r.evidence}` };
+    }
+    rejected.push(r.id);
+    return { ...r, result: 'fail' as const, evidence: `claimed pre-existing, NOT confirmed — ${why} — verify: ${r.evidence}` };
+  });
+  return { results: out, confirmed, rejected };
+}
+
+/**
+ * What one base-check session's outcome means for the labels it was proving.
+ *
+ * A death is the machinery, not a verdict. It used to fold into "not
+ * confirmed", which scored verify 'failed' — verify's own session had
+ * succeeded, so its infra flag was clear — spent a verify lap, and sent
+ * implement to fix a case nobody had checked on the base. Two such deaths are
+ * exactly the laps-burned-then-blocked shape this phase exists to prevent. So:
+ *
+ * - `stopping` (aborted, state/PAUSE, or a usage-limit park) makes it 'died'
+ *   whatever the session returned, ahead of every other branch. A pause does
+ *   not kill a session: pause-check.cjs denies its side-effectful tools and
+ *   tells it to stop and write a summary, so a paused check comes back
+ *   blocked or all-'inconclusive'. Read as 'unavailable' or 'answered', that
+ *   refused every label, failedCases() fired, and verify was recorded
+ *   'failed' before afterFailure() ever looked at PAUSE — a lap spent on a
+ *   check the brake had stopped.
+ * - A usage limit or an account gate is 'died' at once: every re-attempt
+ *   would hit it again.
+ * - Only a plain infra death (a timeout, a stall, a killed spawn) is
+ *   re-attempted in place (`retry`), up to MAX_INFRA_ATTEMPTS. Past that it
+ *   is 'exhausted', which stops the run rather than handing verify an infra
+ *   death: afterFailure() would re-run verify, and each verify re-run calls
+ *   base-check afresh with its own attempts, so the two caps multiplied —
+ *   nine base-check sessions and two extra verify sessions before the run
+ *   blocked.
+ *
+ * 'unavailable' is a session that finished without an answer it would stand
+ * behind (blocked, or no artifact): a fail-closed "not confirmed", as before.
+ */
+export function baseCheckOutcome(
+  out: Pick<PhaseOutput, 'ok' | 'data' | 'blocked' | 'error' | 'infra' | 'rateLimited' | 'accountAction'>,
+  attempt: number, stopping: boolean,
+):
+  | { kind: 'answered'; data: BaseCheck }
+  | { kind: 'retry' }
+  | { kind: 'unavailable'; why: string }
+  | { kind: 'died'; why: string }
+  | { kind: 'exhausted'; why: string } {
+  if (stopping) {
+    const said = out.accountAction ?? out.error ?? out.blocked;
+    return { kind: 'died', why: `the run was stopped or paused during base-check${said ? ` (${said})` : ''}` };
+  }
+  if (out.ok && out.data) return { kind: 'answered', data: out.data as BaseCheck };
+  const dead = Boolean(out.infra || out.rateLimited || out.accountAction);
+  if (!dead) {
+    return { kind: 'unavailable', why: `the base-check session gave no answer: ${out.blocked ?? out.error ?? 'no result'}` };
+  }
+  if (out.rateLimited || out.accountAction) {
+    return { kind: 'died', why: `the base-check session died: ${out.accountAction ?? out.error ?? 'no error text'}` };
+  }
+  if (attempt < MAX_INFRA_ATTEMPTS) return { kind: 'retry' };
+  return {
+    kind: 'exhausted',
+    why: `the base-check session died of infrastructure ${attempt + 1} times in a row: ${out.error ?? 'no error text'}`,
+  };
+}
+
+/**
+ * Hand a base-check death to verify, and say whether it stops the run.
+ *
+ * verify's output is marked infra either way, so its record is 'infra' and
+ * costs no lap. For 'died' the existing paths then decide: an account gate
+ * stops the run, a usage limit parks it, and an abort or a pause ends it and
+ * the resume re-runs verify. For 'exhausted' the returned hard stop blocks the
+ * run instead of afterFailure()'s re-attempt, because a verify re-run starts
+ * base-check's in-place attempts over (see baseCheckOutcome).
+ */
+export function verifyAfterBaseCheckDeath(
+  verify: PhaseOutput,
+  death: { kind: 'died' | 'exhausted'; why: string; out: Pick<PhaseOutput, 'rateLimited' | 'accountAction'> },
+): string | undefined {
+  verify.ok = false;
+  verify.infra = true;
+  verify.rateLimited ||= death.out.rateLimited;
+  verify.accountAction ??= death.out.accountAction;
+  verify.error = death.why;
+  if (death.kind !== 'exhausted') return undefined;
+  return `${death.why}. Re-running verify would start base-check's re-attempts over, so the run ` +
+    "stops here instead: check base-check's maxTurns and timeoutMin in config/phases.json (still " +
+    'an estimate) and whether the base app comes up, then unblock it. No verify lap was spent.';
+}
+
+/** Every migration file, at any depth of the work repo. */
+const MIGRATION_PATHSPEC = '*/migrations/*.py';
+
+/**
+ * Why a base-branch check cannot be independent of this change, or null when
+ * it can.
+ *
+ * Every app instance runs on the one local Postgres (app.cjs copies
+ * hrdb/local_settings.py unchanged into each checkout), verify has already
+ * applied this branch's migrations to it and written its data there, and
+ * nothing ever unapplies them: app.cjs only migrates forward, and Django does
+ * not reverse a migration the base's graph has never heard of. So the base app
+ * runs base code on THIS branch's schema and rows. A buggy data migration, or a
+ * NOT NULL column one create path forgot, then fails the same way on both
+ * sides, the check scores 'fails', and a regression the change introduced is
+ * confirmed as "not caused by this change". `migrations` null means git could
+ * not say, which is not the same as "none".
+ */
+export function sharedDatabaseRefusal(migrations: string[] | null, base: string): string | null {
+  if (migrations === null) {
+    return `could not list this branch's migrations, so a failure on ${base} cannot be shown to be ` +
+      'independent of the change';
+  }
+  if (!migrations.length) return null;
+  const named = migrations.slice(0, 3).join(', ')
+    + (migrations.length > 3 ? ` and ${migrations.length - 3} more` : '');
+  return `this branch migrates the shared database (${named}), so a failure on ${base} is not ` +
+    'independent of the change';
+}
+
+/** Why a 'pre-existing' label is refused, or null when the base check proved it. */
+function labelRefusal(
+  r: CaseResult, seen: NonNullable<BaseCheck['results']>[number] | undefined, base: string, at: string,
+  opts: { ownScope?: ReadonlySet<string>; unavailable?: string },
+): string | null {
+  const ownScope = `failing on ${base} is what the change was meant to fix`;
+  if (opts.ownScope?.has(r.id)) {
+    return `tagged 'happy', so it exercises this ticket's own acceptance criteria — ${ownScope}`;
+  }
+  if (opts.unavailable) return opts.unavailable;
+  if (!seen) return 'no base-branch check ran for it';
+  const observed = `: ${seen.evidence ?? ''}`;
+  if (seen.onBase === 'passes') return `passes on ${base}${at}${observed}`;
+  if (seen.onBase !== 'fails') return `could not be checked on ${base}${observed}`;
+  if (!String(r.evidence ?? '').trim()) {
+    return `fails on ${base}${at}, but verify recorded no evidence for the label${observed}`;
+  }
+  if (seen.inTicketScope === true) return `covers this ticket's own scope — ${ownScope}${observed}`;
+  if (seen.inTicketScope !== false) {
+    return `fails on ${base}${at}, but the check did not judge whether it is this ticket's scope${observed}`;
+  }
+  return null;
 }
 
 /**
@@ -764,6 +1047,15 @@ export async function runTicket(
   const carried = new Set(issue.labels.map((l) => l.toLowerCase()));
   const list = phases().filter((p) => !p.labelGated || carried.has(p.labelGated.toLowerCase()));
   const owner = opts.conductor;
+
+  // The scan skips a ticket the automation mode owns; `--ticket` never scans,
+  // so the same rule is asked here, before anything is claimed, posted or
+  // paid for.
+  const owned = automationOwns(issue.labels);
+  if (owned) {
+    log.info(`#${iid} — ${owned}`);
+    return { runId: '', iid, status: 'refused', reason: owned, final: true };
+  }
 
   if (issue.assignees.length > 0) {
     const me = gitlabUsername();
@@ -1047,6 +1339,11 @@ export async function runTicket(
     for (const name of phasesOwedByRound(j.mrFeedback, j.phases, window)) forced.add(name);
   }
 
+  // The delivery-zone map, read once per run and only for a ticket the guard
+  // holds to it (src/conductor/zoneguard.ts). Null for every other ticket, and
+  // for every ticket while config/project.json carries no `zones` block.
+  const zoneRead = zoneGuardApplies(ticket.labels) ? loadZoneMap() : null;
+
   const researchIdx = list.findIndex((p) => p.name === 'research');
   let i = 0;
   while (i < list.length) {
@@ -1057,6 +1354,20 @@ export async function runTicket(
     if (opts.signal?.aborted) {
       return finish(j, 'aborted', 'the conductor asked this run to stop');
     }
+
+    // A characterization-test ticket is a person's work (src/conductor/zoneguard.ts):
+    // stopped before any phase, code or session, can touch it.
+    const refused = refusedTicket(ticket.labels);
+    if (refused) {
+      log.warn('refused ticket', { iid, reason: refused });
+      logEvent('zone_refused', { iid }, { runId: j.runId });
+      return finish(j, 'blocked', refused);
+    }
+
+    // A map the guard cannot judge by stops the run here, before any session.
+    // Read first at implement, it cost recall, research and plan to learn that
+    // the map was never there.
+    if (zoneRead && 'error' in zoneRead) return stopForZone(zoneVerdict(ticket.labels, [], zoneRead));
 
     // On-demand phases are stepped over before anything else looks at them:
     // they are invoked by name when something needs them, so an unimplemented
@@ -1116,6 +1427,32 @@ export async function runTicket(
       return finish(j, 'blocked',
         `not built yet: phase '${phase.name}'. Implemented so far: ` +
         `${list.filter((p) => isImplemented(p.name) || CODE_PHASES[p.name]).map((p) => p.name).join(' → ')}`);
+    }
+
+    // The delivery-zone guard (src/conductor/zoneguard.ts), ahead of every code
+    // phase and every gate. At implement, over what the plan declares, before
+    // the plan gate asks anyone to approve it. On every pass after implement has
+    // succeeded, over what the branch really carries: this used to wait for the
+    // loop to land on `review`, which it skips whenever review runs inside the
+    // testcases group, and by then mr-open had pushed the branch anyway. Both
+    // read the branch from git, because a branch re-attached from an earlier
+    // run can carry commits the plan and this run's reports never mention.
+    if (zoneRead) {
+      const due = zoneCheckDue(list, i, (name) => phaseSucceeded(iid, name));
+      if (due) {
+        let zone: ZoneVerdict;
+        try {
+          const declared = declaredFiles(prior.plan ?? readArtifact(iid, 'plan.json'),
+            due === 'diff' ? prior.implement ?? readArtifact(iid, 'implement.json') : null);
+          const changed = branchFiles(branch, { repo: worktree });
+          zone = zoneVerdict(ticket.labels, changed && [...declared, ...changed], zoneRead);
+        } catch (err) {
+          // A throw here used to escape runTicket with no finish(): the ticket kept
+          // Loop, got no note, and threw again on every scan. A stop says why.
+          zone = { applies: true, violations: [], unreadable: `the zone guard failed (${(err as Error).message})` };
+        }
+        if (zone.unreadable || zone.violations.length) return stopForZone(zone);
+      }
     }
 
     if (CODE_PHASES[phase.name]) {
@@ -1206,10 +1543,26 @@ export async function runTicket(
         j = updateJournal(iid, { reviewMode: true }) ?? j;
         log.warn('review gates armed by guarded paths, not by the label', { iid, hits: planGate.hits });
       }
+      // The gate note points at the plan note publish.ts posts. Arming before
+      // that note exists — a transient GitLab failure left `plan` unpublished —
+      // would post an approval ask pointing at nothing, and the plan would land
+      // BELOW it on the next tick's publish. Ensure the plan is published first;
+      // if it still is not, park and let the next tick retry rather than ask.
+      if (!(j.published ?? []).includes('plan')) {
+        await publishPending({ iid, runId, journal: j });
+        j = readJournal(iid) ?? j;
+        if (!(j.published ?? []).includes('plan')) {
+          return finish(j, 'parked', 'waiting to publish the plan to the ticket before asking for approval');
+        }
+      }
+      const planNoteId = j.publishedNotes?.plan;
       const gate = await checkApprovalGate({
         iid,
         gate: 'plan',
-        requestBody: planApprovalRequestBody(prior.plan ?? null, triggerLine(planGate)),
+        requestBody: planApprovalRequestBody(triggerLine(planGate), {
+          migrations: (prior.plan as { migrations?: unknown } | null)?.migrations === true,
+          planNoteUrl: planNoteId ? `${issueUrl(iid)}#note_${planNoteId}` : undefined,
+        }),
         trigger: planGate,
         onApproved: async () => { await addIssueNote(iid, planApprovedRecordBody()); },
       });
@@ -1414,6 +1767,24 @@ export async function runTicket(
         }
       }
 
+      // A scoped re-run (QA's corrected steps for a `missing-steps` case) ran
+      // ONLY the rescoped case(s). Merge their fresh results back over the FULL
+      // pre-scope list — snapshotted to verify-prescope.json before the re-run,
+      // because the scoped session already overwrote verify.json with just the
+      // rescoped case (phase.ts writes the artifact on return). Done before the
+      // overrules and failedCases() below, so they see every case, not one.
+      if (r.cfg.name === 'verify' && r.out.ok && (j.verifyRescopeCases?.length)) {
+        const scope = new Set(j.verifyRescopeCases);
+        const baseline = readArtifact<{ results?: CaseResult[] }>(iid, 'verify-prescope.json')?.results
+          ?? readArtifact<{ results?: CaseResult[] }>(iid, 'verify.json')?.results ?? [];
+        const fresh = (r.out.data?.results ?? []) as CaseResult[];
+        const merged = mergeScopedVerify(baseline, fresh, scope);
+        r.out.data = { ...r.out.data, results: merged };
+        writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
+        j = updateJournal(iid, { verifyRescopeCases: [] }) ?? j;
+        log.phase(`verify merged ${scope.size} re-run case(s) back into the ${baseline.length}-case list`, { iid });
+      }
+
       // A verify that executed the list but passed NOTHING is not a green
       // phase, whatever its structured output says. Zero passes with blocked
       // cases means the environment (or the change) is broken end to end, and
@@ -1449,10 +1820,13 @@ export async function runTicket(
           }
         } else if (res.length > 0 && passes === 0) {
           const failed = res.filter((x) => x.result === 'fail').length;
+          const blocked = res.filter((x) => x.result === 'blocked').length;
+          const preExisting = res.filter((x) => x.result === 'pre-existing').length;
           r.out.ok = false;
           overruled.add(r);
           r.hardStop = `verify recorded ${res.length} case(s) — ${failed} failed, ` +
-            `${res.length - failed - skipped} blocked, ${skipped} skipped — and NONE passed. An ` +
+            `${blocked} blocked, ${skipped} skipped` +
+            `${preExisting ? `, ${preExisting} pre-existing` : ''} — and NONE passed. An ` +
             'all-negative local run means the environment or the change is broken end to end, and ' +
             'neither is something a merge should ride through. A human decides whether the ' +
             'demo-server QA gate alone is acceptable for this ticket.';
@@ -1502,6 +1876,60 @@ export async function runTicket(
           r.out.ok = true;
           writeArtifact(iid, r.cfg.artifact ?? `${r.cfg.name}.json`, r.out.data);
           log.warn(`${r.cfg.name} salvaged from partial results — ${recorded.length} recorded, ${skipped.length} skipped`);
+        }
+      }
+
+      // A 'pre-existing' label is verify's claim that a failure is not this
+      // change's. It lets the case past the cycle and the merge gate, so it is
+      // checked here, on the base branch, before failedCases() reads the
+      // results — and a label the base does not confirm is a fail again. After
+      // the salvage above on purpose: a salvaged partial can carry the label too.
+      if (r.cfg.name === 'verify' && r.out.ok && !overruled.has(r)) {
+        const res = (r.out.data?.results ?? []) as CaseResult[];
+        if (res.some((x) => x.result === 'pre-existing')) {
+          // A label the scope floor already refuses is not worth a session.
+          const ownScope = ticketScopeIds(
+            readArtifact<{ cases?: Array<{ id?: unknown; pass?: unknown }> }>(iid, 'testcases.json')?.cases ?? [],
+          );
+          const checkable = res.some(
+            (x) => x.result === 'pre-existing' && !countsAsFailure(x) && !ownScope.has(x.id),
+          );
+          let check: BaseCheck | null = null;
+          let unavailable: string | undefined;
+          let died: Parameters<typeof verifyAfterBaseCheckDeath>[1] | undefined;
+          if (checkable) {
+            // Decided here, from git, rather than left to the session: a base
+            // app on a database this branch migrated is not a second opinion.
+            unavailable = sharedDatabaseRefusal(await branchMigrations(), cfg.branches.base) ?? undefined;
+            if (unavailable) log.warn(`base-check not run — ${unavailable}`);
+            else {
+              const ran = await runBaseCheck();
+              if (ran.kind === 'answered') check = ran.data;
+              else unavailable = ran.why;
+              if (ran.kind === 'died' || ran.kind === 'exhausted') died = ran;
+            }
+          }
+          // Written fail-closed even when the check died, so no reader of
+          // verify.json — the merge gate, the MR note — ever sees an unchecked label.
+          const applied = applyBaseCheck(res, check, cfg.branches.base, { ownScope, unavailable });
+          r.out.data = { ...r.out.data, results: applied.results };
+          writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
+          if (died) {
+            const stop = verifyAfterBaseCheckDeath(r.out, died);
+            if (stop) {
+              r.hardStop = stop;
+              log.error(`verify stopped — ${stop}`);
+            } else {
+              log.warn(`verify recorded as infra — ${died.why}; no lap spent`);
+            }
+          } else {
+            if (applied.confirmed.length) {
+              log.ok(`base-check confirmed pre-existing on ${cfg.branches.base}: ${applied.confirmed.join(', ')}`);
+            }
+            if (applied.rejected.length) {
+              log.warn(`base-check did not confirm ${applied.rejected.join(', ')} — scored as fail`);
+            }
+          }
         }
       }
 
@@ -1693,6 +2121,46 @@ export async function runTicket(
           // the session already established; skip/warn phases still degrade
           // gracefully through afterFailure.
           claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.out.blocked}` }, r.cfg.name);
+        } else if (
+          r.cfg.name === 'verify' && caseFail
+          && failedLapsOf(iid, 'verify', fixingSince()) >= (r.cfg.maxLaps ?? 2)
+        ) {
+          // Verify spent its full lap budget and still records failing cases.
+          // Where afterFailure would block, ask QA what each one means instead.
+          const outcome = await verifyCaseGate(r);
+          if (outcome === 'resolved') {
+            // Re-record the lap as resolved so the phase reads succeeded, and keep
+            // the rewritten (now non-failing) results as prior — verifyCaseGate
+            // has already set prior.verify, so do not null it below.
+            recordPhase(iid, {
+              phase: 'verify', lap: r.lap, status: 'warned',
+              startedAt: r.startedAt, endedAt: r.endedAt, model: modelFor(r.cfg),
+              turns: r.out.turns, weighted: r.out.weighted, sessionId: r.out.sessionId,
+              error: 'resolved by the verify-case QA gate',
+            });
+            j = readJournal(iid) ?? j;
+            // flow stays empty → the loop advances to the next phase.
+          } else if (outcome === 'reverify') {
+            // QA gave corrected steps for a `missing-steps` case: re-run verify
+            // scoped to that case alone (cycle to verify itself, not implement —
+            // no code changed). The scoped results merge back in the next pass.
+            const vIdx = list.findIndex((q) => q.name === 'verify');
+            prior[r.cfg.name] = null;
+            claim(
+              vIdx === -1
+                ? { kind: 'stop', status: 'blocked', reason: 'verify: cannot re-run — verify is not in the phase list' }
+                : { kind: 'cycle', jumpTo: vIdx, windowEnd: vIdx },
+              r.cfg.name,
+            );
+          } else {
+            prior[r.cfg.name] = null;
+            claim(
+              'park' in outcome
+                ? { kind: 'stop', status: 'parked', reason: `verify: ${outcome.park}` }
+                : { kind: 'stop', status: 'blocked', reason: `verify: ${outcome.block}` },
+              r.cfg.name,
+            );
+          }
         } else {
           claim(
             afterFailure(
@@ -1729,7 +2197,7 @@ export async function runTicket(
           logEvent('reproduction', {
             iid, kind: repro.kind, verdict: repro.verdict, blocker: repro.blocker,
             steps: repro.steps.length,
-            shots: repro.evidence.filter((e) => e.endsWith('.png')).length,
+            shots: shotsIn(repro.evidence),
           }, { runId, phase: 'research' });
         }
         if (repro?.verdict === 'reproduced') await declareReproduced(iid, repro);
@@ -1770,6 +2238,20 @@ export async function runTicket(
   return finish(j, 'done');
 
   // ------------------------------------------------------------- run helpers
+
+  /**
+   * Stop the run on a zone verdict that did not pass. One place, so the map
+   * check at the top of the run and the checkpoints log, count and word a stop
+   * the same way.
+   */
+  function stopForZone(zone: ZoneVerdict): Promise<RunOutcome> {
+    log.warn('zone guard stopped the run', { iid, violations: zone.violations, unreadable: zone.unreadable });
+    logEvent('zone_guard_stop', {
+      iid, files: zone.violations.length, unreadable: zone.unreadable !== null,
+      zones: [...new Set(zone.violations.map((v) => v.zone))],
+    }, { runId: j.runId });
+    return finish(j, 'blocked', zoneBlockReason(zone));
+  }
 
   /**
    * phaseSettled, not phaseSucceeded: 'skipped' is a settled decision.
@@ -1834,7 +2316,7 @@ export async function runTicket(
       try {
         const lease = leaseWorktree(runId, branch, worktreeName(iid, runId), { withPort: false });
         worktree = lease.worktree;
-        j = updateJournal(iid, { worktree, branch: lease.branch }) ?? j;
+        j = updateJournal(iid, { worktree, branch: lease.branch, baseSha: lease.baseSha }) ?? j;
         updateRun(runId, { worktree, branch: lease.branch });
       } catch (err) {
         return `worktree: ${(err as Error).message}`;
@@ -1865,6 +2347,18 @@ export async function runTicket(
     // for exactly the phases it exists to confine.
     const wt = p.cwd === 'worktree' ? worktree : undefined;
     const ctx: PromptCtx = { ticket, runId, lap, branch, worktree: wt, port, prior, journal: j };
+
+    // Hand `design` its palette rather than making it go and distil one. The
+    // phase budgets ~10 of its 115 turns for this (config/phases.json), and the
+    // work is a deterministic read of three frontend files. Best-effort by
+    // construction: the skill still knows how to read them itself, and
+    // tokens.css names anything the extractor could not resolve.
+    if (p.name === 'design' && wt) {
+      const tokens = writeDesignTokens(iid, wt);
+      if (!tokens) log.warn(`design     could not generate tokens.css for #${iid} — the phase reads the theme itself`);
+      else if (tokens.sources.length === 0) log.warn(`design     tokens.css for #${iid} read no theme file — the worktree has none of them, so it is empty`);
+      else log.ok(`design     tokens.css generated for #${iid} from ${tokens.sources.length} theme file(s)`);
+    }
 
     // The ledger row is opened before the phase and closed after it, so an
     // external watchdog can see a phase that has been 'running' for longer than
@@ -2045,6 +2539,136 @@ export async function runTicket(
   }
 
   /**
+   * The failure window `failedLapsOf` is measured from — 0 normally, or the
+   * start of an active MR-feedback fix round, so a case that failed before the
+   * reviewer asked for a change does not count against the fix lap's budget.
+   * The same reckoning `afterFailure` uses, named so the verify-case gate agrees
+   * with it on when the laps are spent.
+   */
+  function fixingSince(): number {
+    const round = activeRound(j.mrFeedback);
+    return round?.status === 'fixing' ? round.startedAt : 0;
+  }
+
+  /**
+   * The verify-case QA gate. Reached when verify has cycled through `implement`
+   * its full `maxLaps` and still records failing cases — where the run would
+   * otherwise block. QA classifies each still-failing case on the ticket; this
+   * applies their verdicts to verify.json in place and returns 'resolved' so the
+   * run continues, or a park/block for the caller to claim while it waits.
+   */
+  async function verifyCaseGate(
+    r: PhaseResult,
+  ): Promise<'resolved' | 'reverify' | { park: string } | { block: string }> {
+    let caseResults = (r.out.data?.results ?? []) as CaseResult[];
+    const meta = new Map(
+      (readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases ?? []).map((c) => [c.id, c]),
+    );
+    const failing = caseResults.filter(countsAsFailure).map((c) => ({
+      id: c.id, evidence: c.evidence, scenario: meta.get(c.id)?.scenario, steps: meta.get(c.id)?.steps,
+    }));
+    const gate = await checkVerifyGate({ iid, failing });
+    if (gate.verdict === 'unavailable') return { block: VERIFY_GATE_UNAVAILABLE };
+
+    // Apply the terminal verdicts (skip / invalid / expected / pre-existing) to verify.json in place.
+    if (gate.apply.length) {
+      const decisions: NonNullable<RunJournal['verifyCaseDecisions']> = [];
+      const applied = caseResults.map((c) => ({ ...c }));
+      for (const d of gate.apply) {
+        const c = applied.find((x) => x.id === d.caseId);
+        if (!c) continue;
+        const by = d.by ?? 'unknown';
+        if (d.verdict === 'expected') {
+          c.result = 'pass';
+          c.evidence = `QA (${by}) confirmed expected behaviour. ${c.evidence ?? ''}`.trim();
+          decisions.push({ caseId: d.caseId, verdict: 'expected', by });
+        } else if (d.verdict === 'pre-existing') {
+          const issue = await createIssue(
+            `${ticket.title} — ${d.caseId}: pre-existing failure (from #${iid})`,
+            preExistingIssueBody(iid, ticket.title, c),
+          );
+          const newIid = issue.ok ? issue.data?.iid : undefined;
+          c.result = 'skipped';
+          c.evidence = `QA (${by}) classified pre-existing${newIid ? `; tracked as #${newIid}` : ''}. `
+            + `${c.evidence ?? ''}`.trim();
+          if (newIid) {
+            await addIssueNote(iid,
+              `**${d.caseId}** is a pre-existing issue, not caused by this change (QA: ${by}). `
+              + `A separate bug has been created: #${newIid}.`);
+          } else {
+            log.warn(`verify-case gate: could not open a pre-existing bug for ${d.caseId}`,
+              { iid, error: issue.error?.slice(0, 120) });
+          }
+          decisions.push({ caseId: d.caseId, verdict: 'pre-existing', by, issueIid: newIid });
+        } else {
+          // `skip` and `invalid` both drop the case; the verdict is kept for the audit.
+          c.result = 'skipped';
+          c.evidence = `QA (${by}) marked ${d.verdict}. ${c.evidence ?? ''}`.trim();
+          decisions.push({ caseId: d.caseId, verdict: d.verdict, by });
+        }
+      }
+      r.out.data = { ...r.out.data, results: applied };
+      writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
+      prior.verify = r.out.data;
+      j = updateJournal(iid, {
+        verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
+      }) ?? j;
+      if (decisions.length) await addIssueNote(iid, verifyDecisionsAuditBody(decisions));
+      log.ok(`verify-case gate applied ${decisions.length} QA verdict(s) on #${iid}`);
+      caseResults = applied;
+    }
+
+    // QA supplied corrected steps for a `missing-steps` case: write them onto the
+    // case, scope the next verify run to it, mark the correction spent, and go
+    // re-run verify on only that case (no code changed, so nothing else re-runs).
+    if (gate.rescope.length) {
+      const data = readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json');
+      const cases = (data?.cases ?? []).map((c) => {
+        const rs = gate.rescope.find((x) => x.caseId === c.id);
+        return rs ? { ...c, steps: rs.steps } : c;
+      });
+      writeArtifact(iid, 'testcases.json', { ...(data ?? {}), cases });
+      const missing = { ...(j.verifyMissingSteps ?? {}) };
+      for (const rs of gate.rescope) {
+        const st = missing[rs.caseId];
+        if (st) missing[rs.caseId] = { ...st, rerunDone: true };
+      }
+      const decisions = gate.rescope.map((x) => ({
+        caseId: x.caseId, verdict: 'missing-steps' as const, by: x.by ?? 'unknown',
+        note: 'QA supplied corrected steps; re-running only this case',
+      }));
+      j = updateJournal(iid, {
+        verifyMissingSteps: missing,
+        verifyRescopeCases: gate.rescope.map((x) => x.caseId),
+        verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
+      }) ?? j;
+      await addIssueNote(iid,
+        `Re-running ${gate.rescope.map((x) => `**${x.caseId}**`).join(', ')} with the corrected steps `
+        + '— only that case, since no code changed.');
+      // Snapshot the FULL current list before the scoped re-run. The scoped
+      // verify session runs only the rescoped case(s), and phase.ts writes its
+      // output straight to verify.json the instant it returns — so by the time
+      // the merge below runs, verify.json holds only the rescoped case. The
+      // merge reads this snapshot instead, so every other case (passes and
+      // still-unsettled fails alike) survives.
+      writeArtifact(iid, 'verify-prescope.json', r.out.data);
+      log.phase(`verify re-running ${gate.rescope.length} case(s) with QA's corrected steps`, {
+        iid, cases: gate.rescope.map((x) => x.caseId).join(', '),
+      });
+      return 'reverify';
+    }
+
+    // No failing cases remain → verify completes. Otherwise wait on QA.
+    const stillFailing = ((r.out.data?.results ?? []) as CaseResult[]).filter(countsAsFailure);
+    if (!stillFailing.length) return 'resolved';
+    return {
+      park: 'awaiting a QA decision on the verify case(s) still failing after two laps — a QA reviewer '
+        + 'classifies each on the ticket (`skip`, `invalid`, `expected`, `pre-existing`, or `missing steps` '
+        + 'to supply corrected steps) and the run continues once every one is settled',
+    };
+  }
+
+  /**
    * One round of MR review feedback: triage the new threads, then either cycle
    * back to `implement` (something needs a code change — every phase up to
    * merge re-runs) or re-enter `merge` at once so it posts the replies (nothing
@@ -2148,6 +2772,131 @@ export async function runTicket(
       return { kind: 'cycle', jumpTo, windowEnd: mergeIndex };
     }
     return { kind: 'retry', at: mergeIndex };
+  }
+
+  /**
+   * Every migration file this branch carries against the base — committed,
+   * staged, modified or untracked — plus whatever implement reported, or null
+   * when git could not answer.
+   *
+   * The diff is from the merge-base to the WORKING TREE, so an uncommitted
+   * migration counts and one that landed only on the base does not.
+   * implement.json's `migrationsAdded` is folded in but never relied on alone:
+   * it is the session's own report, not a fact.
+   */
+  async function branchMigrations(): Promise<string[] | null> {
+    if (!worktree) return null;
+    const wt = worktree;
+    const git = async (...args: string[]): Promise<string[]> => {
+      const { stdout } = await exec('git', ['-C', wt, ...args], { timeout: 60_000 });
+      return stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    };
+    try {
+      const [mergeBase] = await git('merge-base', `origin/${cfg.branches.base}`, 'HEAD');
+      if (!mergeBase) return null;
+      const changed = await git('diff', '--name-only', mergeBase, '--', MIGRATION_PATHSPEC);
+      const untracked = await git('ls-files', '--others', '--exclude-standard', '--', MIGRATION_PATHSPEC);
+      const reported = readArtifact<{ migrationsAdded?: unknown }>(iid, 'implement.json')?.migrationsAdded;
+      const claimed = Array.isArray(reported)
+        ? reported.filter((m): m is string => typeof m === 'string' && m.trim() !== '')
+        : [];
+      return [...new Set([...changed, ...untracked, ...claimed])].sort();
+    } catch (err) {
+      log.warn('could not list this branch\'s migrations', { error: (err as Error).message.slice(0, 160) });
+      return null;
+    }
+  }
+
+  /**
+   * Run the on-demand `base-check` session, re-attempting an infra death in
+   * place, and say what came of it.
+   *
+   * 'unavailable' is every way it can fail to answer that is not a death — the
+   * phase switched off, no lease, a token ceiling, a session that finished
+   * without an answer — and applyBaseCheck() reads it as "not confirmed", so
+   * none of them can wave a failure through. Each is logged with its reason,
+   * and the reason lands in the refused case's evidence. A refusal before the
+   * session starts writes no journal record, because no session ran; one that
+   * ran is recorded in the journal and ledger like any phase.
+   *
+   * 'died' and 'exhausted' are the machinery rather than a verdict (see
+   * baseCheckOutcome). Only a plain infra death is re-attempted here, on a
+   * LOCAL counter: base-check's own records are not what infraAttemptsOf()
+   * reads for verify. That counter starts at 0 on every call, which is why
+   * running out of it is 'exhausted' and stops the run — handed to verify as
+   * an infra death, it bought a verify re-run and a fresh counter.
+   *
+   * The brake is checked before each attempt as well as after it: a session
+   * started under state/PAUSE only has its tools denied, and a usage-limit
+   * park would otherwise be refused by checkQuota() as 'unavailable', which
+   * spends the verify lap this exists to save.
+   */
+  async function runBaseCheck(): Promise<
+    | { kind: 'answered'; data: BaseCheck }
+    | { kind: 'unavailable'; why: string }
+    | { kind: 'died' | 'exhausted'; why: string; out: Pick<PhaseOutput, 'rateLimited' | 'accountAction'> }
+  > {
+    const refused = (why: string): { kind: 'unavailable'; why: string } => {
+      log.warn(`base-check not run — ${why}`);
+      return { kind: 'unavailable', why: `no base-branch check ran (${why})` };
+    };
+    // Every brake pause-check.cjs enforces, so what it denies is never read as an answer.
+    const stopping = (): boolean => Boolean(opts.signal?.aborted) || existsSync(PAUSE) || quotaParked();
+    const cfgB = list.find((q) => q.name === 'base-check');
+    if (!cfgB || !isImplemented(cfgB.name)) return refused('the base-check phase is not configured');
+    const leaseError = ensureLeases(cfgB);
+    if (leaseError) return refused(leaseError);
+
+    for (let attempt = 0; ; attempt++) {
+      if (stopping()) {
+        log.warn('base-check not run — the run is stopped or paused');
+        return { kind: 'died', why: 'the run was stopped or paused before base-check ran', out: { rateLimited: false } };
+      }
+      const lap = lapsOf(iid, cfgB.name);
+      const quota = checkQuota(runId, cfgB.name, lap);
+      if (!quota.allowed) return refused(`quota: ${quota.reason}`);
+
+      const startedAt = Date.now();
+      await updateCard(j.slackTs ?? '', cardState(j, [cfgB.name]));
+      updateRun(runId, { phase: cfgB.name, status: 'running', owner_seen_at: Date.now() });
+
+      const ctx: PromptCtx = { ticket, runId, lap, branch, worktree, port, prior, journal: j };
+      const rowId = phaseStart(runId, cfgB.name, lap, modelFor(cfgB));
+      const out = await runPhase({
+        iid, runId, lap, cfg: cfgB,
+        prompt: promptFor(cfgB, ctx),
+        systemPrompt: systemPromptFor(cfgB, ctx),
+        worktree, port, branch,
+        signal: opts.signal,
+      });
+      const outcome = baseCheckOutcome(out, attempt, stopping());
+      // 'infra' for every death, ahead of the onFail policy: statusForFailure()
+      // answers 'warned' for a warn phase before it looks at infra, and
+      // phaseSucceeded() and the card both count 'warned' as done. A session
+      // that finished under the brake is a death too, whatever it answered.
+      const dead = outcome.kind === 'retry' || outcome.kind === 'died' || outcome.kind === 'exhausted';
+      const status = dead ? 'infra' : out.ok ? 'ok' : statusForFailure(cfgB);
+      phaseEnd(rowId, status, {
+        turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+        detail: out.error ?? out.blocked ?? undefined,
+      });
+      recordPhase(iid, {
+        phase: cfgB.name, lap, status, startedAt, endedAt: Date.now(), model: modelFor(cfgB),
+        turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+        error: out.accountAction ?? out.error ?? out.blocked ?? undefined,
+      });
+      j = readJournal(iid) ?? j;
+
+      if (outcome.kind === 'retry') {
+        log.warn('base-check died of infrastructure — re-attempting in place', {
+          attempt: attempt + 1, of: MAX_INFRA_ATTEMPTS, why: (out.error ?? '').slice(0, 120),
+        });
+        continue;
+      }
+      if (outcome.kind === 'died' || outcome.kind === 'exhausted') return { ...outcome, out };
+      if (outcome.kind === 'unavailable') log.warn(`base-check gave no answer — ${outcome.why}`);
+      return outcome;
+    }
   }
 
   /**

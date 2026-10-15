@@ -71,12 +71,12 @@ import {
   type ReviewGateState, type RunJournal,
 } from '../lib/artifacts.js';
 import {
-  addIssueNote, issueNotes, issueUrl, swapLabel, uploadFile, type Upload,
+  addIssueNote, issueNotes, issueUrl, swapLabel, uploadFile, type IssueNote, type Upload,
 } from '../lib/gitlab.js';
 import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/slack.js';
 import { isMachineNote } from '../lib/claims.js';
 import { log } from '../lib/log.js';
-import { codeSpan, mdText, tableCell } from '../lib/gitlabmd.js';
+import { mdText, tableCell } from '../lib/gitlabmd.js';
 import type { DesignArtifact, TestCase } from '../phases/types.js';
 import { parseEdgeCases } from './edgecases.js';
 import { MAX_UPLOAD_BYTES, mimeFor } from '../lib/publish.js';
@@ -84,7 +84,7 @@ import { artifactDir } from '../lib/config.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
-export type Gate = 'plan' | 'testcases' | 'design' | 'notABug';
+export type Gate = 'plan' | 'testcases' | 'design' | 'notABug' | 'verifyCases';
 export type GateVerdict = 'approved' | 'feedback' | 'pending' | 'unavailable';
 
 export interface GateResult {
@@ -183,7 +183,11 @@ export function triggerLine(trigger: GateTrigger): string {
     + 'gates apply whether or not the ticket carries the `Review` label.';
 }
 
-function isApprovedReply(text: string): boolean {
+/**
+ * Exported so the Ready For Automation mode's approval tally
+ * (src/automation/runner.ts) applies the same word rule instead of a copy of it.
+ */
+export function isApprovedReply(text: string): boolean {
   // Exact match, case-insensitive, trimmed — deliberately NOT a substring
   // test. "approved, but see my comment above" is feedback, not a sign-off:
   // the whole point of requiring the bare word is that a reviewer who wants
@@ -209,7 +213,12 @@ export type ReviewRole = 'dev' | 'qa' | 'design';
 // `notABug` is QA's: whether a reported defect really does not happen is a
 // testing judgement, and the people who own the case list are the ones who
 // know which data, role or environment the reproduction may have missed.
-const GATE_ROLE: Record<Gate, ReviewRole> = { plan: 'dev', testcases: 'qa', design: 'design', notABug: 'qa' };
+// `verifyCases` is QA's for the same reason `notABug` is: whether a still-failing
+// case is invalid, expected, pre-existing or just worth skipping is a testing
+// judgement, owned by the people who wrote the case list.
+const GATE_ROLE: Record<Gate, ReviewRole> = {
+  plan: 'dev', testcases: 'qa', design: 'design', notABug: 'qa', verifyCases: 'qa',
+};
 
 /**
  * Does the DESIGN gate apply to this run?
@@ -287,8 +296,34 @@ async function setBoardLabel(iid: number, gate: Gate, on: boolean): Promise<void
  * matched, and `id` replaces the Slack ts as the watermark — note ids are
  * monotonic per project, so "strictly after the request" is an integer
  * comparison rather than a string one.
+ *
+ * `at` is the note's `created_at`. The gates here never read it; the Ready For
+ * Automation mode files an approval under the year it was GIVEN, not the year
+ * the conductor happened to notice it.
  */
-interface NoteReply { id: number; text: string; user: string | null }
+export interface GateReply { id: number; text: string; user: string | null; at: string | null }
+type NoteReply = GateReply;
+
+/**
+ * Human replies strictly after `since`: not system, not machine notes. Pure.
+ * Input order is kept. Shared with the Ready For Automation mode, so both
+ * read "a person answered" the same way.
+ */
+export function repliesAfter(notes: IssueNote[], since: number): GateReply[] {
+  return notes
+    // Strictly after the standing request, so a round never re-reads the
+    // previous round's replies — and never reads the request itself.
+    .filter((n) => n.id > since)
+    // GitLab's own notes (label swaps, assignments) are board noise, and
+    // Oneshot's audit records are its own voice; neither is a human verdict.
+    .filter((n) => n.system !== true)
+    // A claim note is an ordinary comment, so `system` does not catch it. On a
+    // desk whose token belongs to a listed reviewer it therefore read as that
+    // reviewer speaking — which is how run 29 approved-and-revised against its
+    // own fleet. Anything carrying an oneshot marker is this pipeline talking.
+    .filter((n) => !isMachineNote(n.body))
+    .map((n) => ({ id: n.id, text: n.body ?? '', user: n.author?.username ?? null, at: n.created_at ?? null }));
+}
 
 /**
  * Whether this comment's author may resolve the gate.
@@ -308,11 +343,12 @@ function blankState(): ReviewGateState {
 }
 
 const GATE_STATE: Record<Gate, keyof Pick<RunJournal,
-  'planApproval' | 'testcasesApproval' | 'designApproval' | 'notABugApproval'>> = {
+  'planApproval' | 'testcasesApproval' | 'designApproval' | 'notABugApproval' | 'verifyCasesApproval'>> = {
   plan: 'planApproval',
   testcases: 'testcasesApproval',
   design: 'designApproval',
   notABug: 'notABugApproval',
+  verifyCases: 'verifyCasesApproval',
 };
 
 function stateOf(j: RunJournal, gate: Gate): ReviewGateState {
@@ -349,9 +385,9 @@ export interface CheckGateOpts {
   gate: Gate;
   /**
    * Posted as a ticket comment the moment this gate first arms, or re-arms
-   * after a feedback round. Built fresh by the caller on every check (it
-   * embeds the current plan, or the current test-case list), never cached
-   * here.
+   * after a feedback round. Built fresh by the caller on every check — it
+   * carries the current test-case list, or for the plan gate a pointer to the
+   * already-published plan note — never cached here.
    */
   requestBody: string;
   /**
@@ -512,19 +548,7 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
   }
 
   const since = state.requestNoteId;
-  const replies: NoteReply[] = notes.data
-    // Strictly after the standing request, so a round never re-reads the
-    // previous round's replies — and never reads the request itself.
-    .filter((n) => n.id > since)
-    // GitLab's own notes (label swaps, assignments) are board noise, and
-    // Oneshot's audit records are its own voice; neither is a human verdict.
-    .filter((n) => n.system !== true)
-    // A claim note is an ordinary comment, so `system` does not catch it. On a
-    // desk whose token belongs to a listed reviewer it therefore read as that
-    // reviewer speaking — which is how run 29 approved-and-revised against its
-    // own fleet. Anything carrying an oneshot marker is this pipeline talking.
-    .filter((n) => !isMachineNote(n.body))
-    .map((n) => ({ id: n.id, text: n.body ?? '', user: n.author?.username ?? null }));
+  const replies: NoteReply[] = repliesAfter(notes.data, since);
 
   for (const r of replies) {
     if (isApprovedReply(r.text) && !mayApprove(r, gate)) {
@@ -678,8 +702,8 @@ async function mentionOrName(username: string): Promise<string> {
 }
 
 /**
- * SLACK mrkdwn, not GitLab Markdown — the mirror of the warning on
- * `renderPlanForTicket`, and just as easy to get backwards. `**bold**` shows
+ * SLACK mrkdwn, not GitLab Markdown — the mirror of the warning on the ticket
+ * renderers below, and just as easy to get backwards. `**bold**` shows
  * its asterisks here, and a bare URL is written `<url|text>`.
  *
  * Deliberately short. The plan or the case list is already on the ticket in
@@ -727,6 +751,14 @@ const ASK_WORDS: Record<Gate, { what: string; next: string; other: string }> = {
     next: '*Not a Bug* — the ticket is labelled and the run stops',
     other: 'what was missed (data, role, steps, environment) to have it reproduced again',
   },
+  // Present only to keep ASK_WORDS exhaustive over `Gate`. The verify-case gate
+  // does NOT resolve on a bare `approved` — it reads a verdict per failing case
+  // — so it posts its own ask text (`verifyCaseGateAskText`) rather than this.
+  verifyCases: {
+    what: 'the still-failing verify case(s)',
+    next: '`mr` (only the cases QA resolves are recorded)',
+    other: 'a verdict per case — `skip`, `invalid`, `expected` or `pre-existing`',
+  },
 };
 
 export function gateAskText(
@@ -770,107 +802,6 @@ export function gateApprovedText(journal: RunJournal, gate: Gate, approver: stri
 
 // -------------------------------------------------------------- plan gate
 
-interface PlanStep { n: number; what: string; files: string[]; layer: string }
-
-/** The plan artifact, read as the fields this renderer actually wants — same shape as `sField`/`aField` in codephases.ts. */
-function planStr(plan: Record<string, unknown> | null, key: string): string | null {
-  const v = plan?.[key];
-  return typeof v === 'string' && v !== '' ? v : null;
-}
-
-function planSteps(plan: Record<string, unknown> | null): PlanStep[] {
-  const v = plan?.steps;
-  return Array.isArray(v) ? (v as PlanStep[]) : [];
-}
-
-type PlanListKey = 'risks' | 'openQuestions' | 'outOfScope';
-
-function planList(plan: Record<string, unknown> | null, key: PlanListKey): string[] {
-  const v = plan?.[key];
-  return Array.isArray(v) ? v.map(String) : [];
-}
-
-/**
- * Every free-text field below is coerced the same way `planList` coerces its
- * items, and for a harder reason than tidiness: `mdText` calls `.replace` on
- * what it is handed, so one absent or numeric field throws a TypeError. The
- * throw does not stay local — `planApprovalRequestBody` is called straight in
- * `runner.ts`'s implement-phase gate with no try/catch, so a half-written
- * plan.json takes down the whole phase, not just the comment it was rendering.
- */
-const text = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
-
-interface AcCoverage { criterion: string; coveredBy: string; status: string; note: string }
-
-/** Absent on plans written before the field existed — a resumed run's plan.json reads as empty, not as a crash. */
-function planCoverage(plan: Record<string, unknown> | null): AcCoverage[] {
-  const v = plan?.acceptanceCoverage;
-  if (!Array.isArray(v)) return [];
-  return (v as AcCoverage[])
-    .filter((c) => c && typeof c.criterion === 'string')
-    .map((c) => ({ ...c, coveredBy: text(c.coveredBy), note: text(c.note) }));
-}
-
-const COVERAGE_MARK: Record<string, string> = { covered: '✅', partial: '⚠️', 'not-satisfiable': '❌' };
-
-interface FeedbackResponse { point: string; response: string; where: string; note: string }
-
-/**
- * `point` is what makes an entry worth rendering, so it alone is filtered on.
- * `response` is then coerced rather than assumed: it is the one field the
- * renderer interpolates with no truthiness guard in front of it, and an entry
- * carrying a point but no response is exactly the shape a plan.json written
- * halfway through a revision has.
- */
-function planFeedbackResponse(plan: Record<string, unknown> | null): FeedbackResponse[] {
-  const v = plan?.feedbackResponse;
-  if (!Array.isArray(v)) return [];
-  return (v as FeedbackResponse[])
-    .filter((f) => f && typeof f.point === 'string')
-    .map((f) => ({ ...f, response: text(f.response), where: text(f.where), note: text(f.note) }));
-}
-
-/**
- * GitLab Markdown, not Slack mrkdwn.
- *
- * The two are close enough to look interchangeable and are not: Slack's
- * single-asterisk `*bold*` renders as literal asterisks on a ticket, and its
- * `:warning:` shortcode does not resolve at all. This gate posts to the
- * ticket, so everything here is standard Markdown.
- */
-function renderPlanForTicket(plan: Record<string, unknown> | null): string {
-  if (!plan) return '_(no plan recorded)_';
-  const steps = planSteps(plan)
-    .map((s) => `${s.n}. **[${mdText(s.layer)}]** ${mdText(s.what)}${s.files?.length ? ` — ${s.files.map(codeSpan).join(', ')}` : ''}`)
-    .join('\n');
-  const bullets = (key: PlanListKey): string => planList(plan, key).map((r) => `- ${mdText(r)}`).join('\n');
-  const risks = bullets('risks');
-  // Open questions sit ABOVE the steps: they are the decisions the approver is
-  // actually being asked to make, and a plan that silently picked a scope reads
-  // as settled when it is not. Empty sections are omitted, not labelled "none".
-  const questions = bullets('openQuestions');
-  const outOfScope = bullets('outOfScope');
-  const coverage = planCoverage(plan)
-    .map((c) => `- ${COVERAGE_MARK[c.status] ?? '•'} ${mdText(c.criterion)} — ${mdText(c.coveredBy || '—')}` +
-      `${c.note ? ` _(${mdText(c.note)})_` : ''}`)
-    .join('\n');
-  // First on a revision: the approver's question is "did it take my points",
-  // and the answer has to be checkable against the plan below, not asserted.
-  const answered = planFeedbackResponse(plan)
-    .map((f) => `- **${mdText(f.response)}** — ${mdText(f.point)}${f.where ? ` → ${mdText(f.where)}` : ''}` +
-      `${f.note ? `: ${mdText(f.note)}` : ''}`)
-    .join('\n');
-  const approach = planStr(plan, 'approach');
-  return `${answered ? `**Your feedback, point by point**\n${answered}\n\n` : ''}` +
-    `**Approach**\n${approach ? mdText(approach) : '(not recorded)'}\n\n` +
-    `${questions ? `**Open questions** — answer these in a comment, or the stated default is used\n${questions}\n\n` : ''}` +
-    `**Steps**\n${steps || '(none recorded)'}\n\n` +
-    `${coverage ? `**Acceptance coverage**\n${coverage}\n\n` : ''}` +
-    `**Risks**\n${risks || '(none identified)'}` +
-    `${outOfScope ? `\n\n**Out of scope**\n${outOfScope}` : ''}` +
-    `${plan?.migrations === true ? '\n\n⚠️ includes a database migration' : ''}`;
-}
-
 /**
  * Who this gate is waiting on, named in the ask.
  *
@@ -884,9 +815,31 @@ export function approverLine(gate: Gate): string {
   return `Only ${GATE_ROLE[gate].toUpperCase()} may sign this off: ${who || '_(nobody configured)_'}.`;
 }
 
-/** Posted as a ticket comment when the plan gate first arms, or re-arms after feedback. */
-export function planApprovalRequestBody(plan: Record<string, unknown> | null, why: string): string {
-  return `**Oneshot pauses here** — ${why}\n\n${renderPlanForTicket(plan)}\n\n---\n\n` +
+/**
+ * Posted as a ticket comment when the plan gate first arms, or re-arms after
+ * feedback. A short pointer, NOT a second copy of the plan: `publish.ts` has
+ * already posted the full plan — with rendered headings, a step table whose
+ * files are commit-pinned links, and the `.md` attachment — and re-rendering it
+ * here only gave the reviewer the same plan twice. This note's job is the ask:
+ * where the plan is, who signs off, and how.
+ *
+ * `planNoteUrl` links the exact plan comment rather than saying "above", which
+ * is wrong the moment anything lands between the two notes. `migrations` is the
+ * one piece of the plan carried here on purpose: an approver scanning the ask
+ * should see a schema change without opening the plan, and it is a single
+ * boolean, not the plan — so a malformed plan.json still cannot throw here.
+ */
+export function planApprovalRequestBody(
+  why: string, opts: { migrations?: boolean; planNoteUrl?: string } = {},
+): string {
+  const where = opts.planNoteUrl
+    ? `The full plan is in [this comment](${opts.planNoteUrl})`
+    : 'The full plan is in the comment above';
+  const migration = opts.migrations
+    ? '\n\n⚠️ This plan includes a database migration.'
+    : '';
+  return `**Oneshot pauses here** — ${why}\n\n${where}. ` +
+    `Read it there — its file links point at the exact commit it was written against.${migration}\n\n---\n\n` +
     `${approverLine('plan')}\n\n` +
     'Comment the single word **`approved`** to continue to `implement`. Any other comment from ' +
     'those accounts is treated as feedback and `plan` is re-run with it — there is no limit on ' +
@@ -1034,6 +987,288 @@ export function appendEdgeCases(iid: number, feedback: string): TestCase[] | nul
   return updated;
 }
 
+// -------------------------------------------------------- verify-case gate
+
+/**
+ * The four verdicts a QA reviewer can hand a still-failing verify case.
+ *
+ * `skip` and `invalid` both drop the case; they are kept distinct so the audit
+ * records which was meant — "this case should not run" vs "this case is wrong".
+ * `expected` accepts the observed behaviour as correct. `pre-existing` says the
+ * failure is real but not this change's, and splits it into its own bug.
+ */
+export type VerifyVerdict = 'skip' | 'invalid' | 'expected' | 'pre-existing' | 'missing-steps';
+
+/** The four terminal verdicts, which settle a case outright (unlike `missing-steps`). */
+const TERMINAL_VERDICTS: ReadonlySet<VerifyVerdict> = new Set(['skip', 'invalid', 'expected', 'pre-existing']);
+
+export interface VerifyDirective { caseId: string; verdict: VerifyVerdict; by: string | null; raw: string }
+
+/** A still-failing case described to the gate: its evidence, and (for `missing-steps`) its scenario and steps. */
+export interface VerifyFailingCase { id: string; evidence?: string; scenario?: string; steps?: string[] }
+
+export interface VerifyGateResult {
+  verdict: 'actionable' | 'unavailable';
+  /** Terminal verdicts (skip / invalid / expected / pre-existing) the caller applies to verify.json now. */
+  apply: VerifyDirective[];
+  /** Cases whose QA-corrected steps have just arrived — the caller re-runs each one, scoped. */
+  rescope: Array<{ caseId: string; steps: string[]; by: string | null }>;
+  /** Failing cases still awaiting a QA answer this tick (no directive, or mid `missing-steps` exchange). */
+  pending: string[];
+}
+
+/**
+ * Read a QA reply into per-case verdicts. Pure; shared with the resolver and
+ * its tests.
+ *
+ * Only numbers that match a FAILING case id count, so an ordinary "that's the
+ * 2024 figure" in prose never reads as a directive against TC-24. A fragment
+ * carries one verdict and applies it to every failing case it names, so
+ * "skip 14 and 15" resolves both. Fragments are split on newlines and on `;`
+ * `,` — never on `.`, because "skip test case no. 14" depends on the period
+ * after "no". First verdict wins per case: a reviewer who corrects themselves
+ * re-states the whole line rather than appending.
+ */
+export function parseVerifyDirectives(text: string, failingIds: string[]): VerifyDirective[] {
+  const byNumber = new Map<string, string>();
+  for (const id of failingIds) {
+    const m = /(\d{1,5})\s*$/.exec(id);
+    if (m) byNumber.set(String(Number(m[1])), id);
+  }
+  const verdictOf = (s: string): VerifyVerdict | null => {
+    // Terminal verdicts first: a fragment that says both "skip" and "missing
+    // steps" is a reviewer settling the case, so the terminal word wins.
+    if (/pre[\s-]?exist|existing\s+(issue|bug)/i.test(s)) return 'pre-existing';
+    if (/\binvalid\b/i.test(s)) return 'invalid';
+    if (/\bexpected\b/i.test(s)) return 'expected';
+    if (/\bskip\b/i.test(s)) return 'skip';
+    if (/missing\s+steps?|steps?\s+(are\s+|were\s+)?(missing|incomplete|wrong|insufficient)|incomplete\s+steps?|wrong\s+steps?/i.test(s)) {
+      return 'missing-steps';
+    }
+    return null;
+  };
+  const out: VerifyDirective[] = [];
+  const claimed = new Set<string>();
+  for (const fragment of text.split(/[\n;,]+/)) {
+    const verdict = verdictOf(fragment);
+    if (!verdict) continue;
+    const nums = [...fragment.matchAll(/(?:tc[-\s]?|case\s*|no\.?\s*|#)?0*(\d{1,5})/gi)].map((x) => String(Number(x[1])));
+    for (const n of new Set(nums)) {
+      const caseId = byNumber.get(n);
+      if (!caseId || claimed.has(caseId)) continue;
+      claimed.add(caseId);
+      out.push({ caseId, verdict, by: null, raw: fragment.trim() });
+    }
+  }
+  return out;
+}
+
+/** The comment the verify-case gate posts, listing each failing case and the five verdicts. */
+export function verifyCasesRequestBody(failing: VerifyFailingCase[]): string {
+  const lines = failing.map((c) => {
+    const ev = (c.evidence ?? '').split('\n')[0]!.slice(0, 300).trim();
+    return `- **${c.id}**${ev ? ` — ${ev}` : ''}`;
+  });
+  return [
+    '## Verify needs a QA decision',
+    '',
+    'Verify re-ran these case(s) through `implement` twice and they still fail. ' +
+    'No code change fixed them, so QA decides what each one means:',
+    '',
+    ...lines,
+    '',
+    'Reply with **one verdict per case** (one per line), using the case number:',
+    '',
+    '- `skip test case no. N` — drop it; verify completes and the run goes on to the MR.',
+    '- `TC-N: invalid` — the case is wrong; drop it.',
+    '- `TC-N: expected` — the observed behaviour is correct; accept it as a pass.',
+    '- `TC-N: pre-existing` — the failure is real but not this change\'s; a separate bug is opened and linked, and verify completes.',
+    '- `TC-N: missing steps` — the case\'s steps are incomplete. I\'ll post the steps I followed; reply with the corrected ones and I\'ll re-run **only that case**.',
+    '',
+    '_The run reads this from the ticket. It continues once every case above is settled._',
+  ].join('\n');
+}
+
+/** The comment that opens the `missing-steps` exchange: the steps verify followed, and a request for the corrected ones. */
+export function verifyOurStepsBody(
+  caseId: string, scenario: string | undefined, steps: string[], evidence: string | undefined,
+): string {
+  const num = (/(\d+)\s*$/.exec(caseId) ?? [])[1] ?? caseId;
+  const out: string[] = [`### ${caseId} — the steps verify followed`, ''];
+  if (scenario) { out.push(`**Scenario:** ${scenario}`, ''); }
+  out.push(steps.length ? steps.map((s, i) => `${i + 1}. ${s}`).join('\n') : '_(no steps were recorded on this case)_', '');
+  const ev = (evidence ?? '').split('\n')[0]!.trim();
+  if (ev) { out.push(`**What verify observed:** ${ev}`, ''); }
+  out.push(
+    `If these are missing something, reply with the corrected steps for **${caseId}** as a numbered `
+    + `list that mentions \`TC-${num}\`, for example:`,
+    '',
+    '```',
+    `TC-${num} steps:`,
+    '1. …',
+    '2. …',
+    '```',
+    '',
+    `I'll re-run **only ${caseId}** with your steps — nothing else is re-executed, since no code changed.`,
+  );
+  return out.join('\n');
+}
+
+/**
+ * Pull a corrected step list out of a QA reply for one case. Pure.
+ *
+ * Returns the steps only when the reply (a) refers to the case by its number
+ * and (b) actually enumerates steps — a numbered or bulleted list. A reply that
+ * merely restates a verdict ("TC-14: skip") enumerates nothing and returns
+ * null, so it is read as a directive elsewhere rather than as steps.
+ */
+export function parseCorrectedSteps(text: string, caseId: string): string[] | null {
+  const num = (/(\d{1,5})\s*$/.exec(caseId) ?? [])[1];
+  if (!num) return null;
+  if (!new RegExp(`(?:tc[-\\s]?|case\\s*|no\\.?\\s*|#)?0*${Number(num)}\\b`, 'i').test(text)) return null;
+  const enumerated = text.split('\n').map((l) => l.trim())
+    .filter((l) => /^(?:step\s*)?\d+[.)]\s|^[-*]\s/i.test(l))
+    .map((l) => l.replace(/^(?:step\s*)?\d+[.)]\s*/i, '').replace(/^[-*]\s*/, '').trim())
+    .filter(Boolean);
+  if (!enumerated.length) return null;
+  // A single "step" that is only a verdict word is a directive, not steps.
+  if (enumerated.length === 1 && /^(skip|invalid|expected|pre[\s-]?exist|missing\s+steps?)/i.test(enumerated[0]!)) {
+    return null;
+  }
+  return enumerated;
+}
+
+/** The Slack heads-up for the verify-case gate — its own, because it does not resolve on `approved`. */
+function verifyCaseGateAskText(journal: RunJournal, noteId: number, mentions: string, count: number): string {
+  const link = `<${issueUrl(journal.iid)}#note_${noteId}|#${journal.iid} ${linkLabel(journal.title)}>`;
+  const who = mentions || `_QA reviewers (${approversFor('verifyCases').join(', ') || 'nobody configured'})_`;
+  return `:pause_button: *QA decision needed on verify* for ${link}\n` +
+    `${who} — ${count} case(s) still fail after two laps through \`implement\`. A verdict per case ` +
+    'is posted on the ticket (*skip*, *invalid*, *expected* or *pre-existing*). Reply there, per case.\n' +
+    '_Reply on the ticket, not here — this run reads its verdict from GitLab._';
+}
+
+/**
+ * One check of the verify-case QA gate. Same engine shape as
+ * `checkApprovalGate` — never sleeps, never loops, one poll per call — but it
+ * resolves on a verdict PER CASE rather than on a single `approved`, so it has
+ * its own resolver rather than a branch inside that one.
+ *
+ * Accumulates across ticks off the standing request note: every tick re-reads
+ * all qualified replies after it and re-parses, so a reviewer may answer the
+ * cases over several comments. It resolves the moment every failing case
+ * carries a directive; until then it is `pending`, exactly as the engine's
+ * other gates are while they wait.
+ */
+export async function checkVerifyGate(
+  opts: { iid: number; failing: VerifyFailingCase[] },
+): Promise<VerifyGateResult> {
+  const { iid, failing } = opts;
+  const failingIds = failing.map((c) => c.id);
+  const caseOf = new Map(failing.map((c) => [c.id, c]));
+
+  if (DRY_RUN) {
+    log.warn('[dry-run] would pause at the verify-case QA gate — auto-skipping every failing case', { iid });
+    return {
+      verdict: 'actionable',
+      apply: failingIds.map((id) => ({ caseId: id, verdict: 'skip' as const, by: null, raw: 'dry-run' })),
+      rescope: [], pending: [],
+    };
+  }
+
+  const approvers = approversFor('verifyCases');
+  if (!approvers.length) {
+    log.warn("no qa reviewers in config/reviewers.json — 'verifyCases' gate cannot be satisfied", { iid });
+    return { verdict: 'unavailable', apply: [], rescope: [], pending: failingIds };
+  }
+
+  let journal = readJournal(iid);
+  if (!journal) return { verdict: 'actionable', apply: [], rescope: [], pending: failingIds };
+
+  let state = stateOf(journal, 'verifyCases');
+
+  if (state.requestNoteId == null) {
+    const posted = await addIssueNote(iid, verifyCasesRequestBody(failing));
+    if (!posted.ok || !posted.data) {
+      log.warn('verify-case gate request could not be posted to the ticket — will retry next tick', { iid });
+      return { verdict: 'actionable', apply: [], rescope: [], pending: failingIds };
+    }
+    state = { ...state, requestNoteId: posted.data.id };
+    persist(iid, 'verifyCases', state);
+    const mentions = await mentionsFor('verifyCases');
+    await notifySlack(journal, verifyCaseGateAskText(journal, posted.data.id, mentions, failing.length), true);
+    log.phase(`verify-case QA decision requested on #${iid}`, { note: posted.data.id, cases: failing.length });
+    return { verdict: 'actionable', apply: [], rescope: [], pending: failingIds };
+  }
+
+  const notes = await issueNotes(iid);
+  if (!notes.ok || !notes.data) {
+    log.warn('verify-case gate could not read the ticket comments — will retry next tick', { iid });
+    return { verdict: 'actionable', apply: [], rescope: [], pending: failingIds };
+  }
+  const noteData = notes.data;
+
+  // Every directive per case, across every qualified reply, in the order sent.
+  const replies = repliesAfter(noteData, state.requestNoteId).filter((r) => mayApprove(r, 'verifyCases'));
+  const perCase = new Map<string, Array<{ verdict: VerifyVerdict; by: string | null; raw: string }>>();
+  for (const r of replies) {
+    for (const d of parseVerifyDirectives(r.text, failingIds)) {
+      const arr = perCase.get(d.caseId) ?? [];
+      arr.push({ verdict: d.verdict, by: r.user, raw: d.raw });
+      perCase.set(d.caseId, arr);
+    }
+  }
+
+  const missing: Record<string, { oursNoteId: number; rerunDone?: boolean }> = { ...(journal.verifyMissingSteps ?? {}) };
+  const apply: VerifyDirective[] = [];
+  const rescope: VerifyGateResult['rescope'] = [];
+  const pending: string[] = [];
+
+  for (const id of failingIds) {
+    const ds = perCase.get(id) ?? [];
+    // A terminal verdict settles the case, even if a `missing-steps` directive
+    // is also present — a reviewer who classifies it has moved past the steps.
+    const terminal = ds.find((d) => TERMINAL_VERDICTS.has(d.verdict));
+    if (terminal) {
+      apply.push({ caseId: id, verdict: terminal.verdict, by: terminal.by, raw: terminal.raw });
+      continue;
+    }
+    if (!ds.some((d) => d.verdict === 'missing-steps')) { pending.push(id); continue; }
+
+    const st = missing[id];
+    if (!st) {
+      // First `missing-steps`: post the steps verify followed, ask for corrected ones.
+      const c = caseOf.get(id);
+      const posted = await addIssueNote(iid, verifyOurStepsBody(id, c?.scenario, c?.steps ?? [], c?.evidence));
+      if (posted.ok && posted.data) {
+        missing[id] = { oursNoteId: posted.data.id };
+        journal = updateJournal(iid, { verifyMissingSteps: missing }) ?? journal;
+        log.phase(`verify-case gate posted the steps for ${id}, awaiting QA's corrected ones`, { iid });
+      }
+      pending.push(id);
+      continue;
+    }
+    if (st.rerunDone) {
+      // Re-ran once with corrected steps and it still fails — a correction is
+      // spent, so this now needs a terminal verdict rather than another round.
+      pending.push(id);
+      continue;
+    }
+    // Corrected steps are whatever QA enumerated after our posting.
+    const after = repliesAfter(noteData, st.oursNoteId).filter((r) => mayApprove(r, 'verifyCases'));
+    let steps: string[] | null = null;
+    let by: string | null = null;
+    for (const r of after) {
+      const s = parseCorrectedSteps(r.text, id);
+      if (s) { steps = s; by = r.user; break; }
+    }
+    if (steps) rescope.push({ caseId: id, steps, by });
+    else pending.push(id);
+  }
+
+  return { verdict: 'actionable', apply, rescope, pending };
+}
+
 // ------------------------------------------------------------- design gate
 
 /**
@@ -1135,7 +1370,9 @@ export function designDeliverableRefusal(
 }
 
 /**
- * GitLab Markdown, not Slack mrkdwn — same warning as `renderPlanForTicket`.
+ * GitLab Markdown, not Slack mrkdwn — the ticket renders Markdown, so
+ * `**bold**` is bold and `:warning:` resolves (the inverse of the Slack
+ * mrkdwn warning earlier in this file).
  *
  * What a design reviewer is being asked is narrower than what a plan reviewer
  * is asked, so this leads with the two things that decide the answer: the

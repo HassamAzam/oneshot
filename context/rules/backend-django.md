@@ -56,3 +56,8 @@
 - Tasks must be idempotent.
 - Use `logging`, not `print()`.
 - Do not import models at module level inside task files if it causes circular imports — import inside the function.
+
+## Management Commands & Scheduling
+
+- For command structure (`BaseCommand` shape, thin `handle()`, idempotency, testing), read the **`django-management-commands`** skill — it is the authoritative source.
+- For how recurring work actually gets scheduled, read the **`django-scheduled-jobs`** skill. Never seed a `PeriodicTask`/`CrontabSchedule` row in a data migration — no migration in this repo does. Fixed-cadence work that runs at the same time for everyone is a crontab entry registered by DevOps; app code *does* legitimately create per-entity schedules at runtime, and that skill has the three cases and the mandatory ops handoff.

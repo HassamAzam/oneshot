@@ -728,6 +728,347 @@ expect_block "Write that adds an inline style" \
 
 rm -f "$FE"/components/demo/*.bak
 
+# ------------------------------------------------------------ automation-ready
+#
+# Not a registered hook: the readiness script the conductor runs before an
+# automation session (runAutomationReadyGuard). Every way it can fail to judge a
+# ticket has to answer `unknown` and block, never `ready`. It is the only
+# script here that talks to GitLab, so it gets a fixture GitLab on a free local
+# port and never sees the real one. Label names come from the real
+# config/project.json, because ONESHOT_HOME is this checkout.
+echo
+echo "automation-ready"
+
+AR_TOKEN="verify-token-$$"
+AR_PAYLOAD='{"hook_event_name":"UserPromptSubmit","session_id":"verify","transcript_path":"","cwd":"/tmp","prompt":"write the cases"}'
+AR_PORT_FILE="$(mktemp "${TMPDIR:-/tmp}/oneshot-verify-gitlab.XXXXXX")"
+"$NODE" -e '
+const http = require("node:http");
+const fs = require("node:fs");
+const path = require("node:path");
+const [portFile, token] = process.argv.slice(1);
+const project = require(path.join(process.env.ONESHOT_HOME, "config", "project.json"));
+const { trigger: T, deployed: D } = project.automation.labels;
+const L = project.labels.entry;   // the Loop: the master switch, required beside the trigger
+const add = (name, at) => ({ action: "add", created_at: at, label: { name } });
+const mr = (iid, state, source, target) => ({
+  iid, project_id: 7, state, source_branch: source, target_branch: target,
+  merged_at: state === "merged" ? "2026-01-02T10:00:00Z" : null,
+  title: "fixture " + iid, web_url: "http://127.0.0.1/mr/" + iid,
+});
+const tickets = {
+  1: { issue: { iid: 1, project_id: 7, state: "closed", labels: [L, T], updated_at: "2026-01-03T00:00:00Z" },
+       events: [add(T, "2026-01-03T00:00:00Z")],
+       mrs: [mr(11, "merged", "fix/x", "dev"), mr(12, "merged", "stage", "dev")] },
+  2: { issue: { iid: 2, project_id: 7, state: "opened", labels: [L, T, D], updated_at: "2026-01-05T00:00:00Z" },
+       events: [add(T, "2026-01-03T00:00:00Z"), add(D, "2026-01-04T00:00:00Z")],
+       mrs: [mr(21, "opened", "fix/y", "dev")] },
+  // Ticket 1 without the Loop: ready by both rules, switched off.
+  5: { issue: { iid: 5, project_id: 7, state: "closed", labels: [T], updated_at: "2026-01-03T00:00:00Z" },
+       events: [add(T, "2026-01-03T00:00:00Z")],
+       mrs: [mr(51, "merged", "fix/z", "dev")] },
+  // Ticket 2 without the Loop: every reason at once.
+  6: { issue: { iid: 6, project_id: 7, state: "opened", labels: [T, D], updated_at: "2026-01-05T00:00:00Z" },
+       events: [add(T, "2026-01-03T00:00:00Z"), add(D, "2026-01-04T00:00:00Z")],
+       mrs: [mr(61, "opened", "fix/w", "dev")] },
+};
+const server = http.createServer((req, res) => {
+  const send = (status, body, headers) => {
+    res.writeHead(status, { "Content-Type": "application/json", ...(headers || {}) });
+    res.end(JSON.stringify(body));
+  };
+  const m = /^\/api\/v4\/projects\/acme%2Ferp\/issues\/(\d+)(\/resource_label_events|\/related_merge_requests)?(\?|$)/
+    .exec(req.url);
+  if (!m) return send(404, { message: "404 Not Found" });
+  const iid = Number(m[1]);
+  if (iid === 3) return send(500, { message: "500 Internal Server Error" });
+  if (iid === 4 || req.headers["private-token"] !== token) return send(401, { message: "401 Unauthorized" });
+  const t = tickets[iid];
+  if (!t) return send(404, { message: "404 Not Found" });
+  if (m[2] === "/resource_label_events") return send(200, t.events, { "X-Total-Pages": "1" });
+  if (m[2] === "/related_merge_requests") return send(200, t.mrs);
+  return send(200, t.issue);
+});
+server.listen(0, "127.0.0.1", () => fs.writeFileSync(portFile, String(server.address().port)));
+// A fixture orphaned by an interrupted run must not outlive it for long.
+setTimeout(() => process.exit(0), 120000);
+' "$AR_PORT_FILE" "$AR_TOKEN" &
+AR_PID=$!
+for _ in $(seq 1 50); do [ -s "$AR_PORT_FILE" ] && break; sleep 0.1; done
+AR_PORT="$(cat "$AR_PORT_FILE" 2>/dev/null || true)"
+
+# expect_ready <label> <hook> <json> — the readiness guard let the prompt through, WITH a verdict.
+expect_ready() {
+    local out; out="$(run "$2" "$3")"
+    if printf '%s' "$out" | grep -q '"verdict":"ready"' && ! printf '%s' "$out" | grep -q '"decision":"block"'; then
+        green "  PASS  ready: $1"; PASS=$((PASS+1))
+    else
+        red   "  FAIL  should have been READY: $1"; FAIL=$((FAIL+1))
+    fi
+}
+
+# ar_shape <label> <stdout> [text ...] — what every readiness answer must also be.
+# A block is decision:block with its reason and no `continue` or `stopReason`.
+# The token is never printed or logged. Each <text> must appear. Counts only a
+# failure, so the section still reports one line per case.
+ar_shape() {
+    local label="$1" out="$2" bad="" want; shift 2
+    printf '%s' "$out" | grep -q '"continue"' && bad="$bad a-continue-key"
+    printf '%s' "$out" | grep -q '"stopReason"' && bad="$bad a-stopReason-key"
+    printf '%s' "$out" | grep -qF -- "$AR_TOKEN" && bad="$bad the-token-on-stdout"
+    cat "$ROOT/state/hook-events.jsonl" "$ROOT/state/hook-errors.log" 2>/dev/null \
+        | grep -qF -- "$AR_TOKEN" && bad="$bad the-token-in-a-log"
+    for want in "$@"; do printf '%s' "$out" | grep -qF -- "$want" || bad="$bad missing:$want"; done
+    if [ -n "$bad" ]; then red "  FAIL  $label:$bad"; FAIL=$((FAIL+1)); fi
+}
+
+# ar_lacks <label> <stdout> <text ...> — none of <text> may appear. Counts only a failure.
+ar_lacks() {
+    local label="$1" out="$2" bad="" unwanted; shift 2
+    for unwanted in "$@"; do printf '%s' "$out" | grep -qF -- "$unwanted" && bad="$bad unexpected:$unwanted"; done
+    if [ -n "$bad" ]; then red "  FAIL  $label:$bad"; FAIL=$((FAIL+1)); fi
+}
+
+# The fixture's address and the token stay set for the section; each case names
+# its phase and ticket in front of the helper, which exports them to the hook.
+export ONESHOT_AUTOMATION_API="http://127.0.0.1:${AR_PORT:-9}/api/v4"
+export ONESHOT_AUTOMATION_PROJECT="acme/erp"
+export ONESHOT_AUTOMATION_TOKEN="$AR_TOKEN"
+AR_PHASE="automation-testcases"
+
+ONESHOT_PHASE=implement ONESHOT_TICKET=1 \
+    expect_clean "outside the automation phase it says nothing" automation-ready.cjs "$AR_PAYLOAD"
+ar_shape "outside the automation phase it says nothing" \
+    "$(ONESHOT_PHASE=implement ONESHOT_TICKET=1 run automation-ready.cjs "$AR_PAYLOAD")"
+
+if [ -n "$AR_PORT" ]; then
+    L="closed ticket with a merged fix MR"
+    ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=1 expect_ready "$L" automation-ready.cjs "$AR_PAYLOAD"
+    ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=1 run automation-ready.cjs "$AR_PAYLOAD")" \
+        '"hookEventName":"UserPromptSubmit"' 'merged !11 (fix/x → dev).'
+
+    L="open ticket, deployed after the trigger, MR still open"
+    ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=2 expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+    ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=2 run automation-ready.cjs "$AR_PAYLOAD")" \
+        '"code":"rfd-order"' '"code":"mr-not-merged"' '!21 is still open'
+
+    L="GitLab answering 500 fails closed"
+    ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=3 expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+    ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=3 run automation-ready.cjs "$AR_PAYLOAD")" \
+        '"verdict":"unknown"' '"errorKind":"server"'
+
+    # The Loop is the master switch: without it nothing else can make a ticket ready.
+    L="closed ticket with a merged fix MR, but no Loop"
+    ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=5 expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+    AR_OUT="$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=5 run automation-ready.cjs "$AR_PAYLOAD")"
+    ar_shape "$L" "$AR_OUT" '"verdict":"not-ready"' '"code":"loop-missing"' 'is not on the ticket.' '"iid":51'
+    ar_lacks "$L" "$AR_OUT" '"code":"rfa-missing"' '"code":"rfd-order"' '"code":"mr-not-merged"'
+
+    L="no Loop, and both rules failing too: loop-missing first, beside the rest"
+    ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=6 expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+    ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=6 run automation-ready.cjs "$AR_PAYLOAD")" \
+        '"reasons":[{"code":"loop-missing"' '"code":"rfd-order"' '"code":"mr-not-merged"' '!61 is still open'
+else
+    red "  FAIL  the fixture GitLab did not start, so the cases that need it cannot run"; FAIL=$((FAIL+1))
+    skip "closed ticket with a merged fix MR" "no fixture"
+    skip "open ticket, deployed after the trigger, MR still open" "no fixture"
+    skip "GitLab answering 500 fails closed" "no fixture"
+    skip "closed ticket with a merged fix MR, but no Loop" "no fixture"
+    skip "no Loop, and both rules failing too: loop-missing first, beside the rest" "no fixture"
+fi
+
+# Port 9 is on fetch's blocked-port list: refused before any packet leaves.
+L="GitLab unreachable fails closed"
+ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=1 ONESHOT_AUTOMATION_API=http://127.0.0.1:9/api/v4 \
+    expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=1 ONESHOT_AUTOMATION_API=http://127.0.0.1:9/api/v4 \
+    run automation-ready.cjs "$AR_PAYLOAD")" '"verdict":"unknown"' '"errorKind":"network"'
+
+L="no token fails closed"
+ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=1 ONESHOT_AUTOMATION_TOKEN= \
+    expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=1 ONESHOT_AUTOMATION_TOKEN= \
+    run automation-ready.cjs "$AR_PAYLOAD")" '"verdict":"unknown"' '"errorKind":"config"'
+
+if [ -n "$AR_PORT" ]; then
+    L="a rejected token fails closed and says auth"
+    ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=4 expect_block "$L" automation-ready.cjs "$AR_PAYLOAD"
+    ar_shape "$L" "$(ONESHOT_PHASE=$AR_PHASE ONESHOT_TICKET=4 run automation-ready.cjs "$AR_PAYLOAD")" \
+        '"verdict":"unknown"' '"errorKind":"auth"'
+else
+    skip "a rejected token fails closed and says auth" "no fixture"
+fi
+
+unset ONESHOT_AUTOMATION_API ONESHOT_AUTOMATION_PROJECT ONESHOT_AUTOMATION_TOKEN
+kill "$AR_PID" 2>/dev/null
+wait "$AR_PID" 2>/dev/null
+rm -f "$AR_PORT_FILE"
+
+# ---------------------------------------------------------------- artifact-guard
+#
+# RUN=<the run directory the test env already scopes writes to>. The deny cases
+# are a handoff and the journal; the allow cases are the three *-partial.json
+# backstops a prompt actually asks for, and anything one level deeper — a
+# session's own scratch is none of this guard's business.
+echo
+echo "artifact-guard"
+RUN="$ROOT/state/runs/0"
+edit_json_payload() {
+    printf '{"tool_name":"Edit","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$1"
+}
+# bash_cwd_payload <cwd> <command> — a Bash call from a session whose shell
+# already stands in <cwd>. The SDK sends `cwd` on every hook input.
+bash_cwd_payload() {
+    printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":%s}}' "$1" "$(printf '%s' "$2" | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(s)))')"
+}
+
+expect_deny  "Write another phase's findings.json" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/findings.json")"
+expect_deny  "Write verify.json (the merge gate reads it)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/verify.json")"
+expect_deny  "Write run.json (the journal, holds human approvals)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/run.json")"
+expect_deny  "Edit findings.json"      artifact-guard.cjs "$(edit_json_payload "$RUN/findings.json")"
+expect_deny  "Write merge.json (name defaulted from the phase, not declared)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/merge.json")"
+expect_deny  "Write ANOTHER run's artifact" \
+                                       artifact-guard.cjs "$(write_payload "$ROOT/state/runs/999/findings.json")"
+
+expect_allow "Write review-partial.json (the sanctioned backstop)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/review-partial.json")"
+expect_allow "Write verify-partial.json" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/verify-partial.json")"
+expect_allow "Write testcases-partial.json" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/testcases-partial.json")"
+expect_allow "Write artifacts/verify.json (a subdirectory, not a handoff)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/artifacts/verify.json")"
+expect_allow "Write scratch/plan.json" artifact-guard.cjs "$(write_payload "$RUN/scratch/plan.json")"
+expect_allow "Write a worktree file"   artifact-guard.cjs "$(write_payload "$ONESHOT_WORKTREE/apps/x/views.py")"
+
+# APFS is case-insensitive: Findings.json IS findings.json there, and so is a
+# path whose directories are spelled in capitals.
+expect_deny  "Write Findings.json (another spelling of the same file)" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/Findings.json")"
+if [ -d "$ROOT/state" ] && [ -d "$ROOT/STATE" ]; then
+    expect_deny  "Write through STATE/ on a case-insensitive volume" \
+                                       artifact-guard.cjs "$(write_payload "$ROOT/STATE/runs/0/findings.json")"
+else
+    skip "Write through STATE/ on a case-insensitive volume" "case-sensitive volume, or no state/ yet"
+fi
+
+# The Bash surface. write-scope.cjs never sees these, which is the whole reason
+# this guard watches both.
+expect_deny  "redirect over verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "echo '{}' > $RUN/verify.json")"
+expect_deny  "append to the journal"   artifact-guard.cjs "$(bash_payload "echo x >> $RUN/run.json")"
+expect_deny  "python json.dump into findings.json" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import json;json.dump({}, open('$RUN/findings.json','w'))\"")"
+expect_deny  "node writeFileSync into verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "node -e \"require('fs').writeFileSync('$RUN/verify.json','{}')\"")"
+expect_deny  "cp over findings.json"   artifact-guard.cjs "$(bash_payload "cp /tmp/x.json $RUN/findings.json")"
+expect_deny  "sed -i on verify.json"   artifact-guard.cjs "$(bash_payload "sed -i '' 's/fail/pass/' $RUN/verify.json")"
+expect_deny  "tee into findings.json"  artifact-guard.cjs "$(bash_payload "echo '{}' | tee $RUN/findings.json")"
+expect_deny  "rm the journal"          artifact-guard.cjs "$(bash_payload "rm $RUN/run.json")"
+expect_deny  "absolute redirect after cd" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && echo '{}' > $RUN/verify.json")"
+expect_deny  "relative path from the conductor cwd" \
+                                       artifact-guard.cjs "$(bash_payload "echo '{}' > state/runs/0/findings.json")"
+expect_deny  "noclobber redirect (>|) over verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "echo '{}' >| $RUN/verify.json")"
+
+# Where the shell stands. The commonest shape in the event log is
+# `cd …/state/runs/<iid> && …` followed by a bare basename.
+expect_deny  "cd into the run dir, then a relative redirect" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && echo '{}' > verify.json")"
+expect_deny  "relative rm from a session already standing in the run dir" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$RUN" "rm findings.json")"
+expect_deny  "cd via a literal \$ONESHOT_HOME, then a relative rm" \
+                                       artifact-guard.cjs "$(bash_payload 'cd $ONESHOT_HOME/state/runs/0 && rm verify.json')"
+expect_deny  "redirect into a literal \$ONESHOT_HOME path" \
+                                       artifact-guard.cjs "$(bash_payload 'echo x > $ONESHOT_HOME/state/runs/0/run.json')"
+expect_deny  "cd and rm inside a subshell" \
+                                       artifact-guard.cjs "$(bash_payload "(cd $RUN && rm verify.json)")"
+expect_allow "cd into the run dir, then a read" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && cat verify.json > /tmp/v.json")"
+expect_allow "cd into the run dir, then a partial" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && echo '{}' > verify-partial.json")"
+expect_allow "cd into the run dir, then on into artifacts/" \
+                                       artifact-guard.cjs "$(bash_payload "cd $RUN && cd artifacts && echo '{}' > verify.json")"
+
+# Taking a handoff away is as good as rewriting it: the merge gate reads a
+# missing findings.json as "no findings".
+expect_deny  "mv findings.json out of the run dir" \
+                                       artifact-guard.cjs "$(bash_payload "mv $RUN/findings.json /tmp/x")"
+expect_deny  "cp a file INTO the run dir under a handoff's name" \
+                                       artifact-guard.cjs "$(bash_payload "cp /tmp/verify.json $RUN/")"
+expect_deny  "rsync --remove-source-files from a handoff" \
+                                       artifact-guard.cjs "$(bash_payload "rsync --remove-source-files $RUN/findings.json /tmp/")"
+expect_deny  "rm -rf the whole run dir" \
+                                       artifact-guard.cjs "$(bash_payload "rm -rf $RUN")"
+expect_deny  "mv the whole run dir away" \
+                                       artifact-guard.cjs "$(bash_payload "mv $RUN /tmp/x")"
+expect_allow "rm -rf a scratch dir inside the run" \
+                                       artifact-guard.cjs "$(bash_payload "rm -rf $RUN/scratch")"
+expect_allow "mv within scratch/"      artifact-guard.cjs "$(bash_payload "mv $RUN/scratch/a $RUN/scratch/b")"
+expect_allow "mv a partial out"        artifact-guard.cjs "$(bash_payload "mv $RUN/verify-partial.json /tmp/x")"
+expect_allow "cp a handoff out (a read)" \
+                                       artifact-guard.cjs "$(bash_payload "cp $RUN/findings.json /tmp/copy.json")"
+
+# The other spellings of a write.
+expect_deny  "pathlib write_text"      artifact-guard.cjs "$(bash_payload "python3 -c \"from pathlib import Path; Path('$RUN/findings.json').write_text('{}')\"")"
+expect_deny  "os.remove"               artifact-guard.cjs "$(bash_payload "python3 -c \"import os; os.remove('$RUN/findings.json')\"")"
+expect_deny  "os.rename onto verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import os; os.rename('/tmp/f', '$RUN/verify.json')\"")"
+expect_deny  "shutil.copy onto verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import shutil; shutil.copy('/tmp/f', '$RUN/verify.json')\"")"
+expect_deny  "open(..., 'r+')"         artifact-guard.cjs "$(bash_payload "python3 -c \"f=open('$RUN/findings.json','r+'); f.truncate(0)\"")"
+expect_deny  "Path(...).open('r+')"    artifact-guard.cjs "$(bash_payload "python3 -c \"from pathlib import Path; Path('$RUN/verify.json').open('r+')\"")"
+# A heredoc can put the path on the line after the call. Segments split on
+# newlines, so only the pass over the whole command sees the two together.
+expect_deny  "python heredoc: open( and its path on separate lines" \
+                                       artifact-guard.cjs "$(bash_payload "python3 - <<'EOF'"$'\n'"with open("$'\n'"    '$RUN/verify.json', 'w') as f:"$'\n'"    f.write('{}')"$'\n'"EOF")"
+expect_deny  "node heredoc: writeFileSync( and its path on separate lines" \
+                                       artifact-guard.cjs "$(bash_payload "node - <<'EOF'"$'\n'"require('fs').writeFileSync("$'\n'"  '$RUN/verify.json',"$'\n'"  '{}')"$'\n'"EOF")"
+expect_allow "python heredoc: a read whose path is on the next line" \
+                                       artifact-guard.cjs "$(bash_payload "python3 - <<'EOF'"$'\n'"import json"$'\n'"with open("$'\n'"    '$RUN/verify.json') as f:"$'\n'"    print(json.load(f))"$'\n'"EOF")"
+# That pass takes absolute paths only. A relative one means wherever the shell
+# stood at that point, and here that is artifacts/, not the run directory.
+expect_allow "cd on into artifacts/, then a relative python write" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$RUN" "cd artifacts && python3 -c \"open('verify.json','w')\"")"
+expect_deny  "sed -i.bak"              artifact-guard.cjs "$(bash_payload "sed -i.bak 's/fail/pass/' $RUN/verify.json")"
+expect_deny  "sed --in-place"          artifact-guard.cjs "$(bash_payload "sed --in-place 's/fail/pass/' $RUN/verify.json")"
+expect_deny  "find -name findings.json -delete" \
+                                       artifact-guard.cjs "$(bash_payload "find $RUN -name findings.json -delete")"
+expect_deny  "find over every run's verify.json" \
+                                       artifact-guard.cjs "$(bash_payload "find $ROOT/state -name verify.json -delete")"
+expect_deny  "find . -delete from a session standing in the run dir" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$RUN" "find . -name findings.json -delete")"
+expect_deny  "find . -delete from a conductor phase standing in \$ONESHOT_HOME" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$ROOT" "find . -name verify.json -delete")"
+expect_deny  "cd above state/runs, then find . -delete" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$ONESHOT_WORKTREE" "cd $ROOT/state && find . -name verify.json -delete")"
+# `.` is above state/runs only when the shell really stands there. Resolved
+# against the $ONESHOT_HOME fallback as well, every worktree `find .` was.
+expect_allow "find -name <handoff> -delete inside the worktree" \
+                                       artifact-guard.cjs "$(bash_cwd_payload "$ONESHOT_WORKTREE" "find . -name verify.json -delete")"
+expect_deny  "rm FINDINGS.JSON"        artifact-guard.cjs "$(bash_payload "rm $RUN/FINDINGS.JSON")"
+expect_allow "shutil.copy a handoff out (a read)" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import shutil; shutil.copy('$RUN/findings.json', '/tmp/f.json')\"")"
+expect_allow "sed -n over verify.json" artifact-guard.cjs "$(bash_payload "sed -n '/fail/p' $RUN/verify.json")"
+expect_allow "find findings.json without deleting" \
+                                       artifact-guard.cjs "$(bash_payload "find $RUN -name findings.json")"
+
+expect_allow "cat findings.json (reads are never refused)" \
+                                       artifact-guard.cjs "$(bash_payload "cat $RUN/findings.json")"
+expect_allow "python json.load of testcases.json" \
+                                       artifact-guard.cjs "$(bash_payload "python3 -c \"import json;d=json.load(open('$RUN/testcases.json'))\"")"
+expect_allow "jq over verify.json"     artifact-guard.cjs "$(bash_payload "jq '.results' $RUN/verify.json")"
+expect_allow "redirect into a partial" artifact-guard.cjs "$(bash_payload "echo '{}' > $RUN/verify-partial.json")"
+expect_allow "grep -r for a finding id" \
+                                       artifact-guard.cjs "$(bash_payload "grep -rn F-1 $RUN/findings.json")"
+expect_allow "an ordinary build command" \
+                                       artifact-guard.cjs "$(bash_payload 'npm test -- --watchAll=false')"
+
 rm -rf "$ONESHOT_WORKTREE"
 
 echo

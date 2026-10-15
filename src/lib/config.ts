@@ -162,8 +162,39 @@ export interface ProjectConfig {
   highScrutinyPaths: string[];
   preserveLabels: string[];
   branches: { base: string; protected: string[]; prefix: string; pattern: string };
+  /**
+   * The ERP delivery-zone map (src/conductor/zoneguard.ts). `file` is read from
+   * the work repo's origin/<base>; the guard applies only to tickets carrying
+   * `guardLabel`; `yellowLabel` (grooming's yellow classification, not a record
+   * that tests merged: see zoneVerdict) allows yellow areas; a ticket carrying
+   * `testsLabel` is always stopped (a person writes those). Absent = no zone guard,
+   * and no refusal either: that is how it ships until the map is on the base branch
+   * (see _comment_zones in config/project.json for the line that switches it on).
+   */
+  zones?: { file: string; guardLabel: string; yellowLabel: string; testsLabel?: string };
   promotions: Array<{ from: string; to: string; auto: boolean }>;
+  /**
+   * The Ready For Automation mode (src/automation). Optional: absent, the mode
+   * cannot be switched on. Read through `automationConfig()`, which checks it,
+   * never directly. The Loop reads only its trigger label, through
+   * `automationTriggerLabel()`, to leave those tickets to the mode.
+   */
+  automation?: AutomationConfig;
   concurrency: number;
+}
+
+/**
+ * config/project.json `automation`. The `_why` keys beside each field say what
+ * it is for; this is the shape the code relies on.
+ */
+export interface AutomationConfig {
+  /** Exact, case-sensitive GitLab label names. `deployed` is only read (by the readiness hook). */
+  labels: { trigger: string; deployed: string; review: string; done: string };
+  /** Regex SOURCE, e.g. '^Adhoc-\\d{4}-\\d{2}-\\d{2}$'. The hook compiles it with the 'i' flag. */
+  releaseBranchPattern: string;
+  sheet: { spreadsheetId: string; trackerTab: string; moduleTabPrefix: string; sectionAliases?: Record<string, string> };
+  /** A not-ready ticket is re-checked at least this often, since a merge does not touch the ticket. */
+  recheckMinutes: number;
 }
 
 /**
@@ -345,7 +376,8 @@ export function projectConfig(): ProjectConfig {
     // A getter rather than a value, so that a machine without GITLAB_REPO_URL
     // can still read labels and branches: only asking WHICH project throws.
     Object.defineProperty(c, 'gitlab', { get: gitlabRepo, enumerable: false, configurable: true });
-    // Shared with the Plane triage router, so the gates and the routing can never disagree.
+    // Review gating only. The Plane triage router used to read this file too; it
+    // now routes by the ERP repo's own .claude/zones.json (see _comment_high_scrutiny).
     const risk = loadJson<{ modules: Array<{ paths?: string[] }> }>('risk-modules.json');
     c.highScrutinyPaths = [...new Set([...(c.highScrutinyPaths ?? []), ...risk.modules.flatMap((m) => m.paths ?? [])])];
     _project = c;
@@ -559,6 +591,98 @@ export function reviewersConfig(): ReviewersConfig {
     };
   }
   return _reviewers;
+}
+
+/**
+ * config/project.json `automation`, checked. Throws
+ * 'config/project.json has no usable `automation` block: <what>' naming the
+ * first field that is missing or of the wrong type.
+ *
+ * Checked field by field rather than cast, because every one of these is used
+ * somewhere a wrong value is silent: an empty label name makes the scan find
+ * nothing, a bad regex makes the readiness check hold every ticket as
+ * `unknown`, and a non-numeric cadence makes a not-ready ticket re-check every
+ * tick. Saying which field is wrong at boot is cheaper than any of those. Not cached, so a test or
+ * a preflight always sees the file as it is. `cfg` is for tests; everything
+ * else reads config/project.json.
+ */
+export function automationConfig(cfg: Pick<ProjectConfig, 'automation'> = projectConfig()): AutomationConfig {
+  const bad = (what: string): never => {
+    throw new Error(`config/project.json has no usable \`automation\` block: ${what}`);
+  };
+  const a = cfg.automation as unknown;
+  if (!a || typeof a !== 'object') bad('it is missing');
+  const raw = a as Record<string, unknown>;
+  const str = (v: unknown, name: string): string => (typeof v === 'string' && v.trim() !== '' ? v : bad(`${name} must be a non-empty string`));
+
+  const labels = (raw.labels ?? {}) as Record<string, unknown>;
+  const sheet = (raw.sheet ?? {}) as Record<string, unknown>;
+  const releaseBranchPattern = str(raw.releaseBranchPattern, 'releaseBranchPattern');
+  try { new RegExp(releaseBranchPattern, 'i'); } catch { bad('releaseBranchPattern is not a valid regular expression'); }
+  const recheckMinutes = raw.recheckMinutes;
+  if (typeof recheckMinutes !== 'number' || !Number.isFinite(recheckMinutes) || recheckMinutes <= 0) {
+    bad('recheckMinutes must be a positive number');
+  }
+  const aliases = sheet.sectionAliases;
+  if (aliases !== undefined && (typeof aliases !== 'object' || aliases === null || Array.isArray(aliases)
+    || Object.values(aliases).some((v) => typeof v !== 'string'))) {
+    bad('sheet.sectionAliases must map module names to strings');
+  }
+  return {
+    labels: {
+      trigger: str(labels.trigger, 'labels.trigger'),
+      deployed: str(labels.deployed, 'labels.deployed'),
+      review: str(labels.review, 'labels.review'),
+      done: str(labels.done, 'labels.done'),
+    },
+    releaseBranchPattern,
+    sheet: {
+      spreadsheetId: str(sheet.spreadsheetId, 'sheet.spreadsheetId'),
+      trackerTab: str(sheet.trackerTab, 'sheet.trackerTab'),
+      moduleTabPrefix: str(sheet.moduleTabPrefix, 'sheet.moduleTabPrefix'),
+      ...(aliases ? { sectionAliases: aliases as Record<string, string> } : {}),
+    },
+    recheckMinutes: recheckMinutes as number,
+  };
+}
+
+/**
+ * The Ready For Automation trigger label, for the LOOP's routing: a ticket
+ * carrying it beside the entry label belongs to the automation mode, and the
+ * Loop pipeline never works it (src/conductor/watcher.ts, automationOwns).
+ *
+ * The routing holds on every desk, the mode switched on here or not. Null when
+ * the block is not usable — whenever automationConfig() would throw (missing,
+ * or any field wrong, the sheet's included): the mode cannot run anywhere
+ * then, so there is no trigger to route on and the Loop behaves as it did
+ * before the mode existed, rather than leaving the ticket to nobody. Never
+ * throws: the Loop's scan and runTicket call it.
+ */
+export function automationTriggerLabel(cfg?: Pick<ProjectConfig, 'automation'>): string | null {
+  try {
+    return automationConfig(cfg ?? projectConfig()).labels.trigger;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `.env` ONESHOT_AUTOMATION=1 turns the Ready For Automation tick on for THIS
+ * desk. Off by default, and meant for one desk only: the per-ticket lock is a
+ * local file, so two desks on the same ticket would each spend a session.
+ * `--automation <iid>` works without it.
+ */
+export function automationEnabled(): boolean {
+  return envFlag('ONESHOT_AUTOMATION');
+}
+
+/**
+ * The Google service-account key the sheet writer signs with. Read by
+ * conductor code only: it is not in BASE_ENV, so it reaches no session, and
+ * the automation session is denied every file-reading tool besides.
+ */
+export function googleServiceAccountFile(): string {
+  return expandPath(envOr('ONESHOT_GOOGLE_SA_FILE', '~/.claude/google-service-account.json'));
 }
 
 let _mrFeedback: MrFeedbackConfig | null = null;

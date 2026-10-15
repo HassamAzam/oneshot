@@ -82,13 +82,17 @@ Produce, in your own notes and in the MR description later:
   a diff in view but no vocabulary, is what killed run 237 at its turn cap.
 - **The blast radius**: what else reads the function or component you are about to
   change. `grep` for callers before you decide the shape of the fix.
+- **The prior art**, while you are already in those files: what exists that this change
+  could call, mirror, collapse onto or extend. The `prior-art-survey` skill carries the
+  search patterns — the two spellings of every noun, the four kinds a name search misses,
+  and resolving a hit to the definition containing it.
 
-## 2. Plan — reuse first, and keep it short
+## 2. Plan — confirm what you found, and keep it short
 
-Search before you write: this repo has `common/`, `apps/*/utils.py`,
-`frontend/src/common/` and `frontend/src/components/shared/` full of helpers that a new
-function will duplicate. The `planning-methodology` and `util-reuse-methodology` skills
-carry the search patterns.
+You gathered the prior art in phase 1; here you confirm it. Open every candidate you
+intend to lean on rather than trusting the note you made, and search the residual your
+approach introduces — the unit you are adding, its mirror, the tests already covering the
+surface. The `change-scoping` skill carries that method, and where each finding lands.
 
 The plan is a handful of steps naming real files and real symbols. If it needs a schema
 migration, or it touches any path listed in `$ONESHOT_HOME/config/risk-modules.json`, **stop and confirm

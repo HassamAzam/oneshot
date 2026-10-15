@@ -56,3 +56,10 @@ objects = models.Manager()
 ## Migrations
 
 Read and follow the **`django-migration-standards`** skill for all migration rules — one-migration-per-task consolidation (with HITL merge proposals), schema/data separation, `_base_manager` and other data-migration patterns, `max_migration.txt` discipline, crash-safety logging, reversibility, and the mandatory verification protocol.
+
+## Management Commands & Scheduling
+
+Two skills, two questions:
+
+- **`django-management-commands`** — writing a command under `apps/<app>/management/commands/`. `BaseCommand` shape, thin `handle()`, idempotency, testing, and a post-task validation checklist.
+- **`django-scheduled-jobs`** — making something run on a schedule. Never seed a `PeriodicTask`/`CrontabSchedule` row in a data migration. Beyond that the answer depends on which of three shapes you have — fixed cadence for everyone, one-off per entity, or repeating per entity — and only the first is a DevOps crontab entry. Read that skill before proposing any scheduling mechanism; do not infer the rule from this line.

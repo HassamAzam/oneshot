@@ -26,10 +26,12 @@ import {
 } from '../lib/config.js';
 import { join } from 'node:path';
 import { approvalCovers, readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
+import { DESIGN_DIR, NEW_TOKENS_FILE, TOKENS_FILE } from '../lib/designtokens.js';
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
+import { PRIOR_ART_KINDS } from '../conductor/schemas.js';
 import {
-  GITLAB_PROJECT_URL,
+  GITLAB_PROJECT_URL, countsAsFailure, ticketScopeIds,
   type CaseResult, type DesignArtifact, type Finding, type Screenshot, type TestCase,
   type Ticket, type TicketDoc,
 } from './types.js';
@@ -70,7 +72,7 @@ export interface PromptCtx {
  * which is only safe because of the addendum: the gate is the edit, not the
  * forecast. See skillsFor() for the half of this that runs in code.
  */
-const SKILL_LINE = (skills: string[], lazy = false): string => {
+export const SKILL_LINE = (skills: string[], lazy = false): string => {
   if (!skills.length) return '';
   const head = lazy
     ? `\n## Skills\nThese are the method, and they are the current version of it. Read the plan ` +
@@ -131,6 +133,26 @@ function labelSkills(cfg: PhaseConfig, ticket: Ticket): string[] {
   if (!pairs.length) return [];
   const carried = new Set(ticket.labels.map((l) => l.toLowerCase()));
   return pairs.filter(([label]) => carried.has(label.toLowerCase())).map(([, skill]) => skill);
+}
+
+/**
+ * The layers grooming labelled this ticket with (Backend / Frontend, decided by
+ * Jev from the ticket text). Where the plan forecasts a layer, the labels only
+ * ever ADD an agent to that forecast, never take one away: the forecast reads
+ * the files the plan intends to touch, the label reads what the ticket asks
+ * for, and either one alone is a reason to dispatch that layer's agent.
+ *
+ * With no plan, or a plan that names no layer, the labels DECIDE instead of
+ * the old default of both agents. That is deliberate, and it is skillsFor()'s
+ * rule that an absent label is an answer rather than a missing signal: Jev's
+ * labels skipped no layer wrongly on 42 tickets (`_why_layer_skills` in
+ * config/phases.json). The other agent is still not forbidden; the implement
+ * prompt says to dispatch it if the change turns out to need that layer.
+ * Case-insensitive, like labelSkills.
+ */
+export function labelledLayers(ticket: Pick<Ticket, 'labels'>): { backend: boolean; frontend: boolean } {
+  const carried = new Set(ticket.labels.map((l) => l.toLowerCase()));
+  return { backend: carried.has('backend'), frontend: carried.has('frontend') };
 }
 
 interface PlanForecast {
@@ -236,7 +258,7 @@ environment that is down, a decision only a human can make. Say what would unblo
 ${SKILL_LINE(skillsFor(cfg, ctx), cfg.name === 'implement')}`;
 }
 
-function ticketBlock(t: Ticket): string {
+export function ticketBlock(t: Ticket): string {
   return `## Ticket #${t.iid} — ${t.title}
 ${GITLAB_PROJECT_URL()}/-/issues/${t.iid}
 Labels: ${t.labels.join(', ') || 'none'}
@@ -492,7 +514,7 @@ Load the \`bug-reproduction\` skill and follow it. In short:
 - Follow the ticket's steps, measure what the bug is about, screenshot into the run's
   artifacts dir as \`repro-<n>.png\`, and fill \`reproduction\`. Screenshot for EITHER
   verdict: a 'reproduced' or 'not-reproduced' verdict is posted on the ticket with those
-  screenshots attached, and one with no \`.png\` in \`evidence\` posts nothing (a
+  screenshots attached, and one whose \`evidence\` names no screenshot file posts nothing (a
   'not-reproduced' one is treated as 'inconclusive'). Finish with the skill's checklist.
 
 **'not-reproduced' pauses this run for a QA reviewer**: your evidence is posted on the ticket and in
@@ -555,7 +577,7 @@ function findingsOf(ctx: PromptCtx): Finding[] {
  */
 function verifyFailuresOf(ctx: PromptCtx): CaseResult[] {
   const a = readArtifact<{ results?: CaseResult[] }>(ctx.ticket.iid, 'verify.json');
-  return (a?.results ?? []).filter((r) => r.result === 'fail');
+  return (a?.results ?? []).filter(countsAsFailure);
 }
 
 
@@ -638,6 +660,11 @@ const ORACLE =
  * phase reading the one it is currently working on, and the exact values —
  * the hex, the spacing, the copy — are what "build it like the design" means,
  * so they have to be readable at source rather than summarised.
+ *
+ * Both token files are named. tokens.css is regenerated from the theme every
+ * design lap, so a token the design adds lives apart in new-tokens.css; naming
+ * only the first, with "rather than new ones", told plan and implement to avoid
+ * exactly the values the reviewer was shown as additions.
  */
 function approvedDesignBlock(ctx: PromptCtx): string {
   const d = artifact<DesignArtifact>(ctx, 'design');
@@ -656,12 +683,197 @@ ${approved
     ? 'A human approved these screens on the ticket before any of this was planned.'
     : 'These screens were designed for this ticket. (No approval covers this version of them yet.)'}
 Build to them: the same layout, the same states, the same copy, and the same values from
-\`${join(dir, d.tokensFile ?? 'tokens.css')}\` rather than new ones. Where the design and your own
-judgement disagree, the design won the argument already — if it is genuinely wrong, say so
-rather than quietly improving it, because the reviewer approved what they saw.
+\`${join(dir, d.tokensFile || join(DESIGN_DIR, TOKENS_FILE))}\` rather than values of your own —
+plus, if it exists, \`${join(dir, DESIGN_DIR, NEW_TOKENS_FILE)}\`: the tokens this design adds as new.
+Take their values from there and add them to the theme rather than choosing your own. Where
+the design and your own judgement disagree, the design won the argument already — if it is genuinely
+wrong, say so rather than quietly improving it, because the reviewer approved what they saw.
 
 ${screens}
 ${d.newPatterns?.length ? `\nApproved as NEW to the design system: ${d.newPatterns.join('; ')}.` : ''}
+`;
+}
+
+/** Where writeDesignTokens writes tokens.css, so the prompt cannot name a file it never wrote. */
+function designTokensPath(ctx: PromptCtx): string {
+  return join(artifactDir(ctx.ticket.iid), DESIGN_DIR, TOKENS_FILE);
+}
+
+const BETA_SKILL = 'beta-version-toggle';
+
+/**
+ * The label that asks for a beta, read back out of the phase's own
+ * `labelSkills` so the heading a session is shown names the label that
+ * actually gated it.
+ */
+function betaLabel(phase: string): string {
+  const pairs = Object.entries(phaseByName(phase)?.labelSkills ?? {});
+  return pairs.find(([, skill]) => skill === BETA_SKILL)?.[0] ?? 'Beta';
+}
+
+/**
+ * Whether this phase builds the ticket as a beta: a new version beside the
+ * old one, with a switch back.
+ *
+ * The same resolved list that loads the skill decides the prose, exactly as
+ * reproductionRequested() does for research, so the method and the
+ * instruction cannot disagree — and taking the label out of one phase's
+ * `labelSkills` takes both halves out of that phase with no edit here.
+ */
+function betaRequested(ctx: PromptCtx, phase: string): boolean {
+  const cfg = phaseByName(phase);
+  return !!cfg && skillsFor(cfg, ctx).includes(BETA_SKILL);
+}
+
+/**
+ * What every phase holds a beta ticket to. The HOW is the skill's.
+ *
+ * Written against ERP's own precedent rather than an ideal: Project Logs v2 is
+ * a sibling directory behind one route wrapper at the same URLs, it extended
+ * seven v1 files backward-compatibly, and v1 never imports it. What it does
+ * NOT have is any way for a user to choose — its version comes from a server
+ * allowlist — so the switch is the one part this label adds, and point 5 is
+ * phrased as behaviour a case can check rather than as a storage mechanism.
+ */
+const betaContract = (): string => `The change ships as a NEW version of the feature (v2) built BESIDE the one users have today
+(v1), not as an edit to it, and the end user gets a switch to go back to v1 and forward again.
+The layout is the one ERP used for Project Logs v2 — a sibling \`<module>_v2/\` directory and one
+route wrapper that picks the version at the same URL — and the method is the
+\`${BETA_SKILL}\` skill. Project Logs picks its version from a server allowlist the user never
+sees; the switch is what this label adds. Every phase holds the work to the same points:
+
+  1. v1 behaves exactly as it does on \`origin/${baseBranch()}\` today. Its directory stays where
+     it is, and a v1 file is touched only for an extension v2 cannot do without, kept backward
+     compatible — an optional parameter with a default, a null guard — so every v1 call site
+     does what it did.
+  2. v2 lives in its own \`<module>_v2/\` directory beside v1's, and on the backend in
+     \`api/v2/\` beside \`api/v1/\` for any endpoint v2 needs to behave differently. v2 may reuse
+     v1's data layer; v1 imports nothing from v2.
+  3. ONE switch point — a route wrapper like \`LogsVersionRoute.js\`, on every route of the
+     feature — renders v1 or v2 at the SAME URL. Nothing else knows there are two versions:
+     no v2 URLs, no second sidebar entry.
+  4. The switch is rendered by that wrapper, so it sits in the same place in both versions,
+     says which one the user is on, and flips in place: same URL, no page reload. It is the
+     wrapper's, not a screen's, so it sits outside any approved design: the screens are built
+     to the design, the switch goes above them, and it is never a departure from the design.
+  5. The choice is the user's own — a second account on the same browser does not inherit
+     it — and it survives a reload, and a logout and login.
+  6. A user who never touched the switch gets v2; the switch is the way back.
+
+The ticket's acceptance criteria are met in v2. v1 is held to what it does today.`;
+
+/**
+ * Each phase's own part in a beta. A phase that loads the skill with no entry
+ * here would get the contract and no job — prompts.test.ts refuses that.
+ */
+const BETA_DUTIES: Record<string, () => string> = {
+  plan: () => `Plan the split before the feature. \`approach\` names v1's directory, the \`<module>_v2/\` files
+to create, the routes the switch point wraps, any v1 file v2 cannot do without extending (and
+how that stays backward compatible), whether any endpoint needs an \`api/v2/\` twin, and where
+the choice is kept. The switch point and the switch get their own steps: they are what makes
+this a beta, and a plan that folds them into "build v2" is how they get forgotten.
+\`acceptanceCoverage\` places each criterion in v2. If there is nothing to switch back to — the
+ticket creates a screen that does not exist today — say so in \`openQuestions\` with the default
+"ship it without a switch" rather than inventing a v1.
+Research's \`codePath\` may hand you v1's COMPONENTS as \`callable:\` or \`duplicate:\`; for v2
+they are \`reject\`, the reason being the Beta label. v2's copy of a component is the
+requirement, not a duplicate to reuse or collapse — the same carve-out
+\`implement\` and \`review\` are given. Collapsing a duplicate that already sits in v1's
+directory is out of scope too: under point 1 it is an edit to v1. What v2 reuses from v1 is its
+data layer — actions, selectors, utils, API helpers — imported from where it lives.`,
+
+  implement: () => `Load \`${BETA_SKILL}\` before you write anything: its layout is what \`review\` checks the
+diff against. Build v2 beside v1 as the plan lays it out, and commit the switch point and the
+switch as their own step. The duplication is the requirement, not slop. \`ponytail\` never
+simplifies away anything explicitly requested, and the label is that request: its "does this
+need to exist" does not fold v2's copy of a component back into v1's, because the point is to
+keep v1 runnable exactly as it is. What v2 reuses is v1's data layer — actions, selectors,
+utils, API helpers — imported from where it lives, never copied. Name every v1 file you had to
+touch in \`summary\`, with why, and why it stays backward compatible; if v2 needs a v1 helper to
+behave differently, give v2 its own.`,
+
+  testcases: () => `The list covers both versions and the switch, not only the new behaviour:
+  - each acceptance criterion, in v2;
+  - the switch, from v2 to v1 and back again, staying on the same URL (\`state\`);
+  - v1's main flow after switching, expecting what \`origin/${baseBranch()}\` does today
+    (\`regression\`) — the case that proves v1 was left alone;
+  - the choice surviving a reload, and a logout and login (\`state\`);
+  - a user who never touched the switch landing on v2 (\`boundary\`). Its first step removes the
+    stored choice, naming its localStorage key exactly as the diff spells it, because the harness
+    carries browser storage from one case to the next: that restores the precondition, it does
+    not reach a version.
+A second account not inheriting the choice is point 5 too, but it is not a case here: \`verify\`
+has one login, so the case would end \`blocked\`, which no gate refuses. \`review\` checks it in
+the code instead.
+The points above are part of this ticket's oracle, alongside its acceptance criteria: a switch
+case's \`expected\` comes from them, never from the diff. Steps reach a version by clicking the
+switch, the way a user does — never by writing the stored choice directly, which would leave
+the switch itself untested.`,
+
+  review: () => `Check that the split held, from the diff rather than from the plan's intent: run
+\`git diff --stat origin/${baseBranch()}...HEAD\` and read every file it lists under v1's
+directory. Each must be an extension v2 cannot do without, kept backward compatible — an
+optional parameter with a default, a null guard — with every v1 call site doing what it did.
+Anything else there — a changed behaviour, a rename, a move — is a \`major\` finding: it is
+exactly what the label exists to prevent. So is v1 importing from \`<module>_v2/\`, a route of
+the feature the switch point does not wrap, a v2 URL or sidebar entry of its own, and the
+stored choice's key spelled in more than one place.
+
+Point 5's second account is yours to prove, because no browser case can: \`verify\` has one
+login. Read where the choice is read and written, and confirm each one keys it by the signed-in
+user's username, read at that moment.
+A username cached at module scope or once per page load is a \`major\` finding: ERP's logout
+does not reload the page, so the next person on the tab gets the last one's choice.
+
+v2's own copies of v1's COMPONENTS are what the label asked for, so they are not a duplication
+finding — tell \`util-reuse-agent\` so when you dispatch it, and do not raise them from
+\`ponytail-review\`. A copied HELPER (a util, a constant, an API call) is a finding as usual.
+Put the points above into \`spec-conformance-agent\`'s \`ticket_context\` too: the split and the
+switch are in scope because of the label, and the description will not say so.`,
+
+  verify: () => `Reach every version THROUGH THE SWITCH, clicking it the way a user does. Never set the stored
+choice directly — a browser storage write, a database row, a query parameter: a case that skips
+the switch has not tested it. Log out through the app's own logout, never by clearing browser
+storage, which wipes the very choice a case is measuring. The one write you may make is SETUP
+for the never-touched case: the harness saves the browser's storage when it logs in and loads it
+into every later case, phase and lap, so a choice an earlier case (or \`ui-evidence\`) made is
+still there. Remove that one key — not the rest of storage, which holds the login — then load
+the feature's URL, and say so in that case's \`evidence\`. That restores the precondition; it
+does not reach a version. v1's regression cases pass only when v1 behaves as it does on
+\`origin/${baseBranch()}\`, whatever v2 now does.`,
+
+  'ui-evidence': () => `Your 'before' is already running: v1, reached through the switch on YOUR instance. That is the
+one exception to the rule above that a 'before' comes from a second instance: v1 IS the base
+branch's behaviour, kept runnable on purpose. Shoot v1 and then v2 of each changed screen at the
+same viewport, data and path, with captions that say which is which, plus one shot of the switch
+itself in each state. A base-branch 'before' from a second instance is optional here — take it
+only if the cheapness check above allows — and when you do, compare the page BELOW the switch:
+the switch is new in both versions, so its absence from the base-branch shot is expected and is
+not a difference. Any other difference between the two is v1 having changed, and it goes in
+\`summary\` as well as in the caption.`,
+
+  mr: () => `The description says this ships as a beta: where v1 and v2 live, the switch point and the
+routes it wraps, where the choice is kept and that it does not follow a user to another browser,
+what a user gets by default, the v1 files v2 had to extend and why, and what retiring v1 later
+takes — the routes to point straight at v2 and the files to delete. That last line is what
+makes the beta removable by someone who never read this ticket.`,
+
+  'base-check': () => `The base branch is v1 only — no \`<module>_v2/\`, no switch, no stored choice — so a case
+whose steps reach a version by CLICKING THE SWITCH cannot run as written: run v1's own flow
+directly, since the base has nothing else to reach, and score a case that only reaches v2 or the
+switch itself \`inconclusive\`, never \`fails\` or \`passes\`. Every v1-regression, switch or v2 case
+is THIS ticket's own scope (\`inTicketScope\` true) whatever the base shows: the Beta label put it
+there and the ticket text will not say so. So a v1-regression case that fails is the change
+breaking v1 — it goes back to being a fail, and the \`pre-existing\` label does not stick.`,
+};
+
+function betaBlock(ctx: PromptCtx, phase: string): string {
+  if (!betaRequested(ctx, phase)) return '';
+  return `\n## This ticket carries **${betaLabel(phase)}** — v2 beside v1, with a switch back
+${betaContract()}
+
+### Your part, as \`${phase}\`
+${BETA_DUTIES[phase]?.() ?? ''}
 `;
 }
 
@@ -785,7 +997,15 @@ The method is the \`prior-art-recall\` skill — load it and follow it. In short
 - Produce a prior-art brief short enough to sit inside three later prompts: what was done,
   what broke, what to reuse. An empty brief is a correct answer, not a failure.`,
 
-  research: (ctx) => `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
+  research: (ctx) => {
+    const mins = budgetMin('research', 70);
+    const turns = budgetTurns('research');
+    // Counted in turns, not minutes, for the same reason review and verify are:
+    // the session is handed no start instant, so its own tool calls are the only
+    // clock it can read. Research was the last long session phase with no pacing
+    // line at all, which is affordable right up until the survey above lands.
+    const landAt = Math.round(turns * 0.7);
+    return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 
 Work out what this ticket actually requires, and trace the code that implements it.
 
@@ -801,6 +1021,50 @@ Work out what this ticket actually requires, and trace the code that implements 
   tool, so it can never be read from here. Record it in \`unknowns\` by URL and move on.
 - Trace the real execution path and cite \`file:line\` for each step. Do not describe the
   architecture in general terms — follow THIS ticket's path.
+- While you are in those files, record what ALREADY EXISTS that this change could build on,
+  into \`codePath\` alongside the trace, each such entry's \`role\` PREFIXED with its kind so
+  the next phase can tell prior art from the trace. Go looking for FOUR kinds, not one:
+  \`callable:\` the **helper a change can import and call**; \`mirror:\` the opposite-direction
+  sibling (start/end, grant/revoke, the read of the thing being written), found by searching
+  the antonym of the ticket's verb; \`duplicate:\` the same logic already written twice, found
+  by searching a distinctive LINE of it rather than its name; and \`fragment:\` arithmetic or
+  a predicate inside a larger function with no identifier at all, reachable only through the
+  constants it uses. A search for a plausible helper name finds the first and none of the
+  other three. Two more prefixes are for what you pick up on the way rather than hunt:
+  \`constant:\` a value the change must use, and \`test-sibling:\` the test already covering
+  this surface. An existing IMPORT between two modules and a \`TODO\`/\`FIXME\` in code you
+  traced are both findings — the first says the connection is already sanctioned, the second
+  names its own fix.
+- Spell every noun TWICE before concluding it does not exist. A stored thing is reached by its
+  TYPE and by the FIELD or RELATION pointing at it, and working code usually mentions only one:
+  CamelCase class → snake_case field → reverse accessor → manager/queryset → column, on the
+  backend; component → route constant → testid constant → DISPLAY_STRINGS key, on the frontend.
+  One spelling returning nothing is half a search. A noun searched both ways and still not
+  found goes in \`unknowns\`, so the next phase neither repeats it nor invents a near-match.
+- Resolve every hit to its enclosing DEFINITION before you judge it, and cite the definition's
+  own line — never a line inside a body that the search matched. One Bash grep per FILE, not
+  per hit. For python,
+  \`grep -nE '^([[:space:]]*(async )?(def|class) |[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=])' <file>\`
+  lists every def and class plus each module-level assignment, because a constant's assignment
+  IS its definition. For js/ts,
+  \`grep -nE '^(export default |(export )?(async )?(function|const|let|class) )' <file>\` lists
+  top-level definitions only, an anonymous \`export default (props) =>\` component included. A
+  hit that is itself a listed entry is its own definition. Otherwise, for python the enclosing
+  definition of a hit at line N is the last listed entry before N indented LESS than line N,
+  so a hit inside a multi-line constant resolves to its assignment, not to the def above it;
+  a python hit at column 0 that is not listed is a module-level statement, cited at its own
+  line. For js/ts it is the last entry before N; when that is a component or class and the
+  hit sits in an inner handler or method, read down to that \`const handleX =\` or method
+  line and cite it instead of the component's. Stop a noun after two definitions you have
+  actually READ, and tighten any pattern returning more than ~30 hits rather than skimming
+  it. An unresolved hit is a location, not evidence: never report one on its own, and never
+  promote a signature you skimmed to a definition you read. A fabricated near-match costs the
+  next phase more than an empty answer would have.
+- Say which bar each candidate clears, never a percentage: **call it**, **extend it** (naming
+  the callers you counted), **mirror it** (not callable, but its shape and tests are the
+  pattern), or **leave it** (close but not close enough — two honest functions beat one with
+  a boolean). "Nothing clears a bar" is a real and cheap answer. You are reporting what the
+  code can support, not choosing the approach — the plan phase decides.
 - Determine the blast radius. Consult the module-linkage table in CLAUDE.md: payroll↔leaves,
   payroll↔costing, costing↔invoices, allowances↔payroll, leaves↔costing, payroll↔odoo. A
   change inside one of those pairs affects the other side.
@@ -815,8 +1079,15 @@ Work out what this ticket actually requires, and trace the code that implements 
   the rest empty when the change genuinely has no UI surface.
 - List what you could NOT determine. An explicit unknown is worth more than a confident
   guess — the plan phase can work around a stated gap and cannot work around a wrong claim.
+- LAND THE PLANE at ~${landAt} turns — about 70% of your ${turns}. Keep a rough count of your
+  own tool calls; you are not told the time, so the count is your clock. The trace, the
+  acceptance criteria and \`uiPath\` are the deliverable and they come first; the prior-art
+  survey is what you pick up while producing them, not a second job to finish. An artifact
+  that is complete on the trace and thin on prior art beats ${mins} minutes that ended with
+  neither, because a run that dies here has produced nothing for any later phase to use.
 ${reproductionBlock(ctx)}
-Do not write or modify any code.`,
+Do not write or modify any code.`;
+  },
 
   design: (ctx) => `${ticketBlock(ctx.ticket)}
 ${reviewGateFeedbackBlock(ctx.journal.designApproval?.feedback, 'Reviewer feedback on an earlier design', 'Design')}
@@ -851,10 +1122,15 @@ of their attention to say "there was nothing here".
 A mockup succeeds when the reaction is "that's our app with the feature in it", and fails when it
 is "that's a nice generic dashboard". So, in order:
 
-1. Read the real tokens out of the frontend: \`frontend/src/jss/Theme.js\` (getColors,
-   getPalateColors), \`frontend/src/jss/style.js\` (Lato/Montserrat), \`frontend/src/scss/_variables.scss\`.
-   Distil them into one \`tokens.css\` that every mockup imports, so a system-level change is a
-   one-file edit.
+1. The real tokens are already extracted for you, at \`${designTokensPath(ctx)}\` — generated
+   from \`frontend/src/jss/Theme.js\`, \`frontend/src/jss/style.js\` and
+   \`frontend/src/scss/_variables.scss\` before this session started. Import it; do not rewrite
+   it, because it is regenerated every round and your edits to it would be lost. Read its header
+   first: it lists every token it could NOT resolve, and those are the only ones you read the
+   source for. A token the product does not have yet goes in \`${DESIGN_DIR}/${NEW_TOKENS_FILE}\`
+   and in \`newPatterns\`. For a dark-mode screen put \`data-theme="dark"\` on \`<html>\`: the dark
+   values are in that block, not a media query. Only if the file is absent do you read the three
+   files above and distil them yourself. Report \`tokensFile\` as \`${DESIGN_DIR}/${TOKENS_FILE}\`.
 2. Open the running app and screenshot the screens this ticket touches AS THEY ARE TODAY. That
    capture is the \`before\` on each screen, and it is also where you read the real shell — nav,
    header, density, spacing — which every mockup then reproduces.
@@ -862,7 +1138,8 @@ is "that's a nice generic dashboard". So, in order:
 
 ## What to draw
 
-One self-contained \`.html\` per screen, importing \`../tokens.css\`. No CDN scripts, no external
+One self-contained \`.html\` per screen, in \`${DESIGN_DIR}/\` beside the tokens and importing
+\`./${TOKENS_FILE}\` (and \`./${NEW_TOKENS_FILE}\` if you made one). No CDN scripts, no external
 fonts or images — inline everything. Real content always: plausible names, dates, amounts and
 statuses for this product, 5-8 varied rows in any table, one long value that tests truncation.
 Never lorem ipsum and never "Item 1". Draw the states that matter — empty, error,
@@ -880,7 +1157,12 @@ journey, and draw each state of that flow as its own screen so the mockups read 
 build a clickable prototype and do not record a walkthrough — those follow in a later change,
 once real runs have measured what this phase's budget actually is.
 
-${artifactsBlock(ctx)}
+Everything you make goes in ${join(artifactDir(ctx.ticket.iid), DESIGN_DIR)} (create it if it is
+not there) — the mockups, their renders, and the before-captures, beside the tokens. Report
+\`mockupHtml\`, \`screenshot\` and \`before\` as \`${DESIGN_DIR}/<filename>\`: artifact-relative and
+the very form \`tokensFile\` already uses, never a bare filename. The gate and the MR resolve these
+against the run's artifact dir, so a name missing the \`${DESIGN_DIR}/\` prefix points at a file
+that is not on disk — and the gate refuses a design the reviewer cannot see.
 
 ## What the reviewer decides
 
@@ -893,26 +1175,70 @@ and one without it parks the run.
 Do not modify any application code. The only files you create are under the artifact directory.`,
 
   plan: (ctx) => `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
-${reviewGateFeedbackBlock(ctx.journal.planApproval?.feedback, 'Reviewer feedback on an earlier plan')}${approvedDesignBlock(ctx)}
+${reviewGateFeedbackBlock(ctx.journal.planApproval?.feedback, 'Reviewer feedback on an earlier plan')}${approvedDesignBlock(ctx)}${betaBlock(ctx, 'plan')}
 ## Research (phase 1)
 ${JSON.stringify(ctx.prior.research ?? {}, null, 2)}
 
 Produce an implementation plan an engineer could follow without re-deriving the research.
 
-- Reuse before writing. Search \`common/\`, the app's \`utils.py\`, and
-  \`frontend/src/**/utils/\` for helpers that already do this, and name them.
-- Steps are ordered and each names the files it touches and its layer.
+- The prior art ARRIVES. Research recorded what already exists in \`codePath\`, each entry
+  prefixed with its kind (${PRIOR_ART_KINDS.map((k) => `\`${k}\``).join(', ')}). Do not run
+  that search again — CONFIRM it. A handed \`file:line\` is a claim written before your
+  approach existed, so open every location you lean on and read the function around it. Each entry also carries the bar research judged it against — translate
+  it rather than inheriting it: "call it" → reuse, "extend it" → extend and recount the
+  callers yourself, "leave it" → reject, "mirror it" → not a reuse verdict at all, it is the
+  placement signal below. End on one of four verdicts: reuse, extend, collapse a duplicate
+  onto, or reject — and a rejection stays in \`reuse\` with its reason on the same line. Never
+  write "no prior art" against a trace you did not open; \`implement\` reads that as permission.${betaRequested(ctx, 'plan') ? `
+  On this beta ticket a v1 COMPONENT handed as \`callable:\` or \`duplicate:\` is \`reject\`: v2
+  needs its own copy (your beta block below), and reusing or collapsing onto v1 is an edit to v1.
+  Only v1's data layer — actions, selectors, utils, API helpers — is reused.` : ''}
+- What your APPROACH introduces is still yours to search, because research could not trace it.
+  That residual is: the unit you are about to add (search the identifiers it reads or writes —
+  never the name you would have chosen), its mirror, the second site already carrying the same
+  logic, and the tests already covering this surface.
+- Place a new unit where its MIRROR lives, and have the step say so by name. No mirror, then
+  count the CALLERS it will have: exactly one and clearly never a second → inline at that call
+  site, and say so or the next phase invents a file for it; several but all inside one module →
+  that module's \`utils/\` or \`managers.py\`/\`querysets.py\`; callers in more than one module →
+  \`common/\` or \`frontend/src/common/**\`. A test file's location is derived from the sibling
+  already testing this surface. Naming a directory you did not search is what makes a placement
+  feel decided when nothing was.
+- Count the CONSUMERS of every value you alter, by name, never by estimate — everything that
+  renders, persists, exports, snapshots, emails, logs or keys off it. Weight hardest the
+  values a person or an outside system receives: no test asserts them and nothing fails loudly.
+- Steps are ordered and each names the files it touches and its layer. \`files\` and \`layer\`
+  are machinery, not prose: they decide which standards \`implement\` loads and what the review
+  gate is scoped to, so a file left off a step is a file nobody is scoped to.
 - No step writes a Jest test, or any other frontend unit test. This repo's Jest toolchain has
   rotted (Babel/enzyme/ESM drift) and CI never runs it, so such a step is unpassable by
   construction -- \`testcases\` and \`verify\` are both already instructed to refuse it.
   Frontend behaviour is covered by the Playwright cases \`testcases\` writes against the real
   app; a plan step asking for one anyway spends \`implement\` on code nothing will ever run.
-- Set \`migrations\` true if any model, field, constraint or relation changes.
-- Risks are concrete: what breaks, and the mitigation.
+- Set \`migrations\` true if any model, field, constraint or relation changes. A schema change
+  and a data change are SEPARATE migrations — say which you need and in which order. And a
+  lookup inside a loop is an N+1: where the approach needs per-record data on a bulk path,
+  name where that data is prefetched and how it reaches the helper, or the plan has moved a
+  performance defect into the implementation for \`review\` to find a whole lap later.
+- Risks are concrete: what breaks, the mitigation, AND the check that would catch it before
+  this lands — an assertion against a known-good value, a query count, a named test. A risk
+  that names no check is unease rather than a finding, and the approver cannot weigh it.
+- Breadth is never the default. Where your approach also changes behaviour for records, people
+  or periods the ticket does not name, the steps implement the NARROW version — gated to what
+  the ticket describes — and the wider one becomes an \`openQuestions\` entry with that gating
+  as its stated default. Filing the consequence under \`risks\` instead does not license the
+  steps to take it.
 - Every item in research's \`unknowns\` ends in exactly one place: resolved (say how, with
   \`file:line\`), an \`openQuestions\` entry with the default you assume, or an \`outOfScope\`
-  entry. Never decide one silently. A scope or product choice the ticket does not state is an
-  open question, not a risk — the approver reads open questions first and can overrule them.
+  entry saying how you ruled it out, with \`file:line\` — an out-of-scope entry carrying no
+  evidence is one the approver can only accept or reject whole. Never decide one silently. A
+  scope or product choice the ticket does not state is an open question, not a risk — the
+  approver reads open questions first and can overrule them. So does anything THIS phase
+  discovers that research did not raise: a consequence you found while planning is under the
+  same obligation as one you were handed.
+- Where a step is severable, say so as an \`openQuestions\` entry and state the default
+  plainly: ALL STEPS SHIP unless the approver says otherwise. \`implement\` reads
+  \`openQuestions\` too, and takes silence there as room to drop one.
 - \`acceptanceCoverage\` has one entry per research acceptance criterion. Mark a criterion
   \`not-satisfiable\` when no change can demonstrate it as written, and say what is done instead.
 - \`feedbackResponse\` answers the LATEST feedback round point by point. \`where\` must name the part
@@ -931,7 +1257,7 @@ ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 
 ## What implement (phase 3) actually built
 ${JSON.stringify(ctx.prior.implement ?? {}, null, 2)}
-${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'QA feedback on an earlier version of this list')}
+${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'QA feedback on an earlier version of this list')}${betaBlock(ctx, 'testcases')}
 Write the test cases for this ticket.
 
 If there is QA feedback above, you are REVISING a list that already exists, not writing a new
@@ -1101,20 +1427,29 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
     // reproducible h3 duplication — observed, with evidence — went untouched.
     const verifyFailures = verifyFailuresOf(ctx);
 
-    // Named from the plan's forecast, phrased as a default rather than a
-    // permission. The conductor cannot enforce this — `agents` in phases.json
-    // is documentation, nothing reads it — and the forecast is wrong often
-    // enough that a hard "backend only" would strand the two-line frontend
-    // edit a backend ticket picks up. So the unplanned layer keeps its agent
-    // and simply stops being advertised.
+    // Named from the plan's forecast and the ticket's layer labels (see
+    // labelledLayers), phrased as a default rather than a permission. The
+    // conductor cannot enforce this — `agents` in phases.json is
+    // documentation, nothing reads it — and the forecast is wrong often enough
+    // that a hard "backend only" would strand the two-line frontend edit a
+    // backend ticket picks up. So the unplanned layer keeps its agent and
+    // simply stops being advertised.
     const planned = ctx.prior.plan ? planForecast(ctx) : null;
-    const wanted = planned && (planned.backend || planned.frontend)
-      ? [planned.backend ? '`backend-agent`' : '', planned.frontend ? '`frontend-agent`' : '']
-        .filter(Boolean)
+    const labelled = labelledLayers(ctx.ticket);
+    const backend = Boolean(planned?.backend) || labelled.backend;
+    const frontend = Boolean(planned?.frontend) || labelled.frontend;
+    const wanted = backend || frontend
+      ? [backend ? '`backend-agent`' : '', frontend ? '`frontend-agent`' : ''].filter(Boolean)
       : ['`backend-agent`', '`frontend-agent`'];
+    // With no plan, or one that names no layer, only the labels narrowed the
+    // list, and the sentence must not cite a forecast that does not exist.
+    const other = backend ? 'frontend' : 'backend';
+    const why = planned && (planned.backend || planned.frontend)
+      ? `Neither the plan nor the ticket's layer labels call for ${other} work`
+      : `The ticket's layer labels do not call for ${other} work`;
     const unplanned = wanted.length === 1
-      ? ` The plan forecasts no ${planned?.backend ? 'frontend' : 'backend'} work, so the other
-agent is not listed — but the forecast is not a rule. If the change turns out to need that layer,
+      ? ` ${why}, so the other
+agent is not listed — but that is not a rule. If the change turns out to need that layer,
 dispatch its agent for it rather than writing that layer yourself.`
       : '';
     const agentBlock = `Delegate implementation work to ${wanted.join(' and ')} for changes in `
@@ -1192,7 +1527,7 @@ ${cases.map((c) => `  - ${c.id} [${c.blast}] ${c.scenario}\n      expects: ${c.e
     return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 ${lapBlock}
 ${implementFeedbackBlock(ctx.journal.mrFeedback)}
-${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'Test-case gate reviewer feedback')}${approvedDesignBlock(ctx)}
+${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'Test-case gate reviewer feedback')}${approvedDesignBlock(ctx)}${betaBlock(ctx, 'implement')}
 ## Plan (phase 2) — this is your specification
 ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 
@@ -1200,7 +1535,10 @@ ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 Acceptance criteria:
 ${(r.acceptanceCriteria ?? []).map((a) => `  - ${a}`).join('\n') || '  (none recorded)'}
 
-Code path:
+Code path — the execution trace, then the prior art research SURVEYED while reading it. A
+role carrying a kind prefix (${PRIOR_ART_KINDS.map((k) => `\`${k}\``).join(', ')}) is a
+candidate research found, not a decision: some of them it judged better left alone, and the
+plan's \`reuse\` above is the list of verdicts that actually binds you.
 ${(r.codePath ?? []).map((c) => `  - ${c.file}:${c.line} — ${c.role}`).join('\n') || '  (none recorded)'}
 
 Blast radius: ${(r.blastRadius ?? []).join(', ') || '(none recorded)'}
@@ -1216,7 +1554,9 @@ Write the code.
   helper it names does not do what it claims — do the right thing instead and say so in
   \`summary\`. Do not silently implement a different design, and do not implement a design you
   know to be wrong because the plan said so.
-- Reuse what the plan named under \`reuse\` before writing anything new.
+- Apply the plan's \`reuse\` verdicts before writing anything new. A reuse, extend or collapse
+  entry is binding. A rejected entry is a candidate the plan decided NOT to build on: do not
+  reuse, extend or collapse onto it, for the reason on its line.
 - Every acceptance criterion above must be met by the code you leave behind. The next phase
   writes the test cases that \`verify\` and \`qa\` will execute, and it writes them from those
   same criteria — so a criterion you quietly dropped becomes a failing case, not a saved step.
@@ -1353,7 +1693,8 @@ Blast radius: ${(r.blastRadius ?? []).join(', ') || '(none recorded)'}
 
 ## The plan this was built against (phase 2)
 approach: ${p.approach || '(none recorded)'}
-reuse: ${(p.reuse ?? []).join(', ') || '(none named)'}
+reuse verdicts (rejections included):
+${(p.reuse ?? []).map((x) => `  - ${x}`).join('\n') || '  (none named)'}
 migrations required: ${p.migrations === true}
 steps:
 ${(p.steps ?? []).map((s) => `  ${s.n}. [${s.layer}] ${s.what} — ${(s.files ?? []).join(', ')}`).join('\n') || '  (none recorded)'}
@@ -1365,7 +1706,7 @@ closed from an earlier review: ${(i.addressedFindings ?? []).join(', ') || '(non
 ## The test cases this code has to pass (phase 4)
 Read these as a specification, not as something to run — \`verify\` and \`qa\` execute them.
 ${caseList(cases, { steps: false })}
-
+${betaBlock(ctx, 'review')}
 Review the change on \`${ctx.branch ?? 'the ticket branch'}\` as if it were an MR you must
 approve or send back.
 
@@ -1435,6 +1776,21 @@ above, under the run directory — nothing else.`;
     const migrations = i.migrationsAdded ?? [];
     const mins = budgetMin('verify', 60);
 
+    // A scoped re-run: QA supplied corrected steps for one or more `missing-steps`
+    // cases, so this runs ONLY those, with their steps now updated in the list.
+    // No code changed since the last lap — every other case keeps its verdict.
+    const rescope = ctx.journal.verifyRescopeCases ?? [];
+    const scopedCases = rescope.length ? cases.filter((c) => rescope.includes(c.id)) : cases;
+    const scopeBlock = rescope.length
+      ? `## Scoped re-run — ONLY ${rescope.join(', ')}
+
+A QA reviewer said ${rescope.length === 1 ? 'this case was' : 'these cases were'} failing because the
+steps were incomplete, and supplied corrected steps — already written into the list below. **No code
+has changed** since the last lap. Run ONLY the case(s) listed here, with these exact steps, and
+output a result for each. Do NOT run or re-report any other case: their verdicts stand.
+`
+      : '';
+
     const lapBlock = ctx.lap > 0 && prevResults.length
       ? `## This is verify lap ${ctx.lap}
 
@@ -1450,15 +1806,16 @@ are the only phase positioned to see it. Anything that passed on lap ${ctx.lap -
 now goes in \`regressions\` as well as in \`results\`.
 
 A case blocked last lap for an environment reason — server down, data missing — is not carried
-forward as a failure. Re-run it honestly.
+forward as a failure. Re-run it honestly. The same for a case recorded 'pre-existing' last lap:
+re-run it, and keep that label only if the proof still holds.
 `
       : '';
 
     return `${ticketBlock(ctx.ticket)}
-${lapBlock}
+${rescope.length ? scopeBlock : lapBlock}
 ## Acceptance criteria (phase 1)
 ${criteria(ctx)}
-
+${betaBlock(ctx, 'verify')}
 ## Your app instance
 Worktree: ${ctx.worktree ?? '(none leased)'}
 Port:     ${ctx.port ?? '(none leased)'}   (also in $ONESHOT_PORT)
@@ -1565,13 +1922,44 @@ naming exactly what was missing — data archaeology is where whole sessions qui
 and an honest 'blocked' costs the pipeline far less than a session that died mid-list.
 
 ## The case list — execute it id for id (phase 4)
-${caseList(cases, { steps: true })}
+${caseList(scopedCases, { steps: true })}
 
 Report one result per case, using the case's own id. A case you did not run is 'skipped' with
 the reason in \`evidence\` — never a silent omission, and never a 'pass'.
 
 \`evidence\` for a fail is ACTUAL vs EXPECTED, in that order, in one line. "Did not work" is not
 evidence and the next \`implement\` lap cannot act on it.
+
+## A failure this change did not cause is 'pre-existing', not 'fail'
+
+A 'fail' sends the run back to \`implement\` and blocks the merge. That is right for a defect in
+this diff and wrong for a bug that was already on \`origin/${baseBranch()}\`: no lap can fix it,
+and the run burns its laps and blocks on something that was never this ticket's. Record such a
+case as 'pre-existing'. It does not cycle and does not block; it is listed on the MR for the
+reviewer to confirm and ticket.
+
+'pre-existing' is a claim you must PROVE, in \`evidence\`, after the actual vs expected:
+  - you observed the same failure on \`origin/${baseBranch()}\` (a base-branch app instance, or the
+    base-branch endpoint/shell), or
+  - you name the \`file:line\` on the base branch that produces it, and \`git diff
+    origin/${baseBranch()}...HEAD --stat\` shows the diff does not touch that file or anything it
+    calls on this path.
+"Looks unrelated" is not proof, and a label with no proof is scored as a 'fail'.
+
+Never 'pre-existing':
+  - a case exercising an acceptance criterion of THIS ticket, or the behaviour the ticket reports
+    as broken — on a bug ticket the bug is pre-existing by definition and fixing it is the job;
+  - a case that passed on an earlier lap of this run (that is a regression);
+  - a failure the diff makes worse, even if some of it was already there;
+  - a failure on data this branch's migrations or code wrote.
+When you cannot tell, it is a 'fail'. On a branch that adds or changes a migration the label is
+never confirmed — a base app would run on this branch's schema — so record the failure as 'fail'.
+
+The conductor does not take your word for it. A case tagged \`happy\` covers this ticket's own
+criteria and is refused the label outright. Every other 'pre-existing' case is re-run on
+\`${baseBranch()}\` by a separate check, which also judges, from the ticket and its criteria and
+not from your evidence, whether the case is this ticket's own scope. One that does not fail there
+the same way, or that the check finds in scope, goes back to 'fail' whatever the base shows.
 
 ## Turn economy — this is what killed the last session, so it is a protocol, not advice
 
@@ -1604,7 +1992,9 @@ the case asserts is VISIBLE in the viewport. A screenshot is published as proof 
 one that cannot show the asserted value proves nothing and reads as if it did: for a \`<title>\`,
 an \`aria-*\`/\`alt\` value, a header or a redirect, leave \`screenshot\` empty and put the measured
 value verbatim in \`evidence\`. Never add anything to the page before capturing it — no overlay,
-label, style or script; \`page.evaluate\` reads, it does not write.
+label, style or script; \`page.evaluate\` reads, it does not write.${betaRequested(ctx, 'verify') ? ` The one
+exception is the never-touched case's setup named in your beta block above: removing the single
+stored key restores that case's precondition, it does not paint the page for a shot.` : ''}
 
 A case passes only if its precondition was really in place. If you could not establish it — the
 dark theme did not apply, the role could not be granted, the data could not be made — the case
@@ -1618,6 +2008,98 @@ the evidence the cycle runs on.
 
 A failing case is not a block. \`blocked\` is for: the server never came up, or logging in is
 impossible.`;
+  },
+
+  'base-check': (ctx) => {
+    // A happy-tagged case is refused the label before this session runs, so
+    // it is not handed over to be checked (see ticketScopeIds).
+    const ownScope = ticketScopeIds(testCases(ctx));
+    const claimed = (readArtifact<{ results?: CaseResult[] }>(ctx.ticket.iid, 'verify.json')?.results ?? [])
+      .filter((r) => r.result === 'pre-existing' && !ownScope.has(r.id));
+    const ids = new Set(claimed.map((r) => r.id));
+    const cases = testCases(ctx).filter((c) => ids.has(c.id));
+
+    return `${ticketHead(ctx.ticket)}
+
+## Acceptance criteria (phase 1)
+${criteria(ctx)}
+
+\`verify\` ran this ticket's case list against the branch and said the cases below fail for a
+reason this change did NOT cause — that they fail the same way on \`origin/${baseBranch()}\`.
+That label lets them past the merge gate, so it has to be proven, and you are the proof.
+
+The claim has two halves and you check both. Whether the case fails the same way on the base is
+\`onBase\`. Whether it is THIS ticket's own scope is \`inTicketScope\`, and that one you decide
+from the ticket and the criteria above — never from verify's evidence below, which is the claim
+being checked.
+
+## What verify claimed
+${claimed.map((r) => `  - ${r.id}: ${r.evidence}`).join('\n') || '  (nothing — say so in `summary`)'}
+
+## The cases — run ONLY these, on the base branch
+${caseList(cases, { steps: true })}
+
+## Bring up the base branch, not this one
+
+Your worktree holds the CHANGE. Do not run the cases there, and do not check anything out in it —
+you cannot write to it, and the git guard refuses checkout/restore/stash/reset. Bring up a second
+app on \`${baseBranch()}\` in its own checkout, the way \`ui-evidence\` takes its 'before' shots:
+
+\`env -u ONESHOT_WORKTREE -u ONESHOT_PORT -u ONESHOT_TICKET -u ONESHOT_IID
+ONESHOT_RUN_DIR=$ONESHOT_HOME/state/runs/$ONESHOT_TICKET/base-app node
+$ONESHOT_HOME/scripts/app.cjs ensure --ref ${baseBranch()}\`
+
+Always run exactly that. It reuses a healthy instance already on that commit, so there is
+nothing to look up first — and \`app.cjs list\` prints no URL anyway. From the JSON it prints:
+  - drive the cases against \`app.baseUrl\`;
+  - record \`app.head\`, the full sha of the checkout the app ran from, as \`baseCommit\` (it is
+    also in \`$ONESHOT_HOME/state/runs/$ONESHOT_TICKET/base-app/harness/app-env.json\`). Do not
+    \`cd\` into that checkout or run \`git -C\` on it: the git guard refuses any path outside your
+    worktree.
+A named error code (\`E_NO_PORTS\`, …) means you cannot check anything: report every case
+'inconclusive' with that code, and stop.
+
+${testLoginBlock()}
+
+Drive it with Playwright from Bash with \`node\`, one script for all the cases, the same way
+\`verify\` did. Arrange data with \`erp-ticket-test-data\` as verify's rules say, with one
+difference. The database is the one local Postgres every worktree shares, including the branch
+verify just ran, so the rows verify left behind were written by the CHANGE: create every record
+a case needs fresh, through the base app or its shell, and never reuse a row verify created or
+marked.
+
+Two failures are 'inconclusive', not 'fails', however closely they match:
+  - an error that names a table or column. The schema is not the base's own: another worktree's
+    branch has migrated the shared database, or a migration got past the conductor's check;
+  - a failure that turns on a record verify, or this branch's code, created or modified during
+    this run — anything you did not just create fresh for the case. That row was written by the
+    change.
+In both the base is reading somebody else's schema or data, and a failure on it proves nothing
+about the base. A failure on a record you created fresh through the base app is the base's own
+answer: score it as the rules below say.
+
+## How to score each case
+
+- **fails** — you ran it on the base and it failed the SAME way verify recorded (the same wrong
+  value, error or missing behaviour). A different failure is not a match: that is 'inconclusive'.
+- **passes** — on the base it did what \`expected\` says. The change broke it, and it goes back to
+  being a fail. This is a valuable answer, not a disappointing one.
+- **inconclusive** — anything that stopped you from running it to the end on the base.
+
+An 'inconclusive' is treated as a failure of the change, the same as 'passes'. So never guess
+'fails' to be kind to the run: only what you observed on the base counts.
+
+\`inTicketScope\` is true for a case that exercises an acceptance criterion above, or the
+behaviour the ticket reports as broken, whatever the base shows. Such a case fails on the base by
+definition — on a bug ticket the bug is there, on a feature ticket the feature is not — so
+'fails' proves nothing about it, and it goes back to being a fail. False only for a case about
+the surrounding product that the ticket does not ask to change. When you cannot tell, it is true.
+
+${ORACLE}
+
+Screenshot each case you score 'fails' as \`base-<case-id>.png\`. ${artifactsBlock(ctx)}
+${betaBlock(ctx, 'base-check')}
+Do not change a line of code anywhere. You are checking a claim, not fixing anything.`;
   },
 
   'ui-evidence': (ctx) => {
@@ -1644,7 +2126,10 @@ For each screen below, navigate to it in the running app, capture it at the SAME
 mockup was drawn at, and fill one \`designConformance\` row: the approved render, your capture,
 and every way they differ. An empty \`differences\` IS the claim that it matches, so list the
 small departures too — a spacing change, a reworded label, a missing empty state. Deciding for
-the reviewer which ones were fine is the one thing this row must not do.
+the reviewer which ones were fine is the one thing this row must not do.${betaRequested(ctx, 'ui-evidence') ? `
+This ticket is a beta: pair each approved screen against v2, reached through the switch, and
+compare the page BELOW the switch. The switch belongs to the route wrapper, not the screen
+(point 4 of the beta block below), so leave it out of \`differences\`.` : ''}
 
 Also put both files in \`screenshots\`, approved first and built immediately after, captioned so
 the pair reads in order. The ordering is what makes them comparable at a glance.
@@ -1711,7 +2196,9 @@ pack is what verify's shots do not show:
     $ONESHOT_HOME/scripts/app.cjs ensure --ref ${baseBranch()}\`, shoot the 'before' at the
     \`baseUrl\` it prints, and the 'after' on \`$ONESHOT_PORT\`. Caption the omission only if
     that instance will not come up cheaply; never pass an unchanged region of this branch off as
-    a before.
+    a before.${betaRequested(ctx, 'ui-evidence') ? `
+    This ticket is a beta, the one exception: its block below makes v1, reached through the
+    switch on this instance, the 'before'.` : ''}
   - the states a passing test never reaches: empty, loading, error, and the permission-denied
     view if the change touches a gated screen.
   - one shot per high-blast case that PASSED${highPassed.length ? ` (${highPassed.map((x) => x.id).join(', ')})` : ''}, so the pack shows the feature
@@ -1739,7 +2226,7 @@ The base-branch value comes from the base branch, read without touching this che
 \`git show origin/${baseBranch()}:<path>\` for the template or component, stated as "from source" in
 \`how\`. If you cannot establish it, write "not measured" and why — never infer it.
 
-${conformance}
+${conformance}${betaBlock(ctx, 'ui-evidence')}
 ## Never alter what you are capturing
 
 - Do not inject anything into the page before a screenshot: no overlay, banner, label, style or
@@ -1765,6 +2252,7 @@ saying why, not a block — ship the pack you have and name the gap in \`summary
     const v = artifact<{ results: CaseResult[]; regressions: string[] }>(ctx, 'verify');
     const vAll = v.results ?? [];
     const vPassed = vAll.filter((x) => x.result === 'pass').length;
+    const vPreExisting = vAll.filter((x) => x.result === 'pre-existing');
 
     return `${ticketBlock(ctx.ticket)}
 
@@ -1786,6 +2274,8 @@ findings deliberately left open:
 ${open.map((f) => `  - ${f.id} [${f.severity}] ${f.what}`).join('\n') || '  (none)'}
 local browser run: ${vPassed}/${vAll.length} cases passed
 regressions found: ${(v.regressions ?? []).join('; ') || 'none'}
+pre-existing failures (fail on ${baseBranch()} too — not caused by this change):
+${vPreExisting.map((x) => `  - ${x.id}: ${x.evidence}`).join('\n') || '  (none)'}
 
 Push this run's branch and open the merge request.
 
@@ -1825,11 +2315,14 @@ not read this ticket.
   - How it was verified: lint ${i.lintClean === true}, tests "${i.testsRun || 'none'}", local
     browser run ${vPassed}/${vAll.length}. Link nothing you have not confirmed exists.
   - Any review finding deliberately left open, with its id and why.
+  - Every pre-existing failure listed above, under its own heading, with its case id and the
+    evidence that it is not this change — the merge did not wait on them, so the reviewer is
+    the one who confirms that and raises a ticket for each.
 
 Do NOT put the acceptance criteria or the test-case list in the MR description. Those live on
 the TICKET, and \`document\` puts them there. An MR that restates the AC turns the ticket into a
 stale copy of itself — which is why the criteria are not in this prompt at all.
-
+${betaBlock(ctx, 'mr')}
 The MR is created through the GitLab MCP tools; there is no token in this session, so there is
 no curl fallback. If those tools are genuinely absent from your toolset, set \`blocked\` saying
 exactly that and nothing else — it is a configuration fault, and \`$ONESHOT_DRY_RUN\` being set

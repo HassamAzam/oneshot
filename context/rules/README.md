@@ -8,7 +8,7 @@ Authoritative coding standards for this ERP project, split by domain.
 | `frontend-structure.md` | Container/component split, file limits, util extraction |
 | `frontend-style.md` | Imports, inline styles, schemas, PropTypes, keys |
 | `frontend-performance.md` | Waterfalls, memoization, lazy loading, virtualization |
-| `backend-django.md` | Views, serializers, models, queries, migrations |
+| `backend-django.md` | Views, serializers, models, queries, migrations, management commands & scheduling |
 | `backend-python.md` | Pylint standards, naming, error handling, logging |
 | `solid.md` | SOLID principles applied to Django + React |
 | `security.md` | Secrets, input validation, permissions, XSS |
