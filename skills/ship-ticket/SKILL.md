@@ -160,9 +160,10 @@ the machine is genuinely done, never as a courtesy.
 - Do not declare it working because the build compiled, or because a page returned 200.
   Django's catch-all answers 200 for every path from the moment it boots, bundle or no
   bundle.
-- Do not `npm ci`, `npm install` or rebuild the venv in a worktree. `node_modules` and
-  `venv` are symlinks into a shared repo; installing rewrites them for every other
-  worktree on the machine.
+- Do not try to install your way out of a dependency problem. `node_modules` and `venv`
+  are symlinks into a shared repo, so installing rewrites them for every other worktree
+  on the machine — `install-guard` denies `npm ci`/`install`, `npx`, a venv rebuild and
+  `rm -rf node_modules`. A module that will not resolve is `blocked`.
 - Do not commit the port patches. `frontend/config/localPaths.js` and
   `frontend/src/constants/config.js` carry machine-local ports and are held with
   `--skip-worktree`; `app.cjs` re-applies and re-marks them after every checkout.

@@ -42,10 +42,14 @@ What the harness knows, and why each fact cost a run to learn:
   webpack port is never navigated to; it only serves the bundle.
 - **Use the hostname `localhost`, never `127.0.0.1`.** `ALLOWED_HOSTS` does not
   carry the bare address, so the IP returns 400 from a perfectly healthy server.
-- **Readiness is `static/webpack-stats.dev.json` reaching `"status":"done"`**, not
-  a log line. That file is written once at the start of a compile and again at the
-  end, and Django raises a bare 500 on anything but `done`. A `Compiled
-  successfully` from an earlier build stays in the log forever.
+- **Readiness is the manifest Django reads, written by THIS webpack.** Current app
+  code writes `static/webpack-entrypoints.dev.json` (no status field, written even
+  when a compile fails), so ready means that file is newer than the webpack start
+  AND the latest result in the truncated log is `Compiled`; `Failed to compile` is
+  E_WEBPACK_DEAD with the error lines. Checkouts older than the app's 2026-09-23
+  chunk split write `static/webpack-stats.dev.json` instead, and are ready when it
+  says `"status":"done"`. A log line alone never counts — an earlier build's
+  `Compiled successfully` is history, not this build.
 - **Django runs `--noasgi`.** With Channels' ASGI dev server, a browser's
   keep-alive connections exhaust it and the process then keeps its pid and its
   socket while answering nothing at all.
@@ -55,9 +59,12 @@ What the harness knows, and why each fact cost a run to learn:
   listener's working directory. Confirming HTTP 200 is not confirming it is *your*
   build — a phase that drove a stranger's server recorded every value against the
   wrong code while reading green.
-- **Never `npm ci`, never rebuild the venv.** `node_modules`, `venv` and
-  `staticfiles` are symlinks into a working repo. Reinstalling rewrites that repo's
-  dependencies for every other worktree on this machine.
+- **An install is refused, not discouraged.** `node_modules`, `venv` and
+  `staticfiles` are symlinks into a working repo, so reinstalling rewrites that
+  repo's dependencies for every other worktree on this machine. `install-guard`
+  denies `npm ci`/`install`, `npx`, a venv rebuild and `rm -rf node_modules`
+  outright. What is left to you is the reading: a module that will not resolve is
+  an environment fault worth `blocked`, not a problem to work around.
 - **`staticfiles/` must be seeded or Django 500s on every page.** local_settings.py
   ships DEBUG=False with ManifestStaticFilesStorage, so `{% static %}` raises
   `Missing staticfiles manifest entry` until collectstatic has run — including on
@@ -114,8 +121,9 @@ pytest is unaffected and is fine to run.
 
 - Playwright is **not** in the worktree's symlinked `node_modules`. The harness
   resolves it from the Oneshot repo's install for you; if you write your own
-  script, `require` it through that path. Never `npm install` it into a worktree —
-  that rewrites the shared `node_modules` for every other worktree on the machine.
+  script, `require` it through that path or through `NODE_PATH`. Installing it
+  into a worktree is denied by `install-guard`, so resolving it correctly is the
+  only route there is.
 - Prefer real data. Intercept `**/api/v1/**` only for a state real data cannot
   produce, and say in the evidence that the state was mocked.
 - Retry a flaky step twice with a bounded timeout. Playwright flake is the
