@@ -18,6 +18,30 @@ import { BLOCKERS } from './reproduction.js';
 
 export type JsonSchema = Record<string, unknown>;
 
+/**
+ * The `role` prefixes research uses to mark a `codePath` entry as prior art
+ * rather than a step in the trace.
+ *
+ * Exported because the one measured failure of this shape is a rule that
+ * diverges in one copy invisibly. Everything that can interpolate the list does
+ * — this schema, plan's prompt, implement's prompt — leaving two hand-authored
+ * copies that cannot: research's prompt and the two SKILL.md files, where each
+ * kind carries prose explaining how to search for it. prompts.test.ts asserts
+ * every one of those artefacts names the whole set.
+ *
+ * The first four are the kinds a survey goes LOOKING for; the last two are
+ * findings it picks up on the way (a constant the change must use, and the test
+ * already covering the surface).
+ *
+ * `callable:` rather than `reuse:` because "reuse" is already a VERDICT at plan
+ * — so `reuse: foo() — leave it` was a legal role line whose prefix and bar
+ * contradicted each other, and `implement` reads these prefixes raw, with no
+ * key, where an imperative-sounding one is an instruction.
+ */
+export const PRIOR_ART_KINDS = [
+  'callable:', 'mirror:', 'duplicate:', 'fragment:', 'constant:', 'test-sibling:',
+] as const;
+
 const str = (description: string) => ({ type: 'string', description });
 const strArr = (description: string) => ({ type: 'array', items: { type: 'string' }, description });
 
@@ -86,14 +110,34 @@ export const RESEARCH_SCHEMA = phaseSchema({
   acceptanceCriteria: strArr('Explicit criteria, including any amended in ticket COMMENTS.'),
   codePath: {
     type: 'array',
-    description: 'The trace through the code, in execution order.',
+    description:
+      'Locations that matter, each with a role. The trace through the code in execution ' +
+      'order FIRST, then the prior art you found while reading those files — what already ' +
+      'exists that this change could call, extend, mirror or is better off leaving alone. ' +
+      'A helper found here and not listed is a helper the next phase writes from scratch.',
     items: {
       type: 'object',
       additionalProperties: false,
       properties: {
         file: str('Repo-relative path'),
-        line: { type: 'number', description: '1-indexed anchor line' },
-        role: str('What this location does in the flow'),
+        line: {
+          type: 'number',
+          description:
+            '1-indexed line of the DEFINITION — the `def`, `class`, `function`, ' +
+            'arrow-function `const` or anonymous `export default` line, or for a constant its ' +
+            'top-level assignment line — never a line inside a body that a search matched. ' +
+            'The next phase opens what you cite, and a match line drops it into the middle of ' +
+            'a function it cannot see the shape of. For a fragment, which has no definition ' +
+            'of its own, this is the line of the function CONTAINING it, and the role names ' +
+            'the inner span.',
+        },
+        role: str(
+          'What this location does in the flow. For prior art, prefix the kind — ' +
+          `${PRIOR_ART_KINDS.map((k) => `'${k}'`).join(', ')} — then the signature (for a ` +
+          'fragment, the inner span the `line` above points into) and, in the same line, ' +
+          'which bar it clears: call it, extend it (naming the callers you counted), ' +
+          "mirror it, or leave it. 'Might be relevant' is not a role.",
+        ),
       },
       required: ['file', 'line', 'role'],
     },
@@ -132,7 +176,11 @@ export const RESEARCH_SCHEMA = phaseSchema({
     },
     required: ['reachable', 'route', 'entryPoint', 'gate', 'vocabulary'],
   },
-  unknowns: strArr('What you could NOT determine. State these rather than guessing.'),
+  unknowns: strArr(
+    'What you could NOT determine. State these rather than guessing. A noun you searched ' +
+    'and did not find belongs here too: it stops the next phase repeating a search you ' +
+    'already paid for, and stops it inventing a near-match to fill the gap.',
+  ),
   module: str('Primary module, e.g. Payroll, Leaves, Project Logs.'),
   reproduction: {
     type: 'object',
@@ -165,7 +213,7 @@ export const RESEARCH_SCHEMA = phaseSchema({
       steps: strArr('The steps you actually executed, in order, each with what you did.'),
       expected: str('What the ticket says SHOULD happen.'),
       observed: str('What actually happened when you ran the steps — concrete values, not impressions.'),
-      evidence: strArr('Bare filenames of screenshots written to the run artifacts dir, plus any measurement. For reproduced and not-reproduced the screenshots are attached to the ticket comment.'),
+      evidence: strArr('One item per piece of evidence. An item that names a screenshot file written to the run artifacts dir is attached to the ticket comment, and whatever else that item says becomes the image caption — so put the note on the same item: repro-1-people.png - 566 people, column visible. An item naming no file is reported as a measurement. Write the filename, not a path.'),
       reason: str('Why this verdict. For inconclusive or not-applicable, what stopped you.'),
       blocker: {
         type: 'string',
@@ -211,7 +259,15 @@ const FLOW_KIND_DOC =
 
 export const PLAN_SCHEMA = phaseSchema({
   approach: str('The chosen approach and, in one line, why over the alternative.'),
-  reuse: strArr('Existing helpers/components to extend instead of writing new ones.'),
+  reuse: strArr(
+    'Existing code this change builds on, each as `file:function` or `file:line-line` for ' +
+    'a fragment with no name. One of four verdicts per entry: reuse it, extend it, ' +
+    'collapse a duplicate onto it, or rejected — and a rejection stays here with its ' +
+    'reason on the same line, because a candidate silently dropped is indistinguishable ' +
+    'from one nobody found. Read by implement; the approval comment does NOT render it, ' +
+    "so a choice somebody must be able to decline goes in approach, openQuestions, " +
+    "outOfScope or a step's what instead.",
+  ),
   steps: {
     type: 'array',
     items: {
@@ -227,15 +283,20 @@ export const PLAN_SCHEMA = phaseSchema({
     },
   },
   migrations: { type: 'boolean', description: 'True if any model/schema change is required.' },
-  risks: strArr('What could break, and the mitigation. Not a place for undecided scope — that is openQuestions.'),
+  risks: strArr(
+    'What could break, the mitigation, AND the check that would catch it before this ' +
+    'lands. A risk naming no check is unease rather than a finding. Not a place for ' +
+    'undecided scope — that is openQuestions.',
+  ),
   openQuestions: strArr(
     'Decisions only a person (requester, PM, dev) can make — a scope or product choice the ' +
     'ticket does not state. Each: the question, the default this plan assumes if nobody ' +
     'answers, and what changes if the answer differs. Empty when nothing is undecided.',
   ),
   outOfScope: strArr(
-    'Related problems found and deliberately NOT fixed here. Each: what, why excluded, and ' +
-    'where it belongs (e.g. a separate ticket).',
+    'Related problems found and deliberately NOT fixed here. Each: what, why excluded, ' +
+    'how you ruled it out (with `file:line`), and where it belongs (e.g. a separate ' +
+    'ticket).',
   ),
   acceptanceCoverage: {
     type: 'array',
@@ -440,8 +501,19 @@ const CASE_RESULT = {
     additionalProperties: false,
     properties: {
       id: str('Case id from testcases.json'),
-      result: { type: 'string', enum: ['pass', 'fail', 'blocked', 'skipped'] },
-      evidence: str('What you observed. For a fail, the actual vs expected.'),
+      result: {
+        type: 'string',
+        enum: ['pass', 'fail', 'blocked', 'skipped', 'pre-existing'],
+        description:
+          "pre-existing: the case fails, and it fails the same way on the base branch without " +
+          'this change — it neither cycles to implement nor blocks the merge, and is listed for ' +
+          'the MR reviewer. Never for a case covering what this ticket asks to change.',
+      },
+      evidence: str(
+        'What you observed. For a fail, the actual vs expected. For pre-existing, the actual vs ' +
+        'expected AND the proof it is not this change: the base-branch observation, or the ' +
+        'file:line on the base that produces it and that the diff does not touch.',
+      ),
       screenshot: str('Filename under artifacts/, or empty string.'),
     },
     required: ['id', 'result', 'evidence', 'screenshot'],
@@ -454,6 +526,41 @@ export const VERIFY_SCHEMA = phaseSchema({
   results: CASE_RESULT,
   regressions: strArr('Things that worked before this change and no longer do.'),
 }, ['serverStarted', 'port', 'results', 'regressions']);
+
+/** The on-demand `base-check` phase: do verify's pre-existing cases fail on the base branch too? */
+export const BASE_CHECK_SCHEMA = phaseSchema({
+  baseCommit: str("The `app.head` that `ensure` printed: the full sha of the base-branch checkout the app ran on. Empty if it never ran."),
+  results: {
+    type: 'array',
+    description: 'One entry per case you were given, by its id.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: str('Case id from the list you were given'),
+        onBase: {
+          type: 'string',
+          enum: ['fails', 'passes', 'inconclusive'],
+          description:
+            'fails: you ran the case on the base branch and it failed the same way verify saw. ' +
+            'passes: it behaved as expected on the base — so this change broke it. ' +
+            'inconclusive: you could not run it to the end on the base (app, login, data).',
+        },
+        inTicketScope: {
+          type: 'boolean',
+          description:
+            "true if this case exercises an acceptance criterion of this ticket, or the behaviour " +
+            'the ticket reports as broken — judged from the ticket and its criteria, never from ' +
+            "verify's evidence. Such a case fails on the base by definition, so it is never " +
+            'pre-existing whatever the base shows.',
+        },
+        evidence: str('What you observed on the base, actual vs expected, in one line.'),
+        screenshot: str('Filename under artifacts/, or empty string.'),
+      },
+      required: ['id', 'onBase', 'inTicketScope', 'evidence', 'screenshot'],
+    },
+  },
+}, ['baseCommit', 'results']);
 
 export const DESIGN_SCHEMA = phaseSchema({
   applicable: {
@@ -470,7 +577,7 @@ export const DESIGN_SCHEMA = phaseSchema({
       'True when the change spans more than one screen, or adds a step to an existing journey. ' +
       'Recorded so a later change can decide whether a multi-screen flow needs a prototype; it does not ask you to build one.',
   },
-  tokensFile: str('Artifact-relative path of the tokens.css distilled from the real frontend.'),
+  tokensFile: str('Artifact-relative path of the tokens.css the mockups import: design/tokens.css, generated before the session.'),
   screens: {
     type: 'array',
     description: 'One entry per screen designed. Empty when applicable is false.',
@@ -574,6 +681,106 @@ export const UI_EVIDENCE_SCHEMA = phaseSchema({
   },
 }, ['screenshots', 'observations']);
 
+/**
+ * The local automation tests plan (skill: local-tests-impact), made for a
+ * merged ticket by the post-merge mode (src/localtests/runner.ts). Read by
+ * code, not by a later session: the ticket note is rendered from it, QA
+ * approves that list before every run, and the run executes `specs` as listed.
+ * So a spec missing from `specs` is a spec that does not run.
+ *
+ * An empty `specs` is posted as "Oneshot found no automation test for this
+ * ticket", with the `add` proposals as the suggested tests, and the mode waits
+ * for QA's reply. The descriptions below say so, so the session's picture of
+ * what happens next matches the mode's.
+ */
+export const LOCAL_TESTS_SCOPE_SCHEMA = phaseSchema({
+  applicable: {
+    type: 'boolean',
+    description:
+      'False when nothing a workstream-automation spec could observe changed (a backend path no screen ' +
+      'reaches, say). Say why in `reason` and send empty lists. True when the change is observable, even ' +
+      'if no existing spec reaches it: then `specs` is empty, `proposals` names the suggested test, and ' +
+      'the ticket is told "Oneshot found no automation test" and QA decides what happens next.',
+  },
+  reason: str('Why applicable is what it is, in one sentence a non-developer can read.'),
+  modules: strArr('The automation modules the chosen specs belong to, e.g. "Leaves", "Payroll".'),
+  specs: {
+    type: 'array',
+    description:
+      'Every spec file to run, repo-relative to workstream-automation (cypress/e2e/…). Only these ' +
+      'run. Empty when applicable is false.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        file: str('Spec path, e.g. cypress/e2e/leaves/apply_leave.cy.ts'),
+        module: str('Its module, one of `modules`'),
+        cases: { type: 'number', description: 'How many test cases (it blocks) the file holds.' },
+        ciSeconds: { type: 'number', description: 'Its last CI duration in seconds, when spec-timings.json records one.' },
+        why: str('What in the diff this spec exercises, in one plain line. Start a health-check spec with "Health check:"'),
+      },
+      required: ['file', 'module', 'cases', 'why'],
+    },
+  },
+  edits: {
+    type: 'array',
+    description:
+      'Every temporary change you made to a spec, page object or fixture in the throwaway worktree so ' +
+      'the suite matches what the ticket changed on purpose. Never committed. Empty when you changed nothing.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        file: str('Repo-relative path in workstream-automation'),
+        kind: { type: 'string', enum: ['update', 'add'], description: 'update: an existing file. add: a new one.' },
+        why: str('What the change does, in one plain line'),
+        erpEvidence: str('The ERP file:line in this diff that makes the change necessary'),
+      },
+      required: ['file', 'kind', 'why', 'erpEvidence'],
+    },
+  },
+  proposals: {
+    type: 'array',
+    description:
+      'Changes to the team\'s test list worth QA\'s attention: a new test worth adding, or an existing one ' +
+      'this ticket makes obsolete. QA approves every list before it runs, these included. When `specs` is ' +
+      'empty, the `add` entries here are the suggested tests on the "no automation test found" note. ' +
+      'Empty when the existing tests are enough.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['add', 'remove'] },
+        title: str('The test, as a QA would name it: "Verify that …"'),
+        file: str('The spec file it lives in, or would. Omit when not known.'),
+        why: str('Why, in one plain line'),
+      },
+      required: ['action', 'title', 'why'],
+    },
+  },
+  notRunnable: {
+    type: 'array',
+    description:
+      'Specs that reach this change but cannot run on a local machine, because they need something a desk ' +
+      'does not have: Odoo (payroll sync), a real mailbox, a third-party service. Keep each OUT of `specs` ' +
+      'and list it here with why, so the ticket says it was not run instead of the run reporting it as a ' +
+      'failure. Empty when every spec that reaches the change can run locally.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        spec: str('Spec path, e.g. cypress/e2e/payroll/run_payroll.cy.ts'),
+        why: str('What it needs that a local machine does not have, citing the spec line that shows it'),
+      },
+      required: ['spec', 'why'],
+    },
+  },
+  estimatedMinutes: {
+    type: 'number',
+    description: 'Expected wall-clock minutes for the run, from ciSeconds where known.',
+  },
+}, ['applicable', 'reason', 'modules', 'specs', 'edits', 'proposals', 'estimatedMinutes']);
+
 export const MR_SCHEMA = phaseSchema({
   mrIid: { type: 'number' },
   mrUrl: str('Full MR URL'),
@@ -645,6 +852,70 @@ export const REMEDIATE_SCHEMA = phaseSchema({
 /** Triage of MR review threads — the on-demand `mr-feedback` phase. See src/mrfeedback. */
 export const MR_FEEDBACK_SCHEMA = phaseSchema(MR_FEEDBACK_PROPS, ['items']);
 
+/**
+ * The Ready For Automation mode's one session (src/automation). The same shape
+ * serves WRITE and REVISE, so a revision is checked by the same rules as the
+ * list it revises and the conductor never has to tell the two apart to post it.
+ *
+ * `automatable` and `reason` are required on every case because they are the
+ * product: QA reads this list to decide what the Cypress suite takes on, and a
+ * `no` with no named limit is a verdict nobody can check. `sources` is required
+ * for the opposite reason: it costs the model one line, and it is the only
+ * evidence in the artifact that the cases came from the merged diff rather than
+ * from the ticket's wording alone.
+ *
+ * The 60-case cap, id format and "a removed id is never reused" are stated here
+ * as advice and ENFORCED in code (src/automation/comments.ts validateCases),
+ * because a schema cannot express either rule across versions.
+ */
+export const AUTOMATION_TESTCASES_SCHEMA = phaseSchema({
+  module: str(
+    'The sheet module this ticket belongs to. When one of the listed existing modules fits, copy ' +
+    'its name exactly. Otherwise use a short new name in Title Case with no "TestCases" prefix.',
+  ),
+  cases: {
+    type: 'array',
+    description: 'Usually 6-20 cases, never more than 60. One behaviour per case. Ids are stable across revisions.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: str('TC-01, TC-02, … A revised case keeps its id. A removed id is never reused.'),
+        scenario: str("Starts with 'Verify that'."),
+        precondition: str("The data, role and page that must exist first. Use '' if there are none."),
+        steps: strArr('Concrete UI actions in order, one per element, without numbering.'),
+        expected: str('The observable result that decides pass or fail.'),
+        automatable: { type: 'string', enum: ['yes', 'partly', 'no'] },
+        reason: str(
+          'Why it is yes, partly or no for Cypress. For partly or no, name the limit (PDF content, ' +
+          'email, multi-tab, …). Never empty.',
+        ),
+      },
+      required: ['id', 'scenario', 'precondition', 'steps', 'expected', 'automatable', 'reason'],
+    },
+  },
+  changes: strArr(
+    "REVISE: one entry per change, in the approver's terms, plus 'Not applied: … — why' for any " +
+    'request you could not apply. WRITE: [].',
+  ),
+  sources: strArr(
+    'What you actually read, e.g. "!501 apps/profile/views.py". This is evidence that the list is ' +
+    'grounded in the merged change.',
+  ),
+}, ['module', 'cases', 'changes', 'sources']);
+
+export const DEMO_SCHEMA = phaseSchema({
+  status: {
+    type: 'string',
+    enum: ['ok', 'failed'],
+    description: 'ok when the walkthrough recorded and the webm is on disk; failed when no demo could be produced.',
+  },
+  journey: str('One line naming the user journey the demo walks, for a reader who has not seen the ticket. Empty on failure.'),
+  webm: str('Bare filename of the recorded video under artifacts/demo/, e.g. "demo.webm". Empty on failure — the conductor attaches this to the ticket.'),
+  reason: str('On failure, what broke: which step, what you saw. Empty on success.'),
+  attempts: { type: 'integer', description: 'How many capture attempts were made (the phase retries once).' },
+}, ['status']);
+
 export const SCHEMAS: Record<string, JsonSchema> = {
   recall: RECALL_SCHEMA,
   research: RESEARCH_SCHEMA,
@@ -654,10 +925,14 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   implement: IMPLEMENT_SCHEMA,
   review: FINDINGS_SCHEMA,
   verify: VERIFY_SCHEMA,
+  'base-check': BASE_CHECK_SCHEMA,
   'ui-evidence': UI_EVIDENCE_SCHEMA,
+  'demo-recording': DEMO_SCHEMA,
+  'local-tests-scope': LOCAL_TESTS_SCOPE_SCHEMA,
   mr: MR_SCHEMA,
   remediate: REMEDIATE_SCHEMA,
   'mr-feedback': MR_FEEDBACK_SCHEMA,
+  'automation-testcases': AUTOMATION_TESTCASES_SCHEMA,
 };
 
 export function schemaFor(phase: string): JsonSchema | undefined {

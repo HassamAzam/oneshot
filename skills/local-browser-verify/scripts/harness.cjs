@@ -23,11 +23,13 @@
  *     (`re_path(r"^.*$", index)`) that serves the SPA for every frontend route, so one
  *     port answers for the whole app. The webpack port is never navigated to; it only
  *     serves the bundle that Django's template points at.
- *   - Django renders templates/index.html, whose {% render_bundle %} reads
- *     static/webpack-stats.dev.json. Webpack writes that file with an ABSOLUTE
- *     publicPath taken from frontend/config/localPaths.js (`http://localhost:3000/`,
- *     webpack.config.js:67). So moving webpack off 3000 requires patching that file, or
- *     the browser fetches the bundle from a port with nothing on it.
+ *   - Django renders templates/index.html, whose {% render_entrypoint %} reads
+ *     static/webpack-entrypoints.dev.json (checkouts older than the app's 2026-09-23
+ *     chunk split use {% render_bundle %} and static/webpack-stats.dev.json instead).
+ *     Webpack writes either file with an ABSOLUTE publicPath taken from
+ *     frontend/config/localPaths.js (`http://localhost:3000/`). So moving webpack off
+ *     3000 requires patching that file, or the browser fetches the bundle from a port
+ *     with nothing on it.
  *   - frontend/src/constants/config.js pins `apiUrl` to `http://localhost:8000/`. The
  *     SPA calls the API at that absolute URL, so it must name the Django port we lease.
  *
@@ -65,6 +67,7 @@ const CODES = [
   'E_WEBPACK_DEAD', 'E_BUNDLE_UNREACHABLE',
   'E_NO_CREDENTIALS', 'E_LOGIN_FAILED', 'E_LOGIN_2FA', 'E_TRIAL_EXPIRED',
   'E_MODULE_UNKNOWN', 'E_MODULE_TIMEOUT', 'E_NOT_UP', 'E_PLAYWRIGHT_MISSING',
+  'E_SELECTOR_EMPTY',
 ];
 
 class HarnessError extends Error {
@@ -531,8 +534,9 @@ async function httpStatus(url, timeoutMs = 5000) {
 /**
  * Probe Django on a page that does NOT render the React bundle.
  *
- * `/login/` goes through templates/index.html, whose {% render_bundle %} raises
- * WebpackLoaderBadStatsError until webpack has written static/webpack-stats.dev.json.
+ * `/login/` goes through templates/index.html, which raises until webpack has written
+ * its manifest (ImproperlyConfigured for a missing static/webpack-entrypoints.dev.json;
+ * WebpackLoaderBadStatsError for webpack-stats.dev.json on an older checkout).
  * Probing it means a perfectly healthy Django reads as dead for the whole first compile,
  * which is minutes. The admin login page is plain Django templating and answers as soon
  * as the process is actually serving, which is the thing this check is for.
@@ -582,33 +586,161 @@ async function waitDjango(port, pid, budgetMs) {
     + `${last ? ` (last status ${last})` : ''}`, tail(p.django(), 6));
 }
 
-/**
- * Webpack readiness is the log marker, not a port probe.
- *
- * Django's catch-all answers 200 for every path from the moment it boots, including
- * while the bundle is missing — which is why a curl check passed in run 24 while the page
- * was blank. "Compiled successfully" plus a real fetch of the emitted bundle URL is the
- * only pair that proves the app can actually render.
- */
 function tail(file, n) {
   try { return fs.readFileSync(file, 'utf8').trim().split('\n').slice(-n).join(' | ').slice(0, 400); }
   catch { return '(no log)'; }
 }
 
-async function waitWebpack(wt, port, pid, budgetMs) {
+/**
+ * The two manifests Django can read the bundle's script tags from, relative to the
+ * worktree. Which one a checkout writes depends on its webpack config, not on us.
+ */
+const ENTRYPOINTS_FILE = 'static/webpack-entrypoints.dev.json';
+const STATS_FILE = 'static/webpack-stats.dev.json';
+
+/**
+ * The verdict of the LATEST compile in the webpack log: 'building', 'compiled', 'failed'
+ * or null when no compile has started yet.
+ *
+ * The markers are react-dev-utils' own lines (WebpackDevServerUtils.createCompiler):
+ * `Starting the development server...` before the first build, `Compiling...` on every
+ * rebuild, then exactly one of `Compiled successfully!`, `Compiled with warnings.` or
+ * `Failed to compile.` when it ends. Only the last marker counts — an earlier build's
+ * result is history, and a `Compiling...` after it means the current build is not done.
+ * Matched only at the start of a line, colour codes stripped, so a warning that quotes
+ * one of these words mid-sentence cannot flip the verdict.
+ */
+function compileVerdict(logText) {
+  const lines = String(logText || '').replace(/\x1b\[[0-9;]*m/g, '').split('\n').map((l) => l.trim());
+  let verdict = null;
+  let at = -1;
+  lines.forEach((line, i) => {
+    if (/^(Compiling\.\.\.|Starting the development server)/.test(line)) { verdict = 'building'; at = i; }
+    else if (/^Compiled (successfully|with warnings)/.test(line)) { verdict = 'compiled'; at = i; }
+    else if (/^Failed to compile/.test(line)) { verdict = 'failed'; at = i; }
+  });
+  const errors = verdict === 'failed'
+    ? lines.slice(at + 1).filter(Boolean).slice(0, 8).join(' | ').slice(0, 400)
+    : '';
+  return { verdict, errors };
+}
+
+/**
+ * Is the bundle Django will point at finished, for the webpack started at `since`?
+ *
+ * Returns { state: 'ready' | 'building' | 'failed', via, detail }. Exported so that
+ * app.cjs and localtests.cjs ask the same question this file does instead of keeping
+ * their own copy of which file means "done" — that copy is how this went stale once.
+ *
+ * TWO SIGNALS, because the app changed its manifest under us:
+ *
+ *   - Older checkouts use webpack-bundle-tracker, which writes webpack-stats.dev.json
+ *     TWICE per compile: {"status":"compiling"} the moment a build starts, then
+ *     {"status":"done", chunks:{...}} when it finishes. django-webpack-loader reads that
+ *     exact file and raises WebpackLoaderBadStatsError on anything but `done`, which
+ *     Django serves as a bare 500. The file's own status is the whole answer.
+ *
+ *   - The app replaced that plugin on 2026-09-23 (d0fa609b4e, the ~500 KB chunk split)
+ *     with its own EntrypointFilesPlugin, which writes webpack-entrypoints.dev.json as
+ *     {hash, entrypoints} and carries NO status. It is written once, in webpack's `done`
+ *     hook — which fires for a failed compile too — so the file existing says only that
+ *     SOME compile ended. Waiting for a `status` that file never has is what failed every
+ *     fresh worktree on current code: webpack logged `Compiled with warnings.` and the
+ *     harness still gave up 20 minutes later with E_WEBPACK_DEAD.
+ *
+ * For the second shape the answer needs both halves: the manifest was written by THIS
+ * webpack (mtime at or after `since`, so a file left by an earlier build or an earlier
+ * ref does not count), and the log's latest compile verdict is `Compiled`. The plugin's
+ * `done` tap is registered before react-dev-utils' own, so by the time the log says
+ * `Compiled` the manifest has already been rewritten.
+ *
+ * The log alone was rejected once, rightly: a `Compiled successfully` from an EARLIER
+ * build stays in the log, so a restart read as ready while the current build was still
+ * running and every navigation took a 500. Both reasons are gone here — up() truncates
+ * the log before it starts webpack, compileVerdict() reads only the LAST marker, and the
+ * manifest must be fresh as well.
+ *
+ * The stats file gets the same freshness rule. A checkout that still writes it rewrites
+ * it at the start of every build, so its behaviour is unchanged; a stale `done` left in a
+ * reused worktree that has since moved to the entrypoints plugin would otherwise read as
+ * ready while Django 500s for want of the other file.
+ *
+ * `since` is floored to the second: a filesystem that stores whole-second mtimes would
+ * otherwise date a manifest written 300 ms after start as before it, forever.
+ */
+function bundleState(wt, opts = {}) {
+  const since = Math.floor(Number(opts.since || 0) / 1000) * 1000;
+  const logFile = opts.log || p.webpack();
+  const fresh = (rel) => {
+    const st = fs.statSync(path.join(wt, rel), { throwIfNoEntry: false });
+    return Boolean(st && st.mtimeMs >= since);
+  };
+
+  if (fresh(STATS_FILE)) {
+    const stats = readJson(path.join(wt, STATS_FILE));
+    if (stats && stats.status === 'done') return { state: 'ready', via: STATS_FILE, detail: null };
+    if (stats && stats.status === 'error') {
+      return { state: 'failed', via: STATS_FILE, detail: String(stats.error || '').slice(0, 300) || null };
+    }
+  }
+
+  const logText = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
+  const { verdict, errors } = compileVerdict(logText);
+  if (verdict === 'failed') return { state: 'failed', via: 'webpack log', detail: errors || null };
+  if (verdict === 'compiled') {
+    if (fresh(ENTRYPOINTS_FILE)) return { state: 'ready', via: ENTRYPOINTS_FILE, detail: null };
+    return {
+      state: 'building', via: 'webpack log',
+      detail: `webpack logged a finished compile but wrote neither a fresh ${ENTRYPOINTS_FILE} `
+        + `nor a "done" ${STATS_FILE}`,
+    };
+  }
+  return { state: 'building', via: null, detail: null };
+}
+
+/**
+ * When did this process start? The fallback for a caller that is waiting on a webpack
+ * somebody else started (app.cjs joining a bring-up already in progress) and so has no
+ * start time of its own to hand over. LC_ALL=C because `ps` localises lstart, and a
+ * French month name is not a date Date.parse knows. 0 when it cannot tell, which drops
+ * the freshness half of the check and leaves the log verdict to decide.
+ */
+function processStartedAt(pid) {
+  const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)],
+    { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } });
+  const t = Date.parse(String(r.stdout || '').trim());
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * Wait until the bundle Django points at is finished — bundleState() says what that
+ * means — never a port probe.
+ *
+ * Django's catch-all answers 200 for every path from the moment it boots, including
+ * while the bundle is missing — which is why a curl check passed in run 24 while the page
+ * was blank. A finished manifest plus a real fetch of the bundle URL it names
+ * (assertBundleReachable) is the only pair that proves the app can actually render.
+ *
+ * `startedAt` is when THIS webpack was started; up() records it right before
+ * startWebpack(). The timeout message keeps `did not reach status "done"`: localtests.cjs
+ * matches that phrase to decide to keep waiting on a slow cold build.
+ */
+async function waitWebpack(wt, port, pid, budgetMs, startedAt) {
   const deadline = Date.now() + budgetMs;
-  const statsFile = path.join(wt, 'static/webpack-stats.dev.json');
+  const since = Number.isFinite(Number(startedAt)) && Number(startedAt) > 0
+    ? Number(startedAt) : processStartedAt(pid);
   let sawPort = false;
+  let last = { state: 'building', via: null, detail: null };
   while (Date.now() < deadline) {
     if (!alive(pid)) {
       throw new HarnessError('E_WEBPACK_DEAD', 'the webpack process exited during startup',
         `Last lines of ${p.webpack()}: ${tail(p.webpack(), 8)}`);
     }
-    const logText = fs.existsSync(p.webpack()) ? fs.readFileSync(p.webpack(), 'utf8') : '';
 
     // start.js:69 calls choosePort(), which refuses a busy port rather than drifting
     // silently — but the env can still put it somewhere we did not ask for. Assert once.
     if (!sawPort) {
+      const logText = fs.existsSync(p.webpack()) ? fs.readFileSync(p.webpack(), 'utf8') : '';
       const m = logText.match(/webpack output is served from http:\/\/localhost:(\d+)/);
       if (m) {
         sawPort = true;
@@ -620,47 +752,44 @@ async function waitWebpack(wt, port, pid, budgetMs) {
       }
     }
 
-    /**
-     * Readiness is the stats file's own `status`, not the log.
-     *
-     * webpack-bundle-tracker writes this file TWICE per compile: once with
-     * {"status":"compiling"} the moment a build starts, then again with
-     * {"status":"done", chunks:{...}} when it finishes. django-webpack-loader reads this
-     * exact file, and on anything but `done` it raises WebpackLoaderBadStatsError, which
-     * Django serves as a bare 500 — with DEBUG off there is no traceback in the response,
-     * so from the browser it is indistinguishable from a broken app.
-     *
-     * A log-marker check is not good enough: `Compiled successfully` from an EARLIER
-     * build stays in the log forever, so a restart reads as ready while the current
-     * build is still running. Measured here: the harness reported ready, and every
-     * navigation then took a 500. Reading the file Django reads removes the whole class.
-     */
-    const stats = readJson(statsFile);
-    if (stats && stats.status === 'done') return true;
-    if (stats && stats.status === 'error') {
+    last = bundleState(wt, { since, log: p.webpack() });
+    if (last.state === 'ready') return true;
+    if (last.state === 'failed') {
       throw new HarnessError('E_WEBPACK_DEAD', 'webpack finished with a build error',
-        String(stats.error || '').slice(0, 300) || tail(p.webpack(), 8));
+        last.detail || tail(p.webpack(), 8));
     }
-    await sleep(2000);
+    // Never sleep past the deadline: a short budget is a promise, not a suggestion.
+    await sleep(Math.max(0, Math.min(2000, deadline - Date.now())));
   }
   throw new HarnessError('E_WEBPACK_DEAD',
-    `webpack did not reach status "done" within ${Math.round(budgetMs / 60000)} min`,
-    tail(p.webpack(), 8));
+    `webpack did not reach status "done" within ${Math.round(budgetMs / 60000)} min — no `
+    + `finished compile with a fresh ${ENTRYPOINTS_FILE} or ${STATS_FILE}`,
+    [last.detail, tail(p.webpack(), 8)].filter(Boolean).join(' — '));
 }
 
-/** Prove the browser can actually fetch the bundle Django points at. */
+/**
+ * Prove the browser can actually fetch the bundle Django points at.
+ *
+ * The entrypoints manifest gives the page several script tags per entry, in load order
+ * — the split vendor chunks (`vendors~main.chunk.js`) BEFORE the entry's own
+ * `static/js/bundle.js` — next to Google's gtag loader at the top of the page. Every tag
+ * is read and the entry bundle preferred, so the URL recorded in app-env.json is the
+ * app's own code rather than whichever chunk happened to come first.
+ */
 async function assertBundleReachable(bePort) {
   const html = await (async () => {
     try { return await (await fetch(`http://localhost:${bePort}/login/`)).text(); } catch { return ''; }
   })();
-  const m = html.match(/<script[^>]+src="([^"]+bundle[^"]*|[^"]*main[^"]*\.js)"/i)
-    || html.match(/src="(http:\/\/localhost:\d+\/[^"]+\.js)"/i);
-  if (!m) {
+  const srcs = [...html.matchAll(/<script\b[^>]*\ssrc="([^"]+)"/gi)].map((m) => m[1]);
+  const src = srcs.find((s) => /bundle[^"]*\.js/i.test(s))
+    || srcs.find((s) => /main[^"]*\.js$/i.test(s))
+    || srcs.find((s) => /^http:\/\/localhost:\d+\/[^"]+\.js$/i.test(s));
+  if (!src) {
     throw new HarnessError('E_BUNDLE_UNREACHABLE',
       'Django served /login/ but emitted no bundle script tag',
-      'webpack-stats.dev.json is missing or stale. Check ' + p.webpack());
+      `${ENTRYPOINTS_FILE} (or ${STATS_FILE} on an older checkout) is missing or stale. Check ${p.webpack()}`);
   }
-  const url = m[1].startsWith('http') ? m[1] : `http://localhost:${bePort}${m[1]}`;
+  const url = src.startsWith('http') ? src : `http://localhost:${bePort}${src}`;
   const status = await httpStatus(url, 20000);
   if (status !== 200) {
     throw new HarnessError('E_BUNDLE_UNREACHABLE',
@@ -712,15 +841,22 @@ async function up(opts = {}) {
   if (collectStatic(wt)) log('collected staticfiles');
 
   const djangoPid = startDjango(wt, bePort);
+  // Right before the spawn, not after: a manifest this webpack writes must never date
+  // from before the moment we say it started. waitWebpack() uses it to tell its own
+  // manifest from one an earlier build left in the worktree.
+  const webpackStartedAt = Date.now();
   const webpackPid = startWebpack(wt, fePort);
-  writeJson(p.servers(), { djangoPid, webpackPid, bePort, fePort, worktree: wt, startedAt: Date.now() });
+  writeJson(p.servers(), {
+    djangoPid, webpackPid, bePort, fePort, worktree: wt, startedAt: Date.now(), webpackStartedAt,
+  });
   log('django pid', djangoPid, 'webpack pid', webpackPid);
 
   await waitDjango(bePort, djangoPid, Number(opts.djangoTimeoutMs || 90000));
   log('django ready on', bePort);
   // The first compile is minutes on a cold cache; incremental is seconds. Silence is
   // not failure, so the budget is generous and the liveness check is the pid.
-  await waitWebpack(wt, fePort, webpackPid, Number(opts.webpackTimeoutMs || 20 * 60000));
+  await waitWebpack(wt, fePort, webpackPid, Number(opts.webpackTimeoutMs || 20 * 60000),
+    webpackStartedAt);
   log('webpack compiled on', fePort);
   const bundleUrl = await assertBundleReachable(bePort);
   log('bundle reachable', bundleUrl);
@@ -944,6 +1080,245 @@ async function shot(session, name) {
 }
 
 /**
+ * Wait until an element's geometry stops moving, then return its box.
+ *
+ * `boundingBox()` does not wait for geometry to settle — it returns whatever the box is
+ * at the moment it is asked. Measured against a 1.5s transition, 11 of 12 polls came
+ * back mid-flight; against a popper re-anchoring every 80ms, consecutive reads gave
+ * y = 100, 220, 340, 460, 580, 700. Either way the caller gets a position the element
+ * was passing through, not the one it came to rest at.
+ *
+ * Re-anchoring is the case that matters. A popper (react-datepicker and MUI both sit on
+ * @popperjs/core) measures its reference, computes a placement, and flips it when the
+ * first choice does not fit — so the box moves in discrete jumps for as long as that
+ * negotiation runs, with no transition involved. A pure CSS fade of 0.2-0.3s is often
+ * over before the first round-trip returns, so animation alone is the weaker argument.
+ *
+ * Stability, not a fixed sleep: poll until two consecutive samples agree to within a
+ * pixel and stay that way for `quiet`. A blind `sleep` is either too short on a cold
+ * machine or wasted budget on a warm one.
+ *
+ * Returns `{ box, settled }`. `box` is null when the element never resolves a box —
+ * absent, detached, or `display:none`. Null means "not measurable", never "measured as
+ * zero".
+ *
+ * `settled` is false when the budget ran out while the box was still moving. `box` is
+ * then only the last sample, a position the element was passing through. Returning that
+ * bare made it indistinguishable from a settled box: a popper flipping between y=150 and
+ * y=300 every 100ms, covering the field only at 150, came back from overlap() as a clean
+ * `intersects:false` — the mid-flight read this function exists to prevent, delivered
+ * silently. A timeout is deliberately NOT turned into a null box: null routes to
+ * `missing`, which is a question about the selector, and this selector resolved fine.
+ *
+ * Each probe carries its own timeout. `boundingBox()` with no argument inherits
+ * Playwright's 30s actionability default, so on a selector that matches nothing the first
+ * call outlives this function's whole budget: measured at 30052ms against a 1200ms
+ * timeout, and 60106ms for an `overlap()` where both sides were absent. The missing-
+ * selector path is the common one — "zero matches is a question" means a phase retries
+ * corrected locators routinely — so the per-probe cap is what keeps the documented
+ * `timeout` honest.
+ */
+async function settle(session, selector, opts = {}) {
+  const timeout = Number(opts.timeout || 5000);
+  const quiet = Number(opts.quiet || 250);
+  const loc = session.page.locator(selector).first();
+  const started = Date.now();
+  let last = null;
+  let stableSince = null;
+  while (Date.now() - started < timeout) {
+    const left = timeout - (Date.now() - started);
+    const probe = Math.max(50, Math.min(500, left));
+    const box = await loc.boundingBox({ timeout: probe }).catch(() => null);
+    const steady = box && last
+      && Math.abs(box.x - last.x) < 1 && Math.abs(box.y - last.y) < 1
+      && Math.abs(box.width - last.width) < 1 && Math.abs(box.height - last.height) < 1;
+    if (steady) {
+      if (stableSince === null) stableSince = Date.now();
+      if (Date.now() - stableSince >= quiet) return { box, settled: true };
+    } else {
+      stableSince = null;
+    }
+    last = box;
+    await sleep(50);
+  }
+  return { box: last, settled: false };
+}
+
+/**
+ * Is the element something a user can actually see?
+ *
+ * A box is not visibility. `visibility:hidden` and `opacity:0` both keep their geometry,
+ * so a dismissed popover that is merely hidden rather than unmounted still measures
+ * 200x120 in the same place as the field under it — reported here as a 6000 px² overlap on
+ * a screen where nothing is wrong. That is the ticket-244 failure mode reversed, and it
+ * is the more dangerous direction: a false defect costs a week, a missed one costs a
+ * retest. react-datepicker unmounts on close so it is safe, but MUI Popper with
+ * `keepMounted` and any CSS fade dismissal are not.
+ *
+ * Playwright's own `isVisible()` does not cover this: it treats `opacity:0` as visible.
+ * Opacity also compounds down the tree, so a faded ancestor hides a fully opaque child —
+ * hence the walk to the root rather than reading the one element. `display:none` walks
+ * for the same reason.
+ *
+ * `visibility` does NOT walk. It is inherited and a child can override it, so the
+ * element's own computed value already accounts for a hidden ancestor, and a child set
+ * back to `visibility:visible` under a hidden wrapper is painted and hit-testable.
+ * Walking the ancestors reported exactly that child, on screen and over the field, as
+ * `hidden` with `intersects:false` — a missed defect.
+ *
+ * `visible: null` means the element could not be inspected at all — it detached between
+ * settle() finding its box and this read, or the page navigated. That is "could not
+ * measure", and overlap() files it under `missing`; filing it under `hidden` reported a
+ * popper that vanished mid-measure as a clean `intersects:false`.
+ *
+ * The probe's timeout is evaluate's THIRD argument. The second is the page function's
+ * argument, and passed there `{ timeout }` was handed to the page function and ignored:
+ * the wait for a detached element ran under Playwright's 30s default, and an overlap()
+ * whose popper was removed 550ms in took 30677ms against a 1200ms budget.
+ */
+async function visible(session, selector, opts = {}) {
+  const loc = session.page.locator(selector).first();
+  const cap = Math.min(2000, Number(opts.timeout || 5000));
+  return loc.evaluate((el) => {
+    const own = getComputedStyle(el).visibility;
+    if (own !== 'visible') return { visible: false, why: `visibility:${own}` };
+    let effective = 1;
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      const cs = getComputedStyle(node);
+      if (cs.display === 'none') return { visible: false, why: 'display:none' };
+      effective *= Number(cs.opacity);
+    }
+    if (effective < 0.05) return { visible: false, why: `opacity:${effective.toFixed(2)}` };
+    return { visible: true, why: null };
+  }, undefined, { timeout: cap }).catch(() => ({ visible: null, why: 'unmeasurable' }));
+}
+
+function intersection(a, b) {
+  const width = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+  const height = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+  if (width <= 0 || height <= 0) return { width: 0, height: 0, areaPx: 0 };
+  return {
+    width: Math.round(width),
+    height: Math.round(height),
+    areaPx: Math.round(width * height),
+  };
+}
+
+/**
+ * Do `a` and `b` share screen area, and how much? Answered as an area, in square pixels.
+ *
+ * The answer is symmetric and says nothing about which of the two paints on top: a
+ * popper under the field and one over it return the same `areaPx`. Asked as "does `a`
+ * cover `b`?", a field painting over a portalled popper would be reported as the popper
+ * covering the field, the defect inverted. Check stacking separately
+ * (`document.elementsFromPoint` at the centre of `region`) when that is the question.
+ *
+ * `areaPx` is the size of the shared patch, NOT a distance. It is about
+ * `region.width * region.height`: each side of `region` is rounded on its own and
+ * `areaPx` from the unrounded product, so 10352 sits beside a 242 x 43 region (10406)
+ * because the band was 42.78px. It is named `areaPx` rather than `px` because "10352px"
+ * reads as a length, and a length that large is impossible on a 900px-tall screen, so
+ * the number invites the reader to dismiss a real defect as a broken measurement. Divide
+ * by `region.width` to recover the height a human would describe: 10352 over a
+ * 242px-wide popover is a 43px band, i.e. one input row. Quote `region` when a reviewer
+ * needs to picture it.
+ *
+ * "Obscured", "overlapping" and "covers the field below" are the one bug class this
+ * harness could state a rule about but never measure: a screenshot proves it only to a
+ * human who happens to notice two things in the same place, and an absence-assertion
+ * over a popover passes identically whether dismissal works or is entirely broken.
+ *
+ * Both boxes are settled first, so the result describes where the overlay came to rest
+ * rather than where it started — unless `unsettled` names a side. That side was still
+ * moving when its budget ran out, so its box is a snapshot, and the result is not a
+ * measurement of anything: re-measure with a longer `timeout`.
+ *
+ * `intersects: null` is NOT "no overlap" — it means one of the two could not be
+ * measured (it never resolved a box, or it resolved and then detached before it could
+ * be inspected), and `missing` names which. Which side is missing decides what it means.
+ * A selector for something that should be there is a question about the selector:
+ * reading it as "nothing on top of the field" is how a working screen gets filed as a
+ * product bug, and reading it as "the popper closed" certifies a re-open absent when it
+ * was the FIELD selector that matched nothing. An overlay gone after a dismissal —
+ * missing, or moved into `hidden` — is a dismissal only behind an earlier read that found
+ * both sides resolved, visible and on screen. A control that checked only `missing`
+ * certified the dismissal of a kept-mounted popover that never opened, because it reads
+ * `hidden: [popper]` before and after alike. SKILL.md's calendar bullet is the procedure.
+ *
+ * `outsideViewport` catches the other direction. CSS `zoom` and a short viewport have
+ * already put a real element at `top=1194px` in a 900px window, where it cannot overlap
+ * anything because it is not on screen at all — a green result that means nothing. It is
+ * true when either box lies wholly past ANY edge: boxes are viewport-relative, so one
+ * scrolled above or left of the viewport has a negative y or x, and checking only the
+ * bottom and right edges read a popper above the screen as a believable zero.
+ *
+ * `hidden` is the same guard for elements that kept their box but are not on screen. If
+ * either side is invisible there is nothing for a user to see, so `intersects` is false
+ * and `hidden` names which one and why. `areaPx` is then 0 by design, while `region`
+ * keeps the patch the invisible element would cover: diagnostics, not a defect to quote.
+ *
+ * Each side is its selector's FIRST match — settle() and visible() both go through
+ * `.first()` — so a selector that also matches a parked copy measures whichever comes
+ * first in the DOM. On the live Training modal `.MuiDialogContent-root` matched a hidden
+ * copy of the dialog left at y 1203..1497 and gave two readings that described nothing
+ * on screen. `hidden` or `outsideViewport` on a side that is plainly on screen is this:
+ * narrow the selector rather than believe the result.
+ *
+ * One thing this does NOT handle: both boxes are viewport-relative and they are read one
+ * after the other, so a page that scrolls between the two reads compares two different
+ * coordinate frames. Measured: two elements 600px apart, truthfully `areaPx=0`, came back
+ * as `areaPx=20000` with a 400px scroll landing in the gap. Settle the page before
+ * measuring — do not call this while something is still scrolling a field into view.
+ */
+async function overlap(session, a, b, opts = {}) {
+  const settledA = await settle(session, a, opts);
+  const settledB = await settle(session, b, opts);
+  const boxA = settledA.box;
+  const boxB = settledB.box;
+  const unsettled = [[a, settledA], [b, settledB]]
+    .filter(([, s]) => s.box && !s.settled)
+    .map(([sel]) => sel);
+  const viewport = session.page.viewportSize() || null;
+  const missing = [];
+  if (!boxA) missing.push(a);
+  if (!boxB) missing.push(b);
+  if (missing.length) {
+    return { intersects: null, areaPx: null, missing, unsettled, a: boxA, b: boxB, viewport };
+  }
+  const seen = await Promise.all([visible(session, a, opts), visible(session, b, opts)]);
+  const unmeasured = [a, b].filter((_, i) => seen[i].visible === null);
+  if (unmeasured.length) {
+    return {
+      intersects: null, areaPx: null, missing: unmeasured, unsettled, a: boxA, b: boxB, viewport,
+    };
+  }
+  const hidden = [a, b]
+    .map((sel, i) => (seen[i].visible === false ? { selector: sel, why: seen[i].why } : null))
+    .filter(Boolean);
+  const hit = intersection(boxA, boxB);
+  const offscreen = (box) => box.y >= viewport.height || box.x >= viewport.width
+    || box.y + box.height <= 0 || box.x + box.width <= 0;
+  const outsideViewport = viewport ? [boxA, boxB].some(offscreen) : false;
+  if (hidden.length) {
+    return {
+      intersects: false, areaPx: 0, region: hit, hidden, unsettled, a: boxA, b: boxB, viewport,
+      outsideViewport,
+    };
+  }
+  return {
+    intersects: hit.areaPx > 0,
+    areaPx: hit.areaPx,
+    region: hit,
+    hidden,
+    unsettled,
+    a: boxA,
+    b: boxB,
+    viewport,
+    outsideViewport,
+  };
+}
+
+/**
  * Run one case. NEVER throws.
  *
  * A 20-case list has to be one tool call that cannot abort halfway. An environment fault
@@ -1001,18 +1376,20 @@ async function smoke(keys) {
 /* ------------------------------------------------------------------ cli */
 
 const API = {
-  up, down, status, open, login, goto, shot, runCase, smoke, registry, HarnessError,
+  up, down, status, open, login, goto, shot, settle, overlap, runCase, smoke, registry,
+  HarnessError,
   /**
    * Internals, exported for scripts/app.cjs and nothing else.
    *
    * app.cjs owns the machine-wide question ("is an app already up, and is it on my
    * code?"); this file owns the repository facts ("how does this app actually start").
    * Exporting rather than re-implementing keeps every hard-won fact above — the ASGI
-   * wedge, CI=true, the stats-file readiness, the two pinned files — in ONE place.
+   * wedge, CI=true, the bundle readiness (bundleState), the two pinned files — in ONE
+   * place.
    */
   preflight, checkDb, disabledIntegrations, applyPatches, composeConfigJs,
   needsCollectstatic, collectStatic,
-  startDjango, startWebpack, waitDjango, waitWebpack,
+  startDjango, startWebpack, waitDjango, waitWebpack, bundleState,
   assertBundleReachable, describeEnv, listenerPid, pidCwd, alive, httpStatus,
 };
 module.exports = API;

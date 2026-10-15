@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readlinkSync } from 'node:fs';
-import { detachTrackedClaude, runForkPoint, seedWorktree } from './worktrees.js';
+import { answerKeyCommits, detachTrackedClaude, runForkPoint, seedWorktree } from './worktrees.js';
 import { SKILLS_ROOT } from './config.js';
 
 const git = (args: string[], cwd: string): string =>
@@ -187,6 +187,104 @@ test('runForkPoint refuses a branch the base already contains, rather than retur
       /contained in/,
       'a landed branch must not silently yield its own tip',
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------- the replay declares what it can see
+
+/** A repo where the ticket's fix has LANDED on dev, as it has for any finished run. */
+function repoWithLandedFix(iid: number): { dir: string; base: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'oneshot-ak-'));
+  git(['init', '-q', '-b', 'dev'], dir);
+  git(['config', 'user.email', 'test@example.com'], dir);
+  git(['config', 'user.name', 'Test'], dir);
+  writeFileSync(join(dir, 'a.txt'), 'base\n');
+  git(['add', '-A'], dir);
+  git(['commit', '-qm', 'unrelated groundwork'], dir);
+  const base = git(['rev-parse', 'HEAD'], dir);
+  writeFileSync(join(dir, 'a.txt'), 'the fix\n');
+  git(['commit', '-qam', `fix: give the page a title (#${iid})`], dir);
+  git(['update-ref', 'refs/remotes/origin/dev', git(['rev-parse', 'HEAD'], dir)], dir);
+  return { dir, base };
+}
+
+test('a fix that landed after the base is reported as reachable', () => {
+  // The worktree is detached at `base`, but `git worktree add` shares the object
+  // store: `git log --all --grep` still reaches the fix. The run has to say so.
+  const { dir, base } = repoWithLandedFix(189);
+  try {
+    const got = answerKeyCommits(189, base, dir);
+    assert.equal(got.length, 1);
+    assert.match(got[0] ?? '', /give the page a title \(#189\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a ticket with no commits naming it has no answer key to find', () => {
+  const { dir, base } = repoWithLandedFix(189);
+  try {
+    assert.deepEqual(answerKeyCommits(256, base, dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a source run\'s own unlanded branch is an answer key at its fork point', () => {
+  // The default path, with no --base: runForkPoint answers for a branch that
+  // never landed, and that branch still sits in the shared repo carrying the
+  // `(#77)` commits implement wrote. Reading "never landed" as "blind" is the
+  // mistake this pins.
+  const { dir, base } = repoWithLandedFix(189);
+  try {
+    git(['checkout', '-qb', 'oneshot/ticket-77-x', base], dir);
+    writeFileSync(join(dir, 'b.txt'), 'the run\'s own implementation\n');
+    git(['add', 'b.txt'], dir);
+    git(['commit', '-qm', 'fix: thing (#77)'], dir);
+    git(['checkout', '-q', 'dev'], dir);
+
+    const forkPoint = runForkPoint('oneshot/ticket-77-x', dir);
+    assert.equal(forkPoint, base);
+    const got = answerKeyCommits(77, forkPoint, dir);
+    assert.equal(got.length, 1);
+    assert.match(got[0] ?? '', /#77/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('history already inside the base is not an answer key', () => {
+  // A commit the phase is entitled to read: it is part of what it checked out.
+  const { dir } = repoWithLandedFix(189);
+  try {
+    const tip = git(['rev-parse', 'HEAD'], dir);
+    assert.deepEqual(answerKeyCommits(189, tip, dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a repo git cannot walk is an error, not an empty answer key', () => {
+  // One dangling ref is enough to make `git log --all` exit 128. Returning []
+  // there wrote "nothing reachable" into meta.json for a check that never ran.
+  const { dir, base } = repoWithLandedFix(189);
+  try {
+    writeFileSync(join(dir, '.git', 'refs', 'heads', 'broken'), '0123456789abcdef0123456789abcdef01234567\n');
+
+    assert.throws(() => answerKeyCommits(189, base, dir), /bad object/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a ticket number that is a prefix of another does not match it', () => {
+  // #18 must not be answered by #189's fix, or every low-numbered ticket reads
+  // as contaminated and the warning stops meaning anything.
+  const { dir, base } = repoWithLandedFix(189);
+  try {
+    assert.deepEqual(answerKeyCommits(18, base, dir), []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

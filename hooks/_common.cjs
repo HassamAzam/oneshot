@@ -226,11 +226,105 @@ function envFile(key) {
   return '';
 }
 
+// --------------------------------------------------------------- local tests
+
+/** The Oneshot checkout these hooks ship in, which a relative path in .env is relative to. */
+const ROOT = path.resolve(__dirname, '..');
+
+/**
+ * The .env as a map, read the way scripts/localtests.cjs parseDotenv() reads it:
+ * `export` prefixes, quoted values and trailing `# comments`. envFile() above is
+ * an exact-key lookup and knows none of that, which is fine for the token it
+ * was written for and not for a path a person may have quoted.
+ */
+function envFileMap() {
+  const out = {};
+  let raw = '';
+  try { raw = fs.readFileSync(path.join(ONESHOT, '.env'), 'utf8'); } catch { return out; }
+  for (const line of raw.split(/\r?\n/)) {
+    const t = line.replace(/^\s*export\s+/, '').trim();
+    if (!t || t.startsWith('#')) continue;
+    const eq = t.indexOf('=');
+    if (eq < 1) continue;
+    const key = t.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let v = t.slice(eq + 1).trim();
+    const q = v[0];
+    if (q === '"' || q === "'") {
+      const end = v.indexOf(q, 1);
+      v = end > 0 ? v.slice(1, end) : v.slice(1);
+    } else {
+      v = v.replace(/\s+#.*$/, '').trim();
+    }
+    out[key] = v;
+  }
+  return out;
+}
+
+/**
+ * src/lib/repourl.cjs, the one place the ONESHOT_/ONELOOP_ spelling and the
+ * placeholder screen live, so a guard cannot read a desk's paths differently
+ * from config.ts and scripts/localtests.cjs. Loaded lazily and only here: every
+ * hook requires this file, and a failed require at load would take
+ * pause-check down with it. The fallback keeps the same two rules.
+ */
+function readEnvFn() {
+  try {
+    return require(path.join(ROOT, 'src', 'lib', 'repourl.cjs')).readEnv;
+  } catch (err) {
+    logFailure('localTests(repourl)', err);
+    const placeholder = (v) => /REPLACE_ME|<[a-z_/-]+>|CHANGE_?ME|your-.*-here/i.test(v)
+      || /(^|\/)(their|your|my|some)\/path(\/|$)|(^|\/)path\/to(\/|$)/i.test(v);
+    return (env, name, fallback = '') => {
+      for (const key of [name, name.replace(/^ONESHOT_/, 'ONELOOP_')]) {
+        const v = env[key];
+        if (typeof v === 'string' && v !== '' && !placeholder(v)) return v;
+      }
+      return fallback;
+    };
+  }
+}
+
+let LOCAL_TESTS = null;
+
+/**
+ * The two per-desk paths the local-tests step owns and no session may touch:
+ * the workstream-automation clone and the Cypress credentials file.
+ *
+ * Both are .env settings, read exactly as localTestsConfig() in
+ * src/lib/config.ts and settingsFrom() in scripts/localtests.cjs read them:
+ * .env under the process environment (an exported variable wins, as with
+ * dotenv), ONESHOT_ before the legacy ONELOOP_ spelling, a blank or placeholder
+ * value counted as unset, `~` expanded and a relative path taken from the
+ * Oneshot checkout. The conductor spreads its own environment into every guard
+ * it spawns, so process.env normally has them; the file is the fallback for a
+ * guard whose environment is a session's whitelist. An empty `repo` means the
+ * feature is off on this desk and there is no clone to protect. `creds` always
+ * has a value, because a desk that never set ONESHOT_LOCAL_TESTS_CREDS keeps
+ * the file at the default.
+ *
+ * `env` is for the parity test in src/conductor/hooks.test.ts; without it the
+ * answer is read once per process.
+ */
+function localTests(env) {
+  if (!env && LOCAL_TESTS) return LOCAL_TESTS;
+  const e = env || { ...envFileMap(), ...process.env };
+  const readEnv = readEnvFn();
+  // repourl.cjs expandPath(): only `~` or `~/…` is the home directory.
+  const abs = (p) => (p ? path.resolve(ROOT, String(p).replace(/^~(?=$|\/)/, os.homedir())) : '');
+  const out = {
+    repo: abs(readEnv(e, 'ONESHOT_LOCAL_TESTS_REPO')),
+    creds: abs(readEnv(e, 'ONESHOT_LOCAL_TESTS_CREDS', '~/.config/oneshot/cypress-env.json')),
+  };
+  if (!env) LOCAL_TESTS = out;
+  return out;
+}
+
 module.exports = {
   HOME, ONESHOT, STATE, PAUSE, PAUSE_QUOTA, PAUSE_NETWORK,
   phase, runId, ticket, bailIfNotOneshot,
   readInput, emit, deny, postBlock, allow, logFailure, event,
   isSideEffect, pauseFile, networkPaused,
   realish, isInside, expandTilde,
-  loadConfig, envFile,
+  loadConfig, envFile, envFileMap, localTests,
 };

@@ -526,6 +526,57 @@ export function runForkPoint(branch: string, cwd = WORK_REPO): string {
   );
 }
 
+/**
+ * Commits that reference this ticket and are NOT in the replay's base — the
+ * answer key, if the phase goes looking for it.
+ *
+ * `replayWorktree` uses `git worktree add`, which shares the object store and
+ * every ref of the work repo. So a detached checkout at a pre-fix base is a
+ * blind WORKING TREE inside a repository that still holds the merged fix:
+ * `git log --all`, `git show <sha>` and `git log --grep=#<iid>` all reach it.
+ *
+ * `runForkPoint` fails closed for a landed branch and tells the caller to pass
+ * `--base <sha>`. That escape hatch fixes the checkout and does nothing about
+ * reachability, which is how a measured replay stopped being blind without
+ * anyone noticing. This does not prevent that — it makes the run declare it,
+ * so the artifact carries its own caveat instead of somebody's memory.
+ *
+ * Empty only when no commit naming #<iid> is reachable outside the base, which
+ * in practice means the source run never committed. A run that reached
+ * implement keeps its branch, and its commits carry `(#<iid>)`: those are an
+ * answer key even though they never landed, so the default path (no --base,
+ * base = runForkPoint) is flagged just as a landed fix is. Of 35 local runs
+ * with a research.json, 20 came back non-empty at their fork point and 18 of
+ * those were on branches that never landed.
+ *
+ * Empty is not proof the run was blind. This greps commit messages, so a fix
+ * whose messages never name the ticket — a squash merge titled after the
+ * change — is not found.
+ *
+ * Throws when git cannot list the commits, rather than answering []: an empty
+ * list is the one result a caller reads as reassurance, so a check that did
+ * not run must not be able to produce it. The caller decides what "not
+ * checked" looks like in its artifact.
+ */
+export function answerKeyCommits(iid: number, base: string, cwd = WORK_REPO): string[] {
+  // `([^0-9]|$)` rather than `\b`: git's ERE has no word-boundary escape, and
+  // a bare `#18` would otherwise match #189 and report every low-numbered
+  // ticket as contaminated until the warning stopped meaning anything.
+  //
+  // `--not <base>` drops history the phase is entitled to read, in the same
+  // walk. It replaced a `merge-base --is-ancestor` spawn per candidate, which
+  // gave the same set (32 of 32 on ERP #8783) but read a failed merge-base as
+  // "not in the base" and over-reported.
+  //
+  // No catch. No matching commit exits 0 and gives [] on its own; git fails
+  // only when it cannot walk the repo or resolve the base, and one dangling ref
+  // anywhere in the work repo is enough (`fatal: bad object`, exit 128). The
+  // catch this replaced swallowed that as [], which the caller recorded as the
+  // reassuring reading for a check that never ran.
+  return git(['log', '--all', '--not', base, '--format=%H %s', '-E', `--grep=#${iid}([^0-9]|$)`], cwd)
+    .split('\n').map((l) => l.trim()).filter(Boolean);
+}
+
 /** Counterpart to replayWorktree. No branch to preserve, and no port to release. */
 export function removeReplayWorktree(worktree: string): void {
   if (!existsSync(worktree)) return;

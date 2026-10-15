@@ -260,6 +260,12 @@ one-loop-v2/
 `graphify-knowledge-graph` was planned here and is now excluded in `src/lib/claudedir.ts`: it
 reads a pre-built graph from `graphify-out/`, which no repo on this machine has.
 
+*Superseded 2026-10-01: `planning-methodology` is no longer loaded by any phase, and the
+discovery half of its method plus `util-reuse-methodology`'s now runs in `research` via
+`skills/prior-art-survey/` and in `plan` via `skills/change-scoping/`. Both vendored files
+remain symlinked and `util-reuse-methodology` is still reached by `util-reuse-agent` under
+`erp-code-review`. The live list is `config/phases.json`; this section is the design record.*
+
 Plus your agents, reused as SDK subagents in `implement` and `review`: `backend-agent`, `frontend-agent`,
 `qa-agent`, `backend-reviewer-agent`, `frontend-reviewer-agent`, `util-reuse-agent`.
 
