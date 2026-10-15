@@ -231,6 +231,22 @@ test('plan keeps whole-flow frontend coverage on Playwright', () => {
   assert.match(prompt, /Playwright cases/);
 });
 
+test('testcases whitelists Jest as a runner a case may assert through', () => {
+  // The Good bullet's list is the only thing sanctioning a Jest case now that
+  // plan can order one. Drop Jest from it and testcases silently refuses the
+  // coverage plan asked for, restoring the old contradiction.
+  const p = promptFor(cfg('testcases'), ctx(ticket()));
+  assert.match(p, /Jest for a frontend unit/);
+});
+
+test('verify runs a shipped frontend unit test through Jest, non-interactively', () => {
+  // Without a named command a verify session runs bare `npm test` and watch-mode
+  // wedges the phase; and nothing else makes Jest a runner the pipeline uses,
+  // which is what keeps the testcases whitelist above honest.
+  const p = promptFor(cfg('verify'), ctx(ticket()));
+  assert.match(p, /CI=true npx jest --watchAll=false/);
+});
+
 // ------------------------------------------- research's reproduction is gated
 
 test('the bug label puts the reproduction skill in front of research', () => {

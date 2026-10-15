@@ -1354,9 +1354,11 @@ artifact is above, and its \`testsRun\` field records the commands that actually
 ran on this branch and what they returned. Read it before writing a case around
 any runner.
 
-- **Bad:** a case built on a runner \`testsRun\` shows failing to start or never
-  invoked on this branch — it is unpassable by construction and proves nothing
-  about the change either way, however the assertion is written.
+- **Bad:** a case built on a runner \`testsRun\` shows failing to start, or on one
+  neither \`testsRun\` nor any later phase of this pipeline runs — it is unpassable
+  by construction and proves nothing about the change either way, however the
+  assertion is written. A fresh Jest test the ticket ships is not this: \`verify\`
+  runs it (below), so it is a runner this pipeline uses.
 - **Good:** assert through a runner \`testsRun\` shows working, or one this
   pipeline itself uses — Jest for a frontend unit, Playwright for the browser,
   pytest and flake8 for the backend — and name it in \`steps\`.
@@ -1891,7 +1893,9 @@ session. Resolve \`playwright\` through the \`node_modules\` your worktree alrea
 through NODE_PATH; if neither resolves it, that is an environment fault worth \`blocked\`, not
 something to fix by installing into the shared tree. Rendered and whole-flow behaviour is
 verified here through the browser; a frontend unit test the change ships belongs to its own
-Jest runner, so run it through that runner rather than reasserting the same logic by hand.
+Jest runner, so run it non-interactively with \`CI=true npx jest --watchAll=false <path>\` —
+never bare \`npm test\`, which defaults to watch mode and wedges the phase until its timeout —
+rather than reasserting the same logic by hand.
 
 ## Test data — the method is a skill, the boundaries are here
 
