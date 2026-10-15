@@ -13,6 +13,7 @@
  */
 import { ADDRESSED_FEEDBACK_PROP, MR_FEEDBACK_PROPS } from '../mrfeedback/schema.js';
 import { BLOCKERS } from './reproduction.js';
+import { TEST_PASSES } from '../phases/types.js';
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -326,21 +327,21 @@ export const TESTCASES_SCHEMA = phaseSchema({
         expected: str('The oracle. Required — without it a QA verdict means nothing.'),
         pass: {
           type: 'array',
-          items: {
-            type: 'string',
-            enum: ['happy', 'boundary', 'negative', 'state', 'side-effect',
-              'cross-module', 'regression', 'hostile'],
-          },
+          items: { type: 'string', enum: [...TEST_PASSES] },
         },
         blast: { type: 'string', enum: ['high', 'medium', 'low'] },
       },
       required: ['id', 'scenario', 'precondition', 'steps', 'expected', 'pass', 'blast'],
     },
   },
-  passesEmpty: strArr(
-    'Passes you ran that legitimately produced nothing. Recording this is what stops ' +
-    'a SKIPPED pass from looking identical to a clean one.',
-  ),
+  passesEmpty: {
+    type: 'array',
+    items: { type: 'string', enum: [...TEST_PASSES] },
+    description:
+      'Passes you ran that legitimately produced nothing. Recording this is what stops ' +
+      'a SKIPPED pass from looking identical to a clean one. Each entry is one of the ' +
+      'pass names above, so a reader can match it to a pass by name, not by prose.',
+  },
 }, ['module', 'lv', 'cases', 'passesEmpty']);
 
 export const IMPLEMENT_SCHEMA = phaseSchema({

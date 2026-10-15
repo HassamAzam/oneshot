@@ -88,6 +88,18 @@ export function countsAsFailure(r: { result?: string; evidence?: string }): bool
 }
 
 /**
+ * How the base check's evidence opens when it refuses a 'pre-existing' label
+ * and rescores the case as 'fail'. The written verify.json keeps only the
+ * rescored result, so this prefix is how a reader recovers verify's own label.
+ */
+export const OVERRULED_PRE_EXISTING = 'claimed pre-existing, NOT confirmed';
+
+/** The test-design passes a case can be tagged with; testcases runs every one. */
+export const TEST_PASSES = [
+  'happy', 'boundary', 'negative', 'state', 'side-effect', 'cross-module', 'regression', 'hostile',
+] as const;
+
+/**
  * The ids of the cases that exercise this ticket's own acceptance criteria:
  * those tagged with the `happy` pass, which the testcases prompt defines as
  * "every acceptance criterion, exercised the way the ticket describes it".

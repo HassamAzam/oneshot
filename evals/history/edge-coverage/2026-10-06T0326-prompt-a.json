@@ -1,0 +1,102 @@
+{
+  "label": "prompt-a",
+  "at": "2026-10-05T22:26:24.155Z",
+  "oneshot": "db2e5bc",
+  "mode": "live",
+  "data": {
+    "judge": "claude-sonnet-5",
+    "tickets": [
+      {
+        "repo": "erp",
+        "iid": 8772,
+        "covered": 8,
+        "edges": 9,
+        "bugCovered": 0,
+        "bugEdges": 0,
+        "missing": [
+          "E2"
+        ]
+      },
+      {
+        "repo": "erp",
+        "iid": 8781,
+        "covered": 6,
+        "edges": 7,
+        "bugCovered": 0,
+        "bugEdges": 1,
+        "missing": [
+          "E6"
+        ]
+      },
+      {
+        "repo": "workstreamai",
+        "iid": 53,
+        "covered": 7,
+        "edges": 9,
+        "bugCovered": 1,
+        "bugEdges": 2,
+        "missing": [
+          "E7",
+          "E9"
+        ]
+      },
+      {
+        "repo": "workstreamai",
+        "iid": 74,
+        "covered": 9,
+        "edges": 9,
+        "bugCovered": 1,
+        "bugEdges": 1,
+        "missing": []
+      },
+      {
+        "repo": "workstreamai",
+        "iid": 179,
+        "covered": 5,
+        "edges": 9,
+        "bugCovered": 2,
+        "bugEdges": 5,
+        "missing": [
+          "E2",
+          "E5",
+          "E7",
+          "E9"
+        ]
+      },
+      {
+        "repo": "workstreamai",
+        "iid": 193,
+        "covered": 8,
+        "edges": 9,
+        "bugCovered": 2,
+        "bugEdges": 2,
+        "missing": [
+          "E5"
+        ]
+      },
+      {
+        "repo": "workstreamai",
+        "iid": 241,
+        "covered": 7,
+        "edges": 9,
+        "bugCovered": 0,
+        "bugEdges": 0,
+        "missing": [
+          "E5",
+          "E6"
+        ]
+      },
+      {
+        "repo": "workstreamai",
+        "iid": 259,
+        "covered": 8,
+        "edges": 9,
+        "bugCovered": 0,
+        "bugEdges": 1,
+        "missing": [
+          "E6"
+        ]
+      }
+    ]
+  }
+}
