@@ -179,6 +179,16 @@ echo
 echo "git-guard: local tests"
 expect_deny  "commit in a run's automation worktree" \
                                        git-guard.cjs "$(bash_payload "git -C $WSA commit -am wip")"
+expect_deny  "commit in the automation worktree, inside sh -c" \
+                                       git-guard.cjs "$(bash_payload "sh -c \"git -C $WSA commit -am x\"")"
+expect_deny  "reset --hard in the automation worktree, inside eval" \
+                                       git-guard.cjs "$(bash_payload "eval \"git -C $WSA reset --hard origin/master\"")"
+expect_deny  "commit in the automation worktree, inside bash -lc after a cd" \
+                                       git-guard.cjs "$(bash_payload "bash -lc \"cd $WSA && git commit -am x\"")"
+expect_deny  "push of a protected branch, inside sh -c" \
+                                       git-guard.cjs "$(bash_payload 'sh -c "git push origin dev"')"
+expect_allow "a read in the automation worktree, inside sh -c" \
+                                       git-guard.cjs "$(bash_payload "sh -c \"git -C $WSA status --short\"")"
 expect_deny  "bare push from the automation worktree, after a cd" \
                                        git-guard.cjs "$(bash_payload "cd $WSA && git push")"
 expect_deny  "checkout -- <path> in the automation worktree" \
@@ -348,6 +358,11 @@ expect_deny  "timeout 900 npx cypress run" \
 expect_deny  "nohup cypress run"       git-guard.cjs "$(bash_payload 'nohup cypress run &')"
 expect_deny  "bash -c with npx cypress inside" \
                                        git-guard.cjs "$(bash_payload 'bash -c "npx cypress run --spec x"')"
+expect_deny  "sh -lc with npx cypress inside" \
+                                       git-guard.cjs "$(bash_payload 'sh -lc "npx cypress run"')"
+expect_deny  "bash -ec with npx cypress inside" \
+                                       git-guard.cjs "$(bash_payload 'bash -ec "npx cypress run"')"
+expect_deny  "eval of npx cypress"     git-guard.cjs "$(bash_payload 'eval "npx cypress run"')"
 expect_deny  "node on Cypress's own bin" \
                                        git-guard.cjs "$(bash_payload 'node node_modules/cypress/bin/cypress run')"
 expect_deny  "Cypress's module API from node -e" \

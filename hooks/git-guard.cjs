@@ -526,10 +526,6 @@ function testRunner(t, here) {
   const first = pos[0] || '';
   if (argv0 === 'cypress') return 'Cypress';
   if (LOCALTESTS.test(argv0)) return 'scripts/localtests.cjs';
-  // `bash -c "npx cypress run"`: tokens() has dropped the quotes, so the payload is the rest.
-  if (['sh', 'bash', 'zsh'].includes(argv0) && t.includes('-c')) {
-    return testRunner(t.slice(t.indexOf('-c') + 1), here);
-  }
   if (SCRIPT_RUNNERS.has(argv0)) {
     if (path.basename(first) === 'cypress' || first.includes('node_modules/cypress/')) return 'Cypress';
     if (LOCALTESTS.test(path.basename(first))) return 'scripts/localtests.cjs';
@@ -590,6 +586,38 @@ function unwrap(t) {
   return vars;
 }
 
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
+
+/**
+ * Strip a shell that runs its argument: `sh -c "git …"`, `bash -lc`, `bash
+ * -ec`, `eval "git …"`. segments() has already split the payload at its own
+ * separators and tokens() dropped its quotes, so what follows the `-c` (or the
+ * `eval`) IS the payload's first command, and it is judged like any other.
+ * Repeated with unwrap(), so `bash -c "timeout 900 eval npx cypress run"` is
+ * the Cypress run it ends in. Returns the env assignments unwrap() found.
+ */
+function unshell(t) {
+  const vars = {};
+  for (;;) {
+    Object.assign(vars, unwrap(t));
+    const argv0 = path.basename(t[0] || '');
+    if (argv0 === 'eval') {
+      t.shift();
+      continue;
+    }
+    const c = SHELLS.has(argv0) ? t.findIndex((a, i) => i > 0 && /^-[a-z]*c[a-z]*$/i.test(a)) : -1;
+    if (c === -1) return vars;
+    t.splice(0, c + 1);
+  }
+}
+
+/** A segment as the policy reads it: tokens, its subshell parentheses off, and unshell()ed. */
+function command(seg) {
+  const t = tokens(seg.replace(/^[({]+\s*/, '').replace(/\s*\)+$/, ''));
+  const vars = unshell(t);
+  return { t, vars };
+}
+
 /**
  * Walks the command in order, so a `cd` moves where every later segment
  * stands: `cd state/runs/12/wsa && git stash` is a stash in the worktree.
@@ -608,8 +636,7 @@ function checkLocalTests(cmd, data) {
   const segs = segments(cmd);
   for (let idx = 0; idx < segs.length; idx += 1) {
     const seg = segs[idx];
-    const t = tokens(seg.replace(/^[({]+\s*/, '').replace(/\s*\)+$/, ''));
-    const vars = unwrap(t);
+    const { t, vars } = command(seg);
     if (!t.length) continue;
     if (t[0] === 'cd' || t[0] === 'pushd') {
       const to = t.slice(1).find((a) => a === '-' || !a.startsWith('-'));
@@ -667,7 +694,7 @@ function checkCwd(cmd) {
   // An explicit `cd <path>` or `git -C <path>` moves the effective directory.
   const explicit = [];
   for (const seg of segments(cmd)) {
-    const t = tokens(seg);
+    const { t } = command(seg);
     if (t[0] === 'cd' && t[1]) explicit.push(t[1]);
     const ci = t.indexOf('-C');
     if (t[0] === 'git' && ci !== -1 && t[ci + 1]) explicit.push(t[ci + 1]);
@@ -704,7 +731,7 @@ try {
     const segs = segments(cmd);
     for (let idx = 0; idx < segs.length; idx += 1) {
       const seg = segs[idx];
-      const t = tokens(seg);
+      const { t } = command(seg);
       if (!t.length) continue;
 
       if (t[0] === 'gh' || t[0] === 'glab') {
