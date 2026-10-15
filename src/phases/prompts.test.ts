@@ -3,7 +3,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { labelledLayers, mrOpenNote, promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
 import { gateSubjectDigest } from '../lib/artifacts.js';
-import { ROOT, phaseByName, phases, runDir, type PhaseConfig } from '../lib/config.js';
+import {
+  ROOT, localTestsConfig, localTestsPatchFile, localTestsWorktree, phaseByName, phases, runDir, type PhaseConfig,
+} from '../lib/config.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -137,6 +139,15 @@ test('the scheduling skill plan declares actually ships in the snapshot', () => 
   assert.ok(existsSync(join(ROOT, 'context', 'skills', 'django-scheduled-jobs', 'SKILL.md')));
 });
 
+test('plan declares ponytail, so "does this need to exist" is asked before the approach is settled', () => {
+  // At implement ponytail sits behind the lazy SKILL_LINE and was invoked in three
+  // of ten first sessions; plan never offered it. Its first rungs are approach
+  // decisions, and plan's eager line is the one that runs them on every ticket.
+  const got = names(systemPromptFor(cfg('plan'), ctx(ticket())));
+  assert.ok(got.includes('ponytail'), 'plan must declare ponytail');
+  assert.ok(existsSync(join(ROOT, 'skills', 'ponytail', 'SKILL.md')));
+});
+
 // --------------------------------------------- implement's gating is unchanged
 
 test('implement keeps a plan-gated skill when there is no plan to gate on', () => {
@@ -193,6 +204,32 @@ test('an approval predating digests still pairs, so upgrades do not regress', ()
   assert.match(uiEvidencePrompt(gate, DESIGN), /is this what I approved/);
 });
 
+// ------------------------------------------- demo-recording records, the conductor posts
+
+test('demo-recording records the webm under artifacts/demo and names it in demo.json', () => {
+  // The conductor reads `webm` from demo.json and attaches that file from
+  // artifacts/demo/, so the prompt must point the recording at the same place.
+  const p = promptFor(cfg('demo-recording'), ctx(ticket()));
+  assert.match(p, /artifacts\/demo\//);
+  assert.match(p, /Write `demo.json`/);
+  assert.match(p, /"webm"/);
+});
+
+test('demo-recording does not tell its session to post to GitLab', () => {
+  // The blocker this phase shipped with: session phases are off every GitLab
+  // write tool, so a prompt that ordered upload_markdown / create_issue_note
+  // produced a video nobody could post. The conductor publishes it instead.
+  const p = promptFor(cfg('demo-recording'), ctx(ticket()));
+  assert.ok(!/mcp__gitlab__upload_markdown/.test(p), 'must not order an upload the session cannot run');
+  assert.ok(!/mcp__gitlab__create_issue_note/.test(p), 'must not order a note the session cannot post');
+  assert.match(p, /conductor/, 'must say the conductor posts the webm');
+});
+
+test('demo-recording quotes its own configured budget, not a typed-in number', () => {
+  const p = promptFor(cfg('demo-recording'), ctx(ticket()));
+  assert.match(p, new RegExp(`~${cfg('demo-recording').timeoutMin} min`));
+});
+
 test('plan does not tell itself a stale design was approved', () => {
   const gate = {
     requestTs: 'x', approved: true, feedback: [],
@@ -215,21 +252,36 @@ test('plan does not tell itself a stale design was approved', () => {
   assert.match(fresh, /A human approved these screens/);
 });
 
-// ------------------------------------------- plan does not order frontend unit tests
+// ------------------------------------------- plan may order frontend unit tests
 
-test('plan is told not to put a Jest or other frontend unit test in a step', () => {
-  // testcases and verify both already refuse Jest -- the toolchain has rotted and
-  // CI never runs it. plan did not, so it could still order one, and implement
-  // would then write code that nothing downstream will ever execute.
+test('plan may put a Jest or other frontend unit test in a step', () => {
+  // Frontend unit coverage is sanctioned again; plan is where a step that needs
+  // it gets ordered, so implement knows to write one.
   const prompt = promptFor(cfg('plan'), ctx(ticket()));
-  assert.match(prompt, /No step writes a Jest test, or any other frontend unit test/);
+  assert.match(prompt, /may order a Jest or other frontend unit test/);
 });
 
-test('plan says where frontend behaviour is covered instead', () => {
-  // A prohibition with no alternative reads as "skip frontend coverage". It is
-  // Playwright, written by testcases against the real app.
+test('plan keeps whole-flow frontend coverage on Playwright', () => {
+  // A unit test isolates logic; rendered and whole-flow behaviour still belongs
+  // to the Playwright cases testcases writes against the real app.
   const prompt = promptFor(cfg('plan'), ctx(ticket()));
   assert.match(prompt, /Playwright cases/);
+});
+
+test('testcases whitelists Jest as a runner a case may assert through', () => {
+  // The Good bullet's list is the only thing sanctioning a Jest case now that
+  // plan can order one. Drop Jest from it and testcases silently refuses the
+  // coverage plan asked for, restoring the old contradiction.
+  const p = promptFor(cfg('testcases'), ctx(ticket()));
+  assert.match(p, /Jest for a frontend unit/);
+});
+
+test('verify runs a shipped frontend unit test through Jest, non-interactively', () => {
+  // Without a named command a verify session runs bare `npm test` and watch-mode
+  // wedges the phase; and nothing else makes Jest a runner the pipeline uses,
+  // which is what keeps the testcases whitelist above honest.
+  const p = promptFor(cfg('verify'), ctx(ticket()));
+  assert.match(p, /CI=true npx jest --watchAll=false/);
 });
 
 // ------------------------------------------- research's reproduction is gated
@@ -536,6 +588,19 @@ test('both skills these phases declare actually ship in this repo', () => {
   // just runs without it, and the prompt's short form is all that survives.
   assert.ok(existsSync(join(ROOT, 'skills', 'prior-art-survey', 'SKILL.md')));
   assert.ok(existsSync(join(ROOT, 'skills', 'change-scoping', 'SKILL.md')));
+});
+
+test('plan declares the superpowers planning skill alongside change-scoping', () => {
+  // change-scoping decides WHAT is in scope and WHERE it goes; the superpowers
+  // planning discipline decides HOW each step is written so implement executes
+  // it without re-deriving. They complement, so both are declared.
+  const got = names(systemPromptFor(cfg('plan'), ctx(ticket())));
+  assert.ok(got.includes('superpowers-planning'));
+  assert.ok(got.includes('change-scoping'));
+});
+
+test('the superpowers planning skill ships in this repo', () => {
+  assert.ok(existsSync(join(ROOT, 'skills', 'superpowers-planning', 'SKILL.md')));
 });
 
 test('the research prompt still stands alone if the skill does not resolve', () => {
@@ -870,6 +935,8 @@ test('plan is told v1\'s components are not prior art for v2, and a duplicate in
   assert.match(p, /for v2\s+they are `reject`, the reason being the Beta label/);
   assert.match(p, /not a duplicate to reuse or collapse/);
   assert.match(p, /Collapsing a duplicate that already sits in v1's directory is out of scope too/);
+  // plan loads ponytail too, and its rung 2 would reuse v1's component for v2.
+  assert.match(p, /"already in this codebase\? reuse it" does not apply to v1's components/);
   // and the prior-art bullet main injects above the beta block carries the same pointer.
   assert.match(p, /On this beta ticket a v1 COMPONENT handed as `callable:` or `duplicate:` is `reject`/);
   const plain = flat('plan', ctx(ticket({ labels: ['Loop'] })));
@@ -1030,4 +1097,201 @@ test('the design prompt reports renders as design/<file>, not the bare filename 
   const prompt = promptFor(cfg('design'), ctx(ticket({ iid: 424244, labels: ['Design'] })));
   assert.ok(prompt.includes('design/<filename>'), 'design names mockupHtml/screenshot/before as design/<file>');
   assert.doesNotMatch(prompt, /BARE FILENAME/, 'the generic bare-filename instruction contradicts design/ outputs');
+});
+
+// ------------------------------------------------------ local-tests-scope
+
+/**
+ * Read from config/phases.json itself rather than phaseByName(): phases() drops
+ * both local-tests phases on a desk where the step is off, and this desk's
+ * .env must not decide whether the prompt is tested.
+ */
+const shippedPhase = (name: string): PhaseConfig => {
+  const raw = JSON.parse(readFileSync(join(ROOT, 'config', 'phases.json'), 'utf8')) as { phases: PhaseConfig[] };
+  const p = raw.phases.find((x) => x.name === name);
+  assert.ok(p, `phase ${name} is in config/phases.json`);
+  return p;
+};
+
+const SCOPE_INPUTS = {
+  wsa: '/oneshot/state/runs/990901/wsa', automationSha: 'c0ffee1234567890', base: 'bbbb1111', head: 'aaaa2222',
+  patchFile: '/oneshot/state/runs/990901/artifacts/local-tests/temporary-changes.patch',
+};
+
+const scopePrompt = (over: Partial<PromptCtx> = {}): string => promptFor(shippedPhase('local-tests-scope'), {
+  ...ctx(ticket({ iid: 990901 })), worktree: '/wt/ticket-990901', localTests: SCOPE_INPUTS, ...over,
+});
+
+test('the scope session is handed the conductor\'s facts: worktree, commits, automation worktree, limits', () => {
+  const p = scopePrompt();
+  const lt = localTestsConfig();
+  const index = join(ROOT, 'skills', 'local-tests-impact', 'scripts', 'index.cjs');
+  assert.ok(p.includes(`node ${index} --erp /wt/ticket-990901 `
+    + '--base bbbb1111 --head aaaa2222 --automation /oneshot/state/runs/990901/wsa --json'));
+  assert.ok(p.includes('index.cjs estimate --automation /oneshot/state/runs/990901/wsa'));
+  assert.ok(p.includes('c0ffee1234567890'), 'the automation commit the patch will be cut against');
+  assert.ok(p.includes(runDir(990901)));
+  assert.ok(p.includes(`maxSpecs ${lt.maxSpecs} · maxRunMinutes ${lt.maxRunMinutes}`));
+  for (const path of lt.allowedPaths) assert.ok(p.includes(`\`${path}\``), `allowed path ${path} is named`);
+  assert.ok(p.includes(SCOPE_INPUTS.patchFile), 'told where its edits are saved');
+});
+
+test('the analysis script is named by an absolute path that exists, never through $ONESHOT_HOME', () => {
+  // Under DRY_RUN $ONESHOT_HOME is state-dry, which has no skills/: a path built
+  // from it fails with module-not-found instead of a named JSON code.
+  const p = scopePrompt();
+  const index = join(ROOT, 'skills', 'local-tests-impact', 'scripts', 'index.cjs');
+  assert.ok(existsSync(index));
+  assert.ok(p.includes(`analysis script       ${index}`));
+  assert.doesNotMatch(p, /\$ONESHOT_HOME\/skills/);
+});
+
+test('the limits are a selection budget, each Cypress run has its own deadline', () => {
+  const p = scopePrompt();
+  const lt = localTestsConfig();
+  assert.match(p, /The limits are a selection budget, not a cut/);
+  assert.ok(p.includes(`every Cypress run is stopped at\n${lt.maxRunMinutes} minutes`));
+});
+
+test('a list with nothing to run goes to QA as "no test found", with the add proposal as the suggestion', () => {
+  const p = scopePrompt();
+  assert.match(p, /Whatever you return goes on the ticket for QA, who approve every local run before it starts/);
+  assert.match(p, /posted as\s+"Oneshot found no automation test for this ticket", with your `add` proposals as the suggested tests/);
+  assert.doesNotMatch(p, /"not needed" line/, 'the Loop\'s one-line "not needed" note is gone with the Loop wiring');
+  assert.doesNotMatch(p, /not put to QA/);
+});
+
+test('specs that cannot run on a desk are listed apart, with why, and not run', () => {
+  const p = scopePrompt();
+  assert.match(p, /goes in `notRunnable` with `why`/);
+  assert.match(p, /NOT in `specs`/);
+  assert.match(p, /`notRunnable`, `estimatedMinutes`, `summary`, `blocked`/);
+});
+
+test('without the conductor\'s facts the scope prompt falls back to refs it can name', () => {
+  const p = promptFor(shippedPhase('local-tests-scope'), { ...ctx(ticket({ iid: 990902 })), worktree: '/wt/x' });
+  assert.ok(p.includes('--base origin/dev --head HEAD'));
+  assert.ok(p.includes(localTestsWorktree(990902)));
+  assert.ok(p.includes(localTestsPatchFile(990902)));
+});
+
+test('the scope starts from the precise set and adds at most a few module specs, never padding', () => {
+  const p = scopePrompt();
+  assert.match(p, /The precise set is the floor/);
+  assert.match(p, /limits never\s+remove one/);
+  assert.match(p, /at most 5 module specs, as a health check, not as coverage, and only when the\s+precise set is not empty/);
+  assert.match(p, /NEVER fill the\s+list toward/, 'module specs that cannot see the change are not added to reach the limits');
+  assert.match(p, /a ceiling\s+for the precise set, not a target/);
+  assert.match(p, /If the precise set alone is over either limit, keep all of it/);
+  assert.match(p, /`Trim to fit the limits:`/, 'the over-limit case becomes a QA proposal, not a silent cut');
+  assert.match(p, /There is no silent trim/);
+});
+
+test('with an empty precise set there are no health checks, and health checks are marked for the ticket', () => {
+  const p = scopePrompt();
+  assert.match(p, /With an empty\s+precise set there are no health checks either/);
+  assert.match(p, /Start each one's `why` with `Health check:`/, 'the ticket note marks those rows by this prefix');
+  assert.match(p, /`why` is one short line, starting\s+`Health check:` for a health check/);
+  assert.match(p, /clipped to about 120 characters/);
+});
+
+test('by default an uncovered change gets a suggested test, and nothing is written', () => {
+  const p = scopePrompt();
+  assert.match(p, /Then \*\*do not write one\.\*\* Return `specs: \[\]` \(no health checks either, item 2\)/);
+  assert.match(p, /one `add` proposal per missing test: `title` the way QA would name it/);
+  assert.match(p, /Temporary UPDATES of\s+existing specs \(step 4\) are not this: those stay yours to make, unasked/);
+  assert.match(p, /- Write a new spec QA did not ask for\./);
+  assert.doesNotMatch(p, /\*\*write the missing spec\*\*/);
+  assert.doesNotMatch(p, /## QA asked for a temporary test/);
+});
+
+test('when QA ask for a temporary test, the session writes it and keeps turns for it', () => {
+  const p = scopePrompt({ localTests: { ...SCOPE_INPUTS, request: 'write-temporary' } });
+  assert.match(p, /## QA asked for a temporary test/);
+  assert.match(p, /`disapproved: write a temporary test`/);
+  assert.match(p, /\*\*write the missing spec\*\*/);
+  assert.match(p, /list it in `specs` and `edits`, and propose the\s+`add` for the suite/);
+  assert.match(p, /a test QA added to the suite since the last round is in\s+it, and then you write nothing/);
+  assert.match(p, /Leave it unwritten ONLY when the screen cannot be\s+reached/);
+  assert.match(p, /finish choosing by about turn \d+ of\s+\d+/, 'the session keeps turns for writing the spec');
+  assert.match(p, /`TR_LOCAL_<what>\.ts`/);
+  assert.match(p, /no `force: true`/, 'a new spec follows the no-weakening rules too');
+  assert.doesNotMatch(p, /do not write one/);
+  assert.doesNotMatch(p, /- Write a new spec QA did not ask for/);
+});
+
+test('after the merge, head is the merge commit and base its first parent', () => {
+  const p = scopePrompt({ localTests: { ...SCOPE_INPUTS, base: 'f1rstparent', head: 'mergesha99', mergeSha: 'mergesha99', mrIid: 11042 } });
+  assert.match(p, /base {18}f1rstparent {3}\(first parent of the merge commit: dev just before this change\)/);
+  assert.match(p, /head {18}mergesha99 {3}\(the merge commit of MR !11042: the change as it landed on dev\)/);
+  assert.ok(p.includes('--base f1rstparent --head mergesha99'));
+  assert.match(p, /ERP worktree {10}\/wt\/ticket-990901 {3}\(at the merge commit\)/);
+  // Without base and head the merge sha alone still names both commits.
+  const bare = scopePrompt({ localTests: { ...SCOPE_INPUTS, base: undefined, head: undefined, mergeSha: 'mergesha99' } as unknown as PromptCtx['localTests'] });
+  assert.ok(bare.includes('--base mergesha99^1 --head mergesha99'));
+  assert.match(bare, /the merge commit of the ticket's MR/);
+  assert.doesNotMatch(scopePrompt(), /merge commit of/, 'a ctx without a merge keeps the old wording');
+});
+
+test('the scope never runs Cypress, never commits, never opens the credentials', () => {
+  const p = scopePrompt();
+  assert.match(p, /Run Cypress/);
+  assert.match(p, /`scripts\/localtests\.cjs`/);
+  assert.match(p, /Commit, push, stash, reset, clean or check anything out in the automation worktree/);
+  assert.match(p, /`cypress\.env\.json`/);
+  assert.match(p, /Never weaken a test/);
+});
+
+test('the scope prompt carries the method itself, and declares the skill that has the rest', () => {
+  assert.deepEqual(shippedPhase('local-tests-scope').skills, ['local-tests-impact']);
+  assert.ok(existsSync(join(ROOT, 'skills', 'local-tests-impact', 'SKILL.md')));
+  const sys = systemPromptFor(shippedPhase('local-tests-scope'), ctx(ticket({ iid: 990901 })));
+  assert.ok(names(sys).includes('local-tests-impact'));
+  assert.match(scopePrompt(), /The steps below are enough without it/);
+});
+
+test('the scope session is told it may edit the automation worktree, and only read the ERP one', () => {
+  const sys = systemPromptFor(shippedPhase('local-tests-scope'),
+    { ...ctx(ticket({ iid: 990901 })), worktree: '/wt/ticket-990901', localTests: SCOPE_INPUTS });
+  assert.ok(sys.includes('Your ERP worktree is /wt/ticket-990901: read it, never edit it.'));
+  assert.ok(sys.includes(`throwaway automation worktree ${SCOPE_INPUTS.wsa}`));
+  assert.doesNotMatch(sys, /Everything you touch lives inside it/);
+  // Every other worktree phase keeps the line it had.
+  const other = systemPromptFor(cfg('verify'), { ...ctx(ticket()), worktree: '/wt/x' });
+  assert.match(other, /Your worktree is \/wt\/x\. Everything you touch lives inside it\./);
+});
+
+test('a redo after QA\'s disapproval carries their reply and how to keep the previous edits', () => {
+  const prior = { 'local-tests-scope': {
+    specs: [{ file: 'cypress/e2e/leaves/apply_leave.cy.ts' }],
+    edits: [{ file: 'cypress/Pages/LeavePage.ts' }],
+  } };
+  const p = scopePrompt({
+    localTests: { ...SCOPE_INPUTS, request: 'feedback', feedback: '- remove LV_21\n- also run LV_23' }, prior,
+  });
+  assert.match(p, /## QA asked for changes to an earlier version of this list/);
+  assert.ok(p.includes('- remove LV_21\n- also run LV_23'), 'their reply, verbatim');
+  assert.match(p, /by a case id such as `LV_23`: find the spec file/);
+  assert.match(p, /A spec they ask to remove leaves `specs`, with no `remove` proposal/);
+  assert.match(p, /`summary` opens with what changed from the previous list/);
+  assert.ok(p.includes('`cypress/e2e/leaves/apply_leave.cy.ts`'));
+  assert.ok(p.includes(`git -C ${SCOPE_INPUTS.wsa} apply ${SCOPE_INPUTS.patchFile}`));
+
+  assert.doesNotMatch(scopePrompt(), /QA asked for changes/, 'a first round has no feedback block');
+  assert.doesNotMatch(scopePrompt({ localTests: { ...SCOPE_INPUTS, request: 'feedback', feedback: '  ' } }),
+    /QA asked for changes/, 'a feedback request with no text is no feedback');
+});
+
+test('a redo whose previous list is not in the inputs rebuilds it, and still keeps any saved edits', () => {
+  const p = scopePrompt({ localTests: { ...SCOPE_INPUTS, request: 'feedback', feedback: 'keep the half-day leave test' } });
+  assert.match(p, /The previous list is not in your inputs: build it again from step 1/);
+  assert.ok(p.includes(`If\n${SCOPE_INPUTS.patchFile} exists, it holds the previous round's temporary edits.`));
+  assert.ok(p.includes(`git -C ${SCOPE_INPUTS.wsa} apply ${SCOPE_INPUTS.patchFile}`));
+});
+
+test('the journal\'s old Loop gate state no longer reaches the prompt', () => {
+  // The Loop's localSpecs gate is gone; only the mode's own request carries QA's words.
+  const journal = { localSpecsApproval: { feedback: ['disapproved:\n- stale Loop feedback'] } };
+  const p = scopePrompt({ journal: journal as unknown as PromptCtx['journal'] });
+  assert.doesNotMatch(p, /stale Loop feedback/);
 });

@@ -20,13 +20,13 @@ const VAR = 'GITLAB_REPO_URL';
  * in any key that is missing (see target.test.ts).
  */
 async function phaseList(target: string): Promise<Array<{ name: string; n: number;
-  kind: string; onFail: string }>> {
+  kind: string; onFail: string; onDemand?: boolean }>> {
   const had = Object.prototype.hasOwnProperty.call(process.env, VAR);
   const before = process.env[VAR];
   process.env[VAR] = target ? `https://gitlab.example.com/acme/${target}` : '';
   try {
     const m = await import(`../lib/config.js?mropen=${encodeURIComponent(target)}-${Date.now()}`);
-    return (m.phases as () => Array<{ name: string; n: number; kind: string; onFail: string }>)();
+    return (m.phases as () => Array<{ name: string; n: number; kind: string; onFail: string; onDemand?: boolean }>)();
   } finally {
     if (had) process.env[VAR] = before;
     else delete process.env[VAR];
@@ -83,11 +83,22 @@ test('mr still runs, and last, so the draft is finished and undrafted', async ()
 
 test('every phase in the ordering is either implemented or a code phase', async () => {
   // A phase present in config but wired to nothing is a silent no-op in the
-  // sequence, which is exactly how mr-open could rot.
+  // sequence, which is exactly how mr-open could rot. An on-demand code phase
+  // is not in the sequence: the mode that owns it runs it by name
+  // (local-tests-run, src/localtests), and the Loop steps over it.
   const codes = new Set(Object.keys(CODE_PHASES));
-  for (const p of (await phaseList('erp')).filter((x) => x.kind === 'code')) {
+  for (const p of (await phaseList('erp')).filter((x) => x.kind === 'code' && !x.onDemand)) {
     assert.ok(codes.has(p.name), `code phase ${p.name} has no CODE_PHASES entry`);
   }
+});
+
+test('the Loop registers no local-tests code phase', async () => {
+  // local-tests-run left the pre-merge pipeline: the post-merge mode runs it,
+  // so a Loop pass must never reach it through this registry.
+  assert.equal(CODE_PHASES['local-tests-run'], undefined);
+  assert.deepEqual(Object.keys(CODE_PHASES).sort(), ['merge', 'mr-open']);
+  const lt = (await phaseList('erp')).find((x) => x.name === 'local-tests-run');
+  assert.equal(lt?.onDemand, true);
 });
 
 test('the default pipeline does not carry mr-open at all', async () => {

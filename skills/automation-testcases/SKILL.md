@@ -24,12 +24,17 @@ You get, all of it in the prompt (the conductor read it from GitLab before the s
 - the merged MR(s) that are the change: branches, description and the diff of every changed file;
 - MRs to ignore (still open, or closed without merging), named but not shown;
 - the modules that already have a tab on the test-case sheet;
+- usually a **"What already exists"** section: the Cypress specs and team-sheet rows that already
+  cover this area, and what each spec actually checks, gathered by the conductor (you have no tools
+  to look yourself). When it is missing, coverage could not be checked on this desk;
 - on REVISE: the current list, the approver's comments word for word, and the next free id.
 
 You return:
-- `summary`: a few plain sentences for QA. What the list covers, anything you were unsure of,
-  and anything worth QA's attention you noticed outside the list (for example, a second defect
-  the diff suggests but does not fix). Findings go here, never into a case.
+- `summary`: a few plain sentences for QA. What the list covers, **which existing spec each case
+  extends or which already covers the change** (from "What already exists"), anything you were
+  unsure of, and anything worth QA's attention you noticed outside the list (for example, a second
+  defect the diff suggests but does not fix, or a sheet row marked Done that no spec backs).
+  Findings go here, never into a case.
 - `blocked`: null, unless no retry could help (for example, the prompt carries no merged change
   at all).
 - `module`: the sheet module these cases belong to. See "Choosing the module".
@@ -88,24 +93,61 @@ both out, and the prompt names the second kind so you know to ignore it:
   `Adhoc-2026-01-15`. They carry everyone's work, not this ticket's.
 - **Open or closed-without-merging MRs**: they did not ship.
 
+### Start from what already exists
+
+The **"What already exists"** section in the prompt is the Cypress suite and the team sheet,
+read by the conductor before you started. It is authoritative — you cannot look anything up — and
+it is there so you do not rewrite what is already covered. The #8420 run wrote sixteen cases when
+two would have done, because it could not see that a spec already drove the exact path. Before you
+write a case:
+
+- **A spec already drives this behaviour and re-reads the saved result** (it reloads, then checks):
+  do not write that case. Say in `summary` which spec covers it.
+- **A spec drives it but only checks the immediate response** (a success toast, no reload): one
+  case that reloads and checks the stored result is worth writing — it catches a build that saved
+  nothing. Say in `summary` it extends that spec.
+- **A sheet row is marked Done but no spec above backs it**: that is unverified, not coverage (the
+  sheet marks LV_55 Done, but no LV_55 spec has ever existed). Trust the suite, write the case if
+  the behaviour needs one, and note the mismatch in `summary` for QA.
+- **Nothing above covers it**: write a NEW case.
+
+When the section is missing, coverage could not be checked on this desk: write the list from the
+change alone, and the conductor tells QA it may repeat existing cases.
+
+### Size the list to the change
+
+A fix and a feature do not get the same list.
+
+- **A bug fix** — the diff repairs behaviour that already shipped — is usually **one to four
+  cases**: the original reproduction (with the state that triggered it in the `precondition`),
+  plus at most one guard for a closely related path the same fix touches. **Do not write the
+  control catalogue** (every option listed, the default state, "all options offered") for a bug
+  fix: those cases pass on the unfixed build, so they test nothing the fix changed. The team's own
+  benchmark for a bug fix is one regression spec (bug #8772 → one `it()` in PRL_28).
+- **A new or reworked control or feature** — the change adds the behaviour — gets the fuller list,
+  including the catalogue cases under "One case per option".
+- Either way, a lean list where every case catches something the others do not is what QA
+  approves. If the change is small, the list is small; never pad it to look thorough.
+
 ### Coverage checklist
 
-The list must have at least one case for each of these that applies:
+The list must have at least one case for each of these **that applies to this change** and that
+"What already exists" does not already cover:
 - every acceptance criterion;
 - every behaviour the diff changes;
-- the happy path;
-- validation and negative input (required fields, wrong formats, a value the rule rejects);
-- boundaries (the limit itself and one past it, empty, maximum length, a date at the edge);
+- the happy path, validation and boundaries — each only when the change adds or reworks it
+  (a value the rule rejects, the limit and one past it, empty, maximum length, a date at the edge);
 - roles and permissions, when the change is about who can do something. Not a second-user case
   "to prove isolation" when the screen only ever reads the logged-in user's own settings;
-- persistence: the result is still there once the page re-reads the saved data (a reload).
-  Logging out and in again reads it the same way, so it is not a case of its own;
-- neighbours the diff touched: a screen or report that shares the changed code (regression);
+- a neighbour the diff touched: a screen or report that shares the changed code (regression);
 - for a bug ticket, the original reproduction steps as a case, now expecting the fixed result.
   Put in its `precondition` whatever state made the old bug appear (for example "the option was
   blocked earlier, then removed and saved"). The reporter's steps often skip it, and a case run
   on fresh data then passes on the broken build too. When the reproduction changes several
   controls in one Save, that one Save is the case.
+
+Persistence (the result is still there once the page re-reads the saved data) is part of the case
+that makes the change, not a case of its own; logging out and in again reads it the same way.
 
 **Not in the list:** the Django admin, database rows or flags (duplicate rows, `is_active`), and
 anything else only a developer can see. Nor a case whose precondition the product cannot reach
@@ -120,11 +162,14 @@ example blocked, removed, then blocked again), and each option with a visible ef
 
 **Every case must be able to fail on the unfixed build.** It goes through the changed behaviour
 (for a save bug, it clicks Save). A case that only reloads or views data its precondition already
-set up passes on the broken build too: drop it.
+set up passes on the broken build too: drop it. This is why a bug fix does not get the control
+catalogue — listing a dropdown's options, or its default state, passes whether or not the bug was
+fixed, so it belongs to a list for a NEW control (where the catalogue itself is the change), never
+to a fix.
 
-Usually 6 to 20 cases. Never more than 60. If the change is small, the list is small; do not pad
-it to look thorough. A lean list where every case catches something the others do not is what
-QA approves.
+Never more than 60 cases. A bug fix is usually one to four (see "Size the list to the change"); a
+new control is usually 6 to 20. If the change is small, the list is small; do not pad it to look
+thorough. A lean list where every case catches something the others do not is what QA approves.
 
 ### Every case is a full flow
 
@@ -192,6 +237,10 @@ setting does nothing from one where it works. So every case has three parts:
    - **State a control's whole content**: "shows only A and B", "shows exactly these six", never
      "shows A and B" (which a build that also kept C passes). When a case checks at two moments,
      name both ("after returning from Home, and again after the reload").
+
+**The catalogue below is for a NEW or reworked control — not a bug fix.** When the change *is* the
+control (it adds the dropdown, or reworks what it offers), these cases describe it. When the change
+is a fix to a control that already shipped, skip them: see "Size the list to the change".
 
 **One case per option with a visible effect.** When a control's options each change something on
 screen (each blocked update hides a different Home item), write one case per option, each with its
@@ -384,6 +433,11 @@ Drop TC-07. Add a case for an expired session." `nextId` is `TC-13`.
       start with `Log in as …` and see that item before the change, and `expected` is checked on
       the screen where the user sees the effect.
 - [ ] No API calls, endpoints or seed steps anywhere in a case.
+- [ ] No case repeats behaviour a spec in "What already exists" already asserts after a re-read;
+      `summary` names any spec a case extends or that already covers the change.
+- [ ] A bug fix is one to four cases (reproduction + at most one guard), not the control catalogue;
+      the catalogue (default state, all options offered) appears only for a new or reworked control.
+- [ ] Every case can fail on the unfixed build: it goes through the changed behaviour.
 - [ ] Options with a visible effect have one case each; options without one are covered by the
       save-and-persist cases, and no case invents a screen for them.
 - [ ] Every precondition pins down what `expected` depends on: the whole starting selection, the
