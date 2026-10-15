@@ -47,6 +47,10 @@ Never simplify away: input validation at trust boundaries, error handling that p
 
 Never lazy about understanding the problem. The ladder shortens the solution, never the reading.
 
+## At plan
+
+Plan writes no code, so the ladder decides the approach instead of the diff: climb it for each step before you write that step. Record a rung that held — a step left out as speculative, a helper reused, a stdlib call instead of new code — in one line in `approach` or `reuse`; there is no code yet to carry a `ponytail:` comment. The two sections below are implement's. At plan, the prompt's rules for test steps and the plan's own shape stand.
+
 ## Testing boundary
 
 Do NOT write tests in this phase. A separate phase (`testcases`) authors the test case list, and another (`verify`) executes it in a real browser. Writing tests here duplicates that work and wastes your turn budget.

@@ -821,7 +821,9 @@ ticket creates a screen that does not exist today — say so in \`openQuestions\
 Research's \`codePath\` may hand you v1's COMPONENTS as \`callable:\` or \`duplicate:\`; for v2
 they are \`reject\`, the reason being the Beta label. v2's copy of a component is the
 requirement, not a duplicate to reuse or collapse — the same carve-out
-\`implement\` and \`review\` are given. Collapsing a duplicate that already sits in v1's
+\`implement\` and \`review\` are given. \`ponytail\` never simplifies away anything explicitly
+requested, and the label is that request: its "already in this codebase? reuse it" does not
+apply to v1's components. Collapsing a duplicate that already sits in v1's
 directory is out of scope too: under point 1 it is an edit to v1. What v2 reuses from v1 is its
 data layer — actions, selectors, utils, API helpers — imported from where it lives.`,
 

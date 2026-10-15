@@ -139,6 +139,15 @@ test('the scheduling skill plan declares actually ships in the snapshot', () => 
   assert.ok(existsSync(join(ROOT, 'context', 'skills', 'django-scheduled-jobs', 'SKILL.md')));
 });
 
+test('plan declares ponytail, so "does this need to exist" is asked before the approach is settled', () => {
+  // At implement ponytail sits behind the lazy SKILL_LINE and was invoked in three
+  // of ten first sessions; plan never offered it. Its first rungs are approach
+  // decisions, and plan's eager line is the one that runs them on every ticket.
+  const got = names(systemPromptFor(cfg('plan'), ctx(ticket())));
+  assert.ok(got.includes('ponytail'), 'plan must declare ponytail');
+  assert.ok(existsSync(join(ROOT, 'skills', 'ponytail', 'SKILL.md')));
+});
+
 // --------------------------------------------- implement's gating is unchanged
 
 test('implement keeps a plan-gated skill when there is no plan to gate on', () => {
@@ -906,6 +915,8 @@ test('plan is told v1\'s components are not prior art for v2, and a duplicate in
   assert.match(p, /for v2\s+they are `reject`, the reason being the Beta label/);
   assert.match(p, /not a duplicate to reuse or collapse/);
   assert.match(p, /Collapsing a duplicate that already sits in v1's directory is out of scope too/);
+  // plan loads ponytail too, and its rung 2 would reuse v1's component for v2.
+  assert.match(p, /"already in this codebase\? reuse it" does not apply to v1's components/);
   // and the prior-art bullet main injects above the beta block carries the same pointer.
   assert.match(p, /On this beta ticket a v1 COMPONENT handed as `callable:` or `duplicate:` is `reject`/);
   const plain = flat('plan', ctx(ticket({ labels: ['Loop'] })));
