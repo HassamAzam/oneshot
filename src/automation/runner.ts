@@ -44,8 +44,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  DEFAULT_MAX_TURNS, DRY_RUN, PAUSE, ROOT, automationConfig, googleServiceAccountFile, phaseByName,
-  projectConfig, reviewersConfig, type AutomationConfig,
+  DEFAULT_MAX_TURNS, DRY_RUN, PAUSE, ROOT, automationConfig, googleServiceAccountFile, localTestsConfig,
+  phaseByName, projectConfig, reviewersConfig, type AutomationConfig,
 } from '../lib/config.js';
 import { currentProjectKey } from '../lib/journalproject.js';
 import { isPlaceholder } from '../lib/repourl.cjs';
@@ -74,6 +74,7 @@ import {
   readVersion, saveVersion, writeAutoJournal, type AutomationJournal, type AutomationState, type VersionRecord,
 } from './journal.js';
 import { fetchAutomationTicket, fetchMergedChanges } from './context.js';
+import { coverageNote, gatherCoverage, renderCoverage, type CoverageReport } from './coverage.js';
 import { automationPrompt, automationSystemPrompt, type AutomationPromptInput } from './prompt.js';
 import { AUTOMATION_PHASE, readinessFromHookOutput, withdrawnLabels, type MrRef, type Readiness } from './readiness.js';
 import { moduleDisplayName, moduleTabTitle, normaliseModule } from './sheetlayout.js';
@@ -875,6 +876,23 @@ async function stepAuthor(ctx: Ctx, mode: 'write' | 'revise'): Promise<StepResul
     return stop(`hold — ${changes.error}`);
   }
 
+  // What the Cypress suite and the team sheet already cover. Gathered here
+  // because the session has no tools to look, so it can write NEW or EXTENDing
+  // cases instead of a fresh full list. WRITE only: a REVISE applies the
+  // approver's asks to a list that already exists. Never throws and never holds
+  // the ticket — a source that is off or fails becomes a caveat line QA reads.
+  let coverage: CoverageReport | null = null;
+  if (mode === 'write') {
+    coverage = await gatherCoverage({
+      iid,
+      ticket,
+      changes: changes.changes,
+      repo: localTestsConfig().repo || undefined,
+      sheet: { cfg: cfg.sheet, saFile: googleServiceAccountFile(), modules: modules.data },
+      year: new Date().getFullYear(),
+    });
+  }
+
   const project = projectConfig().gitlab.project;
   const pf = j.pendingFeedback;
   const input: AutomationPromptInput = {
@@ -883,6 +901,7 @@ async function stepAuthor(ctx: Ctx, mode: 'write' | 'revise'): Promise<StepResul
     changes: changes.changes,
     open: j.readiness?.open ?? [],
     modules: modules.data,
+    ...(coverage ? { coverage: renderCoverage(coverage) } : {}),
     ...(previous ? { previous } : {}),
     ...(mode === 'revise' && pf ? {
       feedback: pf.notes.map((n) => ({ author: n.author, body: n.body })),
@@ -957,6 +976,7 @@ async function stepAuthor(ctx: Ctx, mode: 'write' | 'revise'): Promise<StepResul
     v, module: artifact.module, count: artifact.cases.length, hash: casesHash(artifact.cases),
     noteId: null, postedAt: null, reviewLabelled: false, changes: artifact.changes ?? [],
     moduleTab: tab.tab, moduleTabIsNew: tab.isNew,
+    ...(coverage ? { coverageNote: coverageNote(coverage) } : {}),
     ...(mode === 'revise' && pf ? {
       feedbackAuthors: unique(pf.notes.map((n) => n.author).filter(Boolean)), ignoredApproval: pf.ignoredApproval,
     } : {}),
@@ -1030,6 +1050,7 @@ async function stepPost(ctx: Ctx, v: number): Promise<StepResult> {
       hash: rec.hash, doneLabel: cfg.labels.done,
       ...(prevArt ? { diff: diffCases(prevArt.cases, art.cases) } : {}),
       ...(!first ? { notes: art.changes ?? [] } : {}),
+      ...(rec.coverageNote?.length ? { coverageNote: rec.coverageNote } : {}),
       ...(rec.feedbackAuthors ? { feedbackAuthors: rec.feedbackAuthors } : {}),
       ...(rec.ignoredApproval ? { ignoredApproval: true } : {}),
       ...(rec.lostHistory ? { lostHistory: true } : {}),

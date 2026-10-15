@@ -145,6 +145,27 @@ export function getIssue(iid: number): Promise<GitlabResult<Issue>> {
 }
 
 /**
+ * Open a new issue on the same project and return it (its `iid` and `web_url`
+ * are what a caller links back to). Used by the verify-case QA gate's
+ * `pre-existing` route, which splits a failure QA judged not this change's into
+ * its own tracked bug. `labels` are applied only if they exist on the project —
+ * Oneshot never creates a label — so an unknown name is dropped by GitLab, not
+ * created, exactly as `editIssueLabels` behaves.
+ */
+export async function createIssue(
+  title: string, description: string, labels: string[] = [],
+): Promise<GitlabResult<Issue>> {
+  if (DRY_RUN) {
+    log.warn(`[dry-run] would create issue "${title}"`, { labels });
+    return { ok: true, kind: 'ok', status: 200, data: null };
+  }
+  const body: Record<string, string> = { title, description };
+  const clean = labels.filter((l) => l !== '');
+  if (clean.length) body.labels = clean.join(',');
+  return call<Issue>('POST', `/projects/${projectId()}/issues`, body, true);
+}
+
+/**
  * Open issues carrying the entry label, oldest-updated first (rough FIFO), one
  * page of 50 — minus, server-side, those carrying the Ready For Automation
  * trigger (automationTriggerLabel). Those are the automation mode's, and they
@@ -569,6 +590,9 @@ export async function editIssueLabels(
 
 export interface Label { name: string }
 
+/** Enough for any real project (2,000 labels); only here so a misbehaving API cannot loop forever. */
+const MAX_LABEL_PAGES = 20;
+
 /**
  * Every label defined on the project.
  *
@@ -577,9 +601,24 @@ export interface Label { name: string }
  * on the board, or never created simply never matches. Nothing raises: a swap
  * writes a label the board does not show, and a `labelSkills` pair silently
  * stops routing. This is the one call that can turn that into a sentence.
+ *
+ * Every page of them, a hundred at a time until a short page. GitLab caps
+ * `per_page` at 100, and arbisoft/erp carries over 300 labels, so the first
+ * page alone reported labels that exist — the local-tests ones among them — as
+ * missing. All or nothing, like allIssueNotes: a list read half-way makes
+ * every label on the unread pages look absent, which is the false alarm this
+ * fixes.
  */
-export function listLabels(): Promise<GitlabResult<Label[]>> {
-  return call<Label[]>('GET', `/projects/${projectId()}/labels?per_page=100`);
+export async function listLabels(): Promise<GitlabResult<Label[]>> {
+  const all: Label[] = [];
+  for (let page = 1; page <= MAX_LABEL_PAGES; page++) {
+    const res = await call<Label[]>('GET', `/projects/${projectId()}/labels?per_page=100&page=${page}`);
+    if (!res.ok || !res.data) return res;
+    all.push(...res.data);
+    if (res.data.length < 100) return { ...res, data: all };
+  }
+  log.warn(`project labels exceed ${MAX_LABEL_PAGES * 100}; checked only the first ${all.length}`);
+  return { ok: true, kind: 'ok', status: 200, data: all };
 }
 
 export interface Branch { name: string; protected: boolean; commit: { id: string } }

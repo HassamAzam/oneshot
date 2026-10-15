@@ -1,7 +1,9 @@
+import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  planApprovalRequestBody, repliesAfter, testcasesApprovalRequestBody, testcasesApprovedRecordBody,
+  parseCorrectedSteps, parseVerifyDirectives, planApprovalRequestBody, repliesAfter,
+  testcasesApprovalRequestBody, testcasesApprovedRecordBody, verifyCasesRequestBody, verifyOurStepsBody,
 } from './reviewgate.js';
 import { renderPlanMd } from '../lib/publish.js';
 
@@ -23,29 +25,19 @@ const newPlan = {
   ],
 };
 
-test('gate comment for a plan written before the new fields renders as before', () => {
-  const body = planApprovalRequestBody(oldPlan, 'why');
-  assert.match(body, /\*\*Approach\*\*\nDarken the bar colour/);
-  assert.match(body, /\*\*Risks\*\*\n- Snapshot drift/);
-  assert.doesNotMatch(body, /Open questions|Acceptance coverage|Out of scope/);
+test('gate comment is a short pointer, not a second copy of the plan', () => {
+  const body = planApprovalRequestBody('why');
+  assert.match(body, /\*\*Oneshot pauses here\*\* — why/);
+  assert.match(body, /The full plan is in the comment above/);
+  // The plan's own content lives in the publish note above, not here — re-rendering
+  // it gave the reviewer the same plan twice. None of it is repeated in this body.
+  assert.doesNotMatch(body, /Darken the bar colour|\*\*Steps\*\*|Acceptance coverage|point by point/);
 });
 
-test('gate comment puts open questions before the steps', () => {
-  const body = planApprovalRequestBody(newPlan, 'why');
-  const q = body.indexOf('**Open questions**');
-  assert.ok(q > 0 && q < body.indexOf('**Steps**'));
-  assert.match(body, /- Is Project Logs V2 in scope\? Default: no, V1 only\./);
-});
-
-test('gate comment renders acceptance coverage and out of scope', () => {
-  const body = planApprovalRequestBody(newPlan, 'why');
-  assert.match(body, /\*\*Acceptance coverage\*\*\n- ✅ Indicators reach 3:1 — steps 1-3; step 5 test\n- ❌ VoiceOver confirms fix — — _\(1\.4\.11 is visual\)_/);
-  assert.match(body, /\*\*Out of scope\*\*\n- checkIcon contrast/);
-});
-
-test('gate comment escapes HTML in the new sections', () => {
-  const body = planApprovalRequestBody({ ...oldPlan, openQuestions: ['Add a <main> landmark?'] }, 'why');
-  assert.match(body, /Add a &lt;main&gt; landmark\?/);
+test('gate comment still names who may approve and how', () => {
+  const body = planApprovalRequestBody('why');
+  assert.match(body, /may sign this off/);
+  assert.match(body, /Comment the single word \*\*`approved`\*\*/);
 });
 
 test('plan markdown omits the new sections for an old plan and renders them for a new one', () => {
@@ -66,17 +58,14 @@ const revisedPlan = {
   ],
 };
 
-test('gate comment answers reviewer feedback first, point by point', () => {
-  const body = planApprovalRequestBody(revisedPlan, 'why');
-  assert.ok(body.indexOf('**Your feedback, point by point**') < body.indexOf('**Approach**'));
-  assert.match(body, /- \*\*changed\*\* — opacity:1 cannot undo the parent → step 6: dot moved out of the faded label/);
-  assert.match(body, /- \*\*answered\*\* — V2 scope → open question 1\n/);
-  assert.match(body, /- \*\*declined\*\* — rename the token: matches the existing naming/);
+test('the plan markdown carries the feedback response, point by point', () => {
+  const md = renderPlanMd(1, 't', revisedPlan);
+  assert.match(md, /\| opacity:1 cannot undo the parent \| changed \| step 6 \|/);
+  assert.match(md, /\| V2 scope \| answered \|/);
+  assert.match(md, /\| rename the token \| declined \|/);
 });
 
 test('no feedback section on a first plan or an old artifact', () => {
-  assert.doesNotMatch(planApprovalRequestBody(newPlan, 'why'), /point by point/);
-  assert.doesNotMatch(planApprovalRequestBody({ ...newPlan, feedbackResponse: [] }, 'why'), /point by point/);
   assert.doesNotMatch(renderPlanMd(1, 't', newPlan), /point by point/);
   assert.match(renderPlanMd(1, 't', revisedPlan), /## Reviewer feedback, point by point\n\| Point \| Response \| Where \| Note \|/);
 });
@@ -128,8 +117,82 @@ test('plan markdown escapes HTML in table cells as well as in prose', () => {
     acceptanceCoverage: [
       { criterion: 'Add a <main> landmark', coveredBy: 'step 1', status: 'covered', note: '' },
     ],
+    // The prose bullets render into a note body GitLab renders, so a tag in a
+    // risk would open an HTML block and the sanitiser would eat it and the rest.
+    risks: ['<title> is not refreshed by the router'],
+    reuse: ['<Foo> component already does this'],
+    openQuestions: ['Is <Bar> in scope?'],
+    outOfScope: ['<Baz> page — separate ticket'],
+    approach: 'Wrap the <Widget> so it re-renders',
   });
   assert.match(md, /\| Add a &lt;main&gt; landmark \|/);
+  assert.match(md, /- &lt;title&gt; is not refreshed by the router/);
+  assert.match(md, /- &lt;Foo&gt; component already does this/);
+  assert.match(md, /- Is &lt;Bar&gt; in scope\?/);
+  assert.match(md, /- &lt;Baz&gt; page/);
+  assert.match(md, /Wrap the &lt;Widget&gt; so it re-renders/);
+  assert.doesNotMatch(md, /<title>|<Foo>|<Bar>|<Baz>|<Widget>/);
+});
+
+// The headline feature: step files become GitLab blob links pinned to the
+// base commit. `existsAt` stands in for the git check so these are hermetic.
+const allExist = (): boolean => true;
+
+test('plan markdown links step files to the base commit, with line anchors', () => {
+  const plan = {
+    ...oldPlan,
+    steps: [
+      { n: 1, what: 'edit', files: ['apps/x/utils.py:7'], layer: 'backend' },
+      { n: 2, what: 'edit', files: ['apps/x/models.py', 'apps/x/views.py:7-20'], layer: 'backend' },
+    ],
+  };
+  const md = renderPlanMd(1, 't', plan, 'abc123', allExist);
+  assert.match(md, /\[apps\/x\/utils\.py:7\]\(\S+\/-\/blob\/abc123\/apps\/x\/utils\.py#L7\)/);
+  assert.match(md, /\[apps\/x\/models\.py\]\(\S+\/-\/blob\/abc123\/apps\/x\/models\.py\)/);
+  assert.match(md, /\[apps\/x\/views\.py:7-20\]\(\S+\/-\/blob\/abc123\/apps\/x\/views\.py#L7-20\)/);
+});
+
+test('a planned file that does not exist at the base commit is not linked', () => {
+  const plan = {
+    ...oldPlan,
+    steps: [{ n: 1, what: 'create', files: ['apps/x/new_file.py'], layer: 'test' }],
+  };
+  const exists = (p: string): boolean => p !== 'apps/x/new_file.py';
+  const md = renderPlanMd(1, 't', plan, 'abc123', exists);
+  assert.doesNotMatch(md, /-\/blob\/.*new_file/);
+  assert.match(md, /apps\/x\/new_file\.py/);
+});
+
+test('plan markdown URL-encodes path segments so spaces and parens do not break the link', () => {
+  const plan = {
+    ...oldPlan,
+    steps: [
+      { n: 1, what: 'edit', files: ['docs/Release Notes.md'], layer: 'config' },
+      { n: 2, what: 'edit', files: ['docs/sad).md'], layer: 'config' },
+    ],
+  };
+  const md = renderPlanMd(1, 't', plan, 'abc123', allExist);
+  assert.match(md, /\]\(\S+\/-\/blob\/abc123\/docs\/Release%20Notes\.md\)/);
+  // An unbalanced paren would otherwise end the CommonMark destination early.
+  assert.match(md, /\]\(\S+\/-\/blob\/abc123\/docs\/sad%29\.md\)/);
+});
+
+test('no base commit means no links', () => {
+  const plan = { ...oldPlan, steps: [{ n: 1, what: 'edit', files: ['apps/x/utils.py'], layer: 'backend' }] };
+  const md = renderPlanMd(1, 't', plan);
+  assert.doesNotMatch(md, /-\/blob\//);
+});
+
+test('the plan gate pointer carries the migration flag and links the plan note', () => {
+  const withMigration = planApprovalRequestBody('why', {
+    migrations: true, planNoteUrl: 'https://gitlab/x/-/issues/1#note_42',
+  });
+  assert.match(withMigration, /includes a database migration/);
+  assert.match(withMigration, /\[this comment\]\(https:\/\/gitlab\/x\/-\/issues\/1#note_42\)/);
+
+  const plain = planApprovalRequestBody('why');
+  assert.doesNotMatch(plain, /includes a database migration/);
+  assert.match(plain, /in the comment above/);
 });
 
 // `point` present, `response` absent: the shape a plan.json written halfway
@@ -137,14 +200,12 @@ test('plan markdown escapes HTML in table cells as well as in prose', () => {
 // truthiness guard in front of it.
 test('a feedback entry missing its response renders instead of throwing', () => {
   const partial = { ...newPlan, feedbackResponse: [{ point: 'V2 scope' }] };
-  const body = planApprovalRequestBody(partial, 'why');
-  assert.match(body, /\*\*Your feedback, point by point\*\*\n- \*\*\*\* — V2 scope/);
   assert.equal(cells(renderPlanMd(1, 't', partial as unknown as Plan), 'V2 scope').length, 4);
 });
 
 test('non-string coverage fields render instead of throwing', () => {
   const odd = { ...newPlan, acceptanceCoverage: [{ criterion: 'Contrast', coveredBy: 2, note: 3 }] };
-  assert.match(planApprovalRequestBody(odd, 'why'), /- • Contrast — 2 _\(3\)_/);
+  assert.equal(cells(renderPlanMd(1, 't', odd as unknown as Plan), 'Contrast').length, 4);
 });
 
 const tcase = (over: Record<string, unknown> = {}) => ({
@@ -207,4 +268,99 @@ test('repliesAfter drops system notes, machine notes and anything at or before t
     { id: 313, text: 'approved', user: 'anosha.saeed', at },
     { id: 314, text: 'no author, no time', user: null, at: null },
   ]);
+});
+
+// ---------------------------------------------------- verify-case gate parser
+
+const FAILING = ['TC-14', 'TC-09', 'TC-2', 'TC-20'];
+
+test('parses "skip test case no. N" despite the period after "no"', () => {
+  const d = parseVerifyDirectives('skip test case no. 14', FAILING);
+  assert.deepEqual(d.map((x) => [x.caseId, x.verdict]), [['TC-14', 'skip']]);
+});
+
+test('parses each classification keyword against the case number', () => {
+  const text = 'TC-14: invalid\nTC-09: expected\nTC-2: pre-existing\nskip TC-20';
+  const got = Object.fromEntries(parseVerifyDirectives(text, FAILING).map((x) => [x.caseId, x.verdict]));
+  assert.deepEqual(got, { 'TC-14': 'invalid', 'TC-09': 'expected', 'TC-2': 'pre-existing', 'TC-20': 'skip' });
+});
+
+test('matches a bare or TC- or padded number to the failing case id', () => {
+  // "9" and "09" and "TC-9" all mean TC-09; "2" means TC-2, not TC-20.
+  assert.equal(parseVerifyDirectives('skip 9', FAILING)[0]?.caseId, 'TC-09');
+  assert.equal(parseVerifyDirectives('invalid TC-09', FAILING)[0]?.caseId, 'TC-09');
+  assert.equal(parseVerifyDirectives('expected 2', FAILING)[0]?.caseId, 'TC-2');
+});
+
+test('applies one verdict to every case a fragment names', () => {
+  const got = parseVerifyDirectives('skip 14 and 20', FAILING);
+  assert.deepEqual(got.map((x) => x.caseId).sort(), ['TC-14', 'TC-20']);
+  assert.ok(got.every((x) => x.verdict === 'skip'));
+});
+
+test('ignores numbers that are not failing cases, and verdict-less prose', () => {
+  assert.deepEqual(parseVerifyDirectives('that is the 2024 figure', FAILING), []);
+  assert.deepEqual(parseVerifyDirectives('TC-99: skip', FAILING), []);
+  assert.deepEqual(parseVerifyDirectives('TC-14 looks odd', FAILING), []);
+});
+
+test('pre-existing is recognised from "existing issue" phrasing too', () => {
+  assert.equal(parseVerifyDirectives('TC-14 is an existing issue', FAILING)[0]?.verdict, 'pre-existing');
+});
+
+test('first verdict wins when a case is named twice', () => {
+  const got = parseVerifyDirectives('skip 14\nTC-14: invalid', FAILING);
+  assert.equal(got.length, 1);
+  assert.equal(got[0]?.verdict, 'skip');
+});
+
+test('the request body lists each failing case and all four verdicts', () => {
+  const body = verifyCasesRequestBody([{ id: 'TC-14', evidence: 'filter reset on reload' }, { id: 'TC-09' }]);
+  assert.match(body, /TC-14/);
+  assert.match(body, /filter reset on reload/);
+  assert.match(body, /TC-09/);
+  for (const w of ['skip', 'invalid', 'expected', 'pre-existing']) assert.match(body, new RegExp(w));
+});
+
+// ---------------------------------------------- verify-case gate: missing-steps
+
+test('parses a missing-steps directive and maps it to the case', () => {
+  for (const phrase of ['TC-14: missing steps', 'TC-14 steps are incomplete', '14: steps missing']) {
+    const d = parseVerifyDirectives(phrase, FAILING);
+    assert.deepEqual(d.map((x) => [x.caseId, x.verdict]), [['TC-14', 'missing-steps']], phrase);
+  }
+});
+
+test('a terminal verdict in the same fragment beats missing-steps', () => {
+  // "skip, the steps are missing anyway" is a reviewer settling the case.
+  assert.equal(parseVerifyDirectives('TC-14: skip, steps missing', FAILING)[0]?.verdict, 'skip');
+});
+
+test('parseCorrectedSteps extracts a numbered list that names the case', () => {
+  const reply = 'TC-14 steps:\n1. Open /pod/people\n2. Apply the 2-4 band\n3. Reload and read the footer';
+  assert.deepEqual(parseCorrectedSteps(reply, 'TC-14'), [
+    'Open /pod/people', 'Apply the 2-4 band', 'Reload and read the footer',
+  ]);
+});
+
+test('parseCorrectedSteps accepts bullets and bare numbers for the case', () => {
+  assert.deepEqual(parseCorrectedSteps('for 9:\n- first\n- second', 'TC-09'), ['first', 'second']);
+});
+
+test('parseCorrectedSteps returns null without a case reference or without steps', () => {
+  assert.equal(parseCorrectedSteps('1. do a thing\n2. do another', 'TC-14'), null); // no case ref
+  assert.equal(parseCorrectedSteps('TC-14 looks wrong to me', 'TC-14'), null);       // no enumerated steps
+  assert.equal(parseCorrectedSteps('TC-14: skip', 'TC-14'), null);                   // a directive, not steps
+});
+
+test('the our-steps comment shows the steps followed and asks for a numbered reply', () => {
+  const body = verifyOurStepsBody('TC-14', 'Filter survives reload', ['Open', 'Apply', 'Reload'], 'footer reset to 566');
+  assert.match(body, /TC-14/);
+  assert.match(body, /1\. Open/);
+  assert.match(body, /footer reset to 566/);
+  assert.match(body, /\*\*only TC-14\*\*/);
+});
+
+test('the request body lists the missing-steps option', () => {
+  assert.match(verifyCasesRequestBody([{ id: 'TC-14' }]), /missing steps/i);
 });

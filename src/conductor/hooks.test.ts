@@ -20,7 +20,7 @@ import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { DRY_RUN } from '../lib/config.js';
+import { DRY_RUN, localTestsConfig } from '../lib/config.js';
 import { editIssueLabels, issuesWithLabel, readToken } from '../lib/gitlab.js';
 import { scratchHome } from '../lib/test-scratch-home.js';
 import { AUTOMATION_PHASE, readinessFromHookOutput } from '../automation/readiness.js';
@@ -31,6 +31,17 @@ process.env.GITLAB_READ_TOKEN = 'test-read-token';
 process.env.ONESHOT_GITLAB_TOKEN = 'test-write-token';
 
 const hook = createRequire(import.meta.url)('../../hooks/automation-ready.cjs') as { DEADLINE_MS: number };
+const common = createRequire(import.meta.url)('../../hooks/_common.cjs') as {
+  localTests: (env?: Record<string, string | undefined>) => { repo: string; creds: string };
+};
+
+type HookFn = (input: unknown) => Promise<Record<string, unknown>>;
+type Entry = { matcher?: string; hooks: HookFn[] };
+
+function denial(out: Record<string, unknown>): string | null {
+  const h = out.hookSpecificOutput as { permissionDecision?: string; permissionDecisionReason?: string } | undefined;
+  return h?.permissionDecision === 'deny' ? h.permissionDecisionReason ?? '' : null;
+}
 
 /** What the SDK is handed, minus the callbacks: event → [matcher, timeout] per entry. */
 function shape(env: Record<string, string>): Record<string, Array<[string | undefined, number]>> {
@@ -48,6 +59,45 @@ test('the automation session gets exactly the guards a Loop phase gets, and none
   const automation = shape({ ONESHOT_PHASE: AUTOMATION_PHASE });
   assert.deepEqual(automation, shape({ ONESHOT_PHASE: 'implement' }));
   assert.equal('UserPromptSubmit' in automation, false);
+});
+
+test('a Glob reaches secret-guard: one hunting for cypress.env.json is denied, one for specs is not', async () => {
+  // Routed the way the SDK routes it: every PreToolUse entry whose matcher takes
+  // `Glob` (or that has none) runs. Dropping Glob from secret-guard's matcher
+  // leaves the script's own test green and this one red.
+  const { home, cleanup } = scratchHome();
+  try {
+    const entries = hooksFor({ ONESHOT_PHASE: 'implement', ONESHOT_HOME: home }).PreToolUse as Entry[];
+    const routed = entries.filter((e) => e.matcher === undefined || new RegExp(e.matcher).test('Glob'));
+    const run = async (pattern: string): Promise<string[]> => {
+      const outs = await Promise.all(routed.flatMap((e) => e.hooks.map((h) => h({
+        hook_event_name: 'PreToolUse', tool_name: 'Glob', cwd: home, tool_input: { pattern, path: home },
+      }))));
+      return outs.map(denial).filter((r): r is string => r !== null);
+    };
+    const hunt = await run('**/cypress.env.json');
+    assert.equal(hunt.length, 1, 'exactly one guard refuses it');
+    assert.match(hunt[0] ?? '', /Cypress credentials/);
+    assert.deepEqual(await run('cypress/e2e/**/*.cy.ts'), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('the guards read the local-tests paths as localTestsConfig() does: spelling, placeholders, ~ and relative paths', () => {
+  const cases: Array<[string, Record<string, string | undefined>]> = [
+    ['unset', {}],
+    ['plain', { ONESHOT_LOCAL_TESTS_REPO: '/tmp/wsa', ONESHOT_LOCAL_TESTS_CREDS: '/tmp/creds.json' }],
+    ['legacy spelling', { ONELOOP_LOCAL_TESTS_REPO: '~/wsa', ONELOOP_LOCAL_TESTS_CREDS: '~/secrets/wsa.json' }],
+    ['ONESHOT_ wins over ONELOOP_', { ONESHOT_LOCAL_TESTS_REPO: '/tmp/a', ONELOOP_LOCAL_TESTS_REPO: '/tmp/b' }],
+    ['placeholders count as unset', { ONESHOT_LOCAL_TESTS_REPO: '<your/path/to>/wsa', ONESHOT_LOCAL_TESTS_CREDS: 'REPLACE_ME' }],
+    ['blank falls through to the legacy spelling', { ONESHOT_LOCAL_TESTS_REPO: '', ONELOOP_LOCAL_TESTS_REPO: '/tmp/legacy' }],
+    ['relative to the checkout', { ONESHOT_LOCAL_TESTS_REPO: 'wsa', ONESHOT_LOCAL_TESTS_CREDS: 'creds.json' }],
+  ];
+  for (const [name, env] of cases) {
+    const want = localTestsConfig(undefined, env);
+    assert.deepEqual(common.localTests(env), { repo: want.repo, creds: want.credsFile }, name);
+  }
 });
 
 test('the readiness script gives its own answer before runGuard kills it', () => {

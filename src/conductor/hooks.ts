@@ -165,7 +165,12 @@ const BASH = '^Bash$';
  */
 const WRITE_TOOLS_OR_BASH = '^(Write|Edit|NotebookEdit|Bash)$';
 const MR_TOOLS = '^mcp__gitlab__(create|update)_merge_request$';
-const READ_OR_BASH = '^(Read|NotebookRead|Grep|Bash)$';
+/**
+ * secret-guard's surfaces. Glob is on the list because the guard judges it too:
+ * a pattern that hunts for a cypress.env.json by name is how a session finds a
+ * credentials file it was never told the path of (docs/HOOKS.md, local tests).
+ */
+const READ_OR_BASH = '^(Read|NotebookRead|Grep|Glob|Bash)$';
 
 /**
  * Build the hook set for one phase.
@@ -205,6 +210,12 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
       // instruction to read a file is a request; a phase that has died at its
       // cap drops reads first. Injecting costs zero turns and cannot be skipped.
       { hooks: [guard('traps-brief.cjs')], timeout: 15 },
+      // Self-gates to `research` and injects bug-reproduction's conditions
+      // reference. Measured need: two research laps on one bug ticket made
+      // three Read calls between them and none was that file. It lands before
+      // the account is chosen and the options enumerated, which is the only
+      // point at which two of those conditions can still change the run.
+      { hooks: [guard('repro-conditions.cjs')], timeout: 15 },
     ],
   };
 }

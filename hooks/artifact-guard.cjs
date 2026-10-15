@@ -48,7 +48,8 @@
  * The Bash arm is pattern matching, not a shell parser, and is therefore
  * best-effort in the same way secret-guard.cjs declares itself to be. What
  * keeps that honest is the narrowness of the subject: it considers ONLY the
- * exact basenames of every declared artifact plus run.json, directly inside a
+ * exact basenames of every declared artifact plus run.json and the local-tests
+ * step's three records (CONDUCTOR_STATE), directly inside a
  * run directory — and, for a command that deletes or moves a whole directory,
  * only a run directory or the runs root itself. Reads are left completely
  * alone. There is no legitimate command that writes one of them, so the cost of
@@ -74,6 +75,18 @@ C.bailIfNotOneshot();
 const JOURNAL = 'run.json';
 
 /**
+ * The local-tests step's own bookkeeping, written by scripts/localtests.cjs
+ * (conductor code) beside the handoffs. local-tests-resources.json is what the
+ * run step's crash recovery reads back to decide which processes to signal,
+ * which ports to free, which database to drop and which worktrees to remove;
+ * local-tests-capture.json pins the patch and the automation commit the run
+ * applies; local-tests-seq numbers the database copies. A session that holds
+ * `writes: ['run']` has no reason to write any of them, and a forged resources
+ * file turns the next recovery into a kill list of the session's choosing.
+ */
+const CONDUCTOR_STATE = ['local-tests-resources.json', 'local-tests-capture.json', 'local-tests-seq'];
+
+/**
  * Used only when config/phases.json cannot be read. A guard that protects
  * nothing when its config is missing would be indistinguishable from one that
  * ran, so it falls back to the list as it stands today — the same reason
@@ -96,7 +109,7 @@ function protectedNames() {
   const names = phases
     ? phases.filter((p) => p && p.name).map((p) => p.artifact || `${p.name}.json`)
     : FALLBACK;
-  return new Set([...names, JOURNAL].map((n) => n.toLowerCase()));
+  return new Set([...names, JOURNAL, ...CONDUCTOR_STATE].map((n) => n.toLowerCase()));
 }
 
 /**
@@ -182,12 +195,20 @@ function refuse(hit, how) {
       + '(`scratch/`, `artifacts/`) is yours to delete.',
     );
   }
-  const own = hit.name.toLowerCase() === JOURNAL
-    ? 'That file is the run journal: it holds the plan and test-case approvals a '
-      + 'human gave on the ticket, and the merge SHA. Nothing in a session writes it.'
-    : `That file is the '${hit.name.replace(/\.json$/i, '')}' phase's handoff. The conductor `
+  const lc = hit.name.toLowerCase();
+  let own;
+  if (lc === JOURNAL) {
+    own = 'That file is the run journal: it holds the plan and test-case approvals a '
+      + 'human gave on the ticket, and the merge SHA. Nothing in a session writes it.';
+  } else if (CONDUCTOR_STATE.includes(lc)) {
+    own = 'That file is the local-tests step\'s own record, written by scripts/localtests.cjs: '
+      + 'the processes, ports, database and worktrees its cleanup acts on, the patch it applies, '
+      + 'or the number of its next database copy. Nothing in a session writes it.';
+  } else {
+    own = `That file is the '${hit.name.replace(/\.json$/i, '')}' phase's handoff. The conductor `
       + 'writes it from a phase\'s structured output, and reads it back to decide whether this '
       + 'change merges.';
+  }
   C.deny(
     `Denied: ${how} would write state/runs/${hit.iid}/${hit.name}. ${own}\n`
     + 'Reading it is fine — this guard only refuses writes. If what it holds is wrong, say so '
