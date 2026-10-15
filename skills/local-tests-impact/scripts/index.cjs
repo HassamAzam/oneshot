@@ -123,10 +123,32 @@ function showMany(repo, items) {
 
 /* ------------------------------------------------------------------ source parsing */
 
+/** Words after which a `/` opens a regex literal rather than dividing. */
+const REGEX_AFTER_WORD = new Set([
+  'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await',
+]);
+
+/**
+ * Does a `/` after `out` open a regex literal? Where a value is expected - at the start,
+ * after an operator, an opening bracket or a word like `return` - it does; after a name,
+ * a number, a string or a closing `)`/`]` it divides.
+ */
+function regexStarts(out) {
+  let k = out.length - 1;
+  while (k >= 0 && /\s/.test(out[k])) k -= 1;
+  if (k < 0) return true;
+  if (!/[\w$]/.test(out[k])) return !/[)\]'"`]/.test(out[k]);
+  let w = k;
+  while (w > 0 && /[\w$]/.test(out[w - 1])) w -= 1;
+  return REGEX_AFTER_WORD.has(out.slice(w, k + 1));
+}
+
 /**
  * Source with comments blanked, strings kept - or emptied too, with `blankStrings`. A
  * commented-out `it(` is not a test case and a commented-out import is not a dependency;
- * a `//` inside a URL string is neither, and neither is an `it(` inside a title.
+ * a `//` inside a URL string is neither, and neither is an `it(` inside a title. A regex
+ * literal is skipped whole, so the quote in `/['"]/` opens no string that would blank
+ * the rest of the file.
  */
 function stripComments(src, blankStrings = false) {
   let out = '';
@@ -145,6 +167,17 @@ function stripComments(src, blankStrings = false) {
       while (j < src.length && src[j] !== c) { if (src[j] === '\\') j += 1; j += 1; }
       out += blankStrings ? c + c : src.slice(i, j + 1);
       i = j;
+    } else if (c === '/' && regexStarts(out)) {
+      let j = i + 1;
+      let inClass = false;
+      while (j < src.length && src[j] !== '\n' && (inClass || src[j] !== '/')) {
+        if (src[j] === '\\') j += 1;
+        else if (src[j] === '[') inClass = true;
+        else if (src[j] === ']') inClass = false;
+        j += 1;
+      }
+      out += blankStrings ? '/ /' : src.slice(i, j + 1);
+      i = j;
     } else {
       out += c;
     }
@@ -152,7 +185,8 @@ function stripComments(src, blankStrings = false) {
   return out;
 }
 
-const countIts = (src) => (stripComments(src, true).match(/\bit\(/g) || []).length;
+/** `it(`, `it (`, `it.only(`, `it.skip(` and `it.each(`: each one is a case Cypress reports. */
+const countIts = (src) => (stripComments(src, true).match(/\bit(?:\.(?:only|skip|each))?\s*\(/g) || []).length;
 
 /**
  * Calls an API helper (`ExpenseApi.clearAllExpenses(`), an e2e endpoint, or a raw

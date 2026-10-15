@@ -331,6 +331,19 @@ test('a commented-out it() is not a test case, and a // inside a string is not a
   assert.ok(impact.stripComments(src).includes("'http://x/'"));
 });
 
+test('it.only, it.skip and `it (` are cases too', () => {
+  const src = "it('a', () => {});\nit.only('b', () => {});\nit.skip('c', () => {});\nit ('d', () => {});\nedit('e'); split(x);";
+  assert.equal(impact.countIts(src), 4);
+});
+
+test('a quote inside a regex literal opens no string, so the cases after it are still counted', () => {
+  const src = "const clean = (s) => s.replace(/['\"]/g, '');\nit('a', () => {});\nit('b', () => { expect(x / 2 / y).to.eq(1); });";
+  assert.equal(impact.countIts(src), 2);
+  assert.ok(impact.stripComments(src).includes("/['\"]/g"));
+  // A division is not a regex: the `it(` after it is still a case.
+  assert.equal(impact.countIts("const h = total / 2; it('c', () => {}); const w = (a) / b; it('d', () => {});"), 2);
+});
+
 test('a per-row testid function and a template selector meet on the same prefix', () => {
   const ids = impact.parseTestIds([
     'export const cvTestIds = {',
