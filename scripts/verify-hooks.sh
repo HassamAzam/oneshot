@@ -555,7 +555,7 @@ expect_deny  "grep TOKEN by absolute path"     secret-guard.cjs \
 expect_allow "the work repo's own .env"        secret-guard.cjs \
     "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"cat .env"}}' "$ONESHOT_WORKTREE")"
 expect_allow "grepping the source for a name"  secret-guard.cjs \
-    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"grep -rn GITLAB_TOKEN src/"}}'
+    "$(printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"grep -rn GITLAB_TOKEN src/"}}' "$ONESHOT_WORKTREE")"
 expect_allow "reading an ordinary file"        secret-guard.cjs \
     '{"tool_name":"Read","tool_input":{"file_path":"/tmp/notes.md"}}'
 # The shell expands these; the guard has to as well. HOME is pointed at the
@@ -678,16 +678,71 @@ expect_allow "grep the specs for Cypress.env(" \
 expect_allow "cat cypress.config.ts"   secret-guard.cjs "$(bash_cwd_payload "$LT_REPO" 'cat cypress.config.ts')"
 expect_allow "recursive grep in a worktree with no cypress.env.json" \
                                        secret-guard.cjs "$(bash_cwd_payload "$ONESHOT_WORKTREE" 'grep -rn TODO .')"
-# grep -r honours no ignore file, so from at or above state/runs it opens every run's
-# worktree; rg skips state/ as ignored. A stand-in ONESHOT_HOME keeps the fixture out
-# of this checkout's real state/.
+# From at or above state/runs a search opens every run's worktree, whatever the
+# searcher: grep -r honours no ignore file, and ripgrep (the Grep tool too) reads an
+# ignored directory it is pointed at, or any with -u. A stand-in ONESHOT_HOME keeps
+# the fixture out of this checkout's real state/.
 mkdir -p "$LT/state/runs/9/wsa" && printf '{}\n' > "$LT/state/runs/9/wsa/cypress.env.json"
 ONESHOT_HOME="$LT" expect_deny "grep -r over state/runs reaches every run's worktree" \
                                        secret-guard.cjs "$(bash_cwd_payload "$LT" 'grep -rn baseUrl state/runs')"
-ONESHOT_HOME="$LT" expect_allow "rg from the Oneshot root (state/ is ignored)" \
+ONESHOT_HOME="$LT" expect_deny "rg over state/runs (an ignored directory it is pointed at)" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT" 'rg PASSWORD state/runs')"
+ONESHOT_HOME="$LT" expect_deny "Grep content over state/runs" \
+    secret-guard.cjs "$(grep_payload '{"pattern":"PASSWORD","path":"'"$LT/state/runs"'","output_mode":"content"}')"
+ONESHOT_HOME="$LT" expect_deny "rg -u from the Oneshot root" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT" 'rg -u baseUrl')"
+ONESHOT_HOME="$LT" expect_deny "rg from the Oneshot root (an ancestor of every run's worktree)" \
                                        secret-guard.cjs "$(bash_cwd_payload "$LT" 'rg baseUrl')"
+ONESHOT_HOME="$LT" expect_allow "rg over state/, leaving the file out" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT" "rg -g '!cypress.env.json' baseUrl state")"
+ONESHOT_HOME="$LT" expect_allow "Grep content over state/runs, leaving the file out" \
+    secret-guard.cjs "$(grep_payload '{"pattern":"PASSWORD","path":"'"$LT/state/runs"'","glob":"!cypress.env.json","output_mode":"content"}')"
+expect_deny  "grep -r over the folder that holds the clone" \
+                                       secret-guard.cjs "$(bash_cwd_payload /tmp "grep -rn baseUrl $LT")"
+expect_deny  "Grep content over the folder above the credentials file" \
+    secret-guard.cjs "$(grep_payload '{"pattern":"pass","path":"'"$LT"'","output_mode":"content"}')"
 expect_allow "Read of another file next to the credentials" \
                                        secret-guard.cjs "$(read_payload "$LT/config/notes.json")"
+
+# The name, shattered or never written, and the readers that open a whole tree.
+# Each stands in a run worktree (or the clone) that holds a cypress.env.json.
+expect_deny  "cat with quotes inside the name" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_RUN/wsa" 'cat cyp"ress".env.json')"
+expect_deny  "cat with a backslash inside the name" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_RUN/wsa" 'cat cypress\.env.json')"
+expect_deny  "cat with a bracket glob" secret-guard.cjs "$(bash_cwd_payload "$LT_RUN/wsa" 'cat cypress.env.jso[n]')"
+expect_deny  "a variable set earlier, read through" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_RUN/wsa" 'F=cypress.env; cat $F.json')"
+expect_deny  "an exported variable, braced" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_RUN/wsa" 'export F=cypress.env && cat ${F}.json')"
+expect_deny  "ls the name, then xargs cat" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_RUN/wsa" 'ls cypress.env.json | xargs cat')"
+expect_deny  "find . -type f -exec cat" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_RUN/wsa" 'find . -type f -exec cat {} +')"
+expect_deny  "find | xargs cat"        secret-guard.cjs "$(bash_cwd_payload "$LT_REPO" 'find . -type f | xargs cat')"
+expect_deny  "tar the worktree, then read the archive" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_RUN/wsa" 'tar cf /tmp/z.tar . && tar xOf /tmp/z.tar')"
+expect_deny  "tar -C <clone>"          secret-guard.cjs "$(bash_cwd_payload /tmp "tar -czf /tmp/z.tgz -C $LT_REPO .")"
+expect_deny  "cp -R the clone out"     secret-guard.cjs "$(bash_cwd_payload /tmp "cp -R $LT_REPO/. /tmp/cp2")"
+expect_deny  "rsync -a the clone out"  secret-guard.cjs "$(bash_cwd_payload /tmp "rsync -a $LT_REPO/ /tmp/cp3/")"
+expect_deny  "diff -r a run worktree against the clone" \
+                                       secret-guard.cjs "$(bash_cwd_payload /tmp "diff -r $LT_RUN/wsa $LT_REPO")"
+expect_allow "find narrowed by -name, -exec grep" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_REPO" "find . -name '*.cy.ts' -exec grep -l visit {} +")"
+expect_allow "find -exec over cypress/ only" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_REPO" 'find cypress -type f -exec wc -l {} +')"
+expect_deny  "find narrowed by -name, undone by -o" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_REPO" "find . -name '*.ts' -o -type f -exec cat {} +")"
+expect_allow "cp -R of cypress/ only"  secret-guard.cjs "$(bash_cwd_payload "$LT_REPO" 'cp -R cypress/e2e /tmp/specs')"
+expect_allow "tar of cypress/ only"    secret-guard.cjs "$(bash_cwd_payload "$LT_REPO" 'tar cf /tmp/specs.tar cypress')"
+expect_allow "rsync -a leaving the file out" \
+                                       secret-guard.cjs "$(bash_cwd_payload /tmp "rsync -a --exclude=cypress.env.json $LT_REPO/ /tmp/cp3/")"
+expect_allow "git ls-files cypress | xargs grep" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_REPO" 'git ls-files cypress | xargs grep -l visit')"
+expect_allow "a variable naming another file" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_REPO" 'F=cypress.config; cat $F.ts')"
+expect_allow "cp of a single file in the clone" \
+                                       secret-guard.cjs "$(bash_cwd_payload "$LT_REPO" 'cp cypress.config.ts /tmp/c.ts')"
 
 # wsa-run is the run step's worktree, and its cypress.env.json is the committed file
 # merged with the desk credentials. capture removes wsa before the run starts, so

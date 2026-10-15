@@ -42,8 +42,10 @@
  * it (the Grep tool's content mode, or a recursive grep/rg/git grep rooted
  * where the file sits) is denied too, and so is git that prints the clone's or
  * a wsa-run's working tree as a patch (`git diff`, `git show`, `log -p`) with
- * no pathspec leaving the file out. The way out is the narrower command the
- * session wanted anyway.
+ * no pathspec leaving the file out. So is a bulk reader rooted at or above one
+ * — a recursive copy, an archive, a tree diff, a `find -exec` — and an `xargs`
+ * fed the names of a directory that holds one. The way out is the narrower
+ * command the session wanted anyway.
  *
  * Brace expansion is judged by what it expands to (`cat *.{json,ts}`), and a
  * segment whose judging throws is refused when a credentials file could be in
@@ -114,7 +116,9 @@ const CREDS_DENIAL =
   '(`--exclude=cypress.env.json`, `-g \'!cypress.env.json\'`, a Grep `glob`). A `git diff`, ' +
   '`git show` or `git log -p` in the clone or a wsa-run prints that file\'s local changes without ' +
   'naming it: give it a pathspec (`-- cypress/`, or `-- . \':!cypress.env.json\'`), or use ' +
-  '`--stat`/`--name-only`. Listing or testing for it (`ls`, `test -f`) is fine.\n' +
+  '`--stat`/`--name-only`. A recursive copy, an archive, a `find -exec` or an `xargs` fed from a ' +
+  'directory holding one opens it too: name a narrower directory, or narrow `find` with `-name`. ' +
+  'Listing or testing for it (`ls`, `test -f`) is fine.\n' +
   'If something genuinely cannot proceed without a credential, report that in `blocked` — the ' +
   'key\'s name, never its value.';
 
@@ -128,12 +132,17 @@ function within(child, parent) {
   return c === p || c.startsWith(p.endsWith(path.sep) ? p : p + path.sep);
 }
 
-/** A shell or ripgrep glob as a case-folded RegExp: `*`, `**`, `?` and `{a,b}`. */
+/** A shell or ripgrep glob as a case-folded RegExp: `*`, `**`, `?`, `[…]` and `{a,b}`. */
 function globRe(glob) {
   let re = '';
   for (let i = 0; i < glob.length; i += 1) {
     const ch = glob[i];
-    if (ch === '*' && glob[i + 1] === '*') {
+    const close = ch === '[' ? classEnd(glob, i) : -1;
+    if (close !== -1) {
+      const body = glob.slice(i + 1, close).replace(/^[!^]/, '^').replace(/\\/g, '\\\\');
+      re += `[${body.replace(/^(\^?)\]/, '$1\\]')}]`;
+      i = close;
+    } else if (ch === '*' && glob[i + 1] === '*') {
       re += '.*';
       i += glob[i + 2] === '/' ? 2 : 1;
     } else if (ch === '*') {
@@ -147,6 +156,18 @@ function globRe(glob) {
     }
   }
   return new RegExp(`^${re}$`, 'i');
+}
+
+/**
+ * Where the bracket expression opening at `glob[i]` closes, or -1 when it does
+ * not: a `]` straight after the `[` (or after its `!`/`^`) is a member, as in
+ * a shell, so `[]x]` is one class.
+ */
+function classEnd(glob, i) {
+  let j = i + 1;
+  if (glob[j] === '!' || glob[j] === '^') j += 1;
+  if (glob[j] === ']') j += 1;
+  return glob.indexOf(']', j);
 }
 
 /**
@@ -246,34 +267,38 @@ function credsFile(abs) {
 }
 
 /**
- * The credentials files a search rooted at `dir` opens, relative to it: a
- * cypress.env.json at the top (the clone, a wsa or wsa-run worktree) or under
- * wsa/ or wsa-run/ (a run directory), and the credentials file when `dir` is
- * its folder. Nothing deeper is looked for; a tree walk on every search would
- * cost more than the guard is worth.
- *
- * The one exception is `deep`, for `grep -r`: it honours no ignore file, so
- * from at or above state/runs it opens every run's worktrees — wsa-run's
- * included, which is the one holding the desk credentials while a run is in
- * progress. ripgrep and the Grep tool skip state/ as ignored, and are not
- * asked about it.
+ * Every credentials file this desk keeps at a place it knows: the clone's,
+ * each run's wsa and wsa-run worktree's, and the desk's own file.
  */
-function reachable(dir, deep = false) {
-  const found = [CYPRESS_ENV, ...RUN_CHECKOUTS.map((n) => path.join(n, CYPRESS_ENV))]
-    .filter((rel) => fs.existsSync(path.join(dir, rel)));
-  if (fs.existsSync(CREDS) && CREDS_DIR === C.realish(dir)) {
-    found.push(path.basename(CREDS));
-  }
+function knownCreds() {
+  const { repo } = C.localTests();
+  const files = [CREDS];
+  if (repo) files.push(path.join(repo, CYPRESS_ENV));
   const runs = path.join(C.STATE, 'runs');
-  if (deep && fs.existsSync(runs) && C.isInside(runs, dir)) {
+  if (fs.existsSync(runs)) {
     for (const iid of fs.readdirSync(runs)) {
-      for (const n of RUN_CHECKOUTS) {
-        const file = path.join(runs, iid, n, CYPRESS_ENV);
-        if (fs.existsSync(file)) found.push(path.relative(C.realish(dir), C.realish(file)));
-      }
+      files.push(...RUN_CHECKOUTS.map((n) => path.join(runs, iid, n, CYPRESS_ENV)));
     }
   }
-  return found;
+  return files.filter((f) => fs.existsSync(f));
+}
+
+/**
+ * The credentials files a search rooted at `dir` opens, relative to it: a
+ * cypress.env.json at the top (any checkout of workstream-automation) or under
+ * wsa/ or wsa-run/ (a run directory), and every known one `dir` is an
+ * ancestor of. Whatever the searcher: ripgrep skips state/ as ignored only
+ * when it walks into it from above — it reads it when it is named (`rg x
+ * state/runs`) or with `-u` — and grep -r honours no ignore file at all.
+ * Case-folded, like within().
+ */
+function reachable(dir) {
+  const top = [CYPRESS_ENV, ...RUN_CHECKOUTS.map((n) => path.join(n, CYPRESS_ENV))]
+    .filter((rel) => fs.existsSync(path.join(dir, rel)));
+  const root = C.realish(dir).toLowerCase();
+  const below = knownCreds().filter((f) => within(f, dir))
+    .map((f) => path.relative(root, C.realish(f).toLowerCase()));
+  return [...new Set([...top, ...below])];
 }
 
 /** Grep tool: the file a content-mode search of `dir` would print lines of, or undefined. */
@@ -290,10 +315,12 @@ function grepReveals(input, dir) {
 /**
  * Does this word name a credentials file? A word with a glob in its last part
  * is judged by what it would expand to, so `cat *.json` in the clone counts.
- * One that does not compile names it whenever its directory holds one.
+ * One that does not compile names it whenever its directory holds one. A
+ * variable an earlier segment set is read through (`F=cypress.env; cat
+ * $F.json`).
  */
-function namesCreds(word, here) {
-  const w = expand(word);
+function namesCreds(word, here, vars = {}) {
+  const w = expand(word).replace(/\$(?:\{(\w+)\}|(\w+))/g, (m, a, b) => vars[a || b] ?? m);
   const abs = path.resolve(here, w);
   const name = path.basename(w);
   if (!/[*?[]/.test(name)) return credsFile(abs);
@@ -376,7 +403,7 @@ function searchReveals(argv0, rest, here) {
   const roots = given.length ? given.filter((p) => fs.statSync(p).isDirectory()) : [base];
   const f = searchFilters(args);
   for (const root of roots) {
-    for (const rel of reachable(root, /grep$/.test(argv0))) {
+    for (const rel of reachable(root)) {
       if (f.excludes.some((g) => globTakes(g, rel, false))) continue;
       if (f.includes.length && !f.includes.some((g) => globTakes(g, rel, true))) continue;
       if (f.types.length && !f.types.some((t) => t.toLowerCase() === 'json')) continue;
@@ -384,6 +411,111 @@ function searchReveals(argv0, rest, here) {
     }
   }
   return null;
+}
+
+// ------------------------------------------------------- bulk readers
+
+/** The operands of `args` that are directories, resolved from `base`. */
+function dirOperands(args, base) {
+  return args.filter((a) => !a.startsWith('-'))
+    .map((a) => path.resolve(base, expand(a)))
+    .filter((p) => fs.existsSync(p) && fs.statSync(p).isDirectory());
+}
+
+/**
+ * Does a `find` expression narrow what it hands on so no credentials file is
+ * among it? By a `-name` that none of `rels` matches, with no `-o` to undo it.
+ * Leaving the file out by name (`! -name cypress.env.json`) names it, which
+ * the name rule has already refused.
+ */
+function findNarrowed(expr, rels) {
+  if (!rels.length) return true;
+  if (expr.some((a) => a === '-o' || a === '-or')) return false;
+  return expr.some((a, i) => (a === '-name' || a === '-iname') && !['!', '-not'].includes(expr[i - 1])
+    && !rels.some((rel) => globTakes(expr[i + 1] || '', path.basename(rel), true)));
+}
+
+/** A `find` call's start points (after -H/-L/-P) and its expression. */
+function findParts(rest) {
+  const args = rest.filter((a, i) => !(['-H', '-L', '-P'].includes(a) && rest.slice(0, i).every((b) => b.startsWith('-'))));
+  const i = args.findIndex((a) => a.startsWith('-') || a === '(' || a === '!');
+  return { starts: i === -1 ? args : args.slice(0, i), expr: i === -1 ? [] : args.slice(i) };
+}
+
+/** The credentials files under `roots` that no `--exclude=` among `args` leaves out. */
+function bulkOpens(roots, args, here) {
+  const excludes = args.filter((a) => a.startsWith('--exclude=')).map((a) => a.slice('--exclude='.length));
+  for (const root of roots) {
+    const rel = reachable(root).find((r) => !excludes.some((g) => globTakes(g, r, false)));
+    if (rel) return path.join(root, rel);
+  }
+  return null;
+}
+
+/**
+ * A command that opens every file under the directories it is given: a
+ * recursive copy (`cp -R <clone>/. /tmp/x`, rsync, scp, ditto), an archive
+ * (`tar c`, `zip -r`), a tree diff (`diff -r`), or a `find` that runs a
+ * command on what it finds. Rooted at or above a credentials file it opens
+ * that too, without naming it. Returns the file, or null.
+ */
+function bulkReveals(argv0, rest, here) {
+  const opts = rest.filter((a) => a.startsWith('-'));
+  const operands = rest.filter((a) => !a.startsWith('-'));
+  const flag = (re) => opts.some((a) => re.test(a));
+  switch (argv0) {
+    case 'cp':
+    case 'scp':
+    case 'rsync':
+      return flag(/^-[^-]*[rRa]|^--(?:recursive|archive)$/)
+        ? bulkOpens(dirOperands(operands.slice(0, -1), here), rest, here) : null;
+    case 'ditto':
+      return bulkOpens(dirOperands(operands.slice(0, -1), here), rest, here);
+    case 'diff':
+      return flag(/^-[^-]*r|^--recursive$/) ? bulkOpens(dirOperands(operands, here), rest, here) : null;
+    case 'zip':
+      return flag(/^-[^-]*r|^--recurse-paths$/) ? bulkOpens(dirOperands(operands, here), rest, here) : null;
+    case 'tar': {
+      const create = (rest[0] && !rest[0].startsWith('-') && rest[0].includes('c'))
+        || flag(/^-[^-]*c|^--create$/);
+      if (!create) return null;
+      const ci = rest.lastIndexOf('-C');
+      const base = ci === -1 ? here : path.resolve(here, expand(rest[ci + 1] || '.'));
+      return bulkOpens(dirOperands(operands, base), rest, here);
+    }
+    case 'find': {
+      const { starts, expr } = findParts(rest);
+      if (!expr.some((a) => /^-(?:exec|execdir|ok|okdir)$/.test(a))) return null;
+      const roots = dirOperands(starts.length ? starts : ['.'], here);
+      return roots.map((r) => ({ r, rels: reachable(r) })).find(({ rels }) => !findNarrowed(expr, rels))
+        ? path.join(here, CYPRESS_ENV) : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Does this segment print the names of a directory holding a credentials file,
+ * for an `xargs` later in the command to open? `ls` and `find` (unnarrowed)
+ * rooted there, and `git ls-files` with no pathspec standing in one.
+ */
+function listsReach(argv0, rest, here) {
+  if (argv0 === 'ls') {
+    const roots = dirOperands(rest, here);
+    return (roots.length ? roots : [here]).some((r) => reachable(r).length > 0);
+  }
+  if (argv0 === 'find') {
+    const { starts, expr } = findParts(rest);
+    return dirOperands(starts.length ? starts : ['.'], here)
+      .some((r) => !findNarrowed(expr, reachable(r)));
+  }
+  if (argv0 === 'git' && rest.includes('ls-files')) {
+    const after = rest.slice(rest.indexOf('ls-files') + 1).filter((a) => !a.startsWith('-'));
+    const roots = after.length ? dirOperands(after, here) : [here];
+    return roots.some((r) => reachable(r).length > 0);
+  }
+  return false;
 }
 
 // ------------------------------------------------------- git that prints a patch
@@ -611,25 +743,47 @@ try {
     // Each segment is judged on its own: one that throws is refused when a
     // credentials file is in reach of it, rather than reaching the catch at the
     // bottom and allowing every segment after it as well.
+    //
+    // A word is judged twice: as the shell splits it at its quotes, and with
+    // the quotes taken out, which is what the shell hands the command —
+    // `cat cyp"ress".env.json` is `cat cypress.env.json`. A variable set by a
+    // segment of its own is read through in every later one. Listing or
+    // testing for the file is fine on its own, but remembered: an `xargs`
+    // later in the command opens whatever it was handed.
     let here = cwd;
+    const shellVars = {};
+    let listed = false;
     for (const raw of segments(input.command)) {
       const segment = raw.replace(/^[({]+\s*/, '').replace(/\s*\)+$/, '');
       try {
-        const t = segment.replace(/["']/g, '').split(/\s+/).filter(Boolean);
+        const unquoted = segment.replace(/["'\\]/g, '');
+        const t = unquoted.split(/\s+/).filter(Boolean);
         const vars = {};
         while (t.length && (/^[A-Za-z_]\w*=/.test(t[0]) || WRAPPERS.has(t[0]))) {
           const m = t.shift().match(/^([A-Za-z_]\w*)=(.*)$/);
           if (m) vars[m[1]] = m[2];
         }
         const argv0 = path.basename(t[0] || '');
+        if (!t.length || ['export', 'declare', 'local', 'readonly', 'typeset'].includes(argv0)) {
+          Object.assign(shellVars, vars);
+          for (const a of t.slice(1)) {
+            const m = a.match(/^([A-Za-z_]\w*)=(.*)$/);
+            if (m) shellVars[m[1]] = m[2];
+          }
+        }
         if (argv0 === 'cd' || argv0 === 'pushd') {
           const to = t.slice(1).find((a) => a === '-' || !a.startsWith('-'));
           if (to === undefined && argv0 === 'cd') here = HOME;
           else if (to && to !== '-') here = path.resolve(here, expand(to));
           continue;
         }
+        const names = [...pathWords(segment), ...pathWords(unquoted)]
+          .some((w) => namesCreds(w, here, shellVars));
+        if (names || listsReach(argv0, t.slice(1), here)) listed = true;
         if (INERT.has(argv0)) continue;
-        if (pathWords(segment).some((w) => namesCreds(w, here))
+        if (names
+          || ((argv0 === 'xargs' || argv0 === 'parallel') && listed)
+          || bulkReveals(argv0, t.slice(1), here)
           || searchReveals(argv0, t.slice(1), here)
           || (argv0 === 'git' && gitReveals(t.slice(1), vars, here))) {
           C.event('denied_cypress_creds', { tool, segment: segment.slice(0, 120) });
