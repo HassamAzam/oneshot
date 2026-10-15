@@ -1370,18 +1370,19 @@ carry work the steps do not.
   \`backend\` (server code, migrations and their tests) or \`config\`: settings, environment
   variables, feature flags, dependency manifests, CI or deploy files — anything someone has to
   set rather than something the app does. \`what\` is at most ~12 words naming the symbol:
-  "Add \`get_maternity_cycle_summary()\`", "New \`MaternityQuotaBar\` component", "Remove the
-  unused \`LeaveTypesWithHalfDayDisabled\`". No why and no line numbers; the steps carry both.
+  "Add \`get_thing_summary()\`", "New \`ThingBadge\` component", "Remove the unused
+  \`LEGACY_THING_TYPES\`". No why and no line numbers; the steps carry both.
 - \`flow\` is the real runtime path, not an architecture sketch — "User → Frontend → Backend →
-  DB" is a wrong answer. Start from research's \`codePath\`, which is already the trace in
-  execution order, and follow the request: the entry point a person or scheduler triggers (the
+  DB" is a wrong answer. Start from the un-prefixed entries in research's \`codePath\` — the trace, in
+  execution order; a kind-prefixed entry is a candidate research surveyed, not a node on the
+  path — and follow the request: the entry point a person or scheduler triggers (the
   component with the button, a management command, a beat task) → the components it renders →
   the call it makes to the server → the view → the helpers, serializers and managers it reaches
   → the models it reads or writes → any external service. Add a side path only when this plan
   touches it: a task it enqueues, a template it renders, a websocket it pushes to.
 - One node per code unit a developer would open — a component, a view, a function, a model, a
-  migration, a template — labelled with its exact identifier (\`LeaveSummaryView\`,
-  \`get_person_leave_info()\`, \`LeaveLimit\`, \`0020_add_employee_maternity_leave_limit\`). Not a
+  migration, a template — labelled with its exact identifier (\`ThingDetailView\`,
+  \`get_thing_summary()\`, \`ThingLimit\`, \`0021_add_thing_flag\`). Not a
   file path, not a sentence. One file can hold several nodes.
 - Every new, modified or removed unit that runs at runtime gets a node with that \`change\`.
   Leave out tests, style modules, fixtures, \`max_migration.txt\`, index re-exports and docs —
@@ -1396,8 +1397,8 @@ carry work the steps do not.
 - Edges go from caller to callee, reader to what it reads or writes, listener to what it
   listens to — never back along a response, so the diagram has no loops. Label an edge only
   when the label says what the arrow cannot: the HTTP method and path
-  (\`GET leaves/leave_summary/get/\`), a condition (\`if Maternity\`), a data verb
-  (\`reads count\`, \`seeds row\`, \`enqueues\`). Plain renders and calls stay unlabelled.
+  (\`GET things/<id>/\`), a condition (\`if is_active\`), a data verb
+  (\`reads limit\`, \`seeds row\`, \`enqueues\`). Plain renders and calls stay unlabelled.
 - Most plans need 4-14 nodes; 18 is a hard cap. GitLab will not draw a diagram over 2,000
   characters, so keep \`label\` to the identifier and each \`detail\` line under ~45 characters —
   the renderer sheds detail to fit, and what it sheds is gone from the one picture the approver

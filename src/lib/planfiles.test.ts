@@ -4,7 +4,7 @@ import { fileChangesOf, fileChangesSection, planFilePaths, renderFileChanges } f
 
 const fc = (path: string, action: string, area: string, what = 'x') => ({ path, action, area, what });
 
-/** #8765's shape, trimmed: a data migration, backend helpers, new and edited React files. */
+/** The largest plan measured so far, trimmed: a data migration, backend helpers, new and edited React files. */
 const plan = {
   steps: [
     { n: 1, what: 'seed', layer: 'migration', files: ['common/migrations/0020_add_limit.py'] },
@@ -147,4 +147,16 @@ test('the paths a plan declares include a table row the table itself would drop'
 test('a plan with no files anywhere declares no paths', () => {
   assert.deepEqual(planFilePaths(null), []);
   assert.deepEqual(planFilePaths({ steps: 'nope', fileChanges: {} }), []);
+});
+
+test('a path with odd inner whitespace is one path everywhere: listed once, never also warned as missing', () => {
+  // The table collapsed inner whitespace while the gate's list and the
+  // missing-from-the-tables check only trimmed, so the same file was a row and
+  // a "missing" warning at once, and reached the gate under a second spelling.
+  const plan = {
+    steps: [{ n: 1, what: 'x', files: ['apps/leaves/odd  name.py'], layer: 'backend' }],
+    fileChanges: [fc('apps/leaves/odd\tname.py', 'modify', 'backend')],
+  };
+  assert.deepEqual(planFilePaths(plan), ['apps/leaves/odd name.py']);
+  assert.doesNotMatch(renderFileChanges(plan).markdown, /missing from these tables/);
 });

@@ -264,8 +264,8 @@ export const PLAN_SCHEMA = phaseSchema({
     'a fragment with no name. One of four verdicts per entry: reuse it, extend it, ' +
     'collapse a duplicate onto it, or rejected — and a rejection stays here with its ' +
     'reason on the same line, because a candidate silently dropped is indistinguishable ' +
-    'from one nobody found. Read by implement; the approval comment does NOT render it, ' +
-    "so a choice somebody must be able to decline goes in approach, openQuestions, " +
+    'from one nobody found. Read by implement; the plan note shows it as verdicts, not as a ' +
+    "question, so a choice somebody must be able to decline goes in approach, openQuestions, " +
     "outOfScope or a step's what instead.",
   ),
   steps: {
@@ -357,7 +357,7 @@ export const PLAN_SCHEMA = phaseSchema({
         },
         what: str(
           'What changes in this file, at most ~12 words, naming the symbol: "Add ' +
-          'get_maternity_cycle_summary()", "New MaternityQuotaBar component". No why, no line numbers — ' +
+          'get_thing_summary()", "New ThingBadge component". No why, no line numbers — ' +
           'the steps carry both.',
         ),
       },
@@ -381,10 +381,10 @@ export const PLAN_SCHEMA = phaseSchema({
           type: 'object',
           additionalProperties: false,
           properties: {
-            id: str('Short unique slug that edges refer to, e.g. "summary_view". Never shown.'),
+            id: str('Short unique slug that edges refer to, e.g. "detail_view". Never shown.'),
             label: str(
-              'The exact identifier a developer would grep: "LeaveSummaryView", "get_person_leave_info()", ' +
-              '"LeaveLimit", "0020_add_employee_maternity_leave_limit". No path, no sentence, no +/~ ' +
+              'The exact identifier a developer would grep: "ThingDetailView", "get_thing_summary()", ' +
+              '"ThingLimit", "0021_add_thing_flag". No path, no sentence, no +/~ ' +
               'prefix. <= 40 chars.',
             ),
             kind: { type: 'string', enum: [...FLOW_KINDS], description: FLOW_KIND_DOC },
@@ -397,8 +397,8 @@ export const PLAN_SCHEMA = phaseSchema({
             },
             detail: strArr(
               'What changes here, 0-2 lines of <= 45 chars; [] for unchanged context. Models: one line ' +
-              'per field, up to 4: "+ cycle_start: DateField", "- legacy_flag", "~ count: 45 -> 90". A ' +
-              'data migration names its rows: "+ row: Maternity, EMPLOYEE, count 90".',
+              'per field, up to 4: "+ starts_on: DateField", "- legacy_flag", "~ limit: 10 -> 20". A ' +
+              'data migration names its rows: "+ row: STANDARD, limit 20".',
             ),
           },
           required: ['id', 'label', 'kind', 'change', 'detail'],
@@ -417,7 +417,7 @@ export const PLAN_SCHEMA = phaseSchema({
             to: str('Node id of the callee / what is read or written / what is listened to.'),
             label: str(
               '"" for a plain call or render. Otherwise what the arrow cannot say, <= 32 chars: ' +
-              '"GET leaves/leave_summary/get/", "if Maternity", "reads count", "seeds row", "enqueues".',
+              '"GET things/<id>/", "if is_active", "reads limit", "seeds row", "enqueues".',
             ),
           },
           required: ['from', 'to', 'label'],

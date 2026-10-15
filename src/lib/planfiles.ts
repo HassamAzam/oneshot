@@ -5,8 +5,8 @@
  * question. The approver's question is the transpose: "what happens to the
  * codebase", split the way a team splits review — frontend, backend, and the
  * config someone has to set on a server. Before this, the only place a file
- * appeared was trailing off the end of a step paragraph, so #8765's approval
- * comment held its 19 files inside 10.6 KB of prose, and whether a file was
+ * appeared was trailing off the end of a step paragraph, so the largest plan
+ * measured so far held its 19 files inside 10.6 KB of prose, and whether a file was
  * new or edited was not written down anywhere at all.
  *
  * `action` and `area` come from the planner rather than from the path. Only
@@ -48,12 +48,23 @@ function asArray(v: unknown): unknown[] {
  * be worse than no row. A second entry for the same path is dropped too: one
  * file, one row, whatever the steps did to it.
  */
+/**
+ * One spelling of a path for every reader: whitespace runs collapsed to a
+ * single space, ends trimmed. The table, the gate's list and the
+ * missing-from-the-tables check all go through this, or the same file is a
+ * row and a "missing" warning at once. It is also why `cellCode` can skip
+ * newline handling: no path that reaches it still carries one.
+ */
+function normalPath(p: unknown): string {
+  return String(p ?? '').replace(/\s+/g, ' ').trim();
+}
+
 export function fileChangesOf(plan: FilesPlan | null, warnings: string[]): FileChange[] {
   const out: FileChange[] = [];
   const seen = new Set<string>();
   for (const v of asArray(plan?.fileChanges)) {
     const c = (v ?? {}) as Record<string, unknown>;
-    const path = String(c.path ?? '').replace(/\s+/g, ' ').trim();
+    const path = normalPath(c.path);
     const action = c.action as FileAction;
     const area = c.area as FileArea;
     if (!path) { warnings.push('file change without a path dropped'); continue; }
@@ -83,7 +94,7 @@ export function fileChangesOf(plan: FilesPlan | null, warnings: string[]): FileC
 export function planFilePaths(plan: FilesPlan | null): string[] {
   const fromSteps = asArray(plan?.steps).flatMap((s) => asArray((s as { files?: unknown } | null)?.files));
   const fromTable = asArray(plan?.fileChanges).map((c) => (c as { path?: unknown } | null)?.path);
-  const paths = [...fromSteps, ...fromTable].map((p) => String(p ?? '').trim()).filter(Boolean);
+  const paths = [...fromSteps, ...fromTable].map(normalPath).filter(Boolean);
   return [...new Set(paths)];
 }
 
@@ -149,7 +160,7 @@ export function renderFileChanges(plan: FilesPlan | null): RenderedFileChanges {
 
   const listed = new Set(changes.map((c) => c.path));
   const steps = asArray(plan?.steps).map((s) => (s ?? {}) as { files?: unknown });
-  const unlisted = [...new Set(steps.flatMap((s) => asArray(s.files).map((f) => String(f).trim())))]
+  const unlisted = [...new Set(steps.flatMap((s) => asArray(s.files).map(normalPath)))]
     .filter((f) => f && !listed.has(f));
   if (unlisted.length) {
     parts.push(`⚠️ Named in the steps but missing from these tables: ${unlisted.map(codeSpan).join(', ')}`);

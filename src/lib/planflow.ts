@@ -33,7 +33,7 @@
  *
  * Layout is ELK (GitLab registers @mermaid-js/layout-elk 0.2.2), top-down,
  * one subgraph per layer. Dagre puts overlapping-rank subgraphs side by side,
- * which on a ~760px comment shrank #8765's 18 nodes to unreadable 4px text;
+ * which on a ~760px comment shrank an 18-node plan to unreadable 4px text;
  * ELK stacks the layers, so text stays near its natural size.
  */
 
@@ -224,8 +224,13 @@ function capFlow(flow: PlanFlow, warnings: string[]): PlanFlow {
     edges = edges.filter((e) => keep.has(e.from) && keep.has(e.to));
   }
   if (edges.length > MAX_EDGES) {
+    // Same priority as the node cap: an edge that touches a changed node is the
+    // picture, one between two context nodes is scenery. Model order is kept.
+    const changedIds = new Set(nodes.filter((n) => n.change !== 'unchanged').map((n) => n.id));
+    const touches = (e: FlowEdge): boolean => changedIds.has(e.from) || changedIds.has(e.to);
+    const keep = new Set([...edges.filter(touches), ...edges.filter((e) => !touches(e))].slice(0, MAX_EDGES));
     warnings.push(`${edges.length - MAX_EDGES} edge(s) over the ${MAX_EDGES}-edge cap dropped`);
-    edges = edges.slice(0, MAX_EDGES);
+    edges = edges.filter((e) => keep.has(e));
   }
   return { nodes, edges };
 }
@@ -266,10 +271,14 @@ function detailFor(n: FlowNode, shed: Shed): string[] {
   const cap = n.kind === 'model' ? shed.modelCap : shed.detailCap;
   if (n.detail.length <= cap) return n.detail.map(detailLine);
   if (cap === 0) return [];
+  // One slot goes to the first real line with a count, not to a bare counter
+  // that tells the approver nothing for more characters than dropping it.
+  if (cap === 1) return [`${detailLine(n.detail[0]!)} (+${n.detail.length - 1})`];
   return [...n.detail.slice(0, cap - 1).map(detailLine), `… ${n.detail.length - cap + 1} more`];
 }
 
-function draw(flow: PlanFlow, shed: Shed): string {
+/** The Mermaid source, and the nodes it actually drew — pruning can leave some out. */
+function draw(flow: PlanFlow, shed: Shed): { text: string; drawn: FlowNode[] } {
   const degree = new Map<string, number>();
   for (const e of flow.edges) {
     degree.set(e.from, (degree.get(e.from) ?? 0) + 1);
@@ -309,7 +318,7 @@ function draw(flow: PlanFlow, shed: Shed): string {
   }
   const used = new Set(nodes.map((n) => CHANGE[n.change].cls));
   for (const [cls, def] of Object.entries(CLASS_DEFS)) if (used.has(cls)) out.push(`classDef ${cls} ${def}`);
-  return out.join('\n');
+  return { text: out.join('\n'), drawn: nodes };
 }
 
 export interface RenderedFlow {
@@ -321,6 +330,8 @@ export interface RenderedFlow {
   /** False only when even the last rung is over budget: GitLab will show its Display button. */
   fits: boolean;
   flow: PlanFlow;
+  /** The nodes the chosen rung drew: `flow` after pruning. The key is built from these. */
+  drawn: FlowNode[];
   warnings: string[];
 }
 
@@ -329,15 +340,17 @@ export function renderFlowMermaid(raw: unknown): RenderedFlow | null {
   const normal = normaliseFlow(raw, warnings);
   if (!normal) return null;
   const flow = capFlow(normal, warnings);
-  let mermaid = '';
+  let out = { text: '', drawn: [] as FlowNode[] };
   for (let rung = 0; rung < LADDER.length; rung += 1) {
-    mermaid = draw(flow, LADDER[rung]!);
-    if (mermaid.length <= BUDGET) {
-      return { mermaid, chars: mermaid.length, rung, fits: true, flow, warnings };
+    out = draw(flow, LADDER[rung]!);
+    if (out.text.length <= BUDGET) {
+      return { mermaid: out.text, chars: out.text.length, rung, fits: true, flow, drawn: out.drawn, warnings };
     }
   }
-  warnings.push(`${mermaid.length} chars after every rung: GitLab will ask the reader to click Display`);
-  return { mermaid, chars: mermaid.length, rung: LADDER.length - 1, fits: false, flow, warnings };
+  warnings.push(`${out.text.length} chars after every rung: GitLab will ask the reader to click Display`);
+  return {
+    mermaid: out.text, chars: out.text.length, rung: LADDER.length - 1, fits: false, flow, drawn: out.drawn, warnings,
+  };
 }
 
 // ------------------------------------------------------------------ markdown
@@ -378,7 +391,7 @@ const LEGEND_SHAPE: Record<FlowKind, string> = {
  */
 export function flowBlock(r: RenderedFlow | null): string {
   if (!r) return '';
-  const { nodes } = r.flow;
+  const nodes = r.drawn;
   const statuses = FLOW_CHANGES.filter((c) => nodes.some((n) => n.change === c)).map((c) => LEGEND_STATUS[c]);
   const shapes = [...new Set(FLOW_KINDS.filter((k) => nodes.some((n) => n.kind === k)).map((k) => LEGEND_SHAPE[k]))];
   return `\`\`\`mermaid\n${r.mermaid}\n\`\`\`\n\n<sub>${statuses.join(' · ')} — ${shapes.join(' · ')}</sub>`;

@@ -11,8 +11,8 @@ const N = (id: string, label: string, kind: string, change: string, ...detail: s
   ({ id, label, kind, change, detail });
 const E = (from: string, to: string, label = '') => ({ from, to, label });
 
-/** #8765's flow as hand-traced from its plan and research: 18 nodes, 20 edges — the largest real plan so far. */
-const T8765 = {
+/** The largest real plan so far, its flow hand-traced from its plan and research: 18 nodes, 20 edges. */
+const LARGEST_PLAN = {
   nodes: [
     N('summary', 'LeaveSummary', 'component', 'modified', '+ maternity row branch'),
     N('row', 'MaternityLeaveRow', 'component', 'new', 'row, cycle caption, exhausted notice'),
@@ -167,8 +167,8 @@ test('hostile text cannot put an ampersand, a fence closer or an unbalanced quot
   }
 });
 
-test('the largest real plan so far, #8765, fits under GitLab\'s 2000 characters without a Display click', () => {
-  const r = renderFlowMermaid(T8765)!;
+test('the largest real plan so far fits under GitLab\'s 2000 characters without a Display click', () => {
+  const r = renderFlowMermaid(LARGEST_PLAN)!;
   assert.equal(r.warnings.length, 0, r.warnings.join('; '));
   assert.equal(r.flow.nodes.length, 18);
   assert.ok(r.fits);
@@ -188,6 +188,53 @@ test('a flow too big for the budget sheds detail, rung by rung, until it fits', 
   assert.ok(r.fits);
   assert.ok(r.rung > 0);
   assert.ok(r.chars <= GITLAB_MERMAID_MAX_CHARS - 10, String(r.chars));
+});
+
+test('with one detail slot a node shows its first line and a count, never a bare counter', () => {
+  // Rungs 2-3 cap detail at one line, which ordinary plans reach. Spending the
+  // slot on "… 2 more" drew every changed node as a name and a number.
+  const nodes = Array.from({ length: 14 }, (_, i) => node(`d${i}`, {
+    label: `helper_number_${i}()`,
+    detail: ['+ first detail line that is fairly long', '+ second detail line, also long'],
+  }));
+  const edges = nodes.slice(1).map((n, i) => E(nodes[i]!.id, n.id, 'GET /api/v1/things/'));
+  const r = renderFlowMermaid({ nodes, edges })!;
+  assert.ok(r.rung === 2 || r.rung === 3, `expected a one-slot rung, got ${r.rung}`);
+  assert.doesNotMatch(r.mermaid, /<\/b><br>… \d+ more"/);
+  assert.match(r.mermaid, /<br>\+\u00a0first detail line that is fairly long \(\+1\)"/);
+});
+
+test('over the edge cap, an edge that touches a changed node outlives one between context nodes', () => {
+  const context = Array.from({ length: 10 }, (_, i) => node(`u${i}`, { change: 'unchanged' }));
+  const pairs: Array<ReturnType<typeof E>> = [];
+  for (let a = 0; a < 10 && pairs.length < 27; a += 1) {
+    for (let b = a + 1; b < 10 && pairs.length < 27; b += 1) pairs.push(E(`u${a}`, `u${b}`));
+  }
+  const r = renderFlowMermaid({ nodes: [...context, node('c')], edges: [...pairs, E('u0', 'c')] })!;
+  assert.equal(r.flow.edges.length, 26);
+  assert.ok(r.flow.edges.some((e) => e.to === 'c'), 'the changed node keeps its edge');
+  assert.match(r.warnings.join('\n'), /2 edge\(s\) over the 26-edge cap dropped/);
+});
+
+test('the key names only what the pruned diagram still draws', () => {
+  // The last rungs prune unchanged leaves; a key built from the pre-prune node
+  // set still promised "dashed = unchanged" and the leaf's shape.
+  const nodes = [
+    ...Array.from({ length: 17 }, (_, i) => node(`x${i}`, {
+      label: `a_considerably_longer_function_name_${i}_for_the_budget()`,
+      detail: ['+ first detail line that is fairly long', '+ second detail line, also long'],
+    })),
+    node('leaf', { kind: 'model', change: 'unchanged', label: 'ContextModel' }),
+  ];
+  const edges = [
+    ...nodes.slice(1, 17).map((n, i) => E(nodes[i]!.id, n.id, 'GET /api/v1/a/rather/long/path/here/')),
+    E('x0', 'leaf', 'reads'),
+  ];
+  const r = renderFlowMermaid({ nodes, edges })!;
+  assert.ok(r.rung >= 5, `expected a pruning rung, got ${r.rung}`);
+  assert.doesNotMatch(r.mermaid, /ContextModel/);
+  const key = flowBlock(r).split('<sub>')[1]!;
+  assert.doesNotMatch(key, /unchanged|cylinder/);
 });
 
 test('over 18 nodes, every changed node is kept before any context node', () => {
