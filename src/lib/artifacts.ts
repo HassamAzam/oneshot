@@ -247,6 +247,40 @@ export interface RunJournal {
    */
   notABugApproval?: ReviewGateState;
   /**
+   * Verify-case QA gate state (armed only when `verify` has cycled through
+   * `implement` its full `maxLaps` and still records failing cases). A QA
+   * reviewer classifies each still-failing case — skip, invalid, expected
+   * behaviour or pre-existing — and the gate resolves once every failing case
+   * carries a directive, after which verify completes rather than blocking.
+   */
+  verifyCasesApproval?: ReviewGateState;
+  /**
+   * The QA verdicts that resolved the verify-case gate, kept so the MR note can
+   * list who decided what and why (the audit the gate exists to leave). One
+   * entry per case the gate resolved; `issueIid` is set only on `pre-existing`,
+   * the case that split off its own tracked bug.
+   */
+  verifyCaseDecisions?: Array<{
+    caseId: string; verdict: 'skip' | 'invalid' | 'expected' | 'pre-existing' | 'missing-steps';
+    by: string; note?: string; issueIid?: number;
+  }>;
+  /**
+   * The `missing-steps` route's per-case state. When QA says a still-failing
+   * case's steps are incomplete, the gate posts the steps verify followed and
+   * records the note id here; a QA reply after it is read as the corrected
+   * steps. `rerunDone` is set once that case has been re-executed with the
+   * corrected steps, so a case that still fails afterwards needs a terminal
+   * verdict rather than looping the same correction.
+   */
+  verifyMissingSteps?: Record<string, { oursNoteId: number; rerunDone?: boolean }>;
+  /**
+   * Case ids the NEXT verify run is scoped to — set when QA supplied corrected
+   * steps for a `missing-steps` case, cleared once that scoped run's results are
+   * merged back into verify.json. A scoped verify re-runs only these cases (no
+   * code changed), and the rest keep their prior results.
+   */
+  verifyRescopeCases?: string[];
+  /**
    * When the `merge` phase last asked GitLab whether a human has merged the
    * MR. A Review-labelled ticket is never merged by Oneshot, so this phase is
    * a wait, not an action, and re-asking on every --follow tick is pure noise.
@@ -255,6 +289,14 @@ export interface RunJournal {
    */
   humanMergeCheckAt?: number;
   branch?: string;
+  /**
+   * The immutable fork-point commit the run branched from (merge-base with the
+   * base branch). `publish` pins the plan's file links to this SHA so they show
+   * the exact code the plan was written against and never drift as the branch
+   * moves. Absent on journals written before it existed, and on resumed runs
+   * whose worktree predates it — the plan then renders file paths without links.
+   */
+  baseSha?: string;
   worktree?: string;
   port?: number;
   mrIid?: number;
@@ -290,6 +332,12 @@ export interface RunJournal {
   claimNoteId?: number;
   /** Publication keys already posted to GitLab — see lib/publish.ts. */
   published?: string[];
+  /**
+   * Note id GitLab assigned each published key, so a later note can link the
+   * exact comment (e.g. the plan gate linking the plan note) rather than a
+   * fragile "see the comment above". Absent for keys posted under DRY_RUN.
+   */
+  publishedNotes?: Record<string, number>;
   slackTs?: string;
   phases: PhaseRecord[];
   /** Blocks this run diagnosed and tried to clear by itself, oldest first. */

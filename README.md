@@ -94,6 +94,11 @@ Three things fall out of that:
       different from ⟨R⟩: the UI is drawn and agreed before it is planned.
       A ticket without the label never runs it and never sees the pause.
       See "Designing before building".
+
+  ⟨B⟩ the optional `Beta` label adds no phase and no pause: plan through mr
+      build and check a v2 BESIDE v1, which keeps working as it does today,
+      with a switch the end user flips to go back. See "Beta: a new version
+      beside the old one".
 ```
 
 **Merge is the last phase.** A merged change is where this pipeline's warrant runs out: the
@@ -339,6 +344,156 @@ they have to take on trust.
 audit record lands there. Slack gets the same write-only heads-up every other gate sends, because
 the dev who has to look is not the person watching the run's thread — but nothing is ever read
 back out of it, so a Slack that is down costs a notification and never a verdict.
+
+## Beta: a new version beside the old one
+
+`Design` decides what a change looks like. `Beta` decides how it ships. Put it on a ticket
+alongside `Loop` and the change is built as a **new version of the feature (v2) beside the one
+users have today (v1)**, not as an edit to it, with a switch that lets the end user go back to v1
+and forward again. On a ticket carrying both, the approved design covers the screens and the
+switch sits above them, outside it — so it is never counted as a departure from the design.
+
+**The layout is Project Logs v2's; the switch is new.** Project Logs v2 is a sibling
+`project_logs_v2/` directory beside `project_logs/`, one route wrapper (`LogsVersionRoute.js`) that
+renders either version at the same URL, and an `api/v2/` folder only where an endpoint had to
+differ. It has no switch — its version comes from a server allowlist the user never sees — so the
+switch, and the per-user choice behind it, is the part this label adds. `skills/beta-version-toggle`
+carries both, with every path cited on `origin/dev`.
+
+**It adds no phase and no pause.** Like `Bug` at research and `Accessibility` at plan, it is a
+`labelSkills` entry in `config/phases.json` — one per phase that plans, builds, checks or shows the
+work — and each of those phases is handed the same contract and its own part in it:
+
+| phase | its part |
+|---|---|
+| `plan` | names v1's directory, the `<module>_v2/` files, the routes the switch wraps, any v1 file v2 must extend, and where the choice is kept; the switch gets its own steps |
+| `implement` | builds v2 beside v1, then the switch point and the switch as their own commit; extends a v1 file only backward-compatibly, and names each one |
+| `testcases` | the criteria in v2, the switch both ways, v1's main flow as a regression case, the choice across a reload and a re-login, and the never-touched case landing on v2 |
+| `review` | reads every v1 file the diff touches — anything but a backward-compatible extension is a `major` finding, and so is v1 importing v2 — and checks in the code that the choice is keyed by the signed-in user, since `verify` has one login and cannot try a second account |
+| `verify` | reaches each version by clicking the switch, never by writing the stored choice, and logs out through the app; it removes the stored choice only as setup for the never-touched case |
+| `ui-evidence` | v1 (through the switch) and v2 of each changed screen, and the switch in both states; against a base-branch shot, only the page below the switch is compared |
+| `mr` | says where v1 and v2 live, where the choice is kept, and what retiring v1 later takes |
+
+**The label decides both halves.** `src/phases/prompts.ts` renders the Beta block only when the
+phase's resolved skill list contains `beta-version-toggle` — the same computation that loads the
+skill — so taking `Beta` out of one phase's `labelSkills` takes the method and the instruction out
+of that phase together. The label has to exist on the project for anyone to apply it; it exists on
+`arbisoft/erp`. Built and unit-tested; no Beta ticket has run through the pipeline yet.
+
+## Local automation tests
+
+Another independent mode in the same conductor, and like the
+[Ready For Automation mode](#ready-for-automation-mode) it runs **after the merge**. `verify` runs the ticket's own case list, not the team's automation suite —
+workstream-automation's Cypress specs — and a change that passes every one of its own cases can
+still break a spec somebody else wrote. This mode runs the specs that reach a merged change, on
+the desk, against the MR's merge commit, once QA has approved the list. The Loop pipeline does not
+run them and does not wait for them: the two local-tests phases are `onDemand`, placed after every
+phase the Loop runs, so `ui-evidence` and `mr` still batch exactly as before.
+
+```
+ "Ready for Automation Testing" + an MR linked to the ticket merged into dev (any assignee)
+   │   labelled, not merged yet ──▶ no comment; checked again on later ticks
+   ▼
+ throwaway ERP worktree at the merge commit ──▶ local-tests-scope picks the specs
+   ▼
+ ONE comment: the list (or "no automation test found"), @QA ──▶ waits for QA
+   │
+   ├─ `disapproved: please check again`        ──▶ quick re-check on master, no session
+   ├─ `disapproved: added cypress/e2e/…`       ──▶ those files join the list
+   ├─ `disapproved: write a temporary test`    ──▶ the scope writes one, for this run only
+   ├─ `disapproved:` anything else             ──▶ the scope redoes the list
+   │                                                └─▶ a new comment, and it waits again
+   ▼ a QA reviewer comments `approved`
+ "Running TestCases Locally" ──▶ local-tests-run ──▶ results ──▶ "Automation Testing Done"
+                                                               (passed or failed)
+```
+
+- **When it starts.** The ticket carries `Ready for Automation Testing` **and** the ticket's own MR
+  — one that closes it, or names its number in its source branch (a title only mentions it) — is merged into
+  `branches.base`; a promotion or a backmerge (source `stage`/`master`/`main`/`dev`, or a title like
+  `stage -> dev` or `Backmerge`) never counts. A ticket whose own MRs are all still open waits
+  quietly, even when an MR that only mentions it is merged; only a ticket with no linked MR that
+  closes it or names it in its source branch falls back to any linked MR merged into the base.
+  `hooks/local-tests-ready.cjs` decides, run by the conductor before any session (it is not a
+  session hook: [docs/HOOKS.md](docs/HOOKS.md)). The code under test is the latest own merged MR's
+  merge (or squash) commit; the base is the commit before the change — the merge commit's first
+  parent, or the MR's `diff_refs.base_sha` when it was merged without a merge commit. With several
+  own MRs merged, the tests are chosen for every one of their changes and the comment names them.
+- **One desk per team.** The per-ticket lock is a local file (`state/localtests/<iid>/lock`) and
+  does not reach other machines, so switch the mode on for **one desk only**, as with the
+  [Ready For Automation mode](#ready-for-automation-mode): two desks would both scope the ticket,
+  and one `approved` would start a run on each. As a backstop, a desk skips a ticket another desk
+  has already posted a list for.
+- **`local-tests-scope`** is a session (skill `local-tests-impact`), invoked by name. Its script
+  maps the merged change onto specs that reach it — a page object selecting a testid it touched —
+  plus at most 5 of the module's smoke specs as a health check, and never pads the list. When an
+  intended UI change has made a spec out of date (a renamed testid), it makes the smallest edit
+  that follows it, in a throwaway worktree of the automation clone (`state/runs/<iid>/wsa`), saved
+  as a patch and never committed. When no spec reaches the change it writes **no** test of its own
+  accord: the list comes back empty with a suggested test, and a temporary one is written only
+  when QA asks for it.
+- **QA approves every local run.** The comment lists what will run (🆕 a temporary test, ✔️ an
+  existing test that checks the change, and the health checks), the counts and minutes, the patch,
+  and @mentions `config/reviewers.json` `qa`. A temporary change that weakens a test, reaches
+  outside the browser (`cy.exec`, `cy.task`, `cy.writeFile`, `Cypress.env`) or touches a file
+  outside `localTests.allowedPaths` is named in a bold line just before the ask, file by file with
+  why, so QA reads the patch before approving. The first reply from one of them decides; anyone
+  else's is ignored. `approved` on a list with tests swaps the label to `Running TestCases Locally`
+  and runs exactly that list; `approved` on an empty list runs nothing, marks the ticket
+  `Automation Testing Done` and records who approved going on without local tests.
+- **`local-tests-run`** is code, not a session. It copies the baseline automation database
+  (`CREATE DATABASE … TEMPLATE`, the baseline itself never written to), applies the patch to a
+  fresh worktree (`state/runs/<iid>/wsa-run`), and runs exactly the approved specs against the merge
+  commit. The credentials stay on Oneshot's side: the desk's credentials file is merged over the
+  committed `cypress.env.json` into a mode-600 `cypress.env.json` in that throwaway worktree,
+  written before the app build and removed with it at cleanup. A failing spec is re-run once on
+  the same code; a test that passes the second time is reported as flaky, and only tests that fail
+  twice are re-run on the base to say whether they fail on dev too. Then it posts the results and
+  drops the copy, the worktrees and the browser whatever happened. One Cypress run per desk at a
+  time (`src/lib/cypresslease.ts`): a busy desk (the lease, the ports, the baseline) makes the run
+  wait for a later tick, not record an error.
+- **Results always finish the ticket.** The results comment ends "Marked **Automation Testing
+  Done**." and the label moves from `Running TestCases Locally` to `Automation Testing Done`,
+  passed or failed; a failure that does not also fail on dev @mentions the MR's author. A run that
+  could not happen at all (a setup error) puts `Ready for Automation Testing` back and is not
+  marked done. Tests that could not be chosen at all (the scope kept failing) change no label: the
+  comment says so, @mentions QA, and any comment from a QA reviewer makes Oneshot try again.
+  Putting the trigger back on a done ticket is a new request: Cypress runs again, and an earlier
+  request's results are never reused (`local-tests-run.json` records the request's run id, and
+  only a crash inside the same request reuses it).
+- **Switching it on.** `config/project.json` `localTests` is the team's policy: the baseline
+  database, the paths a temporary edit may touch, and the selection budget (`maxSpecs`,
+  `maxRunMinutes`; each Cypress run is stopped at `maxRunMinutes`). A desk turns the mode on by
+  setting `ONESHOT_LOCAL_TESTS_REPO` in `.env` to its workstream-automation clone — one desk per
+  team, above; without it nothing about the conductor changes. `localTests.enabled: false` switches it off on every desk
+  at once, and so does leaving any of `labels.localTestsTrigger`, `localTestsRunning` or
+  `localTestsDone` empty.
+- **`DRY_RUN`.** `DRY_RUN=1 npm start -- --local-tests <iid>` runs one pass for one ticket and
+  exits: a real scope session, every GitLab write logged instead of made, QA's approval assumed,
+  and no Cypress ("a dry run starts no Cypress") unless `ONESHOT_LOCAL_TESTS_DRY_CYPRESS=1`, which
+  runs the list for real on the desk and still writes nothing to GitLab. `--assume-label` treats
+  `Ready for Automation Testing` as present, so any merged ticket can be tried; it is refused
+  without `DRY_RUN=1`, and the merged check always applies.
+- **State** lives in `state/localtests/<iid>/` (the mode's journal); the run's files stay in
+  `state/runs/<iid>/`, where `scripts/localtests.cjs` keeps them.
+
+**No session runs a test or sees a credential.** `git-guard` refuses git that would change the
+automation clone or a run's worktree, and refuses to start Cypress or `scripts/localtests.cjs` from
+any session. `secret-guard` keeps every `cypress.env.json` and the desk's credentials file out of
+transcripts. The processes the run starts — Cypress, the app, the Postgres tools — get an
+environment without Oneshot's own `.env` keys or anything named like a token, secret, key or
+password, and any credential value that turns up in an error is posted as `***`. The rules are in
+[docs/HOOKS.md](docs/HOOKS.md).
+
+`npm run doctor` checks the setup once the mode is on: the three labels (on the project, with the
+rest), the clone and its origin, the credentials file (its mode, and the accounts the specs log in
+as — by name, never value), whether the clone's own `cypress.env.json` has local changes (runs
+never read it, and a `git diff` there would print them), the Cypress binary, Node 22, Postgres and
+the baseline. `npm run preflight` checks what changes between runs: sessions holding the baseline
+open, database copies, worktrees (`wsa`, `wsa-run`, `erp-lt`, `erp-base-lt`) and resources files
+left behind (`node scripts/localtests.cjs gc` clears them), and a seed `node_modules` that has
+fallen behind the base branch's `package.json`. Setting a desk up, the reply options and the dry
+run: [docs/LOCAL-TESTS.md](docs/LOCAL-TESTS.md).
 
 ## MR review feedback
 
@@ -739,6 +894,11 @@ The guards (`npm run hooks:verify` — offline assertions, no network, no sessio
   `--no-verify` is deliberately allowed — the husky pre-commit hook is broken locally.
 - **`budget-gate`** — refuses a phase whose per-phase, per-ticket, per-window or per-day weighted
   token ceiling is already spent.
+- **`secret-guard`** — this repo's `.env`, and for local tests every `cypress.env.json` and the
+  desk's Cypress credentials file, denied to Read, Grep, Glob and Bash alike, so a credential never
+  lands in a transcript. On a desk with local tests on, `git-guard` also keeps the automation clone
+  and every run's `state/runs/<iid>/wsa` worktree unchanged by git, and refuses to start Cypress
+  from any session.
 **Every guard fails open, and the exception is kept for the next one that must not.** A guard
 that crashes must not wedge a 90-minute phase, so a spawn error, a timeout or non-JSON output
 from `pause-check`, `write-scope`, `git-guard` or `budget-gate` is logged loudly and treated as
@@ -817,11 +977,12 @@ problem, and letting it trip the breaker would make a wrong `GITLAB_TOKEN` look 
 | `src/phases/` | one module per phase: prompt, schema, tool policy |
 | `src/lib/` | config + session env, SQLite, GitLab, worktrees, promotion mutex, quota, reachability, memory |
 | `src/automation/` | the Ready For Automation mode — readiness verdict, state machine, comments, Google Sheets writer |
+| `src/localtests/` | the local automation tests mode — readiness, QA's replies, the comments it posts, the post-merge run |
 | `config/` | project + labels, per-phase model/tools/skills/groups, budgets, reviewers, Slack |
 | `hooks/` | guardrails — passed to the SDK in-process, never installed globally |
-| `scripts/` | hook verify, `doctor`, preflight, dependency probe, unblock, report |
-| `docs/` | [PLAN.md](docs/PLAN.md) · [HOOKS.md](docs/HOOKS.md) |
-| `state/` | gitignored — runs, artifacts, memory, SQLite, and `automation/<iid>` for the Ready For Automation mode |
+| `scripts/` | hook verify, `doctor`, preflight, dependency probe, unblock, report, the local-tests runner (`localtests.cjs`) |
+| `docs/` | [PLAN.md](docs/PLAN.md) · [HOOKS.md](docs/HOOKS.md) · [LOCAL-TESTS.md](docs/LOCAL-TESTS.md) |
+| `state/` | gitignored — runs, artifacts, memory, SQLite, `automation/<iid>` for the Ready For Automation mode and `localtests/<iid>` for the local automation tests mode |
 
 ## Status
 
@@ -852,6 +1013,7 @@ then-current order of recall → research → plan → testcases:
 | M5 | ~~`deploy`, `qa`, `demo`~~ — **removed**: the pipeline ends at the merge | withdrawn |
 | M6 | `recall` — memory index and recall | built, unproven; merge writes the card and index line (src/lib/memory.ts), `npm run memory:backfill` for runs merged before that |
 | M7 | dashboard, replay, hardening hooks | not started |
+| M8 | local automation tests mode — after the merge, `local-tests-scope` picks the automation specs a merged change reaches, QA approves every run on the ticket, `local-tests-run` runs them on the desk against the merge commit | built, unproven; off unless a desk sets `ONESHOT_LOCAL_TESTS_REPO` |
 
 `runner.ts` stops with an explicit `BLOCKED: not built yet: phase '<name>'` rather than skipping
 ahead — including for the `merge` code phase, so a run can never reach `merged` without having

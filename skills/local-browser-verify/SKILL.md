@@ -42,10 +42,14 @@ What the harness knows, and why each fact cost a run to learn:
   webpack port is never navigated to; it only serves the bundle.
 - **Use the hostname `localhost`, never `127.0.0.1`.** `ALLOWED_HOSTS` does not
   carry the bare address, so the IP returns 400 from a perfectly healthy server.
-- **Readiness is `static/webpack-stats.dev.json` reaching `"status":"done"`**, not
-  a log line. That file is written once at the start of a compile and again at the
-  end, and Django raises a bare 500 on anything but `done`. A `Compiled
-  successfully` from an earlier build stays in the log forever.
+- **Readiness is the manifest Django reads, written by THIS webpack.** Current app
+  code writes `static/webpack-entrypoints.dev.json` (no status field, written even
+  when a compile fails), so ready means that file is newer than the webpack start
+  AND the latest result in the truncated log is `Compiled`; `Failed to compile` is
+  E_WEBPACK_DEAD with the error lines. Checkouts older than the app's 2026-09-23
+  chunk split write `static/webpack-stats.dev.json` instead, and are ready when it
+  says `"status":"done"`. A log line alone never counts — an earlier build's
+  `Compiled successfully` is history, not this build.
 - **Django runs `--noasgi`.** With Channels' ASGI dev server, a browser's
   keep-alive connections exhaust it and the process then keeps its pid and its
   socket while answering nothing at all.
@@ -55,9 +59,12 @@ What the harness knows, and why each fact cost a run to learn:
   listener's working directory. Confirming HTTP 200 is not confirming it is *your*
   build — a phase that drove a stranger's server recorded every value against the
   wrong code while reading green.
-- **Never `npm ci`, never rebuild the venv.** `node_modules`, `venv` and
-  `staticfiles` are symlinks into a working repo. Reinstalling rewrites that repo's
-  dependencies for every other worktree on this machine.
+- **An install is refused, not discouraged.** `node_modules`, `venv` and
+  `staticfiles` are symlinks into a working repo, so reinstalling rewrites that
+  repo's dependencies for every other worktree on this machine. `install-guard`
+  denies `npm ci`/`install`, `npx`, a venv rebuild and `rm -rf node_modules`
+  outright. What is left to you is the reading: a module that will not resolve is
+  an environment fault worth `blocked`, not a problem to work around.
 - **`staticfiles/` must be seeded or Django 500s on every page.** local_settings.py
   ships DEBUG=False with ManifestStaticFilesStorage, so `{% static %}` raises
   `Missing staticfiles manifest entry` until collectstatic has run — including on
@@ -114,8 +121,9 @@ pytest is unaffected and is fine to run.
 
 - Playwright is **not** in the worktree's symlinked `node_modules`. The harness
   resolves it from the Oneshot repo's install for you; if you write your own
-  script, `require` it through that path. Never `npm install` it into a worktree —
-  that rewrites the shared `node_modules` for every other worktree on the machine.
+  script, `require` it through that path or through `NODE_PATH`. Installing it
+  into a worktree is denied by `install-guard`, so resolving it correctly is the
+  only route there is.
 - Prefer real data. Intercept `**/api/v1/**` only for a state real data cannot
   produce, and say in the evidence that the state was mocked.
 - Retry a flaky step twice with a bounded timeout. Playwright flake is the
@@ -345,6 +353,46 @@ pytest is unaffected and is fine to run.
 - A regression — something that worked before this branch and no longer does —
   is reported separately from a case failure, because no case will be watching
   for it.
+
+## When a case still fails after the second lap — the QA gate
+
+A `fail` sends the run back to `implement` and verify re-runs. That happens at
+most **twice**. If a case is still `fail` after the second lap — the fix did not
+work and no further code change is going to be tried automatically — the run
+does **not** block. It arms a **QA decision gate**: the still-failing case(s) are
+posted on the ticket and a QA reviewer (config/reviewers.json `qa`) rules on each
+one. Your job is unchanged — record the honest `fail` with actual-vs-expected
+evidence and a screenshot. The evidence you leave is exactly what QA reads to
+decide, so make it specific.
+
+A reviewer answers each failing case on the ticket with one of:
+
+- **`skip test case no. N`** — drop the case. It is recorded `skipped` and verify
+  completes; the run goes on to the MR.
+- **`TC-N: invalid`** — the case itself is wrong. Dropped, same as skip.
+- **`TC-N: expected`** — the behaviour you observed is actually correct. The case
+  is accepted as a **pass** by exception.
+- **`TC-N: pre-existing`** — the failure is real but not this change's. A separate
+  bug is opened and linked on the ticket, the case is set aside, and verify
+  completes.
+- **`TC-N: missing steps`** — the case's steps are incomplete, not the product.
+  The conductor posts the steps you followed and asks QA for the corrected ones;
+  when QA replies with them, **only that one case** is re-run with the new steps
+  (nothing else re-executes, because no code changed). If it passes, it's done;
+  if it still fails, QA settles it with one of the verdicts above.
+
+The run continues the moment **every** still-failing case is settled, and each
+decision — who made it and why — is recorded on the MR for its reviewer. Until
+then the run waits on QA; it never merges a case that is actually `fail`.
+
+This is why the steps you record matter beyond your own run: on a `missing steps`
+case they are exactly what QA reads to see what you did and to hand back a
+corrected list. Follow the case's authored steps and say, in `evidence`, what you
+actually did and saw — a vague `fail` makes the correction a guess.
+
+Do not pre-empt this by softening a real failure into `skipped`, `pre-existing`
+or `blocked` to avoid the gate: the gate exists so a **person** makes that call,
+and your changing a verdict to dodge it removes exactly the signal they need.
 
 ## Do not
 

@@ -107,6 +107,104 @@ function blockerOf(verdict: Reproduction['verdict'], blocker: unknown): Blocker 
 }
 
 /**
+ * The screenshot filename an evidence line cites, or null if it cites none.
+ *
+ * `evidence` is documented as bare filenames, and the model writes prose around
+ * them. Every reader of this field used to test `/\.png$/i`, so all of them saw
+ * zero screenshots on a run that captured four: `incompleteness` reported "no
+ * screenshot was recorded" and `declareReproduced` posted NOTHING on a confirmed
+ * bug, while the attachment paths ran `basename()` over the whole sentence and
+ * resolved to a fragment of the prose.
+ *
+ * DO NOT ANCHOR THIS. The first fix swapped the end anchor for the leading token
+ * and failed the same way — six ordinary shapes (backticks, an em-dash with no
+ * space, a trailing full stop, parentheses, bold, quotes) matched nothing, and it
+ * was NARROWER than what it replaced: `Screenshot: repro-1.png` and
+ * `see repro-1.png` had matched before and stopped matching, so a run already
+ * parked at the gate could resume and walk past it. Position is not the signal.
+ *
+ * THE SIGNAL IS THE SENTENCE, NOT THE FILENAME. A lap that captured nothing says
+ * so while naming the file it did not write — "No repro-1.png was captured", "Could
+ * not capture repro-1.png", "Failed to write repro-1.png". Reading those as evidence
+ * is the expensive direction: a `not-reproduced` whose only evidence is a statement
+ * that nothing was captured clears `incompleteness`, stops the run and parks the Not
+ * a Bug gate on a person, while `existsSync` quietly drops the file that never
+ * existed. Three of those shapes were a REGRESSION against the end-anchored test,
+ * which read them as no screenshot at all.
+ *
+ * So the text BEFORE the filename is checked for a negation. The glob in
+ * "No repro-*.png" is one special case of the same thing rather than the whole rule.
+ * Only the PRECEDING text counts, and that boundary is deliberate: "repro-3.png —
+ * the aria-label is missing", "— no second email was sent", "— the row is not
+ * blurred" are captions describing the defect, and they are the notes the caption
+ * exists to carry. A trailing "repro-1.png missing" is therefore read as a
+ * screenshot; telling the two apart needs semantics rather than a word list, and
+ * the shapes a blocked lap actually writes all lead with the negation.
+ *
+ * Returning the NAME rather than a boolean is the point: the callers that attach
+ * and upload need the filename, not the sentence it arrived in. A path resolves to
+ * its basename, which all four callers already apply.
+ */
+const SHOT = /(?:^|[\s"'`(\[*—–/])([A-Za-z0-9][\w.-]*\.(?:png|jpe?g|webp))(?=$|[\s"'`)\].,;:*—–])/i;
+
+/**
+ * Words that, standing before the filename, mean the file is not there. `no` is
+ * guarded against the "no. 3" ordinal, which is prose rather than a negation.
+ */
+const ABSENT = /\b(?:none|never|without|cannot|can't|couldn't|didn't|unable|missing|failed|fails|fail|could\s+not|did\s+not|not)\b|\bno\b(?!\.?\s*\d)/i;
+
+export function shotName(line: string): string | null {
+  const m = SHOT.exec(line);
+  const name = m?.[1];
+  if (!m || !name || name.includes('*')) return null;
+  const before = line.slice(0, m.index + (m[0].length - name.length));
+  return ABSENT.test(before) ? null : name;
+}
+
+/**
+ * Whatever the line says ABOUT the screenshot, with the filename and the
+ * punctuation joining them removed. Without this the note on a screenshot line
+ * is lost twice over: `shotName` excludes the line from Measurements, and the
+ * upload renders as `![file](url)` with no caption, so a measured value that used
+ * to be visible-but-unattached becomes attached-but-invisible.
+ */
+export function shotCaption(line: string, name: string): string {
+  const i = line.indexOf(name);
+  if (i < 0) return line.trim();
+  // Collapse the gap the filename left behind, or a mid-line name yields a caption
+  // with a hole in it.
+  const rest = (line.slice(0, i) + ' ' + line.slice(i + name.length)).replace(/\s+/g, ' ').trim();
+  const trimmed = rest.replace(/^[\s—–:,;*`'"()[\]-]+/, '').replace(/[\s*`'"\-—–:;,]+$/, '').trim();
+  // A bare label ("Screenshot", "see") is not a caption; it is the word that
+  // happened to introduce the filename, and rendering it under the image is noise.
+  return /^(screenshot|shot|image|see|evidence|attached)$/i.test(trimmed) ? '' : trimmed;
+}
+
+/**
+ * An uploaded screenshot, plus the two things `Upload` cannot carry: the filename
+ * it came from and the note that accompanied it. Both optional, so a caller with
+ * nothing but an `Upload` still type-checks.
+ */
+export type ReproShot = Upload & { name?: string; caption?: string };
+
+/**
+ * The media type GitLab is told, derived from the name rather than assumed.
+ * `shotName` accepts jpeg and webp, so a hard-coded 'image/png' would declare a
+ * `.jpg` upload as a PNG.
+ */
+export function mimeOf(name: string): string {
+  const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+  if (ext === 'png') return 'image/png';
+  if (ext === 'webp') return 'image/webp';
+  return 'image/jpeg';
+}
+
+/** How many of the evidence lines cite a screenshot. */
+export function shotsIn(evidence: string[]): number {
+  return evidence.filter((e) => shotName(e) !== null).length;
+}
+
+/**
  * What a verdict must carry before it is asserted on the ticket: the ticket is a
  * bug, steps were actually executed, something was observed, on a recorded
  * commit, with a screenshot someone can look at.
@@ -121,7 +219,7 @@ export function incompleteness(repro: Reproduction): string[] {
     repro.steps.length === 0 ? 'no executed steps were recorded' : '',
     !repro.observed ? 'nothing observed was recorded' : '',
     !repro.testedCommit ? 'no tested commit was recorded' : '',
-    !repro.evidence.some((e) => /\.png$/i.test(e)) ? 'no screenshot was recorded' : '',
+    !repro.evidence.some((e) => shotName(e)) ? 'no screenshot was recorded' : '',
   ].filter(Boolean);
 }
 
@@ -155,13 +253,23 @@ const TEMPLATES = join(ROOT, 'skills', 'bug-reproduction', 'templates');
  */
 export function reproductionComment(
   repro: Reproduction,
-  opts: { screenshots: Upload[]; runId?: string; label?: string; entryLabel?: string },
+  opts: { screenshots: ReproShot[]; runId?: string; label?: string; entryLabel?: string },
 ): string {
   if (repro.verdict !== 'reproduced' && repro.verdict !== 'not-reproduced') {
     throw new Error(`reproductionComment: ${repro.verdict} does not post a comment`);
   }
   const verdict = repro.verdict;
-  const measurements = repro.evidence.filter((e) => !/\.png$/i.test(e));
+  // A screenshot line's note belongs with its image. When the shot was NOT
+  // attached — upload failed, file missing, or past MAX_SCREENSHOTS — the note
+  // would otherwise be dropped twice over, so it falls back to a measurement.
+  const attached = new Set(opts.screenshots.map((s) => s.name).filter((n): n is string => !!n));
+  const measurements = repro.evidence.flatMap((e) => {
+    const name = shotName(e);
+    if (!name) return [e];
+    if (attached.has(name)) return [];
+    const caption = shotCaption(e, name);
+    return caption ? [`${name} (not attached): ${caption}`] : [];
+  });
   const values: Record<string, string> = {
     reason: repro.reason || '(no reason recorded)',
     commit: repro.testedCommit || '(not recorded)',
@@ -171,7 +279,7 @@ export function reproductionComment(
     observed: repro.observed || '(not recorded)',
     measurements: measurements.length ? ['**Measurements**', ...measurements.map((e) => `- ${e}`)].join('\n') : '',
     screenshots: opts.screenshots.length
-      ? opts.screenshots.map((u) => u.markdown).join('\n')
+      ? opts.screenshots.map((u) => (u.caption ? `${u.markdown}\n${u.caption}` : u.markdown)).join('\n\n')
       : '_No screenshot was attached._',
     labelClause: opts.label ? ` and labelled the ticket **${opts.label}**` : '',
     labelRef: opts.label ? `**${opts.label}**` : 'the stop',
@@ -187,7 +295,14 @@ export function reproductionComment(
 /** Steps, expected, observed and measurements — the evidence half of the gate's request. */
 function evidenceBody(repro: Reproduction): string[] {
   const steps = repro.steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
-  const extraEvidence = repro.evidence.filter((e) => !/\.png$/i.test(e));
+  // Same reasoning as the ticket comment: the gate's attachments render without
+  // captions, so a note written on a screenshot line has to survive here too.
+  const extraEvidence = repro.evidence.flatMap((e) => {
+    const name = shotName(e);
+    if (!name) return [e];
+    const caption = shotCaption(e, name);
+    return caption ? [`${name}: ${caption}`] : [];
+  });
   return [
     '**What was run**',
     `- Code: \`${repro.testedCommit}\` (unfixed base branch)`,
@@ -242,20 +357,22 @@ export function notABugSlackText(iid: number, title: string, repro: Reproduction
  * research ran again and took new ones.
  */
 export function reproAttachments(iid: number, evidence: string[]): GateAttachment[] {
-  return evidence.filter((e) => /\.png$/i.test(e)).slice(0, MAX_SCREENSHOTS)
+  return evidence.map(shotName).filter((n): n is string => n !== null).slice(0, MAX_SCREENSHOTS)
     .map((name) => join(artifactDir(iid), basename(name)))
     .filter((path) => existsSync(path))
-    .map((path) => ({ name: basename(path), content: readFileSync(path), mime: 'image/png' }));
+    .map((path) => ({ name: basename(path), content: readFileSync(path), mime: mimeOf(path) }));
 }
 
 /** Upload up to MAX_SCREENSHOTS evidence screenshots research wrote to the run's artifacts dir. */
-async function uploadScreenshots(iid: number, evidence: string[]): Promise<Upload[]> {
-  const out: Upload[] = [];
-  for (const name of evidence.filter((e) => /\.png$/i.test(e)).slice(0, MAX_SCREENSHOTS)) {
+async function uploadScreenshots(iid: number, evidence: string[]): Promise<ReproShot[]> {
+  const out: ReproShot[] = [];
+  const lines = evidence.map((e) => ({ line: e, name: shotName(e) }))
+    .filter((x): x is { line: string; name: string } => x.name !== null);
+  for (const { line, name } of lines.slice(0, MAX_SCREENSHOTS)) {
     const path = join(artifactDir(iid), basename(name));
     if (!existsSync(path)) continue;
-    const res = await uploadFile(basename(name), readFileSync(path), 'image/png');
-    if (res.ok && res.data) out.push(res.data);
+    const res = await uploadFile(basename(name), readFileSync(path), mimeOf(name));
+    if (res.ok && res.data) out.push({ ...res.data, name: basename(name), caption: shotCaption(line, name) });
     else log.warn(`not-a-bug: screenshot upload failed for ${basename(name)}`, { error: res.error ?? res.kind });
   }
   return out;

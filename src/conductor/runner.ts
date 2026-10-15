@@ -68,11 +68,12 @@ import {
   type PhaseRecord, type Remediation, type RunJournal,
 } from '../lib/artifacts.js';
 import { branchFor, newRunId, worktreeName } from '../lib/ids.js';
+import { writeDesignTokens } from '../lib/designtokens.js';
 import {
   leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort, seedWorktree,
 } from '../lib/worktrees.js';
 import {
-  addIssueNote, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
+  addIssueNote, createIssue, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
   allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue, type IssueNote,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
@@ -84,7 +85,7 @@ import {
 import { postCard, thread, updateCard, alert, type CardState, type PhaseLine } from '../lib/slack.js';
 import {
   declareNotABug, declareReproduced, notABugApprovalRequestBody, notABugDecision, reproAttachments,
-  reproductionOf,
+  reproductionOf, shotsIn,
 } from './reproduction.js';
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
@@ -96,7 +97,7 @@ import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
-  appendEdgeCases, checkApprovalGate, declaredFiles, designApprovalRequestBody,
+  appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
   rearmGate,
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
@@ -138,6 +139,76 @@ const GATE_UNAVAILABLE =
   'this ticket carries the Review label, but Slack is not configured (token + channel), so its '
   + 'approval gates have nowhere to ask — configure Slack, or remove the Review label to run '
   + 'this ticket in the ordinary full-auto mode';
+
+/**
+ * The verify-case gate's own `unavailable`. Like Not a Bug, it arms on any run
+ * (no Review label needed), and what it is missing is a QA list to ask.
+ */
+const VERIFY_GATE_UNAVAILABLE =
+  'verify failed the same case(s) twice through implement and no code change fixed them, but '
+  + 'config/reviewers.json names no QA reviewer to decide what each one means — add one there and '
+  + 'unblock';
+
+/** The new issue opened when QA classifies a still-failing verify case as pre-existing. */
+function preExistingIssueBody(parentIid: number, title: string, c: CaseResult): string {
+  const ev = (c.evidence ?? '').trim();
+  return [
+    `Split from the verify run of #${parentIid} (${title}).`,
+    '',
+    `Verify case **${c.id}** failed, and a QA reviewer classified it **pre-existing** — a real `
+    + 'defect this change did not introduce, tracked separately so it does not hold the MR for '
+    + `#${parentIid}.`,
+    '',
+    '### What verify observed',
+    '',
+    ev || '_No evidence text was recorded on the case._',
+    '',
+    `_Opened by Oneshot from the verify-case QA gate on #${parentIid}._`,
+  ].join('\n');
+}
+
+/**
+ * Fold a scoped verify re-run's fresh results back over the full pre-scope list.
+ *
+ * `baseline` is the whole case list as it stood before the re-run; `fresh` is
+ * what the scoped session returned (only the rescoped cases are trusted, the
+ * rest of `fresh` is ignored). Every baseline case keeps its verdict unless the
+ * re-run produced a new one for it, so a one-case re-run cannot erase the cases
+ * it did not touch — the bug this exists to prevent. Pure, so it is unit-tested.
+ */
+export function mergeScopedVerify(
+  baseline: CaseResult[], fresh: CaseResult[], scope: Set<string>,
+): CaseResult[] {
+  const freshById = new Map(fresh.filter((c) => scope.has(c.id)).map((c) => [c.id, c]));
+  const merged = baseline.map((c) => freshById.get(c.id) ?? c);
+  for (const c of freshById.values()) if (!baseline.some((p) => p.id === c.id)) merged.push(c);
+  return merged;
+}
+
+/** The audit comment posted on the ticket when the verify-case gate resolves. */
+function verifyDecisionsAuditBody(
+  decisions: Array<{ caseId: string; verdict: string; by: string; issueIid?: number }>,
+): string {
+  const word: Record<string, string> = {
+    skip: 'skipped', invalid: 'invalid — dropped',
+    expected: 'expected behaviour — accepted as a pass', 'pre-existing': 'pre-existing',
+    'missing-steps': "re-run with QA's corrected steps",
+  };
+  const rows = decisions.map(
+    (d) => `- **${d.caseId}** — ${word[d.verdict] ?? d.verdict} (QA: ${d.by})${d.issueIid ? ` → #${d.issueIid}` : ''}`,
+  );
+  return [
+    '## Verify completed by QA decision',
+    '',
+    'After two laps through `implement` the case(s) below still failed, and QA ruled on each so the '
+    + 'run could continue to the MR:',
+    '',
+    ...rows,
+    '',
+    '_Recorded on the MR for the reviewer. `skip`/`invalid` dropped the case; `expected` accepted it '
+    + 'as a pass; `pre-existing` was split into its own bug._',
+  ].join('\n');
+}
 
 /**
  * How long a block is respected before a re-claim is allowed.
@@ -398,7 +469,11 @@ type Control =
   | { kind: 'cycle'; jumpTo: number; windowEnd: number }
   | {
     kind: 'stop'; status: 'blocked' | 'aborted' | 'parked'; reason: string;
-    /** The block is a verdict for a person, not an environment fault — do not spend a remediation on it. */
+    /**
+     * No remediate session can clear this block: it needs a person (a verdict,
+     * a config fix, an account notice) or it lifts on its own (a usage limit).
+     * Do not spend a remediation establishing that.
+     */
     noRemediation?: boolean;
   };
 
@@ -454,6 +529,39 @@ export function mergePollWait(o: {
   if (typeof o.lastCheckAt !== 'number') return null;
   const dueIn = o.lastCheckAt + MERGE_POLL_MS - o.now;
   return dueIn > 0 ? dueIn : null;
+}
+
+/**
+ * Whether the machine is frozen against a remediate session — null when it is
+ * not — and if so, what the blocked note says about it ('' when the freeze
+ * explains itself). Checked before any guard about the run's own history,
+ * because none of these is a judgement about the block.
+ *
+ * A dry run changes nothing anywhere, and a human pause is a freeze; neither is
+ * the moment to start editing the machine's configuration.
+ *
+ * A quota park is the account's own freeze. The remediate session would hit
+ * the same subscription limit on its first turn, park again and record
+ * `fixed: false` — spending one of MAX_REMEDIATIONS, and, because the
+ * exact-block guard ignores `fixed`, later refusing a real remediation of the
+ * same block as one that "already fixed something". The usage-limit stop is
+ * marked `noRemediation`, but other stops reach remediation while the park is
+ * in force: a group member's ordinary failure out-claims its sibling's
+ * rate-limited stop in claim(); a code phase runs without passing checkQuota()
+ * and can block during another run's park; and merge's feedbackRound() turns
+ * its own quota refusal into an ordinary blocked stop. attemptRemediation()
+ * calls runPhase() directly, past that gate, so the park is read here — the one
+ * place every one of those paths goes through.
+ */
+export function remediationFreeze(o: {
+  dryRun: boolean; paused: boolean; quotaParked: boolean;
+}): string | null {
+  if (o.dryRun || o.paused) return '';
+  if (o.quotaParked) {
+    return 'Self-remediation was not attempted: the account is parked after a subscription ' +
+      'usage limit, and a remediate session would hit the same limit on its first turn.';
+  }
+  return null;
 }
 
 /** A finding as review-partial.json carries it — only `severity` is read here. */
@@ -1435,10 +1543,26 @@ export async function runTicket(
         j = updateJournal(iid, { reviewMode: true }) ?? j;
         log.warn('review gates armed by guarded paths, not by the label', { iid, hits: planGate.hits });
       }
+      // The gate note points at the plan note publish.ts posts. Arming before
+      // that note exists — a transient GitLab failure left `plan` unpublished —
+      // would post an approval ask pointing at nothing, and the plan would land
+      // BELOW it on the next tick's publish. Ensure the plan is published first;
+      // if it still is not, park and let the next tick retry rather than ask.
+      if (!(j.published ?? []).includes('plan')) {
+        await publishPending({ iid, runId, journal: j });
+        j = readJournal(iid) ?? j;
+        if (!(j.published ?? []).includes('plan')) {
+          return finish(j, 'parked', 'waiting to publish the plan to the ticket before asking for approval');
+        }
+      }
+      const planNoteId = j.publishedNotes?.plan;
       const gate = await checkApprovalGate({
         iid,
         gate: 'plan',
-        requestBody: planApprovalRequestBody(prior.plan ?? null, triggerLine(planGate)),
+        requestBody: planApprovalRequestBody(triggerLine(planGate), {
+          migrations: (prior.plan as { migrations?: unknown } | null)?.migrations === true,
+          planNoteUrl: planNoteId ? `${issueUrl(iid)}#note_${planNoteId}` : undefined,
+        }),
         trigger: planGate,
         onApproved: async () => { await addIssueNote(iid, planApprovedRecordBody()); },
       });
@@ -1641,6 +1765,24 @@ export async function runTicket(
             log.ok(`mr opened by the conductor — ${made.mrUrl}`);
           }
         }
+      }
+
+      // A scoped re-run (QA's corrected steps for a `missing-steps` case) ran
+      // ONLY the rescoped case(s). Merge their fresh results back over the FULL
+      // pre-scope list — snapshotted to verify-prescope.json before the re-run,
+      // because the scoped session already overwrote verify.json with just the
+      // rescoped case (phase.ts writes the artifact on return). Done before the
+      // overrules and failedCases() below, so they see every case, not one.
+      if (r.cfg.name === 'verify' && r.out.ok && (j.verifyRescopeCases?.length)) {
+        const scope = new Set(j.verifyRescopeCases);
+        const baseline = readArtifact<{ results?: CaseResult[] }>(iid, 'verify-prescope.json')?.results
+          ?? readArtifact<{ results?: CaseResult[] }>(iid, 'verify.json')?.results ?? [];
+        const fresh = (r.out.data?.results ?? []) as CaseResult[];
+        const merged = mergeScopedVerify(baseline, fresh, scope);
+        r.out.data = { ...r.out.data, results: merged };
+        writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
+        j = updateJournal(iid, { verifyRescopeCases: [] }) ?? j;
+        log.phase(`verify merged ${scope.size} re-run case(s) back into the ${baseline.length}-case list`, { iid });
       }
 
       // A verify that executed the list but passed NOTHING is not a green
@@ -1960,6 +2102,10 @@ export async function runTicket(
           kind: 'stop',
           status: 'blocked',
           reason: 'subscription usage limit — parked until the window resets',
+          // The limit is the account's, and the remediate session would hit it
+          // on its first turn. Offering it the stop only records a second,
+          // misleading remediation against a block that clears on its own.
+          noRemediation: true,
         }, r.cfg.name);
         continue;
       }
@@ -1975,6 +2121,46 @@ export async function runTicket(
           // the session already established; skip/warn phases still degrade
           // gracefully through afterFailure.
           claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.out.blocked}` }, r.cfg.name);
+        } else if (
+          r.cfg.name === 'verify' && caseFail
+          && failedLapsOf(iid, 'verify', fixingSince()) >= (r.cfg.maxLaps ?? 2)
+        ) {
+          // Verify spent its full lap budget and still records failing cases.
+          // Where afterFailure would block, ask QA what each one means instead.
+          const outcome = await verifyCaseGate(r);
+          if (outcome === 'resolved') {
+            // Re-record the lap as resolved so the phase reads succeeded, and keep
+            // the rewritten (now non-failing) results as prior — verifyCaseGate
+            // has already set prior.verify, so do not null it below.
+            recordPhase(iid, {
+              phase: 'verify', lap: r.lap, status: 'warned',
+              startedAt: r.startedAt, endedAt: r.endedAt, model: modelFor(r.cfg),
+              turns: r.out.turns, weighted: r.out.weighted, sessionId: r.out.sessionId,
+              error: 'resolved by the verify-case QA gate',
+            });
+            j = readJournal(iid) ?? j;
+            // flow stays empty → the loop advances to the next phase.
+          } else if (outcome === 'reverify') {
+            // QA gave corrected steps for a `missing-steps` case: re-run verify
+            // scoped to that case alone (cycle to verify itself, not implement —
+            // no code changed). The scoped results merge back in the next pass.
+            const vIdx = list.findIndex((q) => q.name === 'verify');
+            prior[r.cfg.name] = null;
+            claim(
+              vIdx === -1
+                ? { kind: 'stop', status: 'blocked', reason: 'verify: cannot re-run — verify is not in the phase list' }
+                : { kind: 'cycle', jumpTo: vIdx, windowEnd: vIdx },
+              r.cfg.name,
+            );
+          } else {
+            prior[r.cfg.name] = null;
+            claim(
+              'park' in outcome
+                ? { kind: 'stop', status: 'parked', reason: `verify: ${outcome.park}` }
+                : { kind: 'stop', status: 'blocked', reason: `verify: ${outcome.block}` },
+              r.cfg.name,
+            );
+          }
         } else {
           claim(
             afterFailure(
@@ -2011,7 +2197,7 @@ export async function runTicket(
           logEvent('reproduction', {
             iid, kind: repro.kind, verdict: repro.verdict, blocker: repro.blocker,
             steps: repro.steps.length,
-            shots: repro.evidence.filter((e) => e.endsWith('.png')).length,
+            shots: shotsIn(repro.evidence),
           }, { runId, phase: 'research' });
         }
         if (repro?.verdict === 'reproduced') await declareReproduced(iid, repro);
@@ -2130,7 +2316,7 @@ export async function runTicket(
       try {
         const lease = leaseWorktree(runId, branch, worktreeName(iid, runId), { withPort: false });
         worktree = lease.worktree;
-        j = updateJournal(iid, { worktree, branch: lease.branch }) ?? j;
+        j = updateJournal(iid, { worktree, branch: lease.branch, baseSha: lease.baseSha }) ?? j;
         updateRun(runId, { worktree, branch: lease.branch });
       } catch (err) {
         return `worktree: ${(err as Error).message}`;
@@ -2161,6 +2347,18 @@ export async function runTicket(
     // for exactly the phases it exists to confine.
     const wt = p.cwd === 'worktree' ? worktree : undefined;
     const ctx: PromptCtx = { ticket, runId, lap, branch, worktree: wt, port, prior, journal: j };
+
+    // Hand `design` its palette rather than making it go and distil one. The
+    // phase budgets ~10 of its 115 turns for this (config/phases.json), and the
+    // work is a deterministic read of three frontend files. Best-effort by
+    // construction: the skill still knows how to read them itself, and
+    // tokens.css names anything the extractor could not resolve.
+    if (p.name === 'design' && wt) {
+      const tokens = writeDesignTokens(iid, wt);
+      if (!tokens) log.warn(`design     could not generate tokens.css for #${iid} — the phase reads the theme itself`);
+      else if (tokens.sources.length === 0) log.warn(`design     tokens.css for #${iid} read no theme file — the worktree has none of them, so it is empty`);
+      else log.ok(`design     tokens.css generated for #${iid} from ${tokens.sources.length} theme file(s)`);
+    }
 
     // The ledger row is opened before the phase and closed after it, so an
     // external watchdog can see a phase that has been 'running' for longer than
@@ -2338,6 +2536,136 @@ export async function runTicket(
     }
 
     return { kind: 'stop', status: 'blocked', reason: `${p.name}: ${why}` };
+  }
+
+  /**
+   * The failure window `failedLapsOf` is measured from — 0 normally, or the
+   * start of an active MR-feedback fix round, so a case that failed before the
+   * reviewer asked for a change does not count against the fix lap's budget.
+   * The same reckoning `afterFailure` uses, named so the verify-case gate agrees
+   * with it on when the laps are spent.
+   */
+  function fixingSince(): number {
+    const round = activeRound(j.mrFeedback);
+    return round?.status === 'fixing' ? round.startedAt : 0;
+  }
+
+  /**
+   * The verify-case QA gate. Reached when verify has cycled through `implement`
+   * its full `maxLaps` and still records failing cases — where the run would
+   * otherwise block. QA classifies each still-failing case on the ticket; this
+   * applies their verdicts to verify.json in place and returns 'resolved' so the
+   * run continues, or a park/block for the caller to claim while it waits.
+   */
+  async function verifyCaseGate(
+    r: PhaseResult,
+  ): Promise<'resolved' | 'reverify' | { park: string } | { block: string }> {
+    let caseResults = (r.out.data?.results ?? []) as CaseResult[];
+    const meta = new Map(
+      (readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases ?? []).map((c) => [c.id, c]),
+    );
+    const failing = caseResults.filter(countsAsFailure).map((c) => ({
+      id: c.id, evidence: c.evidence, scenario: meta.get(c.id)?.scenario, steps: meta.get(c.id)?.steps,
+    }));
+    const gate = await checkVerifyGate({ iid, failing });
+    if (gate.verdict === 'unavailable') return { block: VERIFY_GATE_UNAVAILABLE };
+
+    // Apply the terminal verdicts (skip / invalid / expected / pre-existing) to verify.json in place.
+    if (gate.apply.length) {
+      const decisions: NonNullable<RunJournal['verifyCaseDecisions']> = [];
+      const applied = caseResults.map((c) => ({ ...c }));
+      for (const d of gate.apply) {
+        const c = applied.find((x) => x.id === d.caseId);
+        if (!c) continue;
+        const by = d.by ?? 'unknown';
+        if (d.verdict === 'expected') {
+          c.result = 'pass';
+          c.evidence = `QA (${by}) confirmed expected behaviour. ${c.evidence ?? ''}`.trim();
+          decisions.push({ caseId: d.caseId, verdict: 'expected', by });
+        } else if (d.verdict === 'pre-existing') {
+          const issue = await createIssue(
+            `${ticket.title} — ${d.caseId}: pre-existing failure (from #${iid})`,
+            preExistingIssueBody(iid, ticket.title, c),
+          );
+          const newIid = issue.ok ? issue.data?.iid : undefined;
+          c.result = 'skipped';
+          c.evidence = `QA (${by}) classified pre-existing${newIid ? `; tracked as #${newIid}` : ''}. `
+            + `${c.evidence ?? ''}`.trim();
+          if (newIid) {
+            await addIssueNote(iid,
+              `**${d.caseId}** is a pre-existing issue, not caused by this change (QA: ${by}). `
+              + `A separate bug has been created: #${newIid}.`);
+          } else {
+            log.warn(`verify-case gate: could not open a pre-existing bug for ${d.caseId}`,
+              { iid, error: issue.error?.slice(0, 120) });
+          }
+          decisions.push({ caseId: d.caseId, verdict: 'pre-existing', by, issueIid: newIid });
+        } else {
+          // `skip` and `invalid` both drop the case; the verdict is kept for the audit.
+          c.result = 'skipped';
+          c.evidence = `QA (${by}) marked ${d.verdict}. ${c.evidence ?? ''}`.trim();
+          decisions.push({ caseId: d.caseId, verdict: d.verdict, by });
+        }
+      }
+      r.out.data = { ...r.out.data, results: applied };
+      writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
+      prior.verify = r.out.data;
+      j = updateJournal(iid, {
+        verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
+      }) ?? j;
+      if (decisions.length) await addIssueNote(iid, verifyDecisionsAuditBody(decisions));
+      log.ok(`verify-case gate applied ${decisions.length} QA verdict(s) on #${iid}`);
+      caseResults = applied;
+    }
+
+    // QA supplied corrected steps for a `missing-steps` case: write them onto the
+    // case, scope the next verify run to it, mark the correction spent, and go
+    // re-run verify on only that case (no code changed, so nothing else re-runs).
+    if (gate.rescope.length) {
+      const data = readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json');
+      const cases = (data?.cases ?? []).map((c) => {
+        const rs = gate.rescope.find((x) => x.caseId === c.id);
+        return rs ? { ...c, steps: rs.steps } : c;
+      });
+      writeArtifact(iid, 'testcases.json', { ...(data ?? {}), cases });
+      const missing = { ...(j.verifyMissingSteps ?? {}) };
+      for (const rs of gate.rescope) {
+        const st = missing[rs.caseId];
+        if (st) missing[rs.caseId] = { ...st, rerunDone: true };
+      }
+      const decisions = gate.rescope.map((x) => ({
+        caseId: x.caseId, verdict: 'missing-steps' as const, by: x.by ?? 'unknown',
+        note: 'QA supplied corrected steps; re-running only this case',
+      }));
+      j = updateJournal(iid, {
+        verifyMissingSteps: missing,
+        verifyRescopeCases: gate.rescope.map((x) => x.caseId),
+        verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
+      }) ?? j;
+      await addIssueNote(iid,
+        `Re-running ${gate.rescope.map((x) => `**${x.caseId}**`).join(', ')} with the corrected steps `
+        + '— only that case, since no code changed.');
+      // Snapshot the FULL current list before the scoped re-run. The scoped
+      // verify session runs only the rescoped case(s), and phase.ts writes its
+      // output straight to verify.json the instant it returns — so by the time
+      // the merge below runs, verify.json holds only the rescoped case. The
+      // merge reads this snapshot instead, so every other case (passes and
+      // still-unsettled fails alike) survives.
+      writeArtifact(iid, 'verify-prescope.json', r.out.data);
+      log.phase(`verify re-running ${gate.rescope.length} case(s) with QA's corrected steps`, {
+        iid, cases: gate.rescope.map((x) => x.caseId).join(', '),
+      });
+      return 'reverify';
+    }
+
+    // No failing cases remain → verify completes. Otherwise wait on QA.
+    const stillFailing = ((r.out.data?.results ?? []) as CaseResult[]).filter(countsAsFailure);
+    if (!stillFailing.length) return 'resolved';
+    return {
+      park: 'awaiting a QA decision on the verify case(s) still failing after two laps — a QA reviewer '
+        + 'classifies each on the ticket (`skip`, `invalid`, `expected`, `pre-existing`, or `missing steps` '
+        + 'to supply corrected steps) and the run continues once every one is settled',
+    };
   }
 
   /**
@@ -2638,16 +2966,22 @@ export async function runTicket(
    *
    * Returns the phase to resume from, or null when it could not help — and null
    * is the ordinary answer. The guards below all exist to make sure the run
-   * reaches a person eventually: not while paused, not while dry, not more than
-   * MAX_REMEDIATIONS times, and never twice for the same block, because a cause
-   * that survives being fixed was not the cause.
+   * reaches a person eventually: not while paused, not while dry, not while the
+   * account is quota-parked, not more than MAX_REMEDIATIONS times, and never
+   * twice for the same block, because a cause that survives being fixed was not
+   * the cause.
    */
   async function attemptRemediation(blockedPhase: string, reason: string): Promise<string | null> {
     remediationNote = '';
 
-    // A dry run changes nothing anywhere, and a pause is a freeze: neither is
-    // the moment to start editing the machine's configuration.
-    if (DRY_RUN || existsSync(PAUSE)) return null;
+    // A dry run, a pause or a quota park: see remediationFreeze().
+    const frozen = remediationFreeze({
+      dryRun: DRY_RUN, paused: existsSync(PAUSE), quotaParked: quotaParked(),
+    });
+    if (frozen !== null) {
+      remediationNote = frozen;
+      return null;
+    }
 
     const cfgR = list.find((p) => p.name === 'remediate');
     if (!cfgR || !isImplemented(cfgR.name) || !schemaFor(cfgR.name)) return null;

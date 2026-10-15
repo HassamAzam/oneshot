@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyBaseCheck, baseCheckOutcome, codePhaseStatus, decideClaim, failedCases, mergePollWait,
-  nextIndex, refusalIsFinal, runTicket, salvagedReview, sharedDatabaseRefusal, statusForFailure,
-  testcaseGateRoute, ticketComments, uiEvidenceRefusal, verifyAfterBaseCheckDeath,
+  mergeScopedVerify, nextIndex, refusalIsFinal, remediationFreeze, runTicket, salvagedReview,
+  sharedDatabaseRefusal, statusForFailure, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
+  verifyAfterBaseCheckDeath,
 } from './runner.js';
 import type { PhaseOutput } from './phase.js';
 import type { Issue, IssueNote } from '../lib/gitlab.js';
@@ -163,6 +164,32 @@ test('nothing holds a run that is not waiting on a human merge', () => {
   assert.equal(poll({ dryRun: true }), null);
   assert.equal(poll({ mergeSucceeded: true }), null, 'a later park must not wait behind a finished merge');
   assert.equal(poll({ lastCheckAt: undefined }), null, 'never asked GitLab yet: ask now');
+});
+
+// ---------------------------------------------- what freezes self-remediation
+
+const freeze = (o: Partial<Parameters<typeof remediationFreeze>[0]> = {}): string | null =>
+  remediationFreeze({ dryRun: false, paused: false, quotaParked: false, ...o });
+
+test('a quota park refuses remediation, and the blocked note says why', () => {
+  // The defect: only a dry run and state/PAUSE were checked, so a stop that
+  // reached remediation by any route but the rate-limited phase's own (a group
+  // sibling's ordinary failure, a code phase, merge's quota refusal before
+  // mr-feedback) started a remediate session under the park. It hit the same
+  // limit on its first turn and spent one of the run's two attempts.
+  const why = freeze({ quotaParked: true });
+  assert.notEqual(why, null);
+  assert.match(why ?? '', /parked after a subscription usage limit/);
+});
+
+test('a dry run or a pause refuses remediation without adding to the blocked note', () => {
+  assert.equal(freeze({ dryRun: true }), '');
+  assert.equal(freeze({ paused: true }), '');
+  assert.equal(freeze({ paused: true, quotaParked: true }), '', 'a human pause explains itself first');
+});
+
+test('nothing freezes remediation on a machine that is neither dry, paused nor parked', () => {
+  assert.equal(freeze(), null);
 });
 
 // The case: the reviewer wrote "TC-05 is removed and replaced by the
@@ -660,4 +687,52 @@ test('a base check that kept dying of infrastructure stops the run instead of bu
   assert.equal(statusForFailure(phaseByName('verify')!, verify.infra), 'infra');
   assert.equal(verify.rateLimited, false);
   assert.equal(verify.accountAction, undefined);
+});
+
+// ------------------------------------------------ scoped verify re-run merge
+
+const cr = (id: string, result: string): CaseResult =>
+  ({ id, result, evidence: '', screenshot: '' } as unknown as CaseResult);
+
+test('mergeScopedVerify keeps every non-rescoped case when the re-run returned only one', () => {
+  // The bug: a scoped re-run of TC-14 returns [TC-14] only; merging over that
+  // would erase TC-01/TC-07. Merging over the pre-scope baseline must not.
+  const baseline = [cr('TC-01', 'pass'), cr('TC-07', 'fail'), cr('TC-14', 'fail')];
+  const fresh = [cr('TC-14', 'pass')];
+  const merged = mergeScopedVerify(baseline, fresh, new Set(['TC-14']));
+  assert.deepEqual(merged.map((c) => [c.id, c.result]), [
+    ['TC-01', 'pass'], ['TC-07', 'fail'], ['TC-14', 'pass'],
+  ]);
+});
+
+test('mergeScopedVerify only trusts fresh results for in-scope cases', () => {
+  // A scoped session that wrongly re-reports an out-of-scope case is ignored.
+  const baseline = [cr('TC-01', 'pass'), cr('TC-14', 'fail')];
+  const fresh = [cr('TC-14', 'pass'), cr('TC-01', 'fail')];
+  const merged = mergeScopedVerify(baseline, fresh, new Set(['TC-14']));
+  assert.deepEqual(merged.map((c) => [c.id, c.result]), [['TC-01', 'pass'], ['TC-14', 'pass']]);
+});
+
+test('mergeScopedVerify leaves a still-failing non-scoped case failing (no premature advance)', () => {
+  const baseline = [cr('TC-07', 'fail'), cr('TC-14', 'fail')];
+  const merged = mergeScopedVerify(baseline, [cr('TC-14', 'pass')], new Set(['TC-14']));
+  assert.ok(merged.some((c) => c.id === 'TC-07' && c.result === 'fail'));
+});
+
+test('no Loop code path reaches the local automation tests', async () => {
+  // They run after the merge, in their own mode (src/localtests). A Loop run
+  // that imported the old step's wiring — the scope's prepare and capture, its
+  // gates, the run, its gc — could start a Cypress run or ask QA about an MR
+  // that is not merged yet. Read as source, because an unused import or a
+  // dead branch would pass every behavioural test here.
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('./runner.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /from '\.\/localtests\.js'/, 'runner.ts imports src/conductor/localtests.ts');
+  assert.doesNotMatch(src, /from '\.\.\/localtests\//, 'runner.ts imports the post-merge mode');
+  for (const name of [
+    'prepareScopeSession', 'afterScopeSession', 'localTestsRunPhase', 'gcLocalTests', 'lateForLocalTests',
+    'localSpecsGate', 'localResultsSubject', 'LOCAL_TESTS_PHASES', "'localSpecs'", "'localResults'",
+  ]) {
+    assert.ok(!src.includes(name), `runner.ts still names ${name}`);
+  }
 });
