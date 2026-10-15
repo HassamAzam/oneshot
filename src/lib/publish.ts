@@ -402,6 +402,56 @@ const SPECS: Spec[] = [
   },
   {
     /*
+     * The demo webm, posted to the TICKET so a stakeholder sees the change move
+     * without checking out the branch. Published from here for the same reason
+     * ui-evidence is: `demo-recording` is a session, and session phases are off
+     * every GitLab write tool (toolPolicy in src/conductor/phase.ts) — a model
+     * that could post to the ticket could also answer a reviewer on work nobody
+     * has checked. The session records the webm into artifacts/demo/ and writes
+     * demo.json; this attaches it. GitLab renders an uploaded .webm inline.
+     *
+     * A failed capture still posts, as a note with the reason: the phase is
+     * warn-on-fail, so a missing demo must leave a visible record rather than a
+     * silent gap, and it never holds a change that is already verified.
+     */
+    key: 'demo',
+    artifact: 'demo.json',
+    target: 'ticket',
+    build: (data, ctx) => {
+      if (String(data.status ?? '') === 'failed') {
+        const attempts = Number(data.attempts ?? 0);
+        return {
+          body: '**Demo** — no walkthrough was recorded.\n\n'
+            + `> ${mdText(String(data.reason ?? 'no reason recorded').slice(0, 400))}\n\n`
+            + `_${attempts || 'No'} capture attempt(s). The change was still verified, reviewed and `
+            + 'evidenced — a missing demo does not hold it._',
+          attachments: [],
+        };
+      }
+      const webm = String(data.webm ?? '').trim();
+      if (!webm) return null;
+      const p = join(artifactDir(ctx.iid), 'demo', webm);
+      if (!existsSync(p)) return null;
+      const content = readFileSync(p);
+      if (content.length > MAX_UPLOAD_BYTES) {
+        return {
+          body: '**Demo** — a walkthrough was recorded but is too large to attach '
+            + `(${Math.round(content.length / (1024 * 1024))} MB, over the `
+            + `${MAX_UPLOAD_BYTES / (1024 * 1024)} MB limit). It is saved with the run.`,
+          attachments: [],
+        };
+      }
+      const journey = mdText(String(data.journey ?? '').slice(0, 300));
+      return {
+        body: '**Demo** — a short annotated walkthrough of this feature working in the app, '
+          + 'so you can see the change without checking out the branch.'
+          + (journey ? `\n\n> ${journey}` : ''),
+        attachments: [{ name: webm, content, mime: mimeFor(webm) }],
+      };
+    },
+  },
+  {
+    /*
      * The one note in this file that asks for something rather than reporting
      * something, and the only one that @mentions a person.
      *

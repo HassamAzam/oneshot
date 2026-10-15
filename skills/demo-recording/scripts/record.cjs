@@ -20,6 +20,21 @@ const fs = require('fs');
 const path = require('path');
 
 const ONESHOT_HOME = process.env.ONESHOT_HOME || path.resolve(__dirname, '../../../..');
+
+/**
+ * A phase session is given ONESHOT_TICKET but neither ONESHOT_IID nor
+ * ONESHOT_RUN_DIR, so the harness would fall back to state/runs/adhoc while
+ * scripts/app.cjs (which the session runs first) writes app-env.json and the
+ * fresh storage-state under state/runs/<ticket>. Pin ONESHOT_RUN_DIR to the
+ * same dir app.cjs uses before loading the harness, so the login this file
+ * forces off-camera is the one the recording context then reuses — otherwise
+ * the context opens unauthenticated and the login form is driven on camera.
+ */
+if (!process.env.ONESHOT_RUN_DIR) {
+  const iid = process.env.ONESHOT_IID || process.env.ONESHOT_TICKET;
+  if (iid) process.env.ONESHOT_RUN_DIR = path.join(ONESHOT_HOME, 'state', 'runs', String(iid));
+}
+
 const HARNESS = path.join(ONESHOT_HOME, '.claude/skills/local-browser-verify/scripts/harness.cjs');
 const h = require(HARNESS);
 
@@ -94,34 +109,38 @@ async function adminLogin(session) {
 }
 
 const OVERLAY = (title) => {
-  document.getElementById('demo-overlay-style')?.remove();
-  const style = document.createElement('style');
-  style.id = 'demo-overlay-style';
-  style.textContent = `
-    #demo-title{position:fixed;top:0;left:0;right:0;z-index:2147483647;
-      background:linear-gradient(90deg,#0b5fff,#00b3a4);color:#fff;
-      font:600 15px/40px -apple-system,Segoe UI,Roboto,sans-serif;height:40px;
-      padding:0 18px;letter-spacing:.2px;box-shadow:0 2px 10px rgba(0,0,0,.25)}
-    #demo-caption{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);
-      z-index:2147483647;background:rgba(17,24,39,.94);color:#fff;
-      font:500 16px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;
-      padding:12px 20px;border-radius:12px;max-width:72vw;text-align:center;
-      box-shadow:0 8px 30px rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.08);
-      opacity:0;transition:opacity .25s ease}
-    #demo-caption .step{display:inline-block;background:#00b3a4;color:#042b27;
-      font-weight:700;border-radius:999px;padding:2px 10px;margin-right:10px;font-size:13px}
-    #demo-caption.show{opacity:1}
-    .demo-ring{outline:3px solid #ffcf33 !important;outline-offset:2px !important;
-      border-radius:6px !important}`;
-  document.head.appendChild(style);
-  if (!document.getElementById('demo-title')) {
-    const t = document.createElement('div'); t.id = 'demo-title'; t.textContent = title;
-    document.body.appendChild(t);
-  }
-  if (!document.getElementById('demo-caption')) {
-    const c = document.createElement('div'); c.id = 'demo-caption';
-    document.body.appendChild(c);
-  }
+  const install = () => {
+    document.getElementById('demo-overlay-style')?.remove();
+    const style = document.createElement('style');
+    style.id = 'demo-overlay-style';
+    style.textContent = `
+      #demo-title{position:fixed;top:0;left:0;right:0;z-index:2147483647;
+        background:linear-gradient(90deg,#0b5fff,#00b3a4);color:#fff;
+        font:600 15px/40px -apple-system,Segoe UI,Roboto,sans-serif;height:40px;
+        padding:0 18px;letter-spacing:.2px;box-shadow:0 2px 10px rgba(0,0,0,.25)}
+      #demo-caption{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);
+        z-index:2147483647;background:rgba(17,24,39,.94);color:#fff;
+        font:500 16px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;
+        padding:12px 20px;border-radius:12px;max-width:72vw;text-align:center;
+        box-shadow:0 8px 30px rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.08);
+        opacity:0;transition:opacity .25s ease}
+      #demo-caption .step{display:inline-block;background:#00b3a4;color:#042b27;
+        font-weight:700;border-radius:999px;padding:2px 10px;margin-right:10px;font-size:13px}
+      #demo-caption.show{opacity:1}
+      .demo-ring{outline:3px solid #ffcf33 !important;outline-offset:2px !important;
+        border-radius:6px !important}`;
+    document.head.appendChild(style);
+    if (!document.getElementById('demo-title')) {
+      const t = document.createElement('div'); t.id = 'demo-title'; t.textContent = title;
+      document.body.appendChild(t);
+    }
+    if (!document.getElementById('demo-caption')) {
+      const c = document.createElement('div'); c.id = 'demo-caption';
+      document.body.appendChild(c);
+    }
+  };
+  if (document.body) install();
+  else document.addEventListener('DOMContentLoaded', install, { once: true });
 };
 
 /**
@@ -152,6 +171,15 @@ async function startRecording(opts) {
   const pw = requirePlaywright();
   const browser = await pw.chromium.launch({ headless: true, slowMo: opts.slowMo ?? 220 });
 
+  try {
+    return await buildRecording({ browser, outDir, title, viewport, admin, url });
+  } catch (err) {
+    await browser.close().catch(() => {});
+    throw err;
+  }
+}
+
+async function buildRecording({ browser, outDir, title, viewport, admin, url }) {
   const storage = storagePath();
   const warmCtx = await browser.newContext({
     viewport, ignoreHTTPSErrors: true,
@@ -168,6 +196,7 @@ async function startRecording(opts) {
     recordVideo: { dir: outDir, size: viewport },
     ...(fs.existsSync(storage) ? { storageState: storage } : {}),
   });
+  await context.addInitScript(OVERLAY, title);
   const page = await context.newPage();
   await page.routeWebSocket(/.*/, (ws) => ws.close()).catch(() => {});
   const session = { page, env: { baseUrl: url }, context, browser, consoleErrors: [] };
@@ -234,6 +263,20 @@ async function gotoAdmin(rec, pathOrUrl, timeout = 30000) {
  * name and return its absolute path. Does NOT stop the app servers — the run
  * reaps them by pid, and a later phase reuses the warm app.
  */
+/**
+ * Tear down a recording that failed mid-journey, before a retry.
+ *
+ * finishRecording needs a live page with a flushed video, so it cannot close a
+ * context that died on login or navigation. Call this on the error path so the
+ * retry's startRecording does not leave a second chromium and a stale recording
+ * context alive until the node process exits. Best-effort and idempotent.
+ */
+async function abortRecording(rec) {
+  if (!rec) return;
+  try { await rec.context?.close(); } catch { /* already gone */ }
+  try { await rec.browser?.close(); } catch { /* already gone */ }
+}
+
 async function finishRecording(rec, finalName = 'demo.webm') {
   const video = rec.page.video();
   await rec.context.close();
@@ -245,4 +288,4 @@ async function finishRecording(rec, finalName = 'demo.webm') {
   try { fs.renameSync(src, dest); return dest; } catch { return src; }
 }
 
-module.exports = { startRecording, gotoModule, gotoAdmin, adminLogin, finishRecording, baseUrl, sleep, harness: h };
+module.exports = { startRecording, gotoModule, gotoAdmin, adminLogin, finishRecording, abortRecording, baseUrl, sleep, harness: h };

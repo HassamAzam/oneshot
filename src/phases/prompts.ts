@@ -2105,23 +2105,25 @@ it is narration drawn to read as demo furniture, never a control faked into the 
 data and the real journey; never stage a state by hand and narrate it as the feature, and never
 caption a broken flow as a success.
 
-## Post the webm to the ticket
-The webm goes on the ticket (issue ${ctx.ticket.iid}) as a note — GitLab renders an uploaded .webm
-as an inline player. \`upload_markdown\` rejects absolute paths and anything outside the project
-dir, so: copy the webm into a directory INSIDE the worktree, pass the RELATIVE path to
-\`mcp__gitlab__upload_markdown\`, post the note with \`mcp__gitlab__create_issue_note\` embedding what
-it returned plus one line of context, then DELETE the copy so it never reaches the MR diff.
+## The conductor posts the webm — you only record it
+Do NOT call any GitLab tool. This session is off every GitLab write (session phases are, by
+policy), and it does not need one: record the webm into \`${artifactDir(ctx.ticket.iid)}/demo/\`
+and name it in \`demo.json\` below. The conductor attaches it to the ticket (issue ${ctx.ticket.iid})
+as an inline player once you finish, the same way it posts the ui-evidence pack — the webm stays
+under the run's artifacts, never on the branch.
 
 ## Re-run once, then warn with a reason
 This phase is warn-on-fail: a failed demo must never block a change that is already verified and
-reviewed. So on a flaky step or a failed upload, retry the capture ONCE. If it still fails, post a
-short note to the ticket saying why there is no demo (what step failed, what you saw) and finish.
+reviewed. So on a flaky step, retry the capture ONCE — if the first attempt left a browser open,
+\`abortRecording\` it first. If it still fails, write \`demo.json\` with \`status: "failed"\` and the
+reason (what step broke, what you saw); the conductor posts that to the ticket so the gap is
+recorded where a person sees it, and finish.
 
 ${artifactsBlock(ctx)}
 
-Write \`demo.json\`: on success \`{ "status": "ok", "journey": "<one line>", "ticketNoteUrl": "<url>",
-"webm": "<bare filename under artifacts/demo/>" }\`; on failure \`{ "status": "failed", "reason":
-"<what broke>", "attempts": <n> }\`. Budget: ~${mins} min.`;
+Write \`demo.json\`: on success \`{ "status": "ok", "journey": "<one line>", "webm": "<bare filename
+under artifacts/demo/>", "attempts": <n> }\`; on failure \`{ "status": "failed", "reason": "<what
+broke>", "attempts": <n> }\`. The conductor reads \`webm\` and attaches that file. Budget: ~${mins} min.`;
   },
 
   mr: (ctx) => {

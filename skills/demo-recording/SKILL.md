@@ -56,10 +56,13 @@ journey.
 ```js
 const rec = require('<ONESHOT_HOME>/.claude/skills/demo-recording/scripts/record.cjs');
 const r = await rec.startRecording({
-  outDir: process.env.ONESHOT_RUN_DIR + '/artifacts/demo',
+  outDir: `${process.env.ONESHOT_HOME}/state/runs/${process.env.ONESHOT_TICKET}/artifacts/demo`,
   title: 'Demo — <what the ticket delivers>',
 });
 // r.session is a local-browser-verify session; r.caption / r.ring / r.installOverlay are ready.
+// ONESHOT_RUN_DIR is NOT in a phase session's environment — build the path from
+// ONESHOT_HOME + ONESHOT_TICKET (the same dir the conductor reads the webm from),
+// never `ONESHOT_RUN_DIR + ...`, which would be the literal string "undefined/...".
 
 await rec.gotoModule(r, '<module-key>');          // uses the harness's module routes
 await r.caption(1, 'Open <screen> and start <action>.');
@@ -85,37 +88,32 @@ const webm = await rec.finishRecording(r, 'demo.webm');  // closes context, retu
   webpack bundle — so it still works when the SPA is down. The journey is the same:
   one caption per step, ring the control, drive it.
 
-## Attach the webm to the ticket
+## The conductor posts the webm — you only record it
 
-The webm goes on the **ticket** (the issue), as a note, so a stakeholder sees it
-without the MR. GitLab renders an uploaded `.webm` as an inline player.
+Do **not** call any GitLab tool. Session phases are off every GitLab write (that
+is deliberate — a session that could post could also answer a reviewer on work
+nobody has checked), and this one does not need to. You record the webm into
+`artifacts/demo/` and name it in `demo.json`; the **conductor** attaches it to the
+**ticket** (the issue) as an inline player once the phase finishes, exactly the way
+it posts the ui-evidence pack. GitLab renders an uploaded `.webm` as an inline
+player, and the webm never reaches the branch or the MR diff.
 
-`upload_markdown` **rejects absolute paths and anything outside the project
-directory** — a scratchpad or `artifacts/` path is refused every time, and the
-refusal reads like a permissions error. So:
-
-1. Copy the webm into a directory **inside the worktree** you are invoking from.
-2. Pass the **relative** path to `mcp__gitlab__upload_markdown`; keep the URL/markdown it returns.
-3. Post the note on the ticket with `mcp__gitlab__create_issue_note`, embedding
-   what the upload returned, with one line of context (what the demo shows).
-4. **Delete the copy** from the worktree once the upload returns — it must never
-   reach the MR diff.
-
-The ticket IID is `$ONESHOT_TICKET`. Upload before writing the note, and link only
-what actually returned a URL. Two refusals: stop and report un-uploaded — not a
-third shape of path.
+So there is nothing to upload, copy or delete by hand: get the webm onto disk under
+`artifacts/demo/`, put its bare filename in `demo.json`, and stop.
 
 ## Re-run once, then warn with a reason
 
 This phase is `onFail: warn` — a failed demo must never block a verified, reviewed
 change from merging. So the one re-run it deserves is yours:
 
-- On a flaky step or a failed upload, **retry the capture once**.
-- If it still fails, **post a short note to the ticket** stating why there is no
-  demo (what step failed, what you saw), and finish. Write `demo.json` with
-  `{ status: "failed", reason, attempts }`.
-- On success, write `demo.json` with `{ status: "ok", journey, ticketNoteUrl,
-  webm: "<artifacts path>" }`.
+- On a flaky step, **retry the capture once**. If the first attempt already opened
+  a browser, `rec.abortRecording(r)` it first so the retry does not leave a second
+  chromium and a stale recording context alive.
+- If it still fails, write `demo.json` with `{ status: "failed", reason, attempts }`
+  — the conductor posts that reason to the ticket, so the gap is recorded where a
+  person sees it.
+- On success, write `demo.json` with `{ status: "ok", journey, webm, attempts }`,
+  where `webm` is the **bare filename** under `artifacts/demo/` (e.g. `"demo.webm"`).
 
 A recorded gap a person can see beats a silent one.
 
