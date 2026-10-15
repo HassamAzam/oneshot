@@ -468,9 +468,9 @@ const REPRODUCTION_SKILL = 'bug-reproduction';
 
 /**
  * How many module specs local-tests-scope adds beyond the precise set, as a health check of
- * the module. A dry run on ERP #8800 showed why it is a cap and not the limits: with no spec
- * reaching the change, filling toward maxSpecs picked 40 unrelated specs (~37 min) that could
- * not see the banner the ticket added. For the same reason an empty precise set gets none:
+ * the module. A dry run showed why it is a cap and not the limits: with no spec reaching the
+ * change, filling toward maxSpecs picked 40 unrelated specs (~37 min) that could not see the
+ * banner the change added. For the same reason an empty precise set gets none:
  * a list of health checks alone would run without testing the ticket at all.
  */
 const SMOKE_SPECS = 5;

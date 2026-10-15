@@ -152,7 +152,7 @@ test('the latest of several merged fixes is tested; leftovers and the rest are w
 test('the ticket\'s own change wins over a later MR that only mentions it', () => {
   // Another ticket's MR saying "see also #990601" is linked too, and merged later.
   const own = fix({ iid: 350, source_branch: 'hira/990601-leave-total', merged_at: '2026-10-08T09:00:00Z', merge_commit_sha: SHA('6') });
-  const mention = fix({ iid: 351, source_branch: 'hira/8338-training-link', title: 'Training link', merged_at: '2026-10-08T12:00:00Z', merge_commit_sha: SHA('7') });
+  const mention = fix({ iid: 351, source_branch: 'hira/990602-training-link', title: 'Training link', merged_at: '2026-10-08T12:00:00Z', merge_commit_sha: SHA('7') });
   const r1 = hook.decideReadiness(facts({ mrs: [own, mention] }));
   assert.equal(r1.mergedMr?.iid, 350, 'the branch names the ticket');
   assert.deepEqual(r1.mergedMr?.ranges, [{ mrIid: 350, base: null, head: SHA('6') }], 'the mention is never scoped');
@@ -180,7 +180,7 @@ test('the ticket\'s own change wins over a later MR that only mentions it', () =
 
 test('the ticket\'s own MR still open is a wait, even with another ticket\'s MR that mentions it merged', () => {
   const ownOpen = fix({ iid: 360, source_branch: 'oneshot/ticket-990601-fix', state: 'opened', merged_at: null, merge_commit_sha: null });
-  const mention = fix({ iid: 361, source_branch: 'hira/8801-x', title: 'Unrelated fix (its description says see also the leave ticket)', merged_at: '2026-10-08T12:00:00Z', merge_commit_sha: SHA('b') });
+  const mention = fix({ iid: 361, source_branch: 'hira/990603-x', title: 'Unrelated fix (its description says see also the leave ticket)', merged_at: '2026-10-08T12:00:00Z', merge_commit_sha: SHA('b') });
   const r = hook.decideReadiness(facts({ mrs: [ownOpen, mention] }));
   assert.equal(r.verdict, 'not-ready');
   assert.equal(r.ready, false);
@@ -349,7 +349,7 @@ test('the real script: two own merges, each read in full, the latest tested and 
   world.related = [
     fix({ iid: 380, merged_at: '2026-10-08T08:00:00Z', merge_commit_sha: null }),
     fix({ iid: 381, merged_at: '2026-10-08T12:00:00Z', merge_commit_sha: null }),
-    fix({ iid: 382, source_branch: 'hira/8801-x', title: 'Other ticket', merged_at: '2026-10-08T13:00:00Z', merge_commit_sha: null }),
+    fix({ iid: 382, source_branch: 'hira/990603-x', title: 'Other ticket', merged_at: '2026-10-08T13:00:00Z', merge_commit_sha: null }),
   ];
   world.closing = [];
   world.details.set(380, fix({ iid: 380, merged_at: '2026-10-08T08:00:00Z', merge_commit_sha: null, sha: SHA('4'), diff_refs: { base_sha: SHA('3') } }));
@@ -380,7 +380,7 @@ test('the real script: a fast-forward merge reads its diff base from the MR itse
 test('the real script: the ticket\'s own MR open and a mention merged is a wait, with no GET for the mention', async () => {
   world.related = [
     fix({ iid: 395, source_branch: 'oneshot/ticket-990601-fix', state: 'opened', merged_at: null, merge_commit_sha: null }),
-    fix({ iid: 396, source_branch: 'hira/8801-x', title: 'Other ticket', merge_commit_sha: SHA('d') }),
+    fix({ iid: 396, source_branch: 'hira/990603-x', title: 'Other ticket', merge_commit_sha: SHA('d') }),
   ];
   world.closing = [];
   world.requests = [];

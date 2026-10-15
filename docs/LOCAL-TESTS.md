@@ -322,7 +322,7 @@ DRY_RUN=1 npm start -- --local-tests <iid> --assume-label
 
 ### Measured
 
-On ERP #8800 (2026-10-09):
+On the pilot run (2026-10-09):
 - database copy 18 s
 - database update to the ticket's code (migrate) 40 s
 - first app build about 4–10 min

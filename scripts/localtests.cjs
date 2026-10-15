@@ -6,8 +6,8 @@
  * ---------------
  * `local-tests-run` is code, not a session: it copies the automation database, builds
  * the ticket's app, runs workstream-automation's specs against it and throws all of it
- * away again. Every step is a fact about this desk that a hand-run pilot on ERP #8800
- * (2026-10-09) proved one by one, and every step that went wrong in that pilot is here
+ * away again. Every step is a fact about this desk that a hand-run pilot (2026-10-09)
+ * proved one by one, and every step that went wrong in that pilot is here
  * as a named error rather than as something a caller has to recognise in a log:
  *
  *     createdb -T <baseline>           18 s for 5.4 GB; refused while anything is on it

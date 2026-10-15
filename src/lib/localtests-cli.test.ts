@@ -72,13 +72,13 @@ const sha256 = (b: Buffer | string): string => createHash('sha256').update(b).di
 test('a run copy is <prefix><iid>_<n>, and the baseline or any other name is refused', () => {
   const prefix = 'oneshot_lt_';
   const baseline = 'hrdb_automation_baseline_20261002';
-  assert.equal(lt.dbName(prefix, 8800, 3), 'oneshot_lt_8800_3');
-  assert.equal(lt.dbNameProblem('oneshot_lt_8800_3', prefix, baseline), null);
+  assert.equal(lt.dbName(prefix, 990601, 3), 'oneshot_lt_990601_3');
+  assert.equal(lt.dbNameProblem('oneshot_lt_990601_3', prefix, baseline), null);
   assert.match(String(lt.dbNameProblem(baseline, prefix, baseline)), /does not start with|baseline/);
-  assert.match(String(lt.dbNameProblem('oneshot_lt_8800_3', prefix, 'oneshot_lt_8800_3')), /baseline/);
+  assert.match(String(lt.dbNameProblem('oneshot_lt_990601_3', prefix, 'oneshot_lt_990601_3')), /baseline/);
   assert.match(String(lt.dbNameProblem('hrdb_local', prefix, baseline)), /does not start with/);
-  assert.match(String(lt.dbNameProblem('oneshot_lt_8800', prefix, baseline)), /<iid>_<n>/);
-  assert.match(String(lt.dbNameProblem('oneshot_lt_8800_1x', prefix, baseline)), /<iid>_<n>/);
+  assert.match(String(lt.dbNameProblem('oneshot_lt_990601', prefix, baseline)), /<iid>_<n>/);
+  assert.match(String(lt.dbNameProblem('oneshot_lt_990601_1x', prefix, baseline)), /<iid>_<n>/);
   assert.match(String(lt.dbNameProblem('Oneshot_lt_1_1', prefix, baseline)), /lower-case/);
   assert.match(String(lt.dbNameProblem('oneshot_lt_1_1"; drop database x; --', prefix, baseline)), /lower-case/);
   assert.match(String(lt.dbNameProblem(`oneshot_lt_1_${'1'.repeat(60)}`, prefix, baseline)), /lower-case/);
@@ -86,12 +86,12 @@ test('a run copy is <prefix><iid>_<n>, and the baseline or any other name is ref
 });
 
 test('copies are parsed back to their ticket, and the next sequence clears both server and counter', () => {
-  assert.deepEqual(lt.parseOurDb('oneshot_lt_8800_12', 'oneshot_lt_'), { iid: 8800, seq: 12 });
-  assert.equal(lt.parseOurDb('oneshot_lt_8800', 'oneshot_lt_'), null);
-  assert.equal(lt.parseOurDb('hrdb_pilot_8800', 'oneshot_lt_'), null);
-  const names = ['oneshot_lt_8800_1', 'oneshot_lt_8800_4', 'oneshot_lt_77_9', 'other_8800_20'];
-  assert.equal(lt.nextSeq(8800, names, 'oneshot_lt_'), 5);
-  assert.equal(lt.nextSeq(8800, names, 'oneshot_lt_', 7), 8);
+  assert.deepEqual(lt.parseOurDb('oneshot_lt_990601_12', 'oneshot_lt_'), { iid: 990601, seq: 12 });
+  assert.equal(lt.parseOurDb('oneshot_lt_990601', 'oneshot_lt_'), null);
+  assert.equal(lt.parseOurDb('hrdb_pilot_990601', 'oneshot_lt_'), null);
+  const names = ['oneshot_lt_990601_1', 'oneshot_lt_990601_4', 'oneshot_lt_77_9', 'other_990601_20'];
+  assert.equal(lt.nextSeq(990601, names, 'oneshot_lt_'), 5);
+  assert.equal(lt.nextSeq(990601, names, 'oneshot_lt_', 7), 8);
   assert.equal(lt.nextSeq(1, [], 'oneshot_lt_'), 1);
 });
 
@@ -311,9 +311,9 @@ USE_WEB_SHELL = True
 `;
 
 test('local_settings.py: the DATABASES block points at the copy, the seed password goes, the E2E flags are appended', () => {
-  const out = lt.rewriteLocalSettings(SEED_SETTINGS, { name: 'oneshot_lt_8800_1', host: '127.0.0.1', port: 5432, user: 'arsal.tariq' });
+  const out = lt.rewriteLocalSettings(SEED_SETTINGS, { name: 'oneshot_lt_990601_1', host: '127.0.0.1', port: 5432, user: 'arsal.tariq' });
   assert.match(out, /'ENGINE': 'django\.db\.backends\.postgresql_psycopg2'/);
-  assert.match(out, /'NAME': 'oneshot_lt_8800_1'/);
+  assert.match(out, /'NAME': 'oneshot_lt_990601_1'/);
   assert.match(out, /'USER': 'arsal\.tariq'/);
   assert.match(out, /'PASSWORD': ''/);
   assert.match(out, /'HOST': '127\.0\.0\.1'/);
@@ -321,7 +321,7 @@ test('local_settings.py: the DATABASES block points at the copy, the seed passwo
   assert.doesNotMatch(out, /SEED-SECRET|hrdb_dev|db\.example/);
   assert.match(out, /CELERY_BROKER_URL = 'redis:\/\/localhost:6379'\nUSE_WEB_SHELL = True\n/);
   // The copy's own broker and cache prefix come AFTER the seed's lines, so they win on import.
-  assert.match(out, /\nDATABASE_NAME = 'oneshot_lt_8800_1'\nCELERY_BROKER_URL = 'redis:\/\/127\.0\.0\.1:6379\/15'\n/);
+  assert.match(out, /\nDATABASE_NAME = 'oneshot_lt_990601_1'\nCELERY_BROKER_URL = 'redis:\/\/127\.0\.0\.1:6379\/15'\n/);
   assert.ok(out.lastIndexOf("CELERY_BROKER_URL = 'redis://127.0.0.1:6379/15'") > out.indexOf("CELERY_BROKER_URL = 'redis://localhost:6379'"));
   assert.equal(lt.LT_BROKER, 'redis://127.0.0.1:6379/15');
   assert.match(out, /\nEXPOSE_E2E_API = True\nEXPIRE_TOKEN = False\n$/);
@@ -1354,14 +1354,14 @@ test('run: webpack still compiling past the harness\'s wait is watched (entrypoi
 test('gc drops a leftover copy with a plain DROP, and leaves alone one that something is still connected to', async () => {
   const f = await fakeDesk();
   try {
-    writeFileSync(join(f.logs, 'dbs'), 'oneshot_lt_8181_1\noneshot_lt_8282_1\n');
+    writeFileSync(join(f.logs, 'dbs'), 'oneshot_lt_990602_1\noneshot_lt_8282_1\n');
     const r = spawnSync(process.execPath, [SCRIPT, 'gc'], {
-      encoding: 'utf8', env: { ...process.env, ...f.env, FAKE_BUSY_DB: 'oneshot_lt_8181_1' }, timeout: 60000,
+      encoding: 'utf8', env: { ...process.env, ...f.env, FAKE_BUSY_DB: 'oneshot_lt_990602_1' }, timeout: 60000,
     });
     assert.equal(r.status, 0, r.stderr);
     const out = JSON.parse(r.stdout) as { dropped: string[]; skipped: Array<{ iid: number; db?: string; why: string }>; errors: string[] };
     assert.deepEqual(out.dropped, ['oneshot_lt_8282_1']);
-    assert.deepEqual(out.skipped, [{ iid: 8181, db: 'oneshot_lt_8181_1', why: '1 session(s) are connected to it' }],
+    assert.deepEqual(out.skipped, [{ iid: 990602, db: 'oneshot_lt_990602_1', why: '1 session(s) are connected to it' }],
       'it may be another Oneshot home\'s live run');
     assert.deepEqual(out.errors, []);
     const drops = lines(join(f.logs, 'psql.log')).filter((l) => /DROP DATABASE/.test(l)).map((l) => l.replace(/^.* -c /, ''));

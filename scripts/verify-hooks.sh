@@ -235,7 +235,7 @@ expect_deny  "remote remove origin (rewrites the clone's .git/config)" \
                                        git-guard.cjs "$(bash_payload "git -C $WSA remote remove origin")"
 expect_deny  "remote rename"           git-guard.cjs "$(bash_payload "git -C $WSA remote rename origin up")"
 expect_deny  "worktree remove of another ticket's wsa-run" \
-                                       git-guard.cjs "$(bash_payload "git -C $WSA worktree remove --force $ROOT/state/runs/8800/wsa-run")"
+                                       git-guard.cjs "$(bash_payload "git -C $WSA worktree remove --force $ROOT/state/runs/12/wsa-run")"
 expect_deny  "fetch with a refspec that writes local branches" \
                                        git-guard.cjs "$(bash_payload "git -C $WSA fetch origin '+refs/heads/*:refs/heads/*'")"
 expect_deny  "reflog expire"           git-guard.cjs "$(bash_payload "git -C $WSA reflog expire --expire=now --all")"

@@ -40,7 +40,7 @@ export function localTestsFlags(
   const assumeLabel = argv.some((a) => a === '--assume-label' || a.startsWith('--assume-label='));
   let error: string | null = null;
   if (given && iid === null) {
-    error = '--local-tests needs a positive ticket iid, e.g. --local-tests 8800 (no leading #, no =)';
+    error = '--local-tests needs a positive ticket iid, e.g. --local-tests 123 (no leading #, no =)';
   } else if (assumeLabel && !given) {
     error = '--assume-label only goes with --local-tests <iid>';
   } else if (assumeLabel && !dryRun) {

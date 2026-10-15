@@ -97,8 +97,8 @@ runs in full unless QA trims it (item 3), and every Cypress run is stopped at `m
    leave dashboard"): the ticket marks those rows by it. With an empty precise set there are no
    health checks either - they cannot see the change, so a list of them alone would run without
    testing this ticket. Never fill the list toward `maxSpecs` or `maxRunMinutes` with module specs
-   that cannot see the change: a dry run on ERP #8800 did exactly that, 40 unrelated specs and
-   about 37 minutes, none of which opened the banner the ticket added. Count the module specs you
+   that cannot see the change: a dry run that did exactly that picked 40 unrelated specs and
+   about 37 minutes, none of which opened the banner the change added. Count the module specs you
    left out in `summary` in one line (how many, which modules). The one exception is a diff that
    changes code every screen of a module runs through (its routing, a layout or container all its
    pages share, a module-wide API): then more of the module may go in, within the limits, and
@@ -186,8 +186,8 @@ Follow the repo's own conventions, copied from the specs beside it:
   value, never one built from a variable, so `index.cjs` can see it.
 - **The no-weakening rules of step 4 apply to new code too.** No `click({ force: true })`, no
   `cy.wait`, no raised timeout: a control that only works forced is covered or hidden, which
-  is a finding, not something to click past. The ERP #8800 dry run wrote a forced dismiss
-  click, and the check flagged it to QA.
+  is a finding, not something to click past. A dry run that wrote a forced dismiss click had
+  it flagged to QA by that check.
 - The spec is wrapped in `TestFilters(['regression'], () => { describe(...) })` from
   `support/filter_tests`, logs in with `loginWith('<KEY>_CREDENTIALS')` in `before`, and
   reaches the screen through `SidePanel` the way its neighbours do.

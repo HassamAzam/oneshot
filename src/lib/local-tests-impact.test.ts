@@ -207,7 +207,7 @@ test('changed folders map to their cypress/e2e modules through modules-map.json'
 });
 
 test('a test file changes no screen, but the code beside it still maps', () => {
-  // ticket 8781's shape: apps/expenses/tests/* beside a real fix in apps/expenses.
+  // A backend fix that edits its own tests too: apps/expenses/tests/* beside apps/expenses.
   assert.ok(result.changedFiles.backend.includes('apps/expenses/tests/utils_test.py'));
   assert.ok(result.areas.some((a) => a.area === 'ignored' && a.kind === 'ignored'));
   assert.ok(result.areas.some((a) => a.area === 'backend:expenses' && a.kind === 'mapped'));
