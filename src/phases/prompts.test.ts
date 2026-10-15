@@ -195,6 +195,32 @@ test('an approval predating digests still pairs, so upgrades do not regress', ()
   assert.match(uiEvidencePrompt(gate, DESIGN), /is this what I approved/);
 });
 
+// ------------------------------------------- demo-recording records, the conductor posts
+
+test('demo-recording records the webm under artifacts/demo and names it in demo.json', () => {
+  // The conductor reads `webm` from demo.json and attaches that file from
+  // artifacts/demo/, so the prompt must point the recording at the same place.
+  const p = promptFor(cfg('demo-recording'), ctx(ticket()));
+  assert.match(p, /artifacts\/demo\//);
+  assert.match(p, /Write `demo.json`/);
+  assert.match(p, /"webm"/);
+});
+
+test('demo-recording does not tell its session to post to GitLab', () => {
+  // The blocker this phase shipped with: session phases are off every GitLab
+  // write tool, so a prompt that ordered upload_markdown / create_issue_note
+  // produced a video nobody could post. The conductor publishes it instead.
+  const p = promptFor(cfg('demo-recording'), ctx(ticket()));
+  assert.ok(!/mcp__gitlab__upload_markdown/.test(p), 'must not order an upload the session cannot run');
+  assert.ok(!/mcp__gitlab__create_issue_note/.test(p), 'must not order a note the session cannot post');
+  assert.match(p, /conductor/, 'must say the conductor posts the webm');
+});
+
+test('demo-recording quotes its own configured budget, not a typed-in number', () => {
+  const p = promptFor(cfg('demo-recording'), ctx(ticket()));
+  assert.match(p, new RegExp(`~${cfg('demo-recording').timeoutMin} min`));
+});
+
 test('plan does not tell itself a stale design was approved', () => {
   const gate = {
     requestTs: 'x', approved: true, feedback: [],

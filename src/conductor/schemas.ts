@@ -784,6 +784,18 @@ export const AUTOMATION_TESTCASES_SCHEMA = phaseSchema({
   ),
 }, ['module', 'cases', 'changes', 'sources']);
 
+export const DEMO_SCHEMA = phaseSchema({
+  status: {
+    type: 'string',
+    enum: ['ok', 'failed'],
+    description: 'ok when the walkthrough recorded and the webm is on disk; failed when no demo could be produced.',
+  },
+  journey: str('One line naming the user journey the demo walks, for a reader who has not seen the ticket. Empty on failure.'),
+  webm: str('Bare filename of the recorded video under artifacts/demo/, e.g. "demo.webm". Empty on failure — the conductor attaches this to the ticket.'),
+  reason: str('On failure, what broke: which step, what you saw. Empty on success.'),
+  attempts: { type: 'integer', description: 'How many capture attempts were made (the phase retries once).' },
+}, ['status']);
+
 export const SCHEMAS: Record<string, JsonSchema> = {
   recall: RECALL_SCHEMA,
   research: RESEARCH_SCHEMA,
@@ -795,6 +807,7 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   verify: VERIFY_SCHEMA,
   'base-check': BASE_CHECK_SCHEMA,
   'ui-evidence': UI_EVIDENCE_SCHEMA,
+  'demo-recording': DEMO_SCHEMA,
   'local-tests-scope': LOCAL_TESTS_SCOPE_SCHEMA,
   mr: MR_SCHEMA,
   remediate: REMEDIATE_SCHEMA,

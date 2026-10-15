@@ -2350,6 +2350,77 @@ This phase is warn-on-fail. A screen you could not reach is a missing screenshot
 saying why, not a block — ship the pack you have and name the gap in \`summary\`.`;
   },
 
+  'demo-recording': (ctx) => {
+    const v = artifact<{ results: CaseResult[] }>(ctx, 'verify');
+    const passedIds = new Set((v.results ?? []).filter((x) => x.result === 'pass').map((x) => x.id));
+    const passed = testCases(ctx).filter((c) => passedIds.has(c.id));
+    const ac = artifact<{ acceptanceCriteria: string[] }>(ctx, 'research').acceptanceCriteria ?? [];
+    const mins = budgetMin('demo-recording', 40);
+
+    return `${ticketHead(ctx.ticket)}
+
+## Your app instance
+Worktree: ${ctx.worktree ?? '(none leased)'}
+Port:     ${ctx.port ?? '(none leased)'}   (also in $ONESHOT_PORT)
+Ticket:   ${ctx.ticket.iid}   (also in $ONESHOT_TICKET — this is where the demo gets posted)
+
+The app is already leased for you. \`verify\` and \`ui-evidence\` drove it just before you on this
+same worktree and port. Do not start anything by hand — run the one command they ran:
+
+\`\`\`
+node $ONESHOT_HOME/scripts/app.cjs ensure
+\`\`\`
+
+It returns the running app in ~3s (or rebuilds if it died) and writes the \`app-env.json\` with the
+\`baseUrl\`. Never \`npm ci\`: node_modules is a shared symlink. There is no browser tool here — you
+drive Playwright from Bash with \`node\`, exactly as verify did.
+
+## What to record: ONE journey, the one that passed
+Record a short annotated walkthrough of this feature WORKING — one user journey, 5–8 steps, for a
+stakeholder who has not read the ticket. Not a regression sweep; that was verify's job.
+
+Acceptance criteria (the oracle for what the journey must show):
+${ac.length ? ac.map((a) => `  - ${a}`).join('\n') : '  (research recorded none — derive the journey from the ticket body above)'}
+
+Cases that PASSED in verify — follow the primary happy-path one end to end:
+${caseList(passed, { steps: true })}
+
+If no happy-path case passed, there is NO working feature to demo: do not stage one. Post the
+reason to the ticket (below) and stop.
+
+## Record it with the skill's helper
+The \`demo-recording\` skill is loaded. Its \`scripts/record.cjs\` owns the mechanics that cost a run
+to get right — a video context, the FRESH-login dance (a stale session renders /home but ERR_ABORTs
+every nav), the caption/ring overlay, and flushing the webm. You own the FLOW: the clicks and the
+words. Record into \`${artifactDir(ctx.ticket.iid)}/demo/\`, drive the journey with one caption per
+step written for someone who has not read the ticket, and \`finishRecording\` to get the webm path.
+
+This is NOT a ui-evidence pack, and the one rule inverts: a demo REQUIRES the caption chrome —
+it is narration drawn to read as demo furniture, never a control faked into the app. Record REAL
+data and the real journey; never stage a state by hand and narrate it as the feature, and never
+caption a broken flow as a success.
+
+## The conductor posts the webm — you only record it
+Do NOT call any GitLab tool. This session is off every GitLab write (session phases are, by
+policy), and it does not need one: record the webm into \`${artifactDir(ctx.ticket.iid)}/demo/\`
+and name it in \`demo.json\` below. The conductor attaches it to the ticket (issue ${ctx.ticket.iid})
+as an inline player once you finish, the same way it posts the ui-evidence pack — the webm stays
+under the run's artifacts, never on the branch.
+
+## Re-run once, then warn with a reason
+This phase is warn-on-fail: a failed demo must never block a change that is already verified and
+reviewed. So on a flaky step, retry the capture ONCE — if the first attempt left a browser open,
+\`abortRecording\` it first. If it still fails, write \`demo.json\` with \`status: "failed"\` and the
+reason (what step broke, what you saw); the conductor posts that to the ticket so the gap is
+recorded where a person sees it, and finish.
+
+${artifactsBlock(ctx)}
+
+Write \`demo.json\`: on success \`{ "status": "ok", "journey": "<one line>", "webm": "<bare filename
+under artifacts/demo/>", "attempts": <n> }\`; on failure \`{ "status": "failed", "reason": "<what
+broke>", "attempts": <n> }\`. The conductor reads \`webm\` and attaches that file. Budget: ~${mins} min.`;
+  },
+
   'local-tests-scope': (ctx) => {
     const lt = localTestsConfig();
     const iid = ctx.ticket.iid;
