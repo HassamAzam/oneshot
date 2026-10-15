@@ -680,11 +680,22 @@ function assembleResults(specs, rows, opts = {}) {
 }
 
 /**
+ * Did a second run report the whole of `spec`? Only then does "nothing in it failed"
+ * speak for a row it has no match for. Not when that run was stopped at its deadline,
+ * and not when it holds fewer rows for the spec than the first run did: a report cut
+ * short reads exactly like a spec that passed.
+ */
+function wholeSpec(results, spec, rows, cutOff) {
+  return !cutOff && rows.length >= results.filter((r) => r.spec === spec).length;
+}
+
+/**
  * failingOnDev for every failed row, from the base re-run: the same test failing there
  * too is true, passing there is false, and anything the base run did not settle stays
- * null. Matched on spec + title first, then on the spec as a whole.
+ * null. Matched on spec + title first, then on the spec as a whole — a spec that passed
+ * on the base clears the ticket only when the base run reported all of it (wholeSpec).
  */
-function applyBaseResults(results, baseRows) {
+function applyBaseResults(results, baseRows, { cutOff = false } = {}) {
   for (const r of results) {
     if (r.state !== 'failed') continue;
     const same = baseRows.find((b) => b.spec === r.spec && b.title === r.title);
@@ -695,7 +706,7 @@ function applyBaseResults(results, baseRows) {
     const spec = baseRows.filter((b) => b.spec === r.spec);
     if (!spec.length) r.failingOnDev = null;
     else if (spec.some((b) => b.state === 'failed')) r.failingOnDev = true;
-    else if (spec.every((b) => b.state === 'passed')) r.failingOnDev = false;
+    else if (spec.every((b) => b.state === 'passed') && wholeSpec(results, r.spec, spec, cutOff)) r.failingOnDev = false;
     else r.failingOnDev = null;
   }
   return results;
@@ -707,16 +718,18 @@ function applyBaseResults(results, baseRows) {
  * first error kept only in the returned note — and only what fails twice is left for the
  * base re-run to judge. Matched on spec + title; a row with no such match (a hook that
  * died, a spec that never reported) is flaky only when its whole spec passed on the
- * retry. Returns one note per flaky row.
+ * retry, and the retry reported all of it (wholeSpec): a retry stopped at its deadline
+ * leaves the failures it never reached standing. Returns one note per flaky row.
  */
-function applyRetryResults(results, retryRows) {
+function applyRetryResults(results, retryRows, { cutOff = false } = {}) {
   const notes = [];
   for (const r of results) {
     if (r.state !== 'failed') continue;
     const spec = retryRows.filter((b) => b.spec === r.spec);
     const same = spec.find((b) => b.title === r.title);
     const passed = same ? same.state === 'passed'
-      : spec.length > 0 && spec.every((b) => b.state !== 'failed') && spec.some((b) => b.state === 'passed');
+      : spec.length > 0 && spec.every((b) => b.state !== 'failed') && spec.some((b) => b.state === 'passed')
+        && wholeSpec(results, r.spec, spec, cutOff);
     if (!passed) continue;
     const first = firstLine(r.error).slice(0, 160);
     r.state = 'passed';
@@ -985,8 +998,20 @@ function statusSpecs(porcelainZ) {
 
 /* ------------------------------------------------------------------ shell */
 
+/**
+ * How long a signalled run's cleanup may take: inside the conductor's kill grace
+ * (RUN_KILL_GRACE_MS, 30 s, in src/lib/cypresslease.ts), with room left to print and
+ * exit. What does not fit stays named in the resources file for the next run or gc.
+ */
+const SIGNAL_CLEANUP_MS = 25000;
+/** Set by a signal: every wait and child process after it ends by then. */
+let CLEANUP_BY = Infinity;
+
+/** `ms`, cut to what is left before CLEANUP_BY. */
+function capped(ms) { return Math.max(500, Math.min(ms, CLEANUP_BY - Date.now())); }
+
 function sh(cmd, args, opts = {}) {
-  const r = spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 1 << 28, timeout: opts.timeout || 120000, ...opts });
+  const r = spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 1 << 28, ...opts, timeout: capped(opts.timeout || 120000) });
   return { code: r.status, out: String(r.stdout || ''), err: String(r.stderr || ''), error: r.error || null };
 }
 
@@ -1055,7 +1080,7 @@ function running(pid) {
 function stopPids(pids, graceMs = 8000) {
   const live = pids.filter((p) => running(p));
   for (const p of live) killGroup(p, 'SIGTERM');
-  const deadline = Date.now() + graceMs;
+  const deadline = Date.now() + capped(graceMs);
   while (Date.now() < deadline && live.some((p) => running(p))) sleepSync(200);
   for (const p of live.filter((x) => running(x))) killGroup(p, 'SIGKILL');
   return live;
@@ -1184,23 +1209,30 @@ function removeWorktree(wt, gitDir) {
  * Stop a harness instance by its servers.json — only processes whose cwd is inside
  * `roots` (our throwaway checkouts), so a recycled pid is never someone else's server.
  * `harness.cjs down` does the stopping when every live pid checks out; otherwise the
- * checked ones are stopped here and the rest left alone.
+ * checked ones are stopped here and the rest left alone. A pid with a cwd elsewhere is
+ * someone else's by now, and our server is gone; one whose cwd could not be read at all
+ * may still be ours, so servers.json is kept for recoverStale and gc and this throws —
+ * deleting the only record of it would leave a server on our ports that nothing finds.
  */
 function stopHarness(dir, roots) {
   const f = path.join(dir, 'harness', 'servers.json');
   const s = readJson(f);
   if (!s) return [];
-  const live = [['webpack', s.webpackPid], ['django', s.djangoPid]].filter(([, pid]) => running(pid));
-  const ours = live.filter(([, pid]) => {
-    const cwd = H.pidCwd(pid);
-    return cwd && roots.some((r) => inside(cwd, r));
-  });
+  const live = [['webpack', s.webpackPid], ['django', s.djangoPid]].filter(([, pid]) => running(pid))
+    .map(([name, pid]) => ({ name, pid, cwd: H.pidCwd(pid) }));
+  const ours = live.filter((x) => x.cwd && roots.some((r) => inside(x.cwd, r)));
   if (live.length && ours.length === live.length) {
     sh(process.execPath, [HARNESS_CLI, 'down'], { env: childEnv({ ONESHOT_RUN_DIR: dir }), timeout: 30000 });
   }
-  stopPids(ours.map(([, pid]) => pid));
+  stopPids(ours.map((x) => x.pid));
+  const unsure = live.filter((x) => !x.cwd && running(x.pid));
+  if (unsure.length) {
+    throw new LtError('E_HARNESS_UNSURE',
+      `could not tell whether ${unsure.map((x) => `${x.name} (pid ${x.pid})`).join(' and ')} is this run's, so it was left running and ${f} kept`,
+      'node scripts/localtests.cjs gc');
+  }
   fs.rmSync(f, { force: true });
-  return ours.map(([name, pid]) => ({ name, pid }));
+  return ours.map(({ name, pid }) => ({ name, pid }));
 }
 
 /** Anything still listening on our two ports from inside our checkouts — SIGKILL. */
@@ -1261,7 +1293,7 @@ function endCreatedb(d, name) {
   if (!count()) return;
   for (const fn of ['pg_cancel_backend', 'pg_terminate_backend']) {
     psqlRaw(d, `SELECT ${fn}(pid) FROM pg_stat_activity WHERE application_name = '${name}' AND pid <> pg_backend_pid()`);
-    const until = Date.now() + 15000;
+    const until = Date.now() + capped(15000);
     while (Date.now() < until && count()) sleepSync(500);
     if (!count()) return;
   }
@@ -1287,13 +1319,23 @@ function dropDb(d, name, { force = true } = {}) {
 
 /**
  * Release everything a run recorded, in the order that frees each thing's users first:
- * the browser, the app, the database, the checkouts. Synchronous so a signal handler can
- * run it. Each step is attempted whatever happened to the one before.
+ * the browser, the app, the database, the checkouts. Before any of them, the merged
+ * credentials file goes: it is one unlink, and the rest can outlast a signal's
+ * SIGNAL_CLEANUP_MS. Synchronous so a signal handler can run it. Each step is attempted
+ * whatever happened to the one before, until CLEANUP_BY; a step past it is recorded as
+ * not done, and the resources file kept for gc.
  */
 function cleanup(data, d) {
   const failed = [];
-  const step = (what, fn) => { try { fn(); } catch (err) { failed.push(`${what}: ${err.message}`); log(`cleanup: ${what} failed — ${err.message}`); } };
+  const step = (what, fn) => {
+    if (Date.now() >= CLEANUP_BY) { failed.push(`${what}: out of time`); return; }
+    try { fn(); } catch (err) { failed.push(`${what}: ${err.message}`); log(`cleanup: ${what} failed — ${err.message}`); }
+  };
   const roots = (data.worktrees || []).map((w) => w.path);
+
+  step('remove the credentials', () => {
+    for (const wt of roots.filter(isOurWorktreePath)) fs.rmSync(path.join(wt, 'cypress.env.json'), { force: true });
+  });
 
   step('stop Cypress', () => {
     const groups = data.cypressPgids || [];
@@ -1683,45 +1725,13 @@ function parseLastJson(text) {
   return at >= 0 ? readJsonText(s.slice(at + 1)) : null;
 }
 
-/** The webpack log with its colour codes taken out. */
-const stripAnsi = (s) => String(s || '').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '');
-
 /**
- * Where webpack's current build stands: 'compiled', 'failed' or 'compiling'.
- *
- * Since ERP d0fa609b4e (2026-09-23) the dev build writes static/webpack-entrypoints.dev.json
- * ({hash, entrypoints}) from EntrypointFilesPlugin, which has NO status field and is written
- * on every `done`, a failed build included — so the file alone says only that A build
- * finished. Ready is that file written since this app started AND the webpack log's last
- * compile line being a "Compiled …" one, not "Failed to compile". A ticket branch cut
- * before the switch still writes webpack-bundle-tracker's webpack-stats.dev.json, read the
- * old way (its own status) under the same freshness rule.
+ * harness.cjs's own answer to "is the bundle Django points at finished" for the webpack
+ * this run started — 'ready', 'building' or 'failed'. Asked, never re-derived: a second
+ * copy of which file means "done" is how this went stale once.
  */
-function webpackReadiness({ logText, entrypoints, stats, sinceMs }) {
-  const marks = stripAnsi(logText).split('\n').filter((l) => /Compiled successfully|Compiled with warnings|Failed to compile/.test(l));
-  const last = marks.length ? marks[marks.length - 1] : '';
-  if (/Failed to compile/.test(last)) return 'failed';
-  const fresh = (f) => f && Number.isFinite(f.mtimeMs) && f.mtimeMs >= sinceMs - 1000;
-  if (fresh(stats) && isObj(stats.json) && stats.json.status === 'error') return 'failed';
-  if (!/Compiled/.test(last)) return 'compiling';
-  if (fresh(entrypoints) && isObj(entrypoints.json) && isObj(entrypoints.json.entrypoints)
-    && Object.keys(entrypoints.json.entrypoints).length) return 'compiled';
-  if (fresh(stats) && isObj(stats.json) && stats.json.status === 'done') return 'compiled';
-  return 'compiling';
-}
-
 function webpackState(wt, harnessDir, sinceMs) {
-  const file = (rel) => {
-    const f = path.join(wt, rel);
-    try { return { mtimeMs: fs.statSync(f).mtimeMs, json: readJson(f) }; } catch { return null; }
-  };
-  let logText = '';
-  try { logText = fs.readFileSync(path.join(harnessDir, 'harness', 'webpack.log'), 'utf8'); } catch { /* no log yet */ }
-  return webpackReadiness({
-    logText, sinceMs,
-    entrypoints: file('static/webpack-entrypoints.dev.json'),
-    stats: file('static/webpack-stats.dev.json'),
-  });
+  return H.bundleState(wt, { since: sinceMs, log: path.join(harnessDir, 'harness', 'webpack.log') }).state;
 }
 
 /**
@@ -1754,7 +1764,7 @@ async function harnessUp(dir, wt, ports, budgetMs = APP_BUDGET_MS) {
         if (!H.alive(servers.webpackPid)) break;
         const st = webpackState(wt, dir, since);
         if (st === 'failed') { log('webpack finished with a build error'); break; }
-        if (st === 'compiled') {
+        if (st === 'ready') {
           ({ r, out } = await once(Math.min(5 * 60000, Math.max(left(), 60000))));
           if (out && out.baseUrl) return out;
           break;
@@ -1893,6 +1903,7 @@ function installSignalHandlers() {
     const n = { SIGINT: 2, SIGHUP: 1, SIGTERM: 15 }[sig] || 15;
     log(`${sig}: stopping and cleaning up`);
     for (const c of CHILDREN) { try { c.kill('SIGTERM'); } catch { /* gone */ } }
+    CLEANUP_BY = Date.now() + SIGNAL_CLEANUP_MS;
     let cleaned = null;
     if (ACTIVE) {
       cleaned = cleanup(ACTIVE.res.data, ACTIVE.d);
@@ -2170,10 +2181,11 @@ async function runBody(ctx) {
     else if (!retryMin) notes.push(`the failures were not retried: only ${t.leftText()} were left before the conductor's deadline`);
     else {
       clearCypressOutput(p.wsaRun);
-      await runCypress(p.wsaRun, firstFailed, app.baseUrl, retryMin, path.join(p.harness, 'cypress-retry.log'), res);
+      const retry = await runCypress(p.wsaRun, firstFailed, app.baseUrl, retryMin, path.join(p.harness, 'cypress-retry.log'), res);
       const retryRows = readReports(p.wsaRun);
       if (!retryRows.length) notes.push("the retry on the ticket's code recorded no results, so the first run's failures stand");
-      notes.push(...applyRetryResults(results, retryRows));
+      else if (retry.deadlineHit) notes.push('the retry was stopped at its deadline, so a failure it did not reach still counts');
+      notes.push(...applyRetryResults(results, retryRows, { cutOff: retry.deadlineHit }));
       log(`[${since()}] retry done: ${failedSpecsOf(results).length} of ${firstFailed.length} spec(s) still failing`);
     }
   }
@@ -2190,8 +2202,9 @@ async function runBody(ctx) {
       notes.push(`the failures were not re-run on ${opts.base}: only ${t.leftText()} were left before the conductor's deadline and a base re-run needs about ${Math.round(BASE_RERUN_NEEDS_MS / 60000)}, so whether they fail on ${opts.base} too is unknown`);
     } else {
       try {
-        const baseRows = await baseRerun({ d, p, res, iid, erpGit, failedSpecs, deadlineMin, base: opts.base, t });
-        applyBaseResults(results, baseRows);
+        const baseRun = await baseRerun({ d, p, res, iid, erpGit, failedSpecs, deadlineMin, base: opts.base, t });
+        applyBaseResults(results, baseRun.rows, { cutOff: baseRun.deadlineHit });
+        if (baseRun.deadlineHit) notes.push(`the re-run on ${opts.base} was stopped at its deadline, so a test it did not reach is unknown there`);
         log(`[${since()}] base re-run done`);
       } catch (err) {
         notes.push(`the failures were not re-run on ${opts.base}, so whether they fail there too is unknown: ${err.code ? `${err.code}: ` : ''}${err.message}`);
@@ -2222,7 +2235,7 @@ async function runBody(ctx) {
  * the ticket added as NOT NULL makes every base INSERT into that table fail, which would
  * read as "fails on dev too". The copy is recorded as `baseDb` before it exists, so
  * cleanup and gc drop it like the other. Anything that stops this is the caller's note,
- * and failingOnDev stays unknown.
+ * and failingOnDev stays unknown. Returns the rows and whether Cypress hit its deadline.
  */
 async function baseRerun({ d, p, res, iid, erpGit, failedSpecs, deadlineMin, base, t }) {
   const baseSha = resolveSha(erpGit, base);
@@ -2248,8 +2261,8 @@ async function baseRerun({ d, p, res, iid, erpGit, failedSpecs, deadlineMin, bas
 
   const min = t.cypressMin(deadlineMin) || needTime(0, 'the base Cypress run', t);
   clearCypressOutput(p.wsaRun);
-  await runCypress(p.wsaRun, failedSpecs, app.baseUrl, min, path.join(p.harnessBase, 'cypress.log'), res);
-  return readReports(p.wsaRun);
+  const run = await runCypress(p.wsaRun, failedSpecs, app.baseUrl, min, path.join(p.harnessBase, 'cypress.log'), res);
+  return { rows: readReports(p.wsaRun), deadlineHit: run.deadlineHit };
 }
 
 /* ------------------------------------------------------------------ gc / status */
@@ -2446,7 +2459,7 @@ module.exports = {
   diffFiles, patchAddedFiles, weakenedFindings, parseMochawesome, assembleResults, applyBaseResults,
   applyRetryResults, cacheKey, mergeEnv, rewriteLocalSettings, guardProblem, missingDeps, semverSatisfies,
   depDrift, globEscape, specProblem, parseSpecs, statusSpecs, isOurWorktreePath, sanitizeStale,
-  scrubEnv, secretValuesFrom, redactWith, webpackReadiness, portHolderIsOurs, runsDir, LtError,
+  scrubEnv, secretValuesFrom, redactWith, portHolderIsOurs, runsDir, LtError, SIGNAL_CLEANUP_MS, stopHarness,
   WT_NAMES, MAX_BASE_RERUN_SPECS, LT_BROKER, BASE_RERUN_NEEDS_MS,
 };
 if (require.main === module) main();

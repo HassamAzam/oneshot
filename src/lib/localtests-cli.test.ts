@@ -21,15 +21,17 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { ROOT, localTestsConfig } from './config.js';
+import { RUN_KILL_GRACE_MS } from './cypresslease.js';
 
 const SCRIPT = join(ROOT, 'scripts/localtests.cjs');
 const require = createRequire(import.meta.url);
 
 interface Row { spec: string; title: string; state: string; durationMs: number; error?: string; failingOnDev?: boolean | null; flaky?: boolean }
-interface FileState { mtimeMs: number; json: unknown }
 interface StaleCtx { run: string; iid: number; ports: { be: number; fe: number }; dbPrefix: string; baselineDb: string; gitDirs: string[] }
 const lt = require(SCRIPT) as {
-  applyRetryResults: (results: Row[], retry: Row[]) => string[];
+  applyRetryResults: (results: Row[], retry: Row[], opts?: { cutOff?: boolean }) => string[];
+  stopHarness: (dir: string, roots: string[]) => Array<{ name: string; pid: number }>;
+  SIGNAL_CLEANUP_MS: number;
   guardProblem: (got: Record<string, unknown> | null, expected: string) => string | null;
   semverSatisfies: (version: string, range: string) => boolean | null;
   depDrift: (pkg: unknown, installed: (name: string) => string | null) => { missing: string[]; mismatched: Array<{ name: string; want: string; have: string }> };
@@ -38,7 +40,6 @@ const lt = require(SCRIPT) as {
   scrubEnv: (source: Record<string, string | undefined>, dotenvKeys: string[], opts?: { keepPg?: boolean }) => Record<string, string>;
   secretValuesFrom: (envs: Array<Record<string, string | undefined>>, creds: unknown) => string[];
   redactWith: (secrets: string[], value: unknown) => unknown;
-  webpackReadiness: (s: { logText: string; entrypoints: FileState | null; stats: FileState | null; sinceMs: number }) => string;
   portHolderIsOurs: (cwd: string | null, command: string) => boolean;
   runsDir: () => string;
   LT_BROKER: string;
@@ -55,7 +56,7 @@ const lt = require(SCRIPT) as {
   weakenedFindings: (diff: string) => Array<{ file: string; why: string }>;
   parseMochawesome: (report: unknown) => Row[];
   assembleResults: (specs: string[], rows: Row[], opts?: { deadlineHit?: boolean; deadlineMin?: number }) => Row[];
-  applyBaseResults: (results: Row[], base: Row[]) => Row[];
+  applyBaseResults: (results: Row[], base: Row[], opts?: { cutOff?: boolean }) => Row[];
   cacheKey: (k: { ticketSha: string; automationSha: string; patchSha: string | null; specs: string[]; baseline: string }) => string;
   mergeEnv: (committed: unknown, creds: unknown) => Record<string, unknown>;
   rewriteLocalSettings: (src: string, db: { name: string; host: string; port: number | string; user: string }) => string;
@@ -275,6 +276,24 @@ test('failingOnDev: same test on base, else the spec as a whole, else unknown', 
   assert.deepEqual(results.map((r) => r.failingOnDev), [true, false, true, false, null, undefined]);
 });
 
+test('failingOnDev: a base run cut short clears no test it never reached', () => {
+  // The ticket run reported two rows for s1; the base run reached only one of them and passed it.
+  const rows = (): Row[] => [
+    { spec: 's1', title: '"before each" hook for "t2"', state: 'failed', durationMs: 0 },
+    { spec: 's1', title: 't1', state: 'passed', durationMs: 0 },
+  ];
+  const base: Row[] = [{ spec: 's1', title: 't1', state: 'passed', durationMs: 0 }];
+  const stopped = rows();
+  lt.applyBaseResults(stopped, base, { cutOff: true });
+  assert.equal(stopped[0]!.failingOnDev, null, 'stopped at the deadline: unknown, not "passes on dev"');
+  const short = rows();
+  lt.applyBaseResults(short, base);
+  assert.equal(short[0]!.failingOnDev, null, 'fewer rows for the spec than the ticket run: unknown');
+  const whole = rows();
+  lt.applyBaseResults(whole, [...base, { spec: 's1', title: 't2', state: 'passed', durationMs: 0 }]);
+  assert.equal(whole[0]!.failingOnDev, false, 'the whole spec passed on the base: the ticket broke it');
+});
+
 /* ------------------------------------------------------------------ keys, env, settings */
 
 test('the cache key ignores spec order and duplicates, and changes with every input', () => {
@@ -448,6 +467,30 @@ test('retry before blame: a test that passes on the retry is flaky and passed; o
   assert.match(notes[0]!, /^flaky: s1 › a failed on the first run \(AssertionError: first\) and passed on the retry/);
 });
 
+test('retry before blame: a retry stopped at its deadline turns no unreported failure into a pass', () => {
+  // The spec has four cases; the first run failed one in a hook. The retry was cut
+  // off after three of them passed — the failing one never ran again.
+  const rows = (): Row[] => [
+    { spec: 's1', title: '"before each" hook for "d"', state: 'failed', durationMs: 0, error: 'boom' },
+    { spec: 's1', title: 'a', state: 'passed', durationMs: 1 },
+    { spec: 's1', title: 'b', state: 'passed', durationMs: 1 },
+    { spec: 's1', title: 'c', state: 'passed', durationMs: 1 },
+  ];
+  const retry: Row[] = ['a', 'b', 'c'].map((title) => ({ spec: 's1', title, state: 'passed', durationMs: 1 }));
+  const stopped = rows();
+  assert.deepEqual(lt.applyRetryResults(stopped, retry, { cutOff: true }), []);
+  assert.equal(stopped[0]!.state, 'failed');
+  assert.equal(stopped[0]!.error, 'boom', 'the failure keeps its error');
+  // Not stopped, but the retry holds fewer rows for the spec than the first run did.
+  const short = rows();
+  lt.applyRetryResults(short, retry.slice(0, 2));
+  assert.equal(short[0]!.state, 'failed');
+  // The whole spec reported and passed on the retry: flaky, as before.
+  const whole = rows();
+  assert.equal(lt.applyRetryResults(whole, [...retry, { spec: 's1', title: 'd', state: 'passed', durationMs: 1 }]).length, 1);
+  assert.equal(whole[0]!.flaky, true);
+});
+
 /* ------------------------------------------------------------------ child environment and redaction */
 
 test('a child\'s environment: no Oneshot .env key and nothing named like a secret, PATH and libpq kept', () => {
@@ -487,22 +530,48 @@ test('redaction: every credential value and every secret-named variable\'s value
 
 /* ------------------------------------------------------------------ webpack readiness, port holders */
 
-test('webpack readiness: a fresh entrypoints file AND a last "Compiled" line; a failed compile or an old file is not ready', () => {
-  const since = 1_000_000;
-  const ep = (mtimeMs: number): FileState => ({ mtimeMs, json: { hash: 'h', entrypoints: { main: ['/static/js/bundle.js'] } } });
-  const ready = (logText: string, entrypoints: FileState | null, stats: FileState | null = null): string =>
-    lt.webpackReadiness({ logText, entrypoints, stats, sinceMs: since });
-  assert.equal(ready('Compiling...\n\u001b[32mCompiled successfully!\u001b[39m\n', ep(since + 5)), 'compiled');
-  assert.equal(ready('Compiling...\nCompiled with warnings.\n', ep(since + 5)), 'compiled');
-  assert.equal(ready('Compiling...\n', ep(since + 5)), 'compiling', 'the plugin writes the file on a failed build too');
-  assert.equal(ready('Compiled successfully!\n', ep(since - 60_000)), 'compiling', 'a file from before this app started proves nothing');
-  assert.equal(ready('Compiled successfully!\n', null), 'compiling');
-  assert.equal(ready('Compiled successfully!\nCompiling...\nFailed to compile.\n', ep(since + 5)), 'failed');
-  assert.equal(ready('Failed to compile.\nCompiling...\nCompiled successfully!\n', ep(since + 5)), 'compiled', 'the LAST compile line counts');
-  assert.equal(ready('Compiled successfully!\n', { mtimeMs: since + 5, json: { hash: 'h', entrypoints: {} } }), 'compiling');
-  // A branch from before the switch still writes webpack-bundle-tracker's stats file.
-  assert.equal(ready('Compiled successfully!\n', null, { mtimeMs: since + 5, json: { status: 'done' } }), 'compiled');
-  assert.equal(ready('Compiling...\n', null, { mtimeMs: since + 5, json: { status: 'error' } }), 'failed');
+test('webpack readiness is harness.cjs\'s bundleState, never a copy kept here', () => {
+  // Two copies of "which file means done" disagreed (one said compiled, the other
+  // building) — the stale copy is how the app's bundle switch broke every run once.
+  const src = readFileSync(SCRIPT, 'utf8');
+  assert.match(src, /H\.bundleState\(/);
+  assert.doesNotMatch(src, /webpack-entrypoints\.dev\.json|webpack-stats\.dev\.json|Compiled successfully/);
+});
+
+test('a signalled run\'s cleanup fits inside the conductor\'s kill grace', () => {
+  assert.ok(lt.SIGNAL_CLEANUP_MS < RUN_KILL_GRACE_MS, `${lt.SIGNAL_CLEANUP_MS} ms is not inside ${RUN_KILL_GRACE_MS} ms`);
+  const src = readFileSync(SCRIPT, 'utf8');
+  const body = src.slice(src.indexOf('function cleanup('), src.indexOf("step('stop Cypress'"));
+  assert.match(body, /step\('remove the credentials'/, 'the merged credentials go before anything slow');
+});
+
+test('stopHarness keeps servers.json for a server it could not check, and drops it for one that is someone else\'s', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lt-harness-'));
+  const bin = join(dir, 'bin');
+  mkdirSync(join(dir, 'harness'), { recursive: true });
+  mkdirSync(bin);
+  // A PATH with ps and no lsof: pidCwd() cannot read any process's cwd.
+  execFileSync('ln', ['-s', '/bin/ps', join(bin, 'ps')]);
+  const servers = join(dir, 'harness', 'servers.json');
+  const sleeper = spawnSync(process.execPath, ['-e', `
+    const c = require('child_process').spawn('/bin/sleep', ['30'], { detached: true, stdio: 'ignore' });
+    c.unref(); process.stdout.write(String(c.pid));`], { encoding: 'utf8' });
+  const pid = Number(sleeper.stdout);
+  const call = (path: string): { code?: string; kept: boolean } => {
+    writeFileSync(servers, JSON.stringify({ webpackPid: pid }));
+    const r = spawnSync(process.execPath, ['-e', `
+      try { require(${JSON.stringify(SCRIPT)}).stopHarness(${JSON.stringify(dir)}, [${JSON.stringify(join(dir, 'erp-lt'))}]); }
+      catch (e) { process.stdout.write(e.code || e.message); }`], { encoding: 'utf8', env: { ...process.env, PATH: path } });
+    return { code: r.stdout || undefined, kept: existsSync(servers) };
+  };
+  try {
+    assert.deepEqual(call(bin), { code: 'E_HARNESS_UNSURE', kept: true }, 'cwd unreadable: maybe ours, so recorded for gc');
+    assert.doesNotThrow(() => process.kill(pid, 0), 'and left running');
+    assert.deepEqual(call(process.env.PATH ?? ''), { code: undefined, kept: false }, 'cwd outside our checkouts: not ours, our server is gone');
+  } finally {
+    try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ }
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a port held by another local-tests run or a harness is "try later"; anything else needs a person', () => {
