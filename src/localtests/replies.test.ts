@@ -113,6 +113,11 @@ test('a reply that asks for two things only the session can do together is feedb
   assert.equal(kind('disapproved: added cypress/e2e/a.ts; also write a temporary test for the dialog'), 'feedback');
   assert.equal(kind('disapproved: please check again and drop the health checks'), 'feedback');
   assert.equal(kind('disapproved: please run cypress/e2e/leaves/LV_23.ts'), 'feedback', 'a path not said to be added');
+  assert.equal(
+    kind('disapproved: please run cypress/e2e/leaves/LV_23.ts and write a temporary test for the new field'),
+    'feedback',
+    'a named spec plus a temp-test request stays feedback, so the named spec is not dropped',
+  );
 });
 
 test('the prefix is read leniently: copied backticks or bold, a dash, or a line break', () => {

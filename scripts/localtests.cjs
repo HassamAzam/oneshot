@@ -648,6 +648,17 @@ function parseMochawesome(report) {
     for (const s of Array.isArray(suite.suites) ? suite.suites : []) walk(s, here);
   };
   for (const root of Array.isArray(report && report.results) ? report.results : []) walk(root, '');
+  // Index within the spec, in report order. mocha permits duplicate fullTitles
+  // in one spec, so matching a failed row to its retry/base row by title alone
+  // returned the first instance — reporting a genuine second-instance failure
+  // as a flaky pass, and mis-assigning failingOnDev the same way.
+  const perSpec = new Map();
+  for (const r of out) {
+    const n = perSpec.get(r.spec) || 0;
+    // Non-enumerable: a matching aid only, never serialised into run.json or a note.
+    Object.defineProperty(r, 'idx', { value: n, enumerable: false });
+    perSpec.set(r.spec, n + 1);
+  }
   return out;
 }
 
@@ -698,7 +709,8 @@ function wholeSpec(results, spec, rows, cutOff) {
 function applyBaseResults(results, baseRows, { cutOff = false } = {}) {
   for (const r of results) {
     if (r.state !== 'failed') continue;
-    const same = baseRows.find((b) => b.spec === r.spec && b.title === r.title);
+    const same = baseRows.find((b) => b.spec === r.spec
+      && (r.idx != null && b.idx != null ? b.idx === r.idx : b.title === r.title));
     if (same) {
       r.failingOnDev = same.state === 'failed' ? true : same.state === 'passed' ? false : null;
       continue;
@@ -726,7 +738,7 @@ function applyRetryResults(results, retryRows, { cutOff = false } = {}) {
   for (const r of results) {
     if (r.state !== 'failed') continue;
     const spec = retryRows.filter((b) => b.spec === r.spec);
-    const same = spec.find((b) => b.title === r.title);
+    const same = spec.find((b) => (r.idx != null && b.idx != null ? b.idx === r.idx : b.title === r.title));
     const passed = same ? same.state === 'passed'
       : spec.length > 0 && spec.every((b) => b.state !== 'failed') && spec.some((b) => b.state === 'passed')
         && wholeSpec(results, r.spec, spec, cutOff);
@@ -1895,7 +1907,7 @@ function keepVideos(wsaRun, results, p, notes) {
 
 /* ------------------------------------------------------------------ run */
 
-let ACTIVE = null; // { res, d, printed } while a run holds resources
+let ACTIVE = null; // { res, d } while a run holds resources
 let LAST_CLEANUP = null; // the run's cleanup outcome, for an error's hint
 
 function installSignalHandlers() {
@@ -1909,12 +1921,13 @@ function installSignalHandlers() {
       cleaned = cleanup(ACTIVE.res.data, ACTIVE.d);
       if (cleaned.ok) fs.rmSync(ACTIVE.res.file, { force: true });
     }
-    if (!ACTIVE || !ACTIVE.printed) {
-      process.stdout.write(`${JSON.stringify(redact({
-        code: 'E_ABORTED', message: `stopped by ${sig}`,
-        hint: cleaned && !cleaned.ok ? `cleanup incomplete: ${cleaned.failed.join('; ')} — run gc` : null,
-      }), null, 2)}\n`);
-    }
+    // The old `!ACTIVE.printed` arm of this guard was dead — `printed` was never
+    // set true before ACTIVE was nulled — so the condition always held and the
+    // signal result is always printed.
+    process.stdout.write(`${JSON.stringify(redact({
+      code: 'E_ABORTED', message: `stopped by ${sig}`,
+      hint: cleaned && !cleaned.ok ? `cleanup incomplete: ${cleaned.failed.join('; ')} — run gc` : null,
+    }), null, 2)}\n`);
     process.exit(128 + n);
   };
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, handler);
@@ -2088,7 +2101,7 @@ async function runCmd(opts) {
   const res = new Resources(p.resources, {
     pid: process.pid, iid, startedAt, ports: d.ports, dbPrefix: d.dbPrefix, baselineDb: d.baselineDb,
   });
-  ACTIVE = { res, d, printed: false };
+  ACTIVE = { res, d };
   try {
     const out = await runBody({
       iid, d, p, res, specs, deadlineMin, notes, erpGit, wsaGit, ticketSha, automationSha, patchFile, patchSha, opts, t: clock(until),
@@ -2353,7 +2366,17 @@ async function gc(opts) {
     if (!dry) stopPids(procs.map((x) => x.pid));
     if (procs.length) stopped.add(iid);
     out.killed.push(...procs);
-    for (const name of HARNESS_NAMES) if (!dry) fs.rmSync(path.join(pathsOf(iid).run, name, 'harness', 'servers.json'), { force: true });
+    for (const name of HARNESS_NAMES) {
+      const sf = path.join(pathsOf(iid).run, name, 'harness', 'servers.json');
+      const s = readJson(sf);
+      // Keep the record when a named server is still running but its cwd could
+      // not be read: harnessProcesses() skips such a pid, so it was neither
+      // killed nor port-swept, and deleting servers.json would orphan it on our
+      // ports with nothing to find it — the refusal stopHarness already makes.
+      const unsure = s && [s.webpackPid, s.djangoPid].some((pid) => running(pid) && !H.pidCwd(pid));
+      if (unsure) { out.skipped.push({ iid, why: `a ${name} server is running but its cwd is unreadable; keeping servers.json so gc can find it` }); continue; }
+      if (!dry) fs.rmSync(sf, { force: true });
+    }
   }
 
   try {
@@ -2429,7 +2452,6 @@ async function main() {
       case 'run': {
         installSignalHandlers();
         const r = await runCmd(opts);
-        if (ACTIVE) ACTIVE.printed = true;
         print(r);
         break;
       }

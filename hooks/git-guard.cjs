@@ -277,19 +277,26 @@ const OUTSIDE_WSA = 'would change a checkout other than a run\'s own wsa, the on
  * null when it may. `kinds` holds one entry per directory the call acts on:
  * 'clone', 'wsa', 'wsa-run', or null for a directory that is none of them.
  */
-function automationRefusal(sub, args, kinds) {
+function automationRefusal(sub, args, targets) {
   if (!sub || AUTOMATION_READS.has(sub)) return null;
   const pos = args.filter((a) => !a.startsWith('-'));
-  const onlyWsa = kinds.every((k) => k === 'wsa');
+  // A plain apply/add is allowed only in THIS run's own wsa. `kind === 'wsa'`
+  // alone is not enough: every run's wsa shares the clone's .git, so a session
+  // for one ticket running `git -C state/runs/<other>/wsa apply` corrupts the
+  // patch another run is about to hand to local-tests-run. The run's own iid
+  // (ONESHOT_TICKET) keys state/runs/<iid>, so compare against it.
+  const iid = C.ticket();
+  const onlyOwnWsa = targets.length > 0
+    && targets.every((x) => x && x.kind === 'wsa' && (!iid || x.iid === iid));
   switch (sub) {
     case 'apply':
       if (APPLY_REPORTS.some((r) => args.includes(r)) && !args.includes('--apply')) return null;
       if (args.some((a) => ['--index', '--cached', '--3way', '-3', '--unsafe-paths'].includes(a))) {
         return 'stages or merges as it applies';
       }
-      return onlyWsa ? null : OUTSIDE_WSA;
+      return onlyOwnWsa ? null : OUTSIDE_WSA;
     case 'add':
-      return onlyWsa ? null : OUTSIDE_WSA;
+      return onlyOwnWsa ? null : OUTSIDE_WSA;
     case 'config':
       // `git config <key>` with nothing after it is a read too.
       return args.some((a) => a === '-l' || /^--(?:get|get-all|get-regexp|get-urlmatch|get-color|get-colorbool|list)$/.test(a))
@@ -317,8 +324,8 @@ function automationRefusal(sub, args, kinds) {
     case 'fetch':
       // The first positional is the remote; a refspec with a `:` writes the ref it names.
       return pos.slice(1).some((r) => r.includes(':'))
-        || args.some((a) => /^(?:-u|-p|-P|--update-head-ok|--prune|--prune-tags|--set-upstream|--refmap(?:=.*)?)$/.test(a))
-        ? 'writes local refs, prunes or sets an upstream in the clone' : null;
+        || args.some((a) => /^(?:-u|-p|-P|-t|--tags|--update-head-ok|--prune|--prune-tags|--set-upstream|--refmap(?:=.*)?)$/.test(a))
+        ? 'writes local refs or tags, prunes or sets an upstream in the clone' : null;
     default:
       return 'is not one of the read-only commands';
   }
@@ -349,10 +356,10 @@ function automationTarget(p) {
   const parts = rel.split(path.sep);
   if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
   if (parts[1] === 'wsa') {
-    return { kind: 'wsa', where: `state/runs/${parts[0]}/wsa, a throwaway worktree of the workstream-automation clone` };
+    return { kind: 'wsa', iid: parts[0], where: `state/runs/${parts[0]}/wsa, a throwaway worktree of the workstream-automation clone` };
   }
   if (parts[1] === 'wsa-run') {
-    return { kind: 'wsa-run', where: `state/runs/${parts[0]}/wsa-run, the worktree local-tests-run runs Cypress in` };
+    return { kind: 'wsa-run', iid: parts[0], where: `state/runs/${parts[0]}/wsa-run, the worktree local-tests-run runs Cypress in` };
   }
   return null;
 }
@@ -523,12 +530,15 @@ function packageRunner(argv0, args, here) {
 function testRunner(t, here) {
   const argv0 = path.basename(t[0] || '');
   const pos = t.slice(1).filter((a) => !a.startsWith('-'));
-  const first = pos[0] || '';
   if (argv0 === 'cypress') return 'Cypress';
   if (LOCALTESTS.test(argv0)) return 'scripts/localtests.cjs';
   if (SCRIPT_RUNNERS.has(argv0)) {
-    if (path.basename(first) === 'cypress' || first.includes('node_modules/cypress/')) return 'Cypress';
-    if (LOCALTESTS.test(path.basename(first))) return 'scripts/localtests.cjs';
+    // Every positional, not just pos[0]: an interpreter option that takes a
+    // value (`node --import tsx scripts/localtests.cjs`, `node -r ts-node/register
+    // ./node_modules/.bin/cypress`) shifts the real script out of the first
+    // positional, the same way PACKAGE_RUNNERS already scans all of them.
+    if (pos.some((a) => path.basename(a) === 'cypress' || a.includes('node_modules/cypress/'))) return 'Cypress';
+    if (pos.some((a) => LOCALTESTS.test(path.basename(a)))) return 'scripts/localtests.cjs';
     return null;
   }
   if (!PACKAGE_RUNNERS.has(argv0)) return null;
@@ -630,7 +640,6 @@ function command(seg) {
  * that never touches that worktree.
  */
 function checkLocalTests(cmd, data) {
-  if (CYPRESS_API.test(cmd)) denyTestRunner('Cypress');
   const governed = new Set();
   let here = data.cwd || leasedWorktree() || C.ONESHOT;
   const segs = segments(cmd);
@@ -644,6 +653,10 @@ function checkLocalTests(cmd, data) {
       else if (to && to !== '-') here = resolveFrom(here, to);
       continue;
     }
+    // Per-segment, not over the whole command: `node --version && grep -rn
+    // "from 'cypress'" cypress/` is a read, and testing the joined command let
+    // the `node` in one segment pair with the `cypress` in another.
+    if (CYPRESS_API.test(seg)) denyTestRunner('Cypress');
     const runner = testRunner(t, here);
     if (runner) denyTestRunner(runner);
 
@@ -651,7 +664,7 @@ function checkLocalTests(cmd, data) {
     const call = gitCall(t, vars, here);
     const targets = call.dirs.map(automationTarget);
     if (!targets.some(Boolean)) continue;
-    const why = automationRefusal(call.sub, call.args, targets.map((x) => (x ? x.kind : null)));
+    const why = automationRefusal(call.sub, call.args, targets);
     if (!why) {
       governed.add(idx);
       continue;
@@ -707,7 +720,12 @@ function checkCwd(cmd) {
     // the guard then waves through a commit into the context repo.
     const target = C.expandTilde(raw.replace(/^\$HOME|^\$\{HOME\}/, C.HOME));
     const abs = path.isAbsolute(target) ? target : path.join(wt, target);
-    if (!C.isInside(abs, wt) && !C.isInside(abs, path.join(C.ONESHOT, 'state'))) {
+    // The workstream-automation clone is read-only-reachable from any phase —
+    // checkLocalTests governs what git may do there — so a `cd` into it to read
+    // must not be refused here as "outside the worktree".
+    const { repo } = C.localTests();
+    if (!C.isInside(abs, wt) && !C.isInside(abs, path.join(C.ONESHOT, 'state'))
+      && !(repo && C.isInside(abs, repo))) {
       C.event('denied_cwd', { target: abs, worktree: wt });
       C.deny(
         `Denied: '${target}' is outside this run's worktree (${wt}). ` +
@@ -734,7 +752,7 @@ try {
       const { t } = command(seg);
       if (!t.length) continue;
 
-      if (t[0] === 'gh' || t[0] === 'glab') {
+      if (path.basename(t[0]) === 'gh' || path.basename(t[0]) === 'glab') {
         C.event('denied_forge_cli', { cmd: seg });
         C.deny(
           `Denied: the '${t[0]}' CLI is an unguarded path to pushes, merges and ` +
@@ -743,7 +761,7 @@ try {
         );
       }
 
-      if (t[0] !== 'git') continue;
+      if (path.basename(t[0]) !== 'git') continue;
       const sub = t.find((a, i) => i > 0 && !a.startsWith('-') && t[i - 1] !== '-C');
 
       checkConductorPhase(t);

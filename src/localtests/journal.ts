@@ -27,8 +27,8 @@
  */
 import { randomBytes } from 'node:crypto';
 import {
-  closeSync, copyFileSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync,
-  unlinkSync, writeFileSync, writeSync,
+  copyFileSync, cpSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync,
+  unlinkSync, writeFileSync,
 } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { STATE } from '../lib/config.js';
@@ -420,9 +420,15 @@ export function acquireLtLock(iid: number, owner: string): (() => void) | null {
   const p = join(dir, 'lock');
   const body: LockBody = { pid: process.pid, owner, at: Date.now(), token: randomBytes(6).toString('hex') };
   for (let attempt = 0; attempt < 2; attempt++) {
+    // Write the body to a temp file, then linkSync it into place: the link is
+    // atomic and still fails EEXIST when a lock exists, so the lock file never
+    // appears as the 0-byte window `openSync(p, 'wx')` + a later writeSync left
+    // — a window in which readLock() hit JSON.parse('') → null → lockStale(null)
+    // → a racing taker unlinked a live lock and two advancers held one ticket.
+    const tmp = `${p}.tmp-${process.pid}-${randomBytes(3).toString('hex')}`;
     try {
-      const fd = openSync(p, 'wx');
-      try { writeSync(fd, JSON.stringify(body)); } finally { closeSync(fd); }
+      writeFileSync(tmp, JSON.stringify(body));
+      linkSync(tmp, p);
       return () => {
         // Only our own lock: a stale-lock takeover by someone else must not be undone by us.
         const now = readLock(p);
@@ -434,6 +440,8 @@ export function acquireLtLock(iid: number, owner: string): (() => void) | null {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       if (!lockStale(readLock(p))) return null;
       try { unlinkSync(p); } catch { /* raced with another taker; the retry decides */ }
+    } finally {
+      try { unlinkSync(tmp); } catch { /* linked into place, or never written */ }
     }
   }
   return null;

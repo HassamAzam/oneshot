@@ -46,7 +46,6 @@
 import { localTestsConfig, phaseByName } from './config.js';
 import { db, logEvent } from './db.js';
 import { log } from './log.js';
-import { pidAlive } from './singleton.js';
 
 /**
  * Minutes past `maxRunMinutes` before the conductor kills the script. The
@@ -139,6 +138,24 @@ const attempt = db.transaction((runId: string, pid: number): 'granted' | 'busy' 
     .run(runId, pid, now);
   return 'granted';
 });
+
+/**
+ * A pid still running. EPERM means it exists but belongs to another OS user —
+ * alive, not dead. singleton's `pidAlive` reads EPERM as dead, which would have
+ * `stale()` break a live lease held by a conductor running under a different
+ * account (a second checkout run as another user, or one started via sudo).
+ * The file-lock modules (localtests/journal.ts, automation/journal.ts) keep
+ * their own for exactly this reason; this one imported the wrong one.
+ */
+function pidAlive(pid: number): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
 
 /** Dead holder, or one past any deadline it could have had. See the module comment. */
 function stale(lease: LeaseRow): boolean {

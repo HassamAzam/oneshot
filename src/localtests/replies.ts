@@ -87,10 +87,13 @@ export function classifyLocalTestsReply(body: string): LocalTestsReply | null {
   const write = WRITE_RE.test(rest) && !NO_WRITE_RE.test(rest);
   if (added && write) return feedback;
   if (added) return { kind: 'added', files };
-  if (write) return { kind: 'write-temporary' };
   // Files named without "added" ("please run cypress/e2e/…") are a change to
   // the list, which the session applies; so is a check-again that names one.
+  // This is judged BEFORE write-temporary so a reply that names a spec AND
+  // asks for a temporary test stays feedback — the session runs the spec and
+  // writes the test — rather than dropping the named spec on the write path.
   if (files.length) return feedback;
+  if (write) return { kind: 'write-temporary' };
   if (AGAIN_RE.test(rest)) return { kind: 'check-again' };
   return feedback;
 }

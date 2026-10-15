@@ -230,6 +230,24 @@ expect_allow "config --get in the automation worktree" \
 expect_allow "commit in the ticket's worktree after leaving the automation one" \
                                        git-guard.cjs "$(bash_payload "cd $WSA && git diff --stat && cd $ONESHOT_WORKTREE && git commit -am wip")"
 
+# Round-2 review fixes. A plain apply/add is allowed only in THIS run's own wsa
+# (ONESHOT_TICKET=0); another run's wsa shares the clone's .git and carries a
+# patch this run must not corrupt. These paths are named, never created.
+expect_deny  "apply into another run's wsa" \
+                                       git-guard.cjs "$(bash_payload "git -C $ROOT/state/runs/999/wsa apply /tmp/x.patch")"
+expect_deny  "add -A into another run's wsa" \
+                                       git-guard.cjs "$(bash_payload "git -C $ROOT/state/runs/999/wsa add -A")"
+expect_deny  "fetch --tags into the automation worktree (writes tags to the clone)" \
+                                       git-guard.cjs "$(bash_payload "git -C $WSA fetch --tags")"
+expect_deny  "git push by absolute path (bypassed the exact t[0]=='git' match)" \
+                                       git-guard.cjs "$(bash_payload "/usr/bin/git push origin dev")"
+expect_deny  "localtests via node --import tsx (an option that takes a value)" \
+                                       git-guard.cjs "$(bash_payload "node --import tsx scripts/localtests.cjs run 0")"
+expect_allow "node --version then a grep for a cypress import, a read" \
+                                       git-guard.cjs "$(bash_payload "node --version && grep -rn \"from 'cypress'\" cypress/")"
+expect_allow "cd into the automation clone to read its log" \
+                                       git-guard.cjs "$(bash_payload "cd $LT_REPO && git log --oneline -3")"
+
 # An allow-list, not a list of mutators: the list it replaced let all of these through.
 # A wsa shares the clone's .git, so `remote remove origin` edits the person's
 # .git/config and drops refs/remotes/origin/*, and `worktree remove` can take another

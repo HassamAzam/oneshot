@@ -248,7 +248,7 @@ const TABLE_HEAD = '| | Test | What it checks |\n|---|---|---|';
 
 function row(r: Row): string {
   const what = clip(r.what.replace(/[.\s]+$/, ''), WHY_CHARS);
-  return `| ${MARK[r.mark]} | ${tableCell(codeSpan(r.file))} | ${what ? tableCell(what) : '—'} |`;
+  return `| ${MARK[r.mark]} | ${tableCell(pathText(r.file))} | ${what ? tableCell(what) : '—'} |`;
 }
 
 /** The first TABLE_ROWS rows as the table; any beyond stay one click away, never dropped. */
@@ -278,13 +278,13 @@ function countsLine(rows: Row[], minutes: unknown, cases = 0): string {
 function notRunnableItems(v: unknown): string[] {
   return listOf<{ spec?: unknown; why?: unknown }>(v)
     .filter((n) => String(n.spec ?? '').trim())
-    .map((n) => `${codeSpan(String(n.spec).trim())}${clause(n.why) ? ` (${clause(n.why)})` : ''}`);
+    .map((n) => `${pathText(String(n.spec).trim())}${clause(n.why) ? ` (${clause(n.why)})` : ''}`);
 }
 
 function suggestion(p: { title?: unknown; file?: unknown; why?: unknown }): string {
   const file = String(p.file ?? '').trim();
   const why = flat(p.why);
-  return `${clause(p.title)}${file ? ` (${codeSpan(file)})` : ''}.${why ? ` ${italic(`Why: ${why}`)}` : ''}`;
+  return `${clause(p.title)}${file ? ` (${pathText(file)})` : ''}.${why ? ` ${italic(`Why: ${why}`)}` : ''}`;
 }
 
 /**
@@ -297,7 +297,7 @@ function proposalLines(s: Partial<LocalTestsScope>): string {
     if (p.action === 'remove') {
       const file = String(p.file ?? '').trim();
       const why = flat(p.why);
-      return `- REMOVE: ${file ? `${codeSpan(file)} — ` : ''}${clause(p.title)}.${why ? ` ${italic(`Why: ${why}`)}` : ''}`;
+      return `- REMOVE: ${file ? `${pathText(file)} — ` : ''}${clause(p.title)}.${why ? ` ${italic(`Why: ${why}`)}` : ''}`;
     }
     return `- ADD to the suite: ${suggestion(p)}`;
   }).join('\n');

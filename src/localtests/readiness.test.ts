@@ -149,6 +149,20 @@ test('the latest of several merged fixes is tested; leftovers and the rest are w
   assert.ok(r.warnings.some((w) => /!313 was merged into stage, not dev/.test(w)));
 });
 
+test('a date in an unrelated branch is not read as a short iid', () => {
+  // For ticket 12, `hotfix/2026-10-12-payroll` once matched `[^0-9]12[^0-9]` on
+  // the date and scoped Cypress to a payroll hotfix's commit range.
+  const own = fix({ iid: 40, source_branch: 'oneshot/ticket-12-fix', merged_at: '2026-10-12T09:00:00Z', merge_commit_sha: SHA('b') });
+  const dated = fix({ iid: 41, source_branch: 'hotfix/2026-10-12-payroll', title: 'Payroll hotfix', merged_at: '2026-10-12T12:00:00Z', merge_commit_sha: SHA('c') });
+  const r = hook.decideReadiness(facts({
+    issue: { iid: 12, labels: [TRIGGER], project_id: 7, updated_at: '2026-10-12T13:00:00Z' },
+    mrs: [own, dated],
+  }));
+  assert.equal(r.verdict, 'ready');
+  assert.equal(r.mergedMr?.iid, 40, 'the ticket-12 branch is its own; the 2026-10-12 date is not');
+  assert.deepEqual(r.mergedMr?.ranges, [{ mrIid: 40, base: null, head: SHA('b') }]);
+});
+
 test('the ticket\'s own change wins over a later MR that only mentions it', () => {
   // Another ticket's MR saying "see also #990601" is linked too, and merged later.
   const own = fix({ iid: 350, source_branch: 'hira/990601-leave-total', merged_at: '2026-10-08T09:00:00Z', merge_commit_sha: SHA('6') });

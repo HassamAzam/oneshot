@@ -319,11 +319,21 @@ function listOf<T>(v: unknown): T[] {
   return Array.isArray(v) ? (v.filter((x) => x && typeof x === 'object') as T[]) : [];
 }
 
+/**
+ * A model-supplied spec or file path as a code span, but escaped when it holds
+ * a `<!--`: codeSpan does not escape, so a crafted `specs[].file` could carry a
+ * forged `<!-- oneshot:local-tests:... -->` marker that postOnce()/otherDeskRun()
+ * read as real, suppressing the true note or claiming a foreign desk owns the run.
+ */
+function pathText(file: string): string {
+  return file.includes('<!--') ? mdText(file) : codeSpan(file);
+}
+
 /** `notRunnable` entries as "`spec` (why)", one string each. */
 function notRunnableItems(v: unknown): string[] {
   return listOf<{ spec?: unknown; why?: unknown }>(v)
     .filter((n) => String(n.spec ?? '').trim())
-    .map((n) => `${codeSpan(String(n.spec).trim())}${clause(n.why) ? ` (${clause(n.why)})` : ''}`);
+    .map((n) => `${pathText(String(n.spec).trim())}${clause(n.why) ? ` (${clause(n.why)})` : ''}`);
 }
 
 /**
@@ -374,7 +384,7 @@ export function localTestsPlanNote(data: Record<string, unknown>, ctx: PublishCt
   // first PLAN_TABLE_ROWS specs are the table, and any beyond that stay one click
   // away in a collapsed list rather than turning the note into a wall of rows.
   const row = (s: LocalTestsScope['specs'][number]): string =>
-    `| ${tableCell(codeSpan(String(s.file ?? '')))} | ${tableCell(s.module)} | ${tableCell(s.why)} |`;
+    `| ${tableCell(pathText(String(s.file ?? '')))} | ${tableCell(s.module)} | ${tableCell(s.why)} |`;
   const rest = specs.slice(PLAN_TABLE_ROWS);
   const summary = oneLine(scope.summary);
   const parts = [
@@ -398,7 +408,7 @@ export function localTestsPlanNote(data: Record<string, unknown>, ctx: PublishCt
         // it: "REMOVE: leaves.cy.ts" alone would read as the whole file going.
         const file = String(p.file ?? '').trim();
         const what = file
-          ? `${codeSpan(file)}${clause(p.title) ? ` — ${clause(p.title)}` : ''}`
+          ? `${pathText(file)}${clause(p.title) ? ` — ${clause(p.title)}` : ''}`
           : clause(p.title);
         return `- REMOVE: ${what}. ${italic(`Why: ${clause(p.why)}`)}`;
       }
@@ -408,7 +418,7 @@ export function localTestsPlanNote(data: Record<string, unknown>, ctx: PublishCt
   // Split by kind: a file the scope created is not an existing test that was
   // changed, and saying so would hide that the run covers something new.
   const bullets = (kind: 'update' | 'add'): string => edits.filter((e) => e.kind === kind)
-    .map((e) => `- ${codeSpan(String(e.file ?? ''))} — ${clause(e.why)}`).join('\n');
+    .map((e) => `- ${pathText(String(e.file ?? ''))} — ${clause(e.why)}`).join('\n');
   const changed = bullets('update');
   const added = bullets('add');
   if (changed) parts.push(`**Existing tests changed for this run (temporary, not committed):**\n${changed}`);
@@ -522,7 +532,7 @@ export function localTestsReportNote(data: Record<string, unknown>, ctx: Publish
   };
 
   const testRow = (r: LocalTestsRun['results'][number], result: string, devToo: string): string =>
-    `| ${tableCell(codeSpan(String(r.spec ?? '')))}<br>${tableCell(r.title)} | ${result} | ${devToo} | `
+    `| ${tableCell(pathText(String(r.spec ?? '')))}<br>${tableCell(r.title)} | ${result} | ${devToo} | `
     + `${tableCell(firstLine(r.error))} |`;
   const flaky = results.filter((r) => r.state === 'passed' && r.flaky === true);
   const passedBySpec = new Map<string, number>();
@@ -536,7 +546,7 @@ export function localTestsReportNote(data: Record<string, unknown>, ctx: Publish
     ...flaky.map((r) => testRow(r, `:warning: ${FLAKY_TEXT}`, '—')),
     ...results.filter((r) => r.state === 'skipped').map((r) => testRow(r, ':heavy_minus_sign: skipped', '—')),
     ...[...passedBySpec].map(([spec, n]) =>
-      `| ${tableCell(codeSpan(spec))} | :white_check_mark: passed (${plural(n, 'test')}) | — |  |`),
+      `| ${tableCell(pathText(spec))} | :white_check_mark: passed (${plural(n, 'test')}) | — |  |`),
   ];
 
   const cutShort = clause(run.reason);
@@ -557,7 +567,7 @@ export function localTestsReportNote(data: Record<string, unknown>, ctx: Publish
   const fromRun = notRunnableItems(run.notRunnable);
   const notRunnable = fromRun.length ? fromRun : notRunnableItems(scope?.notRunnable);
   const changed = listOf<LocalTestsScope['edits'][number]>(scope?.edits)
-    .filter((e) => e.kind === 'update').map((e) => codeSpan(String(e.file ?? '')));
+    .filter((e) => e.kind === 'update').map((e) => pathText(String(e.file ?? '')));
   const added = (Array.isArray(run.newTests) ? run.newTests : []).map(clause).filter(Boolean);
   parts.push(`**Tests that can't run on a local machine:** ${notRunnable.join('; ') || 'none'}`);
   parts.push(`**Existing tests changed for this run:** ${changed.join(', ') || 'none'}`);
@@ -573,6 +583,7 @@ export function localTestsReportNote(data: Record<string, unknown>, ctx: Publish
   const dir = artifactDir(ctx.iid);
   const attachments: Attachment[] = [];
   const tooLarge: string[] = [];
+  const missing: string[] = [];
   const seen = new Set<string>();
   const names = new Set<string>();
   for (const r of results) {
@@ -580,7 +591,10 @@ export function localTestsReportNote(data: Record<string, unknown>, ctx: Publish
     if (!rel || seen.has(rel)) continue;
     seen.add(rel);
     const full = isAbsolute(rel) ? rel : join(dir, rel);
-    if (!existsSync(full)) continue;
+    if (!existsSync(full)) {
+      missing.push(codeSpan(basename(rel)));
+      continue;
+    }
     const content = readFileSync(full);
     const short = basename(rel);
     if (content.length > MAX_UPLOAD_BYTES) {
@@ -592,6 +606,7 @@ export function localTestsReportNote(data: Record<string, unknown>, ctx: Publish
     attachments.push({ name, content, mime: mimeFor(rel) });
   }
   if (tooLarge.length) parts.push(`**Videos too large to attach (over 25 MB):** ${tooLarge.join(', ')}`);
+  if (missing.length) parts.push(`**Videos the run named but did not leave on disk:** ${missing.join(', ')}`);
   if (attachments.length) parts.push('**Videos of the failed specs:**');
   return { body: parts.join('\n\n'), attachments };
 }

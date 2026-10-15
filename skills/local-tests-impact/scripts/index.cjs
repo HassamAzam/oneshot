@@ -515,7 +515,11 @@ function analyze({ erp, base, head, automation, mapFile }) {
    * Pages/projectLogs, but kanban_board defined it too, so deleting the kanban board
    * matched every project-logs spec until the ERP side was counted as well.
    */
-  const isGeneric = (v) => new Set([...(selectedBy.get(v) || [])].map(folderOf)).size >= GENERIC_FOLDERS
+  // utils/ and fixtures/ are not screens, so a selector that also lives in a
+  // helper or a fixture must not count as another folder toward "generic".
+  const screenFolders = (v) => new Set([...(selectedBy.get(v) || [])]
+    .map(folderOf).filter((d) => d !== 'utils' && d !== 'fixtures'));
+  const isGeneric = (v) => screenFolders(v).size >= GENERIC_FOLDERS
     || (erpFolders.get(v) || new Set()).size >= 2;
   /** May page object `f` be the screen whose testid `v` changed? See the header. */
   const allowed = (f, v) => {

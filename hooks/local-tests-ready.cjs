@@ -71,11 +71,14 @@ const PER_PAGE = 100;
 
 /**
  * Titles of MRs that carry a branch to another branch rather than fix
- * anything: `stage -> dev`, `master → stage`, `dev into stage`, `Backmerge …`.
+ * anything: `stage -> dev`, `master → stage`, `dev into stage`, `Backmerge …`,
+ * and git's own default `Merge branch 'stage' into 'dev'`. Quotes and spaces
+ * are allowed between the branch word and the operator, because the default
+ * title wraps each branch in single quotes and `\s*` alone cannot cross one.
  * The source branch catches most promotions; the title catches the ones cut
  * from a short-lived branch of a protected one.
  */
-const PROMOTION_TITLE = /\bback[\s-]?merge\b|\b(?:dev|develop|stage|staging|master|main|release|adhoc)\b\s*(?:->|→|=>|>|\binto\b|\bto\b)\s*\b(?:dev|develop|stage|staging|master|main)\b/i;
+const PROMOTION_TITLE = /\bback[\s-]?merge\b|\b(?:dev|develop|stage|staging|master|main|release|adhoc)\b['"\s]*(?:->|→|=>|>|\binto\b|\bto\b)['"\s]*\b(?:dev|develop|stage|staging|master|main)\b/i;
 
 // ------------------------------------------------------------------ helpers
 
@@ -95,15 +98,20 @@ const isSha = (s) => typeof s === 'string' && /^[0-9a-f]{7,64}$/i.test(s);
 /**
  * True when `mr` carries one branch into another instead of fixing the ticket:
  * its source is a protected branch (exact name) or a release branch, or its
- * title reads like a promotion or a backmerge.
+ * title reads like a promotion or a backmerge. The title heuristic is skipped
+ * for the ticket's OWN MR (`own`): its source-branch match is far stronger
+ * evidence, and without the skip a ticket *about* the release tooling —
+ * `oneshot/ticket-55-fix` titled "Fix the stage to dev backmerge script" —
+ * was classified a promotion and the ticket wedged permanently not-ready.
  */
-function isPromotion(mr, protectedBranches, releaseBranch) {
+function isPromotion(mr, protectedBranches, releaseBranch, own = false) {
   const source = String((mr && mr.source_branch) || '');
   if (protectedBranches.includes(source)) return true;
   if (releaseBranch) {
     releaseBranch.lastIndex = 0;
     if (releaseBranch.test(source)) return true;
   }
+  if (own) return false;
   return PROMOTION_TITLE.test(String((mr && mr.title) || ''));
 }
 
@@ -168,15 +176,23 @@ function chooseMerged(f) {
   const { issue, base, protectedBranches, releaseBranch } = f;
   const mrs = Array.isArray(f.mrs) ? f.mrs : [];
   const same = mrs.filter((m) => m && (m.project_id === undefined || m.project_id === issue.project_id));
-  const promotions = same.filter((m) => isPromotion(m, protectedBranches, releaseBranch));
-  const real = same.filter((m) => !isPromotion(m, protectedBranches, releaseBranch));
+  // A delimited run of the iid in the source branch (`<user>/<iid>-<slug>`),
+  // but with ISO dates stripped first: a short iid like 12 otherwise matched the
+  // month or day of `hotfix/2026-10-12-payroll` and read as ticket 12's own
+  // change, scoping Cypress to an unrelated commit range.
+  const names = new RegExp(`(^|[^0-9])${Number(issue.iid)}([^0-9]|$)`);
+  const isOwn = (m) => m.closesIssue === true
+    || names.test(String(m.source_branch || '').replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, ' '));
+  // Classify ownership BEFORE promotions, so an own MR is judged by its source
+  // branch alone and never dropped as a promotion by its title heuristic.
+  const isPromo = (m) => isPromotion(m, protectedBranches, releaseBranch, isOwn(m));
+  const promotions = same.filter(isPromo);
+  const real = same.filter((m) => !isPromo(m));
   const time = (m) => Date.parse(m.merged_at) || 0;
   const intoBase = real.filter((m) => m.state === 'merged' && m.target_branch === base)
     .sort((a, b) => time(a) - time(b) || a.iid - b.iid);
   const elsewhere = real.filter((m) => m.state === 'merged' && m.target_branch !== base);
   const open = real.filter((m) => m.state === 'opened').sort((a, b) => a.iid - b.iid);
-  const names = new RegExp(`(^|[^0-9])${Number(issue.iid)}([^0-9]|$)`);
-  const isOwn = (m) => m.closesIssue === true || names.test(m.source_branch || '');
   const own = real.filter(isOwn).sort((a, b) => a.iid - b.iid);
   const fallback = own.length === 0;
   const pool = fallback ? intoBase : intoBase.filter(isOwn);
