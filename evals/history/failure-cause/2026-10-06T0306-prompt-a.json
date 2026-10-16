@@ -1,0 +1,87 @@
+{
+  "label": "prompt-a",
+  "at": "2026-10-05T22:06:04.744Z",
+  "oneshot": "db2e5bc",
+  "mode": "live",
+  "data": {
+    "tickets": [
+      {
+        "repo": "erp",
+        "iid": 8772,
+        "right": 4,
+        "total": 4,
+        "missed": 0,
+        "wrongBlame": 0,
+        "wrong": []
+      },
+      {
+        "repo": "workstreamai",
+        "iid": 53,
+        "right": 7,
+        "total": 11,
+        "missed": 0,
+        "wrongBlame": 4,
+        "wrong": [
+          "TC-01: gold pre-existing, verify said fail",
+          "TC-13: gold bad-case, verify said fail",
+          "TC-15: gold pre-existing, verify said fail",
+          "TC-18: gold bad-case, verify said fail"
+        ]
+      },
+      {
+        "repo": "workstreamai",
+        "iid": 74,
+        "right": 3,
+        "total": 4,
+        "missed": 0,
+        "wrongBlame": 1,
+        "wrong": [
+          "TC-14: gold pre-existing, verify said fail"
+        ]
+      },
+      {
+        "repo": "workstreamai",
+        "iid": 179,
+        "right": 7,
+        "total": 7,
+        "missed": 0,
+        "wrongBlame": 0,
+        "wrong": []
+      },
+      {
+        "repo": "workstreamai",
+        "iid": 193,
+        "right": 4,
+        "total": 4,
+        "missed": 0,
+        "wrongBlame": 0,
+        "wrong": []
+      },
+      {
+        "repo": "workstreamai",
+        "iid": 241,
+        "right": 3,
+        "total": 7,
+        "missed": 0,
+        "wrongBlame": 4,
+        "wrong": [
+          "TC-18: gold untested, verify said fail",
+          "TC-22: gold bad-case, verify said fail",
+          "TC-25: gold pre-existing, verify said fail",
+          "TC-31: gold bad-case, verify said fail"
+        ]
+      },
+      {
+        "repo": "workstreamai",
+        "iid": 259,
+        "right": 1,
+        "total": 2,
+        "missed": 0,
+        "wrongBlame": 1,
+        "wrong": [
+          "TC-15: gold pre-existing, verify said fail"
+        ]
+      }
+    ]
+  }
+}
