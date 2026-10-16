@@ -6,7 +6,9 @@
  *
  *   npm run eval:edges                                   # grade the lists the runs hold on disk
  *   npm run eval:edges -- <iid> <iid>                    # just these
+ *   npm run eval:edges -- --repeat 5                     # judge each list 5x and report the spread
  *   npm run eval:edges -- --replay --label prompt-b      # re-run testcases with THIS checkout's prompt first
+ *   npm run eval:edges -- --replay --repeat 5 --label b  # regenerate AND judge 5x per ticket
  *   npm run eval:edges -- --save --label prompt-a        # also commit the scores to evals/history/
  *   npm run eval:edges -- --vs prompt-a                  # compare against that saved scoring
  *
@@ -18,6 +20,16 @@
  *
  * The score is edges covered / edges. Edges with source "bug" matter most: a
  * list missing one of those let a real defect through.
+ *
+ * Measurement. One judge pass is a single noisy sample: the judge changes its
+ * mind between identical runs, and under --replay the list itself is
+ * regenerated each time. --repeat k takes k samples of the same ticket — it
+ * re-judges the fixed list, or re-replays and re-judges under --replay — and
+ * reports edges covered in every trial, edges that flip (flaky, the judge's
+ * noise) and the spread between the best and worst trial. Run it once on an
+ * unchanged config to learn that spread; a later --vs change counts as real
+ * only when it clears it. Without --repeat, k is 1 and the output matches the
+ * single-run behaviour exactly.
  *
  * Without --replay this grades the first list each run wrote, before any QA
  * feedback, with whatever prompt was live then, so a prompt change does not move it. --replay runs replay-testcases.ts
@@ -39,12 +51,15 @@ import { join } from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { BASE_ENV, ROOT, STATE } from '../src/lib/config.js';
 import { transcriptResult } from '../src/lib/transcript.js';
+import { tallyTrials, majorityCovered, beyondNoise, type RepeatStats } from '../src/lib/edgestats.js';
+import { rankFailureModes, formatFailureModes, type FailureItem } from '../src/lib/failuremodes.js';
 import { argValue, loadHistory, saveHistory, type Saved } from './evalhistory.js';
 
 interface Edge { id: string; source: 'bug' | 'ticket'; edge: string; truth?: 'covered' | 'none' }
 interface GoldFile { projects: Record<string, Record<string, Edge[]>> }
 interface Case { id: string; scenario: string; precondition: string; steps: string[]; expected: string }
 interface Verdict { edge: string; coveredBy: string; reason: string }
+interface Target { project: string; iid: string; edges: Edge[] }
 
 const GOLD = join(ROOT, 'evals', 'edge-coverage', 'gold.json');
 const IPV4_SHIM = join(ROOT, 'scripts', 'ipv4-dns.cjs');
@@ -144,16 +159,28 @@ async function judge(edges: Edge[], cases: Case[], model: string): Promise<Verdi
   throw new Error('judge returned no result');
 }
 
+/** The edge ids one judge pass marked covered by a case that is actually in the list. */
+function coveredSet(edges: Edge[], cases: Case[], verdicts: Map<string, Verdict>): Set<string> {
+  return new Set(edges.filter((e) => {
+    const by = verdicts.get(e.id)?.coveredBy ?? 'none';
+    return by !== 'none' && cases.some((c) => c.id === by);
+  }).map((e) => e.id));
+}
+
 interface TicketScore {
   repo: string; iid: number; covered: number; edges: number; bugCovered: number; bugEdges: number; missing: string[];
   wellFormed: number; cases: number;
-  /** Edges whose gold truth is known, and how many the judge matched. */
+  /** Edges whose gold truth is known, and how many the judge matched (by majority across trials). */
   truthChecked: number; truthAgreed: number;
+  /** Repeat-run measurement: trials taken, edges that flipped, and the best–worst coverage band. */
+  trials: number; flaky: string[]; spread: number; minCovered: number; maxCovered: number;
+  /** Per-edge failures tagged by mode, for the ranked diagnosis. */
+  diag: FailureItem[];
 }
 interface EdgeScores { judge: string; tickets: TicketScore[] }
 
 const REPLAY_PARALLEL = 3;
-const VALUE_FLAGS = new Set(['--label', '--vs']);
+const VALUE_FLAGS = new Set(['--label', '--vs', '--repeat']);
 
 /** Run replay-testcases.ts for one ticket and return the case list it wrote, or null. */
 function replay(iid: string, label: string): Promise<Case[] | null> {
@@ -200,31 +227,78 @@ function liveCases(project: string, iid: string): Case[] | null {
   return readJson<{ cases: Case[] }>(join(dir, 'testcases.json'))?.cases ?? null;
 }
 
-async function score(project: string, iid: string, edges: Edge[], cases: Case[], model: string): Promise<TicketScore> {
-  const verdicts = new Map((await judge(edges, cases, model)).map((v) => [v.edge, v]));
-  const coveredByJudge = (e: Edge): boolean => {
-    const by = verdicts.get(e.id)?.coveredBy ?? 'none';
-    return by !== 'none' && cases.some((c) => c.id === by);
-  };
-  const uncovered = edges.filter((e) => !coveredByJudge(e));
-  for (const e of uncovered) {
-    console.log(`  ${repoName(project)}#${iid} ${e.id} [${e.source}] missing: ${e.edge}\n      judge: ${verdicts.get(e.id)?.reason ?? 'no verdict'}`);
+/** Build a ticket's score from the k trials' covered-sets, and print its per-edge diagnosis. */
+function scoreTicket(t: Target, stats: RepeatStats, lastVerdicts: Map<string, Verdict>, wellFormedCount: number, caseCount: number): TicketScore {
+  const repo = repoName(t.project);
+  const edgeOf = new Map(t.edges.map((e) => [e.id, e]));
+  const hitsOf = new Map(stats.perEdge.map((p) => [p.id, p.hits]));
+  const reason = (id: string): string => lastVerdicts.get(id)?.reason ?? 'no verdict';
+  const diag: FailureItem[] = [];
+  for (const id of stats.missingEveryTrial) {
+    const bug = edgeOf.get(id)?.source === 'bug';
+    console.log(`  ${repo}#${t.iid} ${id} [${edgeOf.get(id)?.source}] missing${stats.trials > 1 ? ' in every trial' : ''}: ${edgeOf.get(id)?.edge}\n      judge: ${reason(id)}`);
+    diag.push({
+      mode: bug ? 'missing-bug-edge' : 'missing-ticket-edge',
+      label: bug ? 'a bug-sourced edge no case covers (a real defect could slip through)' : 'a required ticket edge no case covers',
+      severity: bug ? 'critical' : 'high', where: `${repo}#${t.iid} ${id}`, detail: reason(id),
+    });
   }
-  const labelled = edges.filter((e) => e.truth !== undefined);
-  const agreed = labelled.filter((e) => (coveredByJudge(e) ? 'covered' : 'none') === e.truth);
+  for (const id of stats.flaky) {
+    console.log(`  ${repo}#${t.iid} ${id} [${edgeOf.get(id)?.source}] flaky: covered in ${hitsOf.get(id)}/${stats.trials} trials — the judge flips on it (noise).`);
+    diag.push({ mode: 'flaky-edge', label: 'coverage the judge flips on between trials (noise, not a real gap)', severity: 'medium', where: `${repo}#${t.iid} ${id}`, detail: `covered in ${hitsOf.get(id)}/${stats.trials} trials` });
+  }
+  const labelled = t.edges.filter((e) => e.truth !== undefined);
+  const majorityOf = (id: string): boolean => majorityCovered({ id, hits: hitsOf.get(id) ?? 0, trials: stats.trials });
+  const agreed = labelled.filter((e) => (majorityOf(e.id) ? 'covered' : 'none') === e.truth);
   for (const e of labelled) {
     if (!agreed.includes(e)) {
-      console.log(`  ${repoName(project)}#${iid} ${e.id} judge disagreed with gold truth '${e.truth}': ${verdicts.get(e.id)?.reason ?? 'no verdict'}`);
+      console.log(`  ${repo}#${t.iid} ${e.id} judge disagreed with gold truth '${e.truth}': ${reason(e.id)}`);
+      diag.push({ mode: 'judge-vs-gold', label: 'the judge disagreed with a known gold truth (its own error rate)', severity: 'info', where: `${repo}#${t.iid} ${e.id}`, detail: `gold '${e.truth}': ${reason(e.id)}` });
     }
   }
-  const bugEdges = edges.filter((e) => e.source === 'bug').length;
+  const bugIds = new Set(t.edges.filter((e) => e.source === 'bug').map((e) => e.id));
   return {
-    repo: repoName(project), iid: Number(iid), covered: edges.length - uncovered.length, edges: edges.length,
-    bugCovered: bugEdges - uncovered.filter((e) => e.source === 'bug').length, bugEdges,
-    missing: uncovered.map((e) => e.id),
-    wellFormed: cases.filter(wellFormed).length, cases: cases.length,
+    repo, iid: Number(t.iid),
+    covered: stats.coveredEveryTrial.length, edges: t.edges.length,
+    bugCovered: stats.coveredEveryTrial.filter((id) => bugIds.has(id)).length, bugEdges: bugIds.size,
+    missing: stats.missingEveryTrial,
+    wellFormed: wellFormedCount, cases: caseCount,
     truthChecked: labelled.length, truthAgreed: agreed.length,
+    trials: stats.trials, flaky: stats.flaky, spread: stats.spread,
+    minCovered: stats.minCovered, maxCovered: stats.maxCovered,
+    diag,
   };
+}
+
+/** Judge a fixed on-disk list k times; the list is identical each trial, so only the judge varies. */
+async function scoreFixed(t: Target, cases: Case[], repeat: number, model: string): Promise<TicketScore> {
+  const sets: Array<Set<string>> = [];
+  let lastVerdicts = new Map<string, Verdict>();
+  for (let n = 0; n < repeat; n++) {
+    lastVerdicts = new Map((await judge(t.edges, cases, model)).map((v) => [v.edge, v]));
+    sets.push(coveredSet(t.edges, cases, lastVerdicts));
+  }
+  return scoreTicket(t, tallyTrials(t.edges.map((e) => e.id), sets), lastVerdicts, cases.filter(wellFormed).length, cases.length);
+}
+
+/** Replay the testcases phase k times, judging each fresh list; both the list and the judge vary. */
+async function scoreReplayed(t: Target, repeat: number, label: string | undefined, model: string): Promise<TicketScore | null> {
+  const repo = repoName(t.project);
+  const sets: Array<Set<string>> = [];
+  let lastVerdicts = new Map<string, Verdict>();
+  let caseCount = 0; let wellFormedCount = 0; let listSeen = false;
+  for (let n = 0; n < repeat; n++) {
+    const cases = await replay(t.iid, `${label ?? 'eval'}${repeat > 1 ? `-t${n + 1}` : ''}`);
+    if (!cases?.length) continue;
+    listSeen = true;
+    caseCount = cases.length;
+    wellFormedCount = cases.filter(wellFormed).length;
+    if (!wellFormedCount) { sets.push(new Set()); continue; }
+    lastVerdicts = new Map((await judge(t.edges, cases, model)).map((v) => [v.edge, v]));
+    sets.push(coveredSet(t.edges, cases, lastVerdicts));
+  }
+  if (!listSeen) { console.log(`${repo}#${t.iid}: no test list to grade, skipped`); return null; }
+  return scoreTicket(t, tallyTrials(t.edges.map((e) => e.id), sets), lastVerdicts, wellFormedCount, caseCount);
 }
 
 function totals(tickets: TicketScore[]): { covered: number; edges: number; bugCovered: number; bugEdges: number } {
@@ -234,29 +308,44 @@ function totals(tickets: TicketScore[]): { covered: number; edges: number; bugCo
 
 function report(now: TicketScore[], base: Saved<EdgeScores> | null): void {
   const was = (t: TicketScore): TicketScore | undefined => base?.data.tickets.find((b) => b.repo === t.repo && b.iid === t.iid);
+  const repeated = now.some((t) => (t.trials ?? 1) > 1);
   console.table(now.map((t) => ({
     repo: t.repo, iid: t.iid,
     covered: `${t.covered}/${t.edges}`, bugCovered: `${t.bugCovered}/${t.bugEdges}`,
     wellFormed: `${t.wellFormed}/${t.cases}`,
+    ...(repeated ? { spread: `${t.minCovered}–${t.maxCovered}`, flaky: t.flaky.length } : {}),
     ...(base ? { [`was (${base.label})`]: was(t) ? `${was(t)!.covered}/${was(t)!.edges}, bug ${was(t)!.bugCovered}/${was(t)!.bugEdges}` : '—' } : {}),
   })));
   const n = totals(now);
   console.log(`now:  ${n.covered}/${n.edges} edges, ${n.bugCovered}/${n.bugEdges} bug edges`);
+  if (repeated) {
+    const flaky = now.reduce((a, t) => a + (t.flaky?.length ?? 0), 0);
+    const band = now.reduce((a, t) => a + (t.spread ?? 0), 0);
+    const trials = Math.max(...now.map((t) => t.trials ?? 1));
+    console.log(`noise: ${flaky} edge(s) flipped across ${trials} trials of the same config; summed spread ${band} edges. A change smaller than the spread is judge noise, not signal.`);
+  }
   const checked = now.reduce((a, t) => a + t.truthChecked, 0);
   if (checked) {
     const agreed = now.reduce((a, t) => a + t.truthAgreed, 0);
     console.log(`judge accuracy: ${agreed}/${checked} edges matched gold truth (${checked - agreed} disagreement(s)) — the judge's own error rate, to weigh its verdicts by.`);
   }
+  for (const line of formatFailureModes(rankFailureModes(now.flatMap((t) => t.diag ?? [])))) console.log(line);
   if (!base) return;
   const both = now.filter(was);
   const b = totals(both.map((t) => was(t)!));
   const m = totals(both);
+  const noiseBand = both.reduce((a, t) => a + (t.spread ?? 0), 0);
+  const delta = m.covered - b.covered;
+  const verdict = repeated ? `, ${beyondNoise(delta, noiseBand) ? 'beyond the noise band' : 'within noise — not a real change'}` : '';
   console.log(`was:  ${b.covered}/${b.edges} edges, ${b.bugCovered}/${b.bugEdges} bug edges   `
     + `(${base.label}, ${base.mode}, oneshot ${base.oneshot}, ${base.at.slice(0, 10)}; over the ${both.length} ticket(s) both scored)`);
-  console.log(`then→now on those: edges ${b.covered}→${m.covered}, bug edges ${b.bugCovered}→${m.bugCovered}`);
+  console.log(`then→now on those: edges ${b.covered}→${m.covered} (Δ${delta >= 0 ? '+' : ''}${delta}${verdict}), bug edges ${b.bugCovered}→${m.bugCovered}`);
   for (const t of both) {
-    const lost = t.missing.filter((id) => !was(t)!.missing.includes(id));
+    const prev = was(t)!;
+    const lost = t.missing.filter((id) => !prev.missing.includes(id));
     if (lost.length) console.log(`  REGRESSED ${t.repo}#${t.iid}: ${lost.join(', ')} covered before, missing now`);
+    const wobbly = (t.flaky ?? []).filter((id) => !prev.missing.includes(id));
+    if (wobbly.length) console.log(`  FLAKY NOW ${t.repo}#${t.iid}: ${wobbly.join(', ')} covered before, intermittently covered now`);
   }
 }
 
@@ -267,33 +356,33 @@ async function main(): Promise<void> {
   const replaying = argv.includes('--replay');
   const label = argValue(argv, '--label');
   if (argv.includes('--save') && !label) { console.error('--save needs --label <name>, e.g. --label prompt-a'); process.exit(2); }
+  const repeat = Math.max(1, Math.floor(Number(argValue(argv, '--repeat') ?? 1)) || 1);
   const only = argv.filter((a, i) => /^\d+$/.test(a) && !VALUE_FLAGS.has(argv[i - 1] ?? ''));
-  const targets = Object.entries(gold.projects)
+  const targets: Target[] = Object.entries(gold.projects)
     .flatMap(([project, tickets]) => Object.entries(tickets).map(([iid, edges]) => ({ project, iid, edges })))
     .filter(({ iid }) => !only.length || only.includes(iid));
-  const iids = targets.map((t) => t.iid);
-  const width = new Set(iids).size === iids.length ? REPLAY_PARALLEL : 1;
   const model = judgeModel();
 
-  const lists = replaying
-    ? await pool(targets.map((t) => () => replay(t.iid, label ?? 'eval')), width)
-    : targets.map((t) => liveCases(t.project, t.iid));
-  const scored = await Promise.all(targets.map(async (t, i) => {
-    const cases = lists[i];
-    if (!cases?.length) {
-      console.log(`${repoName(t.project)}#${t.iid}: no test list to grade, skipped`);
-      return null;
-    }
-    if (!cases.some(wellFormed)) {
-      console.log(`${repoName(t.project)}#${t.iid}: ${cases.length} case(s) but none have steps and a concrete expected result, so none can cover any edge; judge skipped`);
-      return null;
-    }
-    return score(t.project, t.iid, t.edges, cases, model);
-  }));
+  let scored: Array<TicketScore | null>;
+  if (replaying) {
+    const iids = targets.map((t) => t.iid);
+    const width = new Set(iids).size === iids.length ? REPLAY_PARALLEL : 1;
+    scored = await pool(targets.map((t) => () => scoreReplayed(t, repeat, label, model)), width);
+  } else {
+    scored = await Promise.all(targets.map(async (t) => {
+      const cases = liveCases(t.project, t.iid);
+      if (!cases?.length) { console.log(`${repoName(t.project)}#${t.iid}: no test list to grade, skipped`); return null; }
+      if (!cases.some(wellFormed)) {
+        console.log(`${repoName(t.project)}#${t.iid}: ${cases.length} case(s) but none have steps and a concrete expected result, so none can cover any edge; judge skipped`);
+        return null;
+      }
+      return scoreFixed(t, cases, repeat, model);
+    }));
+  }
   const tickets = scored.filter((t): t is TicketScore => t !== null)
     .sort((a, b) => a.repo.localeCompare(b.repo) || a.iid - b.iid);
 
-  console.log(`\njudge: ${model}. graded ${replaying ? 'fresh replays of the current prompt' : "each run's first test list, before QA feedback"}.`);
+  console.log(`\njudge: ${model}. ${repeat > 1 ? `${repeat} trials/ticket. ` : ''}graded ${replaying ? 'fresh replays of the current prompt' : "each run's first test list, before QA feedback"}.`);
   report(tickets, loadHistory<EdgeScores>(ROOT, KIND, argValue(argv, '--vs')));
   if (argv.includes('--save')) {
     console.log(`saved ${saveHistory(ROOT, KIND, label!, replaying ? 'replay' : 'live', { judge: model, tickets })}`);

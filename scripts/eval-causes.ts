@@ -18,12 +18,19 @@
  * It grades whatever verify.json each run holds now, so the before/after for
  * a prompt change is: re-run verify on the gold tickets, then run this again
  * with --vs the saved scoring. There is no verify replay yet.
+ *
+ * Scoring here is deterministic: the same verify.json always grades the same,
+ * so there is no run-to-run noise for this eval to repeat away (unlike the
+ * edge judge in eval:edges, which does). The noise lives in producing
+ * verify.json — a verify replay, k times per ticket, is what a pass rate over
+ * repeats would need, and that replay does not exist yet.
  */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, STATE } from '../src/lib/config.js';
 import type { RunJournal } from '../src/lib/artifacts.js';
 import { blameOf, verifyLabel, type TestcasesArtifact, type VerifyArtifact } from '../src/lib/verifyblame.js';
+import { rankFailureModes, formatFailureModes, type FailureItem } from '../src/lib/failuremodes.js';
 import { argValue, loadHistory, saveHistory, type Saved } from './evalhistory.js';
 
 type Cause = 'change' | 'pre-existing' | 'bad-case' | 'untested';
@@ -35,6 +42,8 @@ interface CauseScore {
   failBlamedElsewhere?: string[]; ownCaseDismissed?: string[];
   /** Failing verdicts for cases absent from testcases.json, with no gold needed. */
   orphanedFailures?: string[];
+  /** Per-case failures tagged by mode, for the ranked diagnosis. */
+  diag: FailureItem[];
 }
 interface CauseScores { tickets: CauseScore[] }
 
@@ -74,15 +83,28 @@ function score(repo: string, iid: number, labels: Labels, dir: string): CauseSco
     repo, iid, right: 0, total: 0, missed: 0, wrongBlame: 0, wrong: [],
     failBlamedElsewhere: blame.failBlamedElsewhere, ownCaseDismissed: blame.ownCaseDismissed,
     orphanedFailures: blame.orphanedFailures,
+    diag: [],
   };
-  for (const [id, { cause }] of Object.entries(labels)) {
+  const where = `${repo}#${iid}`;
+  for (const [id, { cause, why }] of Object.entries(labels)) {
     s.total++;
     const said = causeOf(verdicts.get(id));
     if (cause === 'bad-case' ? said !== 'change' : said === cause) { s.right++; continue; }
-    if (cause === 'change') s.missed++;
-    if (said === 'change') s.wrongBlame++;
-    s.wrong.push(`${id}: gold ${cause}, verify said ${verdicts.get(id) ?? 'nothing'}`);
+    const saidStr = verdicts.get(id) ?? 'nothing';
+    s.wrong.push(`${id}: gold ${cause} (${why}), verify said ${saidStr}`);
+    if (cause === 'change') {
+      s.missed++;
+      s.diag.push({ mode: 'missed-real-failure', label: 'verify missed a real failure of this change (defect hidden)', severity: 'critical', where: `${where} ${id}`, detail: why });
+    } else if (said === 'change') {
+      s.wrongBlame++;
+      s.diag.push({ mode: 'wrong-blame', label: 'verify blamed the change for a pre-existing fail (costs an implement lap)', severity: 'high', where: `${where} ${id}`, detail: why });
+    } else {
+      s.diag.push({ mode: 'mislabel', label: 'verify put the wrong non-change label on a case', severity: 'medium', where: `${where} ${id}`, detail: `gold ${cause}, said ${saidStr}` });
+    }
   }
+  for (const id of blame.ownCaseDismissed ?? []) s.diag.push({ mode: 'own-case-dismissed', label: "verify dismissed the ticket's own acceptance case (defect hidden)", severity: 'critical', where: `${where} ${id}` });
+  for (const id of blame.failBlamedElsewhere ?? []) s.diag.push({ mode: 'blamed-elsewhere', label: 'a fail was blamed on code outside the diff', severity: 'high', where: `${where} ${id}` });
+  for (const id of blame.orphanedFailures ?? []) s.diag.push({ mode: 'orphaned-fail', label: 'failing case is not in testcases.json (stale, salvaged)', severity: 'medium', where: `${where} ${id}` });
   return s;
 }
 
@@ -100,8 +122,9 @@ function report(now: CauseScore[], base: Saved<CauseScores> | null): void {
   console.log('blamedElsewhere / ownDismissed / orphaned: read from verify\'s own evidence and labels, no gold needed.');
   for (const s of now) for (const id of s.orphanedFailures ?? []) console.log(`  ${s.repo}#${s.iid} ${id}: fails in verify.json but is not in testcases.json (stale, salvaged fail).`);
   for (const s of now) for (const w of s.wrong) console.log(`  ${s.repo}#${s.iid} ${w}`);
+  for (const line of formatFailureModes(rankFailureModes(now.flatMap((s) => s.diag)))) console.log(line);
   const sum = (xs: CauseScore[], k: 'right' | 'total' | 'missed' | 'wrongBlame'): number => xs.reduce((a, x) => a + x[k], 0);
-  console.log(`now:  ${sum(now, 'right')}/${sum(now, 'total')} right, ${sum(now, 'missed')} missed, ${sum(now, 'wrongBlame')} wrongBlame`);
+  console.log(`\nnow:  ${sum(now, 'right')}/${sum(now, 'total')} right, ${sum(now, 'missed')} missed, ${sum(now, 'wrongBlame')} wrongBlame`);
   if (!base) return;
   const prev = base.data.tickets;
   console.log(`was:  ${sum(prev, 'right')}/${sum(prev, 'total')} right, ${sum(prev, 'missed')} missed, ${sum(prev, 'wrongBlame')} wrongBlame   `
