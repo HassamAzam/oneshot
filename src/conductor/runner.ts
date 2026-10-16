@@ -2095,6 +2095,23 @@ export async function runTicket(
                 : { kind: 'cycle', jumpTo: vIdx, windowEnd: vIdx },
               r.cfg.name,
             );
+          } else if (outcome === 'refix') {
+            // QA confirmed the failure is a real bug for this ticket: cycle to
+            // `implement`, not to verify. This is the one outcome that asks for
+            // a code change, so every phase between implement and here re-runs
+            // — the same path a first-lap verify failure takes, which is why it
+            // reuses `cycleTo` rather than naming implement itself.
+            const iIdx = list.findIndex((q) => q.name === r.cfg.cycleTo);
+            prior[r.cfg.name] = null;
+            claim(
+              iIdx === -1
+                ? {
+                    kind: 'stop', status: 'blocked',
+                    reason: `verify: QA confirmed a real bug but cycleTo '${r.cfg.cycleTo}' is not in the phase list`,
+                  }
+                : { kind: 'cycle', jumpTo: iIdx, windowEnd: r.index },
+              r.cfg.name,
+            );
           } else {
             prior[r.cfg.name] = null;
             claim(
@@ -2490,7 +2507,12 @@ export async function runTicket(
    */
   function fixingSince(): number {
     const round = activeRound(j.mrFeedback);
-    return round?.status === 'fixing' ? round.startedAt : 0;
+    const feedback = round?.status === 'fixing' ? round.startedAt : 0;
+    // A `confirmed` verdict rebases the window the same way a fix round does,
+    // and for the same reason: the laps already spent were spent before anyone
+    // had said the failure was real, so charging them against the fix QA has
+    // just asked for would send the run straight back to this gate.
+    return Math.max(feedback, j.verifyConfirmedAt ?? 0);
   }
 
   /**
@@ -2502,7 +2524,7 @@ export async function runTicket(
    */
   async function verifyCaseGate(
     r: PhaseResult,
-  ): Promise<'resolved' | 'reverify' | { park: string } | { block: string }> {
+  ): Promise<'resolved' | 'reverify' | 'refix' | { park: string } | { block: string }> {
     let caseResults = (r.out.data?.results ?? []) as CaseResult[];
     const meta = new Map(
       (readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases ?? []).map((c) => [c.id, c]),
@@ -2561,6 +2583,30 @@ export async function runTicket(
       caseResults = applied;
     }
 
+    // QA confirmed one or more cases are real bugs belonging to this ticket. The
+    // results stay as they are — a confirmed failure is still a failure, and
+    // `qualityGate` must keep refusing the merge over it. What changes is the lap
+    // window: `verifyConfirmedAt` rebases `failedLapsOf`, which is what lets
+    // verify cycle through `implement` again instead of blocking here.
+    if (gate.confirmed.length) {
+      const decisions = gate.confirmed.map((d) => ({
+        caseId: d.caseId, verdict: 'confirmed' as const, by: d.by ?? 'unknown',
+        note: 'QA confirmed a real bug in this ticket; going back to implement',
+      }));
+      j = updateJournal(iid, {
+        verifyConfirmedAt: Date.now(),
+        verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
+      }) ?? j;
+      await addIssueNote(iid,
+        `${gate.confirmed.map((d) => `**${d.caseId}**`).join(', ')} confirmed as real bug(s) for this `
+        + 'ticket — going back to `implement` to fix them. The case(s) stay recorded as failures '
+        + 'until they pass, so the merge is still blocked on them.');
+      log.phase(`verify-case gate: ${gate.confirmed.length} case(s) confirmed — cycling to implement`, {
+        iid, cases: gate.confirmed.map((d) => d.caseId).join(', '),
+      });
+      return 'refix';
+    }
+
     // QA supplied corrected steps for a `missing-steps` case: write them onto the
     // case, scope the next verify run to it, mark the correction spent, and go
     // re-run verify on only that case (no code changed, so nothing else re-runs).
@@ -2606,8 +2652,9 @@ export async function runTicket(
     if (!stillFailing.length) return 'resolved';
     return {
       park: 'awaiting a QA decision on the verify case(s) still failing after two laps — a QA reviewer '
-        + 'classifies each on the ticket (`skip`, `invalid`, `expected`, `pre-existing`, or `missing steps` '
-        + 'to supply corrected steps) and the run continues once every one is settled',
+        + 'classifies each on the ticket (`skip`, `invalid`, `expected`, `pre-existing`, `missing steps` '
+        + 'to supply corrected steps, or `actual bug` to send it back to implement) and the run '
+        + 'continues once every one is settled',
     };
   }
 
