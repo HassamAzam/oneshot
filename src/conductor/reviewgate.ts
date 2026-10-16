@@ -1005,10 +1005,25 @@ export function appendEdgeCases(iid: number, feedback: string): TestCase[] | nul
  * `expected` accepts the observed behaviour as correct. `pre-existing` says the
  * failure is real but not this change's, and splits it into its own bug.
  */
-export type VerifyVerdict = 'skip' | 'invalid' | 'expected' | 'pre-existing' | 'missing-steps';
+export type VerifyVerdict =
+  'skip' | 'invalid' | 'expected' | 'pre-existing' | 'missing-steps' | 'confirmed';
 
-/** The four terminal verdicts, which settle a case outright (unlike `missing-steps`). */
+/** The four terminal verdicts, which settle a case outright (unlike `missing-steps` and `confirmed`). */
 const TERMINAL_VERDICTS: ReadonlySet<VerifyVerdict> = new Set(['skip', 'invalid', 'expected', 'pre-existing']);
+
+/**
+ * How many times one case may be confirmed a real bug before it has to be
+ * settled some other way.
+ *
+ * Every other verdict here ENDS the case. `confirmed` is the only one that buys
+ * more work — it rebases verify's lap window so the phase can cycle through
+ * `implement` again — and a reviewer who keeps confirming a case `implement`
+ * keeps failing to fix would spend the run's budget one pair of laps at a time.
+ * A person typing it each round is a real bound, but not a cheap one: past this
+ * the case needs a terminal verdict, which is the same shape as `missing-steps`
+ * spending its one correction.
+ */
+export const MAX_CONFIRMATIONS = 2;
 
 export interface VerifyDirective { caseId: string; verdict: VerifyVerdict; by: string | null; raw: string }
 
@@ -1021,6 +1036,13 @@ export interface VerifyGateResult {
   apply: VerifyDirective[];
   /** Cases whose QA-corrected steps have just arrived — the caller re-runs each one, scoped. */
   rescope: Array<{ caseId: string; steps: string[]; by: string | null }>;
+  /**
+   * Cases QA has just confirmed are real bugs belonging to THIS ticket. The
+   * caller leaves the result as `fail`, rebases verify's lap window and cycles
+   * back to `implement`. Unlike every other verdict this one does not settle the
+   * case — it asks for the fix the run had given up on.
+   */
+  confirmed: VerifyDirective[];
   /** Failing cases still awaiting a QA answer this tick (no directive, or mid `missing-steps` exchange). */
   pending: string[];
 }
@@ -1043,13 +1065,39 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
     const m = /(\d{1,5})\s*$/.exec(id);
     if (m) byNumber.set(String(Number(m[1])), id);
   }
+  /**
+   * Whether a keyword match is negated by something just before it.
+   *
+   * `/pre[\s-]?exist/` matches "not pre-existing", so "TC-14 is not
+   * pre-existing" recorded the exact inverse of what the reviewer said — and
+   * `pre-existing` is the one verdict with a side effect, opening a bug on
+   * another ticket. Bounded to the words just before the match so a negation
+   * earlier in a long sentence does not disarm an unrelated verdict.
+   */
+  const negated = (s: string, m: RegExpExecArray | null): boolean =>
+    !!m && /\b(?:not|isn'?t|aren'?t|wasn'?t|no\s+longer|never|don'?t)\b[^.;,\n]{0,24}$/i
+      .test(s.slice(0, m.index));
+
   const verdictOf = (s: string): VerifyVerdict | null => {
-    // Terminal verdicts first: a fragment that says both "skip" and "missing
+    // `confirmed` is tested FIRST, and only on phrases that cannot mean anything
+    // else. "not pre-existing, it's an actual bug" is the natural way to say it,
+    // and `pre-existing`'s pattern matches the first half of that sentence — so
+    // testing it later would read a confirmation as its opposite. None of these
+    // phrases appear in a reviewer settling a case the other four ways; note
+    // `\bvalid\b` is deliberately NOT one of them, because `invalid` is.
+    if (/\bconfirmed\b|\b(actual|real|genuine|legitimate|legit)\s+(bug|issue|failure|defect|problem)\b|\bfix\s+(it|this|in\s+this\s+ticket)\b/i.test(s)) {
+      return 'confirmed';
+    }
+    // Terminal verdicts next: a fragment that says both "skip" and "missing
     // steps" is a reviewer settling the case, so the terminal word wins.
-    if (/pre[\s-]?exist|existing\s+(issue|bug)/i.test(s)) return 'pre-existing';
-    if (/\binvalid\b/i.test(s)) return 'invalid';
-    if (/\bexpected\b/i.test(s)) return 'expected';
-    if (/\bskip\b/i.test(s)) return 'skip';
+    const pe = /pre[\s-]?exist|existing\s+(issue|bug)/i.exec(s);
+    if (pe && !negated(s, pe)) return 'pre-existing';
+    const inv = /\binvalid\b/i.exec(s);
+    if (inv && !negated(s, inv)) return 'invalid';
+    const exp = /\bexpected\b/i.exec(s);
+    if (exp && !negated(s, exp)) return 'expected';
+    const sk = /\bskip\b/i.exec(s);
+    if (sk && !negated(s, sk)) return 'skip';
     if (/missing\s+steps?|steps?\s+(are\s+|were\s+)?(missing|incomplete|wrong|insufficient)|incomplete\s+steps?|wrong\s+steps?/i.test(s)) {
       return 'missing-steps';
     }
@@ -1068,10 +1116,28 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
       out.push({ caseId, verdict, by: null, raw: fragment.trim() });
     }
   }
+
+  // Second pass, by LINE rather than by comma-fragment, and only for
+  // `confirmed`. A confirmation is naturally written as one sentence containing
+  // a comma — "TC-14 is not pre-existing, it is an actual bug" — which the first
+  // pass sees as two fragments: a number with no verdict, then a verdict with no
+  // number. Restricted to cases the first pass left unclaimed, so no reading it
+  // already made can change here.
+  for (const line of text.split(/\n+/)) {
+    if (verdictOf(line) !== 'confirmed') continue;
+    const nums = [...line.matchAll(/(?:tc[-\s]?|case\s*|no\.?\s*|#)?0*(\d{1,5})/gi)]
+      .map((x) => String(Number(x[1])));
+    for (const n of new Set(nums)) {
+      const caseId = byNumber.get(n);
+      if (!caseId || claimed.has(caseId)) continue;
+      claimed.add(caseId);
+      out.push({ caseId, verdict: 'confirmed', by: null, raw: line.trim() });
+    }
+  }
   return out;
 }
 
-/** The comment the verify-case gate posts, listing each failing case and the five verdicts. */
+/** The comment the verify-case gate posts, listing each failing case and the six verdicts. */
 export function verifyCasesRequestBody(failing: VerifyFailingCase[]): string {
   const lines = failing.map((c) => {
     const ev = (c.evidence ?? '').split('\n')[0]!.slice(0, 300).trim();
@@ -1081,7 +1147,7 @@ export function verifyCasesRequestBody(failing: VerifyFailingCase[]): string {
     '## Verify needs a QA decision',
     '',
     'Verify re-ran these case(s) through `implement` twice and they still fail. ' +
-    'No code change fixed them, so QA decides what each one means:',
+    'No code change fixed them yet, so QA decides what each one means:',
     '',
     ...lines,
     '',
@@ -1092,8 +1158,10 @@ export function verifyCasesRequestBody(failing: VerifyFailingCase[]): string {
     '- `TC-N: expected` — the observed behaviour is correct; accept it as a pass.',
     '- `TC-N: pre-existing` — the failure is real but not this change\'s; a separate bug is opened and linked, and verify completes.',
     '- `TC-N: missing steps` — the case\'s steps are incomplete. I\'ll post the steps I followed; reply with the corrected ones and I\'ll re-run **only that case**.',
+    `- \`TC-N: actual bug\` — the failure is real AND belongs to this ticket. The case stays a FAIL, and I go back to \`implement\` and try again. Up to ${MAX_CONFIRMATIONS} times per case.`,
     '',
-    '_The run reads this from the ticket. It continues once every case above is settled._',
+    '_The run reads this from the ticket. Five of these settle a case; `actual bug` is the one '
+    + 'that asks for the fix instead, so the run keeps working rather than waiting._',
   ].join('\n');
 }
 
@@ -1152,7 +1220,8 @@ function verifyCaseGateAskText(journal: RunJournal, noteId: number, mentions: st
   const who = mentions || `_QA reviewers (${approversFor('verifyCases').join(', ') || 'nobody configured'})_`;
   return `:pause_button: *QA decision needed on verify* for ${link}\n` +
     `${who} — ${count} case(s) still fail after two laps through \`implement\`. A verdict per case ` +
-    'is posted on the ticket (*skip*, *invalid*, *expected* or *pre-existing*). Reply there, per case.\n' +
+    'is posted on the ticket (*skip*, *invalid*, *expected*, *pre-existing*, *missing steps*, or ' +
+    '*actual bug* to send it back for another fix). Reply there, per case.\n' +
     '_Reply on the ticket, not here — this run reads its verdict from GitLab._';
 }
 
@@ -1180,18 +1249,18 @@ export async function checkVerifyGate(
     return {
       verdict: 'actionable',
       apply: failingIds.map((id) => ({ caseId: id, verdict: 'skip' as const, by: null, raw: 'dry-run' })),
-      rescope: [], pending: [],
+      rescope: [], confirmed: [], pending: [],
     };
   }
 
   const approvers = approversFor('verifyCases');
   if (!approvers.length) {
     log.warn("no qa reviewers in config/reviewers.json — 'verifyCases' gate cannot be satisfied", { iid });
-    return { verdict: 'unavailable', apply: [], rescope: [], pending: failingIds };
+    return { verdict: 'unavailable', apply: [], rescope: [], confirmed: [], pending: failingIds };
   }
 
   let journal = readJournal(iid);
-  if (!journal) return { verdict: 'actionable', apply: [], rescope: [], pending: failingIds };
+  if (!journal) return { verdict: 'actionable', apply: [], rescope: [], confirmed: [], pending: failingIds };
 
   let state = stateOf(journal, 'verifyCases');
 
@@ -1199,20 +1268,20 @@ export async function checkVerifyGate(
     const posted = await addIssueNote(iid, verifyCasesRequestBody(failing));
     if (!posted.ok || !posted.data) {
       log.warn('verify-case gate request could not be posted to the ticket — will retry next tick', { iid });
-      return { verdict: 'actionable', apply: [], rescope: [], pending: failingIds };
+      return { verdict: 'actionable', apply: [], rescope: [], confirmed: [], pending: failingIds };
     }
     state = { ...state, requestNoteId: posted.data.id };
     persist(iid, 'verifyCases', state);
     const mentions = await mentionsFor('verifyCases');
     await notifySlack(journal, verifyCaseGateAskText(journal, posted.data.id, mentions, failing.length), true);
     log.phase(`verify-case QA decision requested on #${iid}`, { note: posted.data.id, cases: failing.length });
-    return { verdict: 'actionable', apply: [], rescope: [], pending: failingIds };
+    return { verdict: 'actionable', apply: [], rescope: [], confirmed: [], pending: failingIds };
   }
 
   const notes = await issueNotes(iid);
   if (!notes.ok || !notes.data) {
     log.warn('verify-case gate could not read the ticket comments — will retry next tick', { iid });
-    return { verdict: 'actionable', apply: [], rescope: [], pending: failingIds };
+    return { verdict: 'actionable', apply: [], rescope: [], confirmed: [], pending: failingIds };
   }
   const noteData = notes.data;
 
@@ -1228,19 +1297,47 @@ export async function checkVerifyGate(
   }
 
   const missing: Record<string, { oursNoteId: number; rerunDone?: boolean }> = { ...(journal.verifyMissingSteps ?? {}) };
+  const confirmedState: Record<string, { rounds: number; capNoted?: boolean }> =
+    { ...(journal.verifyConfirmed ?? {}) };
   const apply: VerifyDirective[] = [];
   const rescope: VerifyGateResult['rescope'] = [];
+  const confirmed: VerifyDirective[] = [];
   const pending: string[] = [];
 
   for (const id of failingIds) {
     const ds = perCase.get(id) ?? [];
-    // A terminal verdict settles the case, even if a `missing-steps` directive
-    // is also present — a reviewer who classifies it has moved past the steps.
+    // A terminal verdict settles the case, even if a `missing-steps` or
+    // `confirmed` directive is also present — a reviewer who classifies it has
+    // moved past asking for more work on it.
     const terminal = ds.find((d) => TERMINAL_VERDICTS.has(d.verdict));
     if (terminal) {
       apply.push({ caseId: id, verdict: terminal.verdict, by: terminal.by, raw: terminal.raw });
       continue;
     }
+
+    // Confirmed a real bug: hand it back to `implement` rather than settling it.
+    // Counted per case, because the only verdict that buys work is the only one
+    // that can be repeated, and a spent case needs settling another way.
+    const conf = ds.find((d) => d.verdict === 'confirmed');
+    if (conf) {
+      const st = confirmedState[id] ?? { rounds: 0 };
+      if (st.rounds < MAX_CONFIRMATIONS) {
+        confirmedState[id] = { ...st, rounds: st.rounds + 1 };
+        confirmed.push({ caseId: id, verdict: 'confirmed', by: conf.by, raw: conf.raw });
+        continue;
+      }
+      if (!st.capNoted) {
+        await addIssueNote(iid,
+          `**${id}** has been confirmed a real bug ${st.rounds} time(s) and \`implement\` still has `
+          + 'not fixed it. That budget is spent, so this case now needs a terminal verdict — '
+          + '`skip`, `invalid`, `expected` or `pre-existing` — or a person takes the fix over '
+          + 'outside this run.');
+        confirmedState[id] = { ...st, capNoted: true };
+      }
+      pending.push(id);
+      continue;
+    }
+
     if (!ds.some((d) => d.verdict === 'missing-steps')) { pending.push(id); continue; }
 
     const st = missing[id];
@@ -1274,7 +1371,13 @@ export async function checkVerifyGate(
     else pending.push(id);
   }
 
-  return { verdict: 'actionable', apply, rescope, pending };
+  // Persist the per-case confirmation count before returning it, so a tick that
+  // honours a confirmation cannot honour the same one twice.
+  if (JSON.stringify(confirmedState) !== JSON.stringify(journal.verifyConfirmed ?? {})) {
+    journal = updateJournal(iid, { verifyConfirmed: confirmedState }) ?? journal;
+  }
+
+  return { verdict: 'actionable', apply, rescope, confirmed, pending };
 }
 
 // ------------------------------------------------------------- design gate
