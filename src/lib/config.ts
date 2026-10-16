@@ -1212,6 +1212,17 @@ function buildBaseEnv(): Record<string, string> {
   const oauth = process.env.CLAUDE_CODE_OAUTH_TOKEN;
   if (typeof oauth === 'string' && oauth.trim() !== '') env.CLAUDE_CODE_OAUTH_TOKEN = oauth;
 
+  // Force IPv4-first DNS in every phase subprocess. On a box behind FortiClient
+  // the VPN installs a dead IPv6 default route, so a model stream that resolves
+  // api.anthropic.com to AAAA goes silent mid-session and the phase aborts after
+  // 15m with no stream message. IPv4 is fine; `--dns-result-order=ipv4first`
+  // makes Node prefer it. Preserves any NODE_OPTIONS the environment already set.
+  const ipv4First = '--dns-result-order=ipv4first';
+  const inheritedNodeOptions = process.env.NODE_OPTIONS ?? '';
+  env.NODE_OPTIONS = inheritedNodeOptions.includes('dns-result-order')
+    ? inheritedNodeOptions
+    : `${inheritedNodeOptions} ${ipv4First}`.trim();
+
   for (const v of AUTH_VARS_NEVER_FORWARDED) delete env[v];
   return env;
 }
