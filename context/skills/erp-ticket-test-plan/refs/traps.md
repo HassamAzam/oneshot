@@ -67,6 +67,8 @@ label it, and give it a positive control.
   a row in the same table that *does* render one.
 - Asserting unchanged behaviour on code the ticket does not touch passes
   identically before and after. High blast belongs on the lines being edited.
+- Passing this test is not enough on its own: a case can fail on the revert and
+  still not distinguish the fix from a different wrong answer (see 8).
 
 ### 6. Removing what hid a state exposes states nobody examined
 
@@ -114,6 +116,36 @@ is not only appearance — it is what stopped anyone looking.
   check is repeatable, needs no seeded data, and cannot pass where the helper is
   absent.
 
+### 8. Inputs that cannot tell two formulas apart prove neither
+
+When a change replaces one rule for dividing, sharing, apportioning or rounding
+with another, every candidate rule agrees on symmetric inputs. Three people with
+the same entitlement split a pot the same way under *equal shares*, *weighted by
+entitlement*, and most of the wrong rules in between. A case built on those
+inputs exercises the code path and settles nothing about which rule is running.
+
+This is not principle 5. A case like that genuinely fails on the reverted diff —
+the old behaviour really was broken — so it passes the revert test, reads as
+strong, and still cannot distinguish the fix from a different wrong answer.
+
+**The asymmetry usually has to be built, and often only appears on the second
+record.** A first claim, allocation or draw-down leaves every participant equal;
+it is the second one, against partly-consumed balances, where their remaining
+amounts differ and the rules separate. A single-record case cannot reach that
+state at all.
+
+**Do:** pick inputs where the candidate rules give DIFFERENT answers, and put
+both numbers in the expected result — "under equal shares this is X per person,
+under shares proportional to the remaining limit it is Y and Z; expect Y and Z".
+A case that cannot say what a wrong rule would have produced is not testing the
+rule. Then add the second-record case explicitly: one participant whose balance
+is untouched beside others whose balance is already partly spent.
+
+And check the remainder separately. Where the paid total falls short of the
+entitlement total, how the shortfall is spread — equally, or in proportion — is a
+second decision the same code makes, and a case whose numbers divide exactly
+never asks it.
+
 ---
 
 ## Retiring a principle or a bullet
@@ -142,3 +174,7 @@ the one below — so every source is cited by full URL, and a new one must be to
 - **Principle 2's `keepMounted` bullet**: not a QA round at all — testing the
   `local-browser-verify` helpers against a live app (`f9c7901`), where a MUI `Popper`
   with `keepMounted` kept its geometry after being dismissed.
+- **Principle 8**:
+  [erp#8781](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8781), where an
+  approved case list and a merged fix both held, and QA found the remaining defect
+  by hand afterwards.
