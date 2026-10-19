@@ -135,24 +135,31 @@ discriminates exactly as well as a second claim between equal ones — so use
 whichever the data allows. A run that cannot create a second record has no
 reason to drop the case; it should pick unequal entitlements instead.
 
-**Do:** choose inputs where the candidate rules give DIFFERENT answers, and say
-which rule the other answer would mean. `expected` is the oracle a later phase
-grades against verbatim, so it holds the value you expect and nothing else —
-name the losing value as the fail signal beside it: *"expect 200 to A and 400 to
-B; 300 each means the amount is still being split evenly rather than in
-proportion to the remaining limit."* A case that cannot say what a wrong rule
+**Do:** choose inputs where the candidate rules give DIFFERENT answers, and put
+the losing answer in the case as a named fail signal rather than as a second
+expectation. There is no notes field, so it goes in `expected` — which a later
+phase grades verbatim — and the wording has to leave one value the expectation
+and the other a tripwire: *"A receives 200 and B receives 400. If both receive
+300, the amount is still being split evenly rather than in proportion to the
+remaining limit — that is a FAIL."* A case that cannot say what a wrong rule
 would have produced is not testing the rule.
 
-**Two further decisions live in the same code, and each needs its own setup:**
+**Two further decisions live in the same code, and the case above reaches
+neither:**
 
-- **A shortfall** — the paid total is less than the entitlements add up to. How
-  is the gap spread: equally, or in proportion? Set it up by paying less than
-  the total.
-- **An indivisible remainder** — the amount does not divide evenly between the
-  parties. Who gets the odd unit? Set it up with an amount that leaves one.
+- **A shortfall** — less is paid than the entitlements add up to. Paying less is
+  not the setup; any split against entitlements is already short of something.
+  The setup is a shortfall where spreading the gap EQUALLY and spreading it IN
+  PROPORTION land on different numbers, and the assertion is which of the two
+  happened.
+- **A fractional share** — the rule under test lands on an amount that will not
+  come out whole, and something has to absorb the odd unit. Divisibility by the
+  number of parties is a different question and answers this one wrongly: an
+  amount can divide cleanly between the parties and still produce a fractional
+  share once it is weighted by their limits.
 
-These are different conditions, not one. A payment can be short and still divide
-evenly, so a case can exercise the first and never ask the second.
+A payment can be short and still produce whole shares, so one case can exercise
+the first of these and never ask the second.
 
 This principle is about splitting between parties. A change that only alters how
 a single figure is rounded or formatted has no second party for a rule to treat
