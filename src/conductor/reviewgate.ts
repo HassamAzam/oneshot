@@ -1151,7 +1151,12 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
     // character window instead let an unrelated clause disarm the verdict:
     // "TC-14 is not worth chasing — skip" dropped the skip and parked the run
     // with nothing in the output naming the sentence it threw away.
-    const hit = /\b(?:not|never|no|isn'?t|aren'?t|wasn'?t|don'?t|doesn'?t|didn'?t|no\s+longer)\s+(?:a\s+|an\s+|the\s+)?$/i
+    // Negator, an optional adverb, an optional article, then the keyword. Pure
+    // adjacency let "not REALLY pre-existing" through — the inverse read again,
+    // on the verdict that opens a bug elsewhere, in a phrasing reviewers reach
+    // for constantly. A character window is what over-fired originally, so this
+    // stays a closed list of qualifiers rather than a span.
+    const hit = /\b(?:not|never|no|isn'?t|aren'?t|wasn'?t|don'?t|doesn'?t|didn'?t|no\s+longer)\s+(?:(?:really|actually|necessarily|quite|truly|strictly|entirely|exactly|particularly|wholly|just|simply|that)\s+)?(?:a\s+|an\s+|the\s+)?$/i
       .test(s.slice(0, m.index));
     if (hit) log.warn('verify-case gate: a negated verdict was not read as that verdict', { fragment: s.trim().slice(0, 120) });
     return hit;
@@ -1177,7 +1182,13 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
     // deliberately not one, because `invalid` is. Guarded like the rest — this
     // is the verdict that COSTS the most to invert, since a misread "no" starts
     // a fix cycle nobody asked for.
-    const cf = /\bconfirmed\b|\b(?:actual|real|genuine|legitimate|legit)\s+(?:bug|issue|failure|defect|problem)\b|\bfix\s+(?:it|this|in\s+this\s+ticket)\b/i.exec(s);
+    // `fix it` alone matched reviewers DECLINING a fix — "no need to fix it",
+    // "we'll fix it in a follow-up", "QA will fix it offline" — each of which
+    // would have spent a confirmation round and cycled the run for work nobody
+    // asked for. Only the explicit in-this-ticket form counts. Nouns take `s?`
+    // because the gate always presents several cases, so the plural is the form
+    // a reviewer actually writes.
+    const cf = /\bconfirmed\b|\b(?:actual|real|genuine|legitimate|legit)\s+(?:bug|issue|failure|defect|problem)s?\b|\bfix\s+(?:it|this)\s+in\s+this\s+ticket\b/i.exec(s);
     if (cf && !negated(s, cf)) return 'confirmed';
     if (/missing\s+steps?|steps?\s+(are\s+|were\s+)?(missing|incomplete|wrong|insufficient)|incomplete\s+steps?|wrong\s+steps?/i.test(s)) {
       return 'missing-steps';
@@ -1186,15 +1197,52 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
   };
   const out: VerifyDirective[] = [];
   const claimed = new Set<string>();
-  for (const fragment of text.split(/[\n;,]+/)) {
-    const verdict = verdictOf(fragment);
+  const fragments = text.split(/[\n;,]+/);
+  const numbersIn = (s: string): string[] =>
+    [...s.matchAll(/(?:tc[-\s]?|case\s*|no\.?\s*|#)?0*(\d{1,5})/gi)].map((x) => String(Number(x[1])));
+
+  /**
+   * A fragment that is NOTHING but case references — "TC-14", " 15" — carries no
+   * verdict and takes one from the run of bare fragments it belongs to.
+   *
+   * Splitting on `,` put the cases and the verdict in different fragments for
+   * the commonest multi-case reply, so every case but one was dropped:
+   * "TC-14, TC-15: skip" settled only TC-15, "skip 14, 15" only TC-14. That held
+   * for every verdict, not only the new one. Requiring the fragment to be BARE
+   * is what keeps it safe — "TC-09 — I'll come back to this one, TC-14 is a real
+   * bug" carries prose, so it inherits nothing and TC-09 stays unsettled.
+   */
+  const bare = (s: string): boolean =>
+    s.trim().length > 0
+    && numbersIn(s).length > 0
+    && !/[a-z]/i.test(s.replace(/\b(?:tc|case|no|and)\b/gi, '').replace(/[^a-z]/gi, ''));
+
+  const verdictFor = (i: number): VerifyVerdict | null => {
+    const own = verdictOf(fragments[i]!);
+    if (own) return own;
+    if (!bare(fragments[i]!)) return null;
+    // Both directions, because reviewers put the verdict at either end:
+    // "skip 14, 15" first, "TC-14, TC-15: skip" last. Each walk stops at the
+    // first fragment that is neither bare nor carrying a verdict, so a clause of
+    // prose always ends the run of cases it belongs to.
+    for (const step of [-1, 1]) {
+      for (let k = i + step; k >= 0 && k < fragments.length; k += step) {
+        const v = verdictOf(fragments[k]!);
+        if (v) return v;
+        if (!bare(fragments[k]!)) break;
+      }
+    }
+    return null;
+  };
+
+  for (let i = 0; i < fragments.length; i += 1) {
+    const verdict = verdictFor(i);
     if (!verdict) continue;
-    const nums = [...fragment.matchAll(/(?:tc[-\s]?|case\s*|no\.?\s*|#)?0*(\d{1,5})/gi)].map((x) => String(Number(x[1])));
-    for (const n of new Set(nums)) {
+    for (const n of new Set(numbersIn(fragments[i]!))) {
       const caseId = byNumber.get(n);
       if (!caseId || claimed.has(caseId)) continue;
       claimed.add(caseId);
-      out.push({ caseId, verdict, by: null, raw: fragment.trim() });
+      out.push({ caseId, verdict, by: null, raw: fragments[i]!.trim() });
     }
   }
 
@@ -1206,20 +1254,27 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
   // already made can change here.
   for (const line of text.split(/\n+/)) {
     if (verdictOf(line) !== 'confirmed') continue;
-    const named = [...new Set(
-      [...line.matchAll(/(?:tc[-\s]?|case\s*|no\.?\s*|#)?0*(\d{1,5})/gi)]
-        .map((x) => byNumber.get(String(Number(x[1]))))
-        .filter((x): x is string => !!x),
-    )];
-    // EXACTLY one failing case, or the line is left to the fragment pass. A
-    // whole line is too blunt a unit to spread one verdict across: "TC-09 — I'll
-    // come back to this one, TC-14 is a real bug" names two, and confirming both
-    // would start a fix cycle on the case the reviewer had just deferred.
-    if (named.length !== 1) continue;
-    const caseId = named[0]!;
-    if (claimed.has(caseId)) continue;
-    claimed.add(caseId);
-    out.push({ caseId, verdict: 'confirmed', by: null, raw: line.trim() });
+    const hits = [...line.matchAll(/(?:tc[-\s]?|case\s*|no\.?\s*|#)?0*(\d{1,5})/gi)]
+      .map((m) => ({ id: byNumber.get(String(Number(m[1]))), at: m.index ?? 0, len: m[0].length }))
+      .filter((h): h is { id: string; at: number; len: number } => !!h.id);
+    if (!hits.length) continue;
+    // Several cases are allowed only when written as a LIST — nothing but
+    // separators between them. A clause between two cases means the line says
+    // different things about each, and "TC-09 — I'll come back to this one,
+    // TC-14 is a real bug" would otherwise confirm the one just deferred.
+    const listed = hits.every((h, k) => k === 0
+      || /^[\s,;&]*(?:and|&)?[\s,;&]*$/i.test(line.slice(hits[k - 1]!.at + hits[k - 1]!.len, h.at)));
+    if (!listed) {
+      log.warn('verify-case gate: a confirmation naming several cases in one clause was not applied', {
+        line: line.trim().slice(0, 160),
+      });
+      continue;
+    }
+    for (const h of hits) {
+      if (claimed.has(h.id)) continue;
+      claimed.add(h.id);
+      out.push({ caseId: h.id, verdict: 'confirmed', by: null, raw: line.trim() });
+    }
   }
   return out;
 }

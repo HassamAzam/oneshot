@@ -98,7 +98,7 @@ import { schemaFor } from './schemas.js';
 import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
-  rearmGate,
+  MAX_CONFIRMATIONS, rearmGate,
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
@@ -2590,30 +2590,6 @@ export async function runTicket(
       caseResults = applied;
     }
 
-    // QA confirmed one or more cases are real bugs belonging to this ticket. The
-    // results stay as they are — a confirmed failure is still a failure, and
-    // `qualityGate` must keep refusing the merge over it. What changes is the lap
-    // window: `verifyConfirmedAt` rebases `failedLapsOf`, which is what lets
-    // verify cycle through `implement` again instead of blocking here.
-    if (gate.confirmed.length) {
-      const decisions = gate.confirmed.map((d) => ({
-        caseId: d.caseId, verdict: 'confirmed' as const, by: d.by ?? 'unknown',
-        note: 'QA confirmed a real bug in this ticket; going back to implement',
-      }));
-      j = updateJournal(iid, {
-        verifyConfirmedAt: Date.now(),
-        verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
-      }) ?? j;
-      await addIssueNote(iid,
-        `${gate.confirmed.map((d) => `**${d.caseId}**`).join(', ')} confirmed as real bug(s) for this `
-        + 'ticket — going back to `implement` to fix them. The case(s) stay recorded as failures '
-        + 'until they pass, so the merge is still blocked on them.');
-      log.phase(`verify-case gate: ${gate.confirmed.length} case(s) confirmed — cycling to implement`, {
-        iid, cases: gate.confirmed.map((d) => d.caseId).join(', '),
-      });
-      return 'refix';
-    }
-
     // QA supplied corrected steps for a `missing-steps` case: write them onto the
     // case, scope the next verify run to it, mark the correction spent, and go
     // re-run verify on only that case (no code changed, so nothing else re-runs).
@@ -2652,6 +2628,41 @@ export async function runTicket(
         iid, cases: gate.rescope.map((x) => x.caseId).join(', '),
       });
       return 'reverify';
+    }
+
+    // QA confirmed one or more cases are real bugs belonging to this ticket. The
+    // results stay as they are — a confirmed failure is still a failure, and
+    // `qualityGate` must keep refusing the merge over it. What changes is the lap
+    // window: `verifyConfirmedAt` rebases `failedLapsOf`, which is what lets
+    // verify cycle through `implement` again instead of blocking here.
+    if (gate.confirmed.length) {
+      const decisions = gate.confirmed.map((d) => ({
+        caseId: d.caseId, verdict: 'confirmed' as const, by: d.by ?? 'unknown',
+        note: 'QA confirmed a real bug in this ticket; going back to implement',
+      }));
+      j = updateJournal(iid, {
+        verifyConfirmedAt: Date.now(),
+        verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
+      }) ?? j;
+      // Re-arm the gate. Without this the second round is unreachable even
+      // though the lap arithmetic allows it: `requestNoteId` stays set, so the
+      // next entry posts no new comment and pings nobody, the confirmation is
+      // correctly not re-consumed, every case lands in `pending` — and the run
+      // parks, which `finish()` deliberately alerts nobody about. Nothing would
+      // tell QA their round was spent or that another is wanted.
+      j = rearmGate(iid, 'verifyCases') ?? j;
+      const rounds = gate.confirmed
+        .map((d) => (j.verifyConfirmed ?? {})[d.caseId]?.rounds ?? 1);
+      const roundNote = Math.max(...rounds, 1);
+      await addIssueNote(iid,
+        `${gate.confirmed.map((d) => `**${d.caseId}**`).join(', ')} confirmed as real bug(s) for this `
+        + `ticket (round ${roundNote} of ${MAX_CONFIRMATIONS}) — going back to \`implement\` to fix `
+        + 'them. The case(s) stay recorded as failures until they pass, so the merge is still '
+        + 'blocked on them. If they still fail afterwards I will ask again here.');
+      log.phase(`verify-case gate: ${gate.confirmed.length} case(s) confirmed — cycling to implement`, {
+        iid, cases: gate.confirmed.map((d) => d.caseId).join(', '),
+      });
+      return 'refix';
     }
 
     // No failing cases remain → verify completes. Otherwise wait on QA.
