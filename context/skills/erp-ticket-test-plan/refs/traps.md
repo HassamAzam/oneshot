@@ -120,9 +120,10 @@ is not only appearance — it is what stopped anyone looking.
 
 When a change replaces one rule for splitting an amount between parties with
 another, every candidate rule agrees on symmetric inputs. Three people with
-the same entitlement split a pot the same way under *equal shares*, *weighted by
-entitlement*, and most of the wrong rules in between. A case built on those
-inputs exercises the code path and settles nothing about which rule is running.
+the same entitlement and untouched balances split a pot the same way under
+*equal shares*, *weighted by entitlement*, and most of the wrong rules in
+between. A case built on those inputs exercises the code path and settles
+nothing about which rule is running.
 
 This is not principle 5. A case like that genuinely fails on the reverted diff —
 the old behaviour really was broken — so it passes the revert test, reads as
@@ -136,30 +137,35 @@ whichever the data allows. A run that cannot create a second record has no
 reason to drop the case; it should pick unequal entitlements instead.
 
 **Do:** choose inputs where the candidate rules give DIFFERENT answers, and put
-the losing answer in the case as a named fail signal rather than as a second
-expectation. There is no notes field, so it goes in `expected` — which a later
+each losing answer in the case as a named fail signal rather than as a second
+expectation. There is no notes field, so they go in `expected` — which a later
 phase grades verbatim — and the wording has to leave one value the expectation
-and the other a tripwire: *"A receives 200 and B receives 400. If both receive
-300, the amount is still being split evenly rather than in proportion to the
-remaining limit — that is a FAIL."* A case that cannot say what a wrong rule
-would have produced is not testing the rule.
+and the others tripwires. With 300 and 600 left on A's and B's limits and 600
+to pay out: *"A receives 200 and B receives 400. If both receive 300, the amount
+is being split evenly rather than in proportion to the remaining limit; if they
+receive 150 and 450, the shortfall is being spread equally instead. Either is a
+FAIL."* A case that cannot say what a wrong rule would have produced is not
+testing the rule.
 
-**Two further decisions live in the same code, and the case above reaches
-neither:**
+**Two further decisions live in the same code. The case above reaches one of
+them — that is what its second tripwire is for — and does not reach the other:**
 
-- **A shortfall** — less is paid than the entitlements add up to. Paying less is
-  not the setup; any split against entitlements is already short of something.
-  The setup is a shortfall where spreading the gap EQUALLY and spreading it IN
-  PROPORTION land on different numbers, and the assertion is which of the two
-  happened.
+- **A shortfall** — less is paid than the entitlements add up to. Any split
+  against entitlements is already short of something, so the setup costs
+  nothing to reach: the case above is already a shortfall. What it has to do is
+  assert on it, which is why 150/450 — the equally spread gap — is named
+  alongside the 300/300 equal pot. Reaching a condition is not asserting on
+  it.
 - **A fractional share** — the rule under test lands on an amount that will not
-  come out whole, and something has to absorb the odd unit. Divisibility by the
-  number of parties is a different question and answers this one wrongly: an
-  amount can divide cleanly between the parties and still produce a fractional
-  share once it is weighted by their limits.
+  come out whole, and something has to absorb the rounding difference.
+  Divisibility by the number of parties is a different question and answers
+  this one wrongly: an amount can divide cleanly between the parties and still
+  produce a fractional share once it is weighted by their limits. The assertion
+  is which party ends up absorbing it.
 
-A payment can be short and still produce whole shares, so one case can exercise
-the first of these and never ask the second.
+A payment can be short and still produce whole shares, so the case above — both
+tripwires included — never asks the fractional-share question; that one needs
+its own inputs.
 
 This principle is about splitting between parties. A change that only alters how
 a single figure is rounded or formatted has no second party for a rule to treat
