@@ -342,7 +342,35 @@ const SPECS: Spec[] = [
         skip: 'skipped', invalid: 'invalid — dropped',
         expected: 'expected behaviour — accepted as a pass', 'pre-existing': 'pre-existing',
         'missing-steps': "re-run with QA's corrected steps",
+        confirmed: 'confirmed a real bug and sent back to `implement`',
       };
+      // One row per case, not one per decision. `confirmed` is the only verdict
+      // that does not settle a case, so a case can carry several decisions — two
+      // confirmations and then a terminal verdict — and listing each as its own
+      // line read as three separate sign-offs under a heading that says the
+      // reviewer ruled "so this MR could proceed". What the reviewer of this MR
+      // needs is where each case ENDED, with the rounds it cost named once.
+      const lastOf = new Map<string, typeof qaDecisions[number]>();
+      const lastConfirmed = new Map<string, typeof qaDecisions[number]>();
+      const roundsOf = new Map<string, number>();
+      for (const d of qaDecisions) {
+        if (d.verdict !== 'confirmed') { lastOf.set(d.caseId, d); continue; }
+        roundsOf.set(d.caseId, (roundsOf.get(d.caseId) ?? 0) + 1);
+        lastConfirmed.set(d.caseId, d);
+      }
+      // A case still in the fix cycle has only confirmations, so its row is the
+      // most recent one — the reviewer who asked for the latest round, not the
+      // first, since the two need not be the same person.
+      for (const [caseId, d] of lastConfirmed) if (!lastOf.has(caseId)) lastOf.set(caseId, d);
+      const decisionLines = [...lastOf.values()].map((d) => {
+        const rounds = roundsOf.get(d.caseId) ?? 0;
+        const after = rounds && d.verdict !== 'confirmed'
+          ? ` — after ${rounds} confirmed fix round(s)`
+          : '';
+        const round = rounds && d.verdict === 'confirmed' ? ` (round ${rounds})` : '';
+        return `- ${d.caseId}: ${verdictWord[d.verdict] ?? d.verdict}${round}${after} `
+          + `(QA: ${d.by})${d.issueIid ? ` → #${d.issueIid}` : ''}`;
+      });
       return {
         body: `**Local verification** — ${tally(results)}.\n\n${resultTable(results)}\n\n` +
           (regressions.length
@@ -356,9 +384,10 @@ const SPECS: Spec[] = [
             : '') +
           (qaDecisions.length
             ? '**QA decisions on still-failing cases**\n'
-              + 'After two laps through `implement` these case(s) still failed, and a QA reviewer '
-              + 'ruled on each so this MR could proceed:\n'
-              + `${qaDecisions.map((d) => `- ${d.caseId}: ${verdictWord[d.verdict] ?? d.verdict} (QA: ${d.by})${d.issueIid ? ` → #${d.issueIid}` : ''}`).join('\n')}\n\n`
+              + 'After two laps through `implement` these case(s) still failed and a QA reviewer ruled '
+              + 'on each — either settling it so this MR could proceed, or confirming a real bug and '
+              + 'sending it back for another fix:\n'
+              + `${decisionLines.join('\n')}\n\n`
             : '') +
           `_Run ${ctx.runId} · executed in a real browser against the branch._`,
         // Base shots first, with room of their own, so verify's ten never crowd out the proof.
