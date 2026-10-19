@@ -29,7 +29,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, STATE } from '../src/lib/config.js';
 import type { RunJournal } from '../src/lib/artifacts.js';
-import { blameOf, verifyLabel, type TestcasesArtifact, type VerifyArtifact } from '../src/lib/verifyblame.js';
+import { blameFailureModes, blameOf, verifyLabel, type TestcasesArtifact, type VerifyArtifact } from '../src/lib/verifyblame.js';
 import { rankFailureModes, formatFailureModes, type FailureItem } from '../src/lib/failuremodes.js';
 import { argValue, loadHistory, saveHistory, type Saved } from './evalhistory.js';
 
@@ -102,9 +102,7 @@ function score(repo: string, iid: number, labels: Labels, dir: string): CauseSco
       s.diag.push({ mode: 'mislabel', label: 'verify put the wrong non-change label on a case', severity: 'medium', where: `${where} ${id}`, detail: `gold ${cause}, said ${saidStr}` });
     }
   }
-  for (const id of blame.ownCaseDismissed ?? []) s.diag.push({ mode: 'own-case-dismissed', label: "verify dismissed the ticket's own acceptance case (defect hidden)", severity: 'critical', where: `${where} ${id}` });
-  for (const id of blame.failBlamedElsewhere ?? []) s.diag.push({ mode: 'blamed-elsewhere', label: 'a fail was blamed on code outside the diff', severity: 'high', where: `${where} ${id}` });
-  for (const id of blame.orphanedFailures ?? []) s.diag.push({ mode: 'orphaned-fail', label: 'failing case is not in testcases.json (stale, salvaged)', severity: 'medium', where: `${where} ${id}` });
+  s.diag.push(...blameFailureModes(blame, where));
   return s;
 }
 

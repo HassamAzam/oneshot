@@ -11,6 +11,7 @@
  *   npm run eval:causes   grade verify's labels against hand-labelled causes
  */
 import { OVERRULED_PRE_EXISTING, countsAsFailure, ticketScopeIds } from '../phases/types.js';
+import type { FailureItem } from './failuremodes.js';
 
 /**
  * A 'fail' whose own evidence says the cause is not this change. "not
@@ -78,4 +79,21 @@ export function blameOf(verify: VerifyArtifact | null, testcases: TestcasesArtif
     orphanedFailures: present === null ? []
       : results.filter(countsAsFailure).map(idOf).filter((id) => !present.has(id)),
   };
+}
+
+/**
+ * The failure modes that can be read from verify's own output with no gold
+ * labels — the gold-free subset of the eval:causes diagnosis. Each mode here
+ * flags a failing case that may not be implement's to fix: a pre-existing fail
+ * blamed on the diff, the ticket's own case wrongly dismissed, or a stale case
+ * surviving in a salvaged verify.json. `where` is the location prefix each item
+ * is tagged with, e.g. '#8792'. Shared so eval:causes and the live implement
+ * lap diagnose the same way.
+ */
+export function blameFailureModes(blame: Blame, where: string): FailureItem[] {
+  const items: FailureItem[] = [];
+  for (const id of blame.ownCaseDismissed) items.push({ mode: 'own-case-dismissed', label: "verify dismissed the ticket's own acceptance case (defect hidden)", severity: 'critical', where: `${where} ${id}` });
+  for (const id of blame.failBlamedElsewhere) items.push({ mode: 'blamed-elsewhere', label: 'a fail was blamed on code outside the diff', severity: 'high', where: `${where} ${id}` });
+  for (const id of blame.orphanedFailures) items.push({ mode: 'orphaned-fail', label: 'failing case is not in testcases.json (stale, salvaged)', severity: 'medium', where: `${where} ${id}` });
+  return items;
 }

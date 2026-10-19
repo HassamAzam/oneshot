@@ -5,7 +5,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { blameOf, verifyLabel, type VerifyArtifact } from './verifyblame.js';
+import { blameFailureModes, blameOf, verifyLabel, type VerifyArtifact } from './verifyblame.js';
 import { OVERRULED_PRE_EXISTING } from '../phases/types.js';
 
 const verify = (...results: Array<[string, string, string?]>): VerifyArtifact =>
@@ -81,4 +81,21 @@ test('no verify artifact means nothing to blame', () => {
   assert.deepEqual(blameOf(null, null), {
     failing: [], failBlamedElsewhere: [], ownCaseDismissed: [], orphanedFailures: [],
   });
+});
+
+test('blameFailureModes turns the gold-free blame into ranked-ready items tagged by location', () => {
+  const blame = blameOf(
+    verify(['TC-1', 'fail', overruled('tagged \'happy\'')], ['TC-2', 'fail', 'untouched by this diff'], ['TC-3', 'fail']),
+    { cases: [{ id: 'TC-1', pass: ['happy'] }, { id: 'TC-2', pass: ['state'] }] },
+  );
+  const modes = blameFailureModes(blame, '#8792');
+  assert.deepEqual(modes, [
+    { mode: 'own-case-dismissed', label: "verify dismissed the ticket's own acceptance case (defect hidden)", severity: 'critical', where: '#8792 TC-1' },
+    { mode: 'blamed-elsewhere', label: 'a fail was blamed on code outside the diff', severity: 'high', where: '#8792 TC-2' },
+    { mode: 'orphaned-fail', label: 'failing case is not in testcases.json (stale, salvaged)', severity: 'medium', where: '#8792 TC-3' },
+  ]);
+});
+
+test('blameFailureModes is empty when verify blamed nothing gold-free', () => {
+  assert.deepEqual(blameFailureModes(blameOf(verify(['TC-1', 'fail']), { cases: [{ id: 'TC-1', pass: ['state'] }] }), '#1'), []);
 });
