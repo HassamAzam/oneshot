@@ -100,7 +100,7 @@ import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
-import { mergePhase, mrOpenPhase } from './codephases.js';
+import { mergePhase, mrOpenPhase, mrOpenSettled } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
   MAX_CONFIRMATIONS, rearmGate,
@@ -286,11 +286,14 @@ export interface CodePhaseCtx {
  * alternative (treat 'code' as "nothing to do") would let a run skip the merge
  * and still finish labelled Ready For Deployment.
  *
- * These run on EVERY pass, including a resume and every cycle lap — they are
- * never skipped by the succeeded-already check. GitLab is the source of truth
- * for whether an MR is merged, and a journal that says "merged" while GitLab
- * says "opened" must lose. Both are therefore idempotent by recheck rather than
- * by memory, and both are cheap when there is nothing left to do.
+ * These are never skipped by the succeeded-already check that settles session
+ * phases: a journal that says "merged" while GitLab says "opened" must lose, so
+ * both are idempotent by recheck rather than by memory. What the recheck costs
+ * is the phase's own business. `merge` asks GitLab on every pass. `mr-open`
+ * asks git first, through CODE_PHASE_SETTLED below, and is stepped over while
+ * the branch tip is already on origin and the MR is on record — a parked run
+ * is re-entered on every conductor tick, and before that check each tick spent
+ * a push, two card updates and a journal lap on a phase with nothing to do.
  */
 export const CODE_PHASES: Record<
   string,
@@ -311,6 +314,15 @@ export const CODE_PHASES: Record<
 > = {
   'mr-open': mrOpenPhase,
   merge: mergePhase,
+};
+
+/**
+ * A code phase's own "nothing left to do" check, consulted before its lap is
+ * spent. Absent for `merge` on purpose: only GitLab may answer whether an MR
+ * is merged, and the question must be asked on every pass.
+ */
+export const CODE_PHASE_SETTLED: Record<string, ((ctx: CodePhaseCtx) => boolean) | undefined> = {
+  'mr-open': mrOpenSettled,
 };
 
 // ------------------------------------------------------------------- the card
@@ -1551,6 +1563,13 @@ export async function runTicket(
     }
 
     if (CODE_PHASES[phase.name]) {
+      const settled = CODE_PHASE_SETTLED[phase.name];
+      if (settled?.({ iid, runId, journal: j, prior })) {
+        prior[phase.name] = readArtifact(iid, phase.artifact ?? `${phase.name}.json`);
+        log.info(`skip ${phase.name} — nothing left to do`);
+        i += 1;
+        continue;
+      }
       const control = await runCodePhase(phase, i);
       if (control.kind === 'stop') {
         const resumeAt = await resumeAfterRemediation(control, phase.name);

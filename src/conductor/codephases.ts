@@ -5,12 +5,18 @@
  * That is the whole reason the guardrail hooks have nothing to say about
  * merging — there is no tool call to intercept, only this file.
  *
- * Both phases run UNCONDITIONALLY on every pass, including a resume after a
- * crash, so neither may assume it is running for the first time. They are
- * idempotent BY RECHECK rather than by API: GitLab is the source of truth, and
- * a journal claiming "merged" while GitLab says "opened" must lose. Every step
- * below either re-derives its answer from GitLab or carries a guard forward in
- * its own artifact.
+ * Both phases run on every pass, including a resume after a crash, so neither
+ * may assume it is running for the first time. They are idempotent BY RECHECK
+ * rather than by API: GitLab is the source of truth, and a journal claiming
+ * "merged" while GitLab says "opened" must lose. Every step below either
+ * re-derives its answer from GitLab or carries a guard forward in its own
+ * artifact.
+ *
+ * `merge` rechecks UNCONDITIONALLY, because only GitLab can say whether the MR
+ * is merged. `mr-open` rechecks from git first (`mrOpenSettled`): when the
+ * branch tip is already what origin holds and the journal records the MR,
+ * there is nothing to push and nothing to open, and the loop steps over the
+ * phase without spending a lap on it.
  *
  * Two consequences worth stating, because both are easy to get wrong:
  *
@@ -1274,10 +1280,49 @@ async function recordSuccess(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<voi
  * this branch is reused and its iid returned, so a resumed run cannot produce a
  * second MR for one branch.
  *
+ * The recheck starts before the lap. A run parked at the test-case gate is
+ * re-claimed on every conductor tick, and every pass starts the loop at phase
+ * 0; session phases are skipped as settled, but a code phase was re-run every
+ * time — ticket 8652 recorded 1521 mr-open laps, one a minute, each a push
+ * nobody needed, two Slack card updates, a journal write and a publish sweep.
+ * `mrOpenSettled` answers from git whether anything is left to push, so the
+ * loop skips the phase while nothing has changed, and still runs it the moment
+ * a cycle back through `implement` leaves a commit origin has not seen.
+ *
  * Failure here is a WARN, not an abort. An early MR is a convenience for the
  * humans reading the gates; `mr` still opens one at phase 8 if this could not.
  * A run must not die because a courtesy push failed.
  */
+/** The sha a ref resolves to in `worktree`, or null when the ref does not exist. */
+function revParse(worktree: string, ref: string): string | null {
+  try {
+    return execFileSync('git', ['-C', worktree, 'rev-parse', '--verify', '--quiet', ref], {
+      encoding: 'utf8', stdio: 'pipe', timeout: 10_000,
+    }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether `mr-open` has nothing left to do: the journal records an MR and the
+ * branch tip is already the tip origin holds.
+ *
+ * Read from the remote-tracking ref, which `push -u` keeps current, so a commit
+ * from a later `implement` lap reads as unpushed and the phase runs again. A
+ * push that failed leaves the ref behind too, so a warned lap is retried on
+ * the next pass rather than remembered as done. No fetch and no API call: the
+ * check runs on every pass, and its whole point is to cost nothing when the
+ * answer is "nothing".
+ */
+export function mrOpenSettled(ctx: CodePhaseCtx): boolean {
+  const journal = readJournal(ctx.iid) ?? ctx.journal;
+  const { branch, worktree, mrIid } = journal;
+  if (!branch || !worktree || !mrIid) return false;
+  const head = revParse(worktree, 'HEAD');
+  return head !== null && head === revParse(worktree, `refs/remotes/origin/${branch}`);
+}
+
 export async function mrOpenPhase(
   ctx: CodePhaseCtx,
 ): Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }> {
