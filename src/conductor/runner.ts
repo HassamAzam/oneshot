@@ -2066,7 +2066,7 @@ export async function runTicket(
           claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.out.blocked}` }, r.cfg.name);
         } else if (
           r.cfg.name === 'verify' && caseFail
-          && failedLapsOf(iid, 'verify', fixingSince()) >= (r.cfg.maxLaps ?? 2)
+          && failedLapsOf(iid, 'verify', lapWindowFor('verify')) >= (r.cfg.maxLaps ?? 2)
         ) {
           // Verify spent its full lap budget and still records failing cases.
           // Where afterFailure would block, ask QA what each one means instead.
@@ -2461,10 +2461,11 @@ export async function runTicket(
 
     // Inside an MR review round's fix lap the retry and cycle budgets start
     // over: a review that failed twice before the MR opened has not spent the
-    // budget for revising a reviewer's requested change.
-    const round = activeRound(j.mrFeedback);
-    const since = round?.status === 'fixing' ? round.startedAt : 0;
-    const failed = failedLapsOf(iid, p.name, since);
+    // budget for revising a reviewer's requested change. Same for verify after
+    // a `confirmed` verdict — `lapWindowFor` is the one place both that and the
+    // gate-entry test read the window from, so they cannot disagree about when
+    // the budget began.
+    const failed = failedLapsOf(iid, p.name, lapWindowFor(p.name));
 
     if (p.onFail === 'retry') {
       const budget = p.maxRetries ?? 1;
@@ -2505,14 +2506,20 @@ export async function runTicket(
    * The same reckoning `afterFailure` uses, named so the verify-case gate agrees
    * with it on when the laps are spent.
    */
-  function fixingSince(): number {
+  function lapWindowFor(phase: string): number {
     const round = activeRound(j.mrFeedback);
     const feedback = round?.status === 'fixing' ? round.startedAt : 0;
-    // A `confirmed` verdict rebases the window the same way a fix round does,
-    // and for the same reason: the laps already spent were spent before anyone
-    // had said the failure was real, so charging them against the fix QA has
-    // just asked for would send the run straight back to this gate.
-    return Math.max(feedback, j.verifyConfirmedAt ?? 0);
+    // A `confirmed` verdict rebases VERIFY's window the same way a fix round
+    // rebases every phase's, and for the same reason: the laps already spent
+    // were spent before anyone had said the failure was real, so charging them
+    // against the fix QA has just asked for is charging the wrong work.
+    //
+    // It must be the window BOTH readers use. While only the gate-entry test
+    // knew about it, a confirmed run walked straight past the gate (1 lap since
+    // the confirmation, needs 2) into `afterFailure`, which counted from zero,
+    // saw 3 laps against a budget of 2 and hard-blocked — one implement attempt
+    // after a confirmation, and the cap could never be reached.
+    return phase === 'verify' ? Math.max(feedback, j.verifyConfirmedAt ?? 0) : feedback;
   }
 
   /**

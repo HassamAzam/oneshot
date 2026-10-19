@@ -1145,22 +1145,26 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
    * another ticket. Bounded to the words just before the match so a negation
    * earlier in a long sentence does not disarm an unrelated verdict.
    */
-  const negated = (s: string, m: RegExpExecArray | null): boolean =>
-    !!m && /\b(?:not|isn'?t|aren'?t|wasn'?t|no\s+longer|never|don'?t)\b[^.;,\n]{0,24}$/i
+  const negated = (s: string, m: RegExpExecArray | null): boolean => {
+    if (!m) return false;
+    // ADJACENT only — the negator, an optional article, and nothing else. A
+    // character window instead let an unrelated clause disarm the verdict:
+    // "TC-14 is not worth chasing — skip" dropped the skip and parked the run
+    // with nothing in the output naming the sentence it threw away.
+    const hit = /\b(?:not|never|no|isn'?t|aren'?t|wasn'?t|don'?t|doesn'?t|didn'?t|no\s+longer)\s+(?:a\s+|an\s+|the\s+)?$/i
       .test(s.slice(0, m.index));
+    if (hit) log.warn('verify-case gate: a negated verdict was not read as that verdict', { fragment: s.trim().slice(0, 120) });
+    return hit;
+  };
 
   const verdictOf = (s: string): VerifyVerdict | null => {
-    // `confirmed` is tested FIRST, and only on phrases that cannot mean anything
-    // else. "not pre-existing, it's an actual bug" is the natural way to say it,
-    // and `pre-existing`'s pattern matches the first half of that sentence — so
-    // testing it later would read a confirmation as its opposite. None of these
-    // phrases appear in a reviewer settling a case the other four ways; note
-    // `\bvalid\b` is deliberately NOT one of them, because `invalid` is.
-    if (/\bconfirmed\b|\b(actual|real|genuine|legitimate|legit)\s+(bug|issue|failure|defect|problem)\b|\bfix\s+(it|this|in\s+this\s+ticket)\b/i.test(s)) {
-      return 'confirmed';
-    }
-    // Terminal verdicts next: a fragment that says both "skip" and "missing
-    // steps" is a reviewer settling the case, so the terminal word wins.
+    // Terminal verdicts FIRST, which is the documented rule: a fragment that
+    // says both "skip" and "missing steps" is a reviewer settling the case, so
+    // the terminal word wins. `confirmed` was tried ahead of them to make "not
+    // pre-existing, it's an actual bug" work, and that broke the rule the other
+    // way — "TC-14: invalid — don't fix it" came back as a confirmation. The
+    // negation guard below is what makes ordering unnecessary: "not
+    // pre-existing" no longer matches `pre-existing`, so it falls through.
     const pe = /pre[\s-]?exist|existing\s+(issue|bug)/i.exec(s);
     if (pe && !negated(s, pe)) return 'pre-existing';
     const inv = /\binvalid\b/i.exec(s);
@@ -1169,6 +1173,12 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
     if (exp && !negated(s, exp)) return 'expected';
     const sk = /\bskip\b/i.exec(s);
     if (sk && !negated(s, sk)) return 'skip';
+    // Only on phrases that cannot mean anything else; `\bvalid\b` is
+    // deliberately not one, because `invalid` is. Guarded like the rest — this
+    // is the verdict that COSTS the most to invert, since a misread "no" starts
+    // a fix cycle nobody asked for.
+    const cf = /\bconfirmed\b|\b(?:actual|real|genuine|legitimate|legit)\s+(?:bug|issue|failure|defect|problem)\b|\bfix\s+(?:it|this|in\s+this\s+ticket)\b/i.exec(s);
+    if (cf && !negated(s, cf)) return 'confirmed';
     if (/missing\s+steps?|steps?\s+(are\s+|were\s+)?(missing|incomplete|wrong|insufficient)|incomplete\s+steps?|wrong\s+steps?/i.test(s)) {
       return 'missing-steps';
     }
@@ -1196,14 +1206,20 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
   // already made can change here.
   for (const line of text.split(/\n+/)) {
     if (verdictOf(line) !== 'confirmed') continue;
-    const nums = [...line.matchAll(/(?:tc[-\s]?|case\s*|no\.?\s*|#)?0*(\d{1,5})/gi)]
-      .map((x) => String(Number(x[1])));
-    for (const n of new Set(nums)) {
-      const caseId = byNumber.get(n);
-      if (!caseId || claimed.has(caseId)) continue;
-      claimed.add(caseId);
-      out.push({ caseId, verdict: 'confirmed', by: null, raw: line.trim() });
-    }
+    const named = [...new Set(
+      [...line.matchAll(/(?:tc[-\s]?|case\s*|no\.?\s*|#)?0*(\d{1,5})/gi)]
+        .map((x) => byNumber.get(String(Number(x[1]))))
+        .filter((x): x is string => !!x),
+    )];
+    // EXACTLY one failing case, or the line is left to the fragment pass. A
+    // whole line is too blunt a unit to spread one verdict across: "TC-09 — I'll
+    // come back to this one, TC-14 is a real bug" names two, and confirming both
+    // would start a fix cycle on the case the reviewer had just deferred.
+    if (named.length !== 1) continue;
+    const caseId = named[0]!;
+    if (claimed.has(caseId)) continue;
+    claimed.add(caseId);
+    out.push({ caseId, verdict: 'confirmed', by: null, raw: line.trim() });
   }
   return out;
 }
@@ -1358,17 +1374,19 @@ export async function checkVerifyGate(
 
   // Every directive per case, across every qualified reply, in the order sent.
   const replies = repliesAfter(noteData, state.requestNoteId).filter((r) => mayApprove(r, 'verifyCases'));
-  const perCase = new Map<string, Array<{ verdict: VerifyVerdict; by: string | null; raw: string }>>();
+  const perCase = new Map<
+    string, Array<{ verdict: VerifyVerdict; by: string | null; raw: string; noteId: number }>
+  >();
   for (const r of replies) {
     for (const d of parseVerifyDirectives(r.text, failingIds)) {
       const arr = perCase.get(d.caseId) ?? [];
-      arr.push({ verdict: d.verdict, by: r.user, raw: d.raw });
+      arr.push({ verdict: d.verdict, by: r.user, raw: d.raw, noteId: r.id });
       perCase.set(d.caseId, arr);
     }
   }
 
   const missing: Record<string, { oursNoteId: number; rerunDone?: boolean }> = { ...(journal.verifyMissingSteps ?? {}) };
-  const confirmedState: Record<string, { rounds: number; capNoted?: boolean }> =
+  const confirmedState: Record<string, { rounds: number; lastNoteId?: number; capNoted?: boolean }> =
     { ...(journal.verifyConfirmed ?? {}) };
   const apply: VerifyDirective[] = [];
   const rescope: VerifyGateResult['rescope'] = [];
@@ -1389,21 +1407,27 @@ export async function checkVerifyGate(
     // Confirmed a real bug: hand it back to `implement` rather than settling it.
     // Counted per case, because the only verdict that buys work is the only one
     // that can be repeated, and a spent case needs settling another way.
-    const conf = ds.find((d) => d.verdict === 'confirmed');
+    const cst = confirmedState[id] ?? { rounds: 0 };
+    // Only a confirmation NEWER than the one already spent counts. The resolver
+    // re-reads every qualified reply each tick, so without this the same typed
+    // line is consumed again the next time the gate is reached — spending a
+    // second round unattended and defeating the "a human types it each round"
+    // bound this verdict relies on. `missing-steps` gates on `oursNoteId` for
+    // exactly this reason.
+    const conf = ds.find((d) => d.verdict === 'confirmed' && d.noteId > (cst.lastNoteId ?? 0));
     if (conf) {
-      const st = confirmedState[id] ?? { rounds: 0 };
-      if (st.rounds < MAX_CONFIRMATIONS) {
-        confirmedState[id] = { ...st, rounds: st.rounds + 1 };
+      if (cst.rounds < MAX_CONFIRMATIONS) {
+        confirmedState[id] = { ...cst, rounds: cst.rounds + 1, lastNoteId: conf.noteId };
         confirmed.push({ caseId: id, verdict: 'confirmed', by: conf.by, raw: conf.raw });
         continue;
       }
-      if (!st.capNoted) {
+      if (!cst.capNoted) {
         await addIssueNote(iid,
-          `**${id}** has been confirmed a real bug ${st.rounds} time(s) and \`implement\` still has `
+          `**${id}** has been confirmed a real bug ${cst.rounds} time(s) and \`implement\` still has `
           + 'not fixed it. That budget is spent, so this case now needs a terminal verdict — '
           + '`skip`, `invalid`, `expected` or `pre-existing` — or a person takes the fix over '
           + 'outside this run.');
-        confirmedState[id] = { ...st, capNoted: true };
+        confirmedState[id] = { ...cst, lastNoteId: conf.noteId, capNoted: true };
       }
       pending.push(id);
       continue;

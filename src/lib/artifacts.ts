@@ -275,7 +275,7 @@ export interface RunJournal {
    * gone. `capNoted` keeps the "that budget is spent" comment to one posting
    * rather than one per poll.
    */
-  verifyConfirmed?: Record<string, { rounds: number; capNoted?: boolean }>;
+  verifyConfirmed?: Record<string, { rounds: number; lastNoteId?: number; capNoted?: boolean }>;
   /**
    * When the most recent `confirmed` verdict was applied. `failedLapsOf` counts
    * from it, which is what hands verify a fresh lap budget — the laps it already

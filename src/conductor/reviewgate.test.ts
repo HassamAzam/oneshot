@@ -294,6 +294,42 @@ test('confirming does not collide with invalid, which contains "valid"', () => {
   assert.equal(parseVerifyDirectives('TC-09 is a real bug', FAILING)[0]?.verdict, 'confirmed');
 });
 
+test('a confirmation respects negation, like every other verdict', () => {
+  // The guard went on the other four and not on this one — the verdict that
+  // costs the most to invert, since a misread "no" starts a fix cycle.
+  assert.deepEqual(parseVerifyDirectives('TC-14 is not a real bug', FAILING), []);
+  assert.deepEqual(parseVerifyDirectives('TC-14: not confirmed', FAILING), []);
+});
+
+test('a terminal word wins inside one fragment, not just on its own line', () => {
+  // `confirmed` was tested ahead of the terminal verdicts to make the "not
+  // pre-existing, it's an actual bug" sentence work, which broke the documented
+  // rule the other way round. The negation guard is what makes the order
+  // unnecessary.
+  assert.equal(parseVerifyDirectives("TC-14: invalid — don't fix it", FAILING)[0]?.verdict, 'invalid');
+  assert.equal(
+    parseVerifyDirectives('TC-09 pre-existing — fix it in the other ticket', FAILING)[0]?.verdict,
+    'pre-existing',
+  );
+});
+
+test('a line naming two cases does not confirm the one it defers', () => {
+  const got = parseVerifyDirectives(
+    "TC-09 — I'll come back to this one, TC-14 is a real bug", FAILING,
+  );
+  assert.deepEqual(got.map((x) => [x.caseId, x.verdict]), [['TC-14', 'confirmed']]);
+});
+
+test('a negation qualifying something other than the verdict leaves it alone', () => {
+  // A character window let an unrelated clause disarm the verdict, and the case
+  // then parked with nothing in the output naming the sentence thrown away.
+  assert.equal(
+    parseVerifyDirectives('TC-14 is not worth chasing — skip', FAILING)[0]?.verdict, 'skip',
+  );
+  // Still adjacent-negated, which is the case the guard is for.
+  assert.deepEqual(parseVerifyDirectives('TC-14 is not invalid', FAILING), []);
+});
+
 test('a terminal verdict still wins over a confirmation in the same breath', () => {
   // The resolver prefers a terminal verdict when both are present; the parser's
   // job is only to not swallow the terminal one. First verdict wins per case,
