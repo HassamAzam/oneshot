@@ -67,6 +67,8 @@ label it, and give it a positive control.
   a row in the same table that *does* render one.
 - Asserting unchanged behaviour on code the ticket does not touch passes
   identically before and after. High blast belongs on the lines being edited.
+- Passing this test is not enough on its own: a case can fail on the revert and
+  still not distinguish the fix from a different wrong answer (see 8).
 
 ### 6. Removing what hid a state exposes states nobody examined
 
@@ -114,6 +116,62 @@ is not only appearance — it is what stopped anyone looking.
   check is repeatable, needs no seeded data, and cannot pass where the helper is
   absent.
 
+### 8. Inputs that cannot tell two formulas apart prove neither
+
+When a change replaces one rule for splitting an amount between parties with
+another, every candidate rule agrees on symmetric inputs. Three people with
+the same entitlement and untouched balances split a pot the same way under
+*equal shares*, *weighted by entitlement*, and most of the wrong rules in
+between. A case built on those inputs exercises the code path and settles
+nothing about which rule is running.
+
+This is not principle 5. A case like that genuinely fails on the reverted diff —
+the old behaviour really was broken — so it passes the revert test, reads as
+strong, and still cannot distinguish the fix from a different wrong answer.
+
+**Where the asymmetry comes from.** Two places, and either one is enough:
+participants whose entitlements differ to begin with, or balances an earlier
+record has already partly spent. A first claim between unequal entitlements
+discriminates exactly as well as a second claim between equal ones — so use
+whichever the data allows. A run that cannot create a second record has no
+reason to drop the case; it should pick unequal entitlements instead.
+
+**Do:** choose inputs where the candidate rules give DIFFERENT answers, and put
+each losing answer in the case as a named fail signal rather than as a second
+expectation. There is no notes field, so they go in `expected` — which a later
+phase grades verbatim — and the wording has to leave one value the expectation
+and the others tripwires. With 300 and 600 left on A's and B's limits and 600
+to pay out: *"A receives 200 and B receives 400. If both receive 300, the amount
+is being split evenly rather than in proportion to the remaining limit; if they
+receive 150 and 450, the shortfall is being spread equally instead. Either is a
+FAIL."* A case that cannot say what a wrong rule would have produced is not
+testing the rule.
+
+**Two further decisions live in the same code. The case above reaches one of
+them — that is what its second tripwire is for — and does not reach the other:**
+
+- **A shortfall** — less is paid than the entitlements add up to. Any split
+  against entitlements is already short of something, so the setup costs
+  nothing to reach: the case above is already a shortfall. What it has to do is
+  assert on it, which is why 150/450 — the equally spread gap — is named
+  alongside the 300/300 equal pot. Reaching a condition is not asserting on
+  it.
+- **A fractional share** — the rule under test lands on an amount that will not
+  come out whole, and something has to absorb the rounding difference.
+  Divisibility by the number of parties is a different question and answers
+  this one wrongly: an amount can divide cleanly between the parties and still
+  produce a fractional share once it is weighted by their limits. The assertion
+  is which party ends up absorbing it.
+
+A payment can be short and still produce whole shares, so the case above — both
+tripwires included — never asks the fractional-share question; that one needs
+its own inputs.
+
+This principle is about splitting between parties. A change that only alters how
+a single figure is rounded or formatted has no second party for a rule to treat
+differently, so none of this applies to it — principle 2 is the one that covers
+a displayed value diverging from a stored one.
+
 ---
 
 ## Retiring a principle or a bullet
@@ -142,3 +200,7 @@ the one below — so every source is cited by full URL, and a new one must be to
 - **Principle 2's `keepMounted` bullet**: not a QA round at all — testing the
   `local-browser-verify` helpers against a live app (`f9c7901`), where a MUI `Popper`
   with `keepMounted` kept its geometry after being dismissed.
+- **Principle 8**:
+  [erp#8781](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8781), where an
+  approved case list and a merged fix both held, and QA found the remaining defect
+  by hand afterwards.
