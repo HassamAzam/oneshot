@@ -65,6 +65,30 @@ function runDirs(): string[] {
   return [...under(RUNS), ...under(ARCHIVE)];
 }
 
+interface GoldRun { project: string; journal: RunJournal; labels: Labels; dir: string }
+
+/**
+ * The gold runs to grade, one per (project, iid). A re-run parks its previous
+ * attempt under runs-archive/<iid>-<runId>, so a ticket that was ever re-run
+ * has two or more directories on disk; grading them all double-counts the
+ * ticket and scores its stale pre-fix verify.json as missed. Keep only the
+ * newest journal per ticket.
+ */
+function goldRuns(gold: GoldFile, only: string[]): GoldRun[] {
+  const newest = new Map<string, GoldRun>();
+  for (const dir of runDirs()) {
+    const journal = readJson<RunJournal>(join(dir, 'run.json'));
+    if (!journal) continue;
+    const project = Object.keys(gold.projects).find((p) => journal.url.startsWith(`${p}/`));
+    const labels = project ? gold.projects[project]?.[String(journal.iid)] : undefined;
+    if (!project || !labels || (only.length && !only.includes(String(journal.iid)))) continue;
+    const key = `${project}#${journal.iid}`;
+    const prev = newest.get(key);
+    if (!prev || journal.createdAt > prev.journal.createdAt) newest.set(key, { project, journal, labels, dir });
+  }
+  return [...newest.values()];
+}
+
 /** What verify's label claims the cause is. */
 function causeOf(result: string | undefined): Cause | 'none' {
   if (result === 'fail') return 'change';
@@ -137,14 +161,8 @@ function main(): void {
   if (argv.includes('--save') && !label) { console.error('--save needs --label <name>, e.g. --label prompt-a'); process.exit(2); }
   const only = argv.filter((a, i) => /^\d+$/.test(a) && !VALUE_FLAGS.has(argv[i - 1] ?? ''));
 
-  const scores: CauseScore[] = [];
-  for (const dir of runDirs()) {
-    const journal = readJson<RunJournal>(join(dir, 'run.json'));
-    const project = journal && Object.keys(gold.projects).find((p) => journal.url.startsWith(`${p}/`));
-    const labels = project && gold.projects[project]?.[String(journal.iid)];
-    if (!journal || !labels || (only.length && !only.includes(String(journal.iid)))) continue;
-    scores.push(score(project.split('/').pop() ?? project, journal.iid, labels, dir));
-  }
+  const scores = goldRuns(gold, only).map(({ project, journal, labels, dir }) =>
+    score(project.split('/').pop() ?? project, journal.iid, labels, dir));
   if (!scores.length) { console.log('No run on disk matches a gold ticket.'); return; }
   scores.sort((a, b) => a.repo.localeCompare(b.repo) || a.iid - b.iid);
 

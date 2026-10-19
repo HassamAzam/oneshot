@@ -270,34 +270,57 @@ function scoreTicket(t: Target, stats: RepeatStats, lastVerdicts: Map<string, Ve
   };
 }
 
-/** Judge a fixed on-disk list k times; the list is identical each trial, so only the judge varies. */
+/**
+ * Judge a fixed on-disk list k times; the list is identical each trial, so only
+ * the judge varies. A list with no well-formed case covers no edge, so it is
+ * scored 0/edges without paying the judge — not dropped, which would hide the
+ * regression that degenerated the list.
+ */
 async function scoreFixed(t: Target, cases: Case[], repeat: number, model: string): Promise<TicketScore> {
+  const wellFormedCount = cases.filter(wellFormed).length;
+  if (!wellFormedCount) {
+    console.log(`${repoName(t.project)}#${t.iid}: ${cases.length} case(s) but none have steps and a concrete expected result, so none can cover any edge; scored 0/${t.edges.length}, judge skipped`);
+  }
   const sets: Array<Set<string>> = [];
   let lastVerdicts = new Map<string, Verdict>();
   for (let n = 0; n < repeat; n++) {
+    if (!wellFormedCount) { sets.push(new Set()); continue; }
     lastVerdicts = new Map((await judge(t.edges, cases, model)).map((v) => [v.edge, v]));
     sets.push(coveredSet(t.edges, cases, lastVerdicts));
   }
-  return scoreTicket(t, tallyTrials(t.edges.map((e) => e.id), sets), lastVerdicts, cases.filter(wellFormed).length, cases.length);
+  return scoreTicket(t, tallyTrials(t.edges.map((e) => e.id), sets), lastVerdicts, wellFormedCount, cases.length);
 }
 
-/** Replay the testcases phase k times, judging each fresh list; both the list and the judge vary. */
+/**
+ * Replay the testcases phase k times, judging each fresh list; both the list
+ * and the judge vary. replay-testcases.ts derives the project from the on-disk
+ * run at state/runs/<iid>, so when two gold projects share an iid both targets
+ * would replay the same run — grade only the one whose run.json matches this
+ * target's project, mirroring liveCases.
+ */
 async function scoreReplayed(t: Target, repeat: number, label: string | undefined, model: string): Promise<TicketScore | null> {
   const repo = repoName(t.project);
+  const source = readJson<{ url: string }>(join(STATE, 'runs', t.iid, 'run.json'));
+  if (!source?.url.startsWith(`${t.project}/`)) {
+    console.log(`${repo}#${t.iid}: state/runs/${t.iid} is not a ${t.project} run, skipped (its list belongs to another project's edges)`);
+    return null;
+  }
   const sets: Array<Set<string>> = [];
   let lastVerdicts = new Map<string, Verdict>();
-  let caseCount = 0; let wellFormedCount = 0; let listSeen = false;
+  let caseCount = 0; let wellFormedCount = 0;
   for (let n = 0; n < repeat; n++) {
     const cases = await replay(t.iid, `${label ?? 'eval'}${repeat > 1 ? `-t${n + 1}` : ''}`);
     if (!cases?.length) continue;
-    listSeen = true;
     caseCount = cases.length;
     wellFormedCount = cases.filter(wellFormed).length;
     if (!wellFormedCount) { sets.push(new Set()); continue; }
     lastVerdicts = new Map((await judge(t.edges, cases, model)).map((v) => [v.edge, v]));
     sets.push(coveredSet(t.edges, cases, lastVerdicts));
   }
-  if (!listSeen) { console.log(`${repo}#${t.iid}: no test list to grade, skipped`); return null; }
+  if (!sets.length) { console.log(`${repo}#${t.iid}: no test list to grade, skipped`); return null; }
+  if (sets.length < repeat) {
+    console.log(`${repo}#${t.iid}: only ${sets.length}/${repeat} replays produced a list; scored on ${sets.length} trial(s), so its noise band rests on fewer samples than requested`);
+  }
   return scoreTicket(t, tallyTrials(t.edges.map((e) => e.id), sets), lastVerdicts, wellFormedCount, caseCount);
 }
 
@@ -363,26 +386,29 @@ async function main(): Promise<void> {
     .filter(({ iid }) => !only.length || only.includes(iid));
   const model = judgeModel();
 
+  const guarded = async (t: Target, run: () => Promise<TicketScore | null>): Promise<TicketScore | null> => {
+    try { return await run(); } catch (err) {
+      console.log(`${repoName(t.project)}#${t.iid}: judge failed, skipped — ${(err as Error).message}`);
+      return null;
+    }
+  };
+
   let scored: Array<TicketScore | null>;
   if (replaying) {
     const iids = targets.map((t) => t.iid);
     const width = new Set(iids).size === iids.length ? REPLAY_PARALLEL : 1;
-    scored = await pool(targets.map((t) => () => scoreReplayed(t, repeat, label, model)), width);
+    scored = await pool(targets.map((t) => () => guarded(t, () => scoreReplayed(t, repeat, label, model))), width);
   } else {
-    scored = await Promise.all(targets.map(async (t) => {
+    scored = await Promise.all(targets.map((t) => guarded(t, () => {
       const cases = liveCases(t.project, t.iid);
-      if (!cases?.length) { console.log(`${repoName(t.project)}#${t.iid}: no test list to grade, skipped`); return null; }
-      if (!cases.some(wellFormed)) {
-        console.log(`${repoName(t.project)}#${t.iid}: ${cases.length} case(s) but none have steps and a concrete expected result, so none can cover any edge; judge skipped`);
-        return null;
-      }
+      if (!cases?.length) { console.log(`${repoName(t.project)}#${t.iid}: no test list to grade, skipped`); return Promise.resolve(null); }
       return scoreFixed(t, cases, repeat, model);
-    }));
+    })));
   }
   const tickets = scored.filter((t): t is TicketScore => t !== null)
     .sort((a, b) => a.repo.localeCompare(b.repo) || a.iid - b.iid);
 
-  console.log(`\njudge: ${model}. ${repeat > 1 ? `${repeat} trials/ticket. ` : ''}graded ${replaying ? 'fresh replays of the current prompt' : "each run's first test list, before QA feedback"}.`);
+  console.log(`\njudge: ${model}. ${repeat > 1 ? `${repeat} trials/ticket requested. ` : ''}graded ${replaying ? 'fresh replays of the current prompt' : "each run's first test list, before QA feedback"}.`);
   report(tickets, loadHistory<EdgeScores>(ROOT, KIND, argValue(argv, '--vs')));
   if (argv.includes('--save')) {
     console.log(`saved ${saveHistory(ROOT, KIND, label!, replaying ? 'replay' : 'live', { judge: model, tickets })}`);
