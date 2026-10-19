@@ -118,8 +118,8 @@ is not only appearance — it is what stopped anyone looking.
 
 ### 8. Inputs that cannot tell two formulas apart prove neither
 
-When a change replaces one rule for dividing, sharing, apportioning or rounding
-with another, every candidate rule agrees on symmetric inputs. Three people with
+When a change replaces one rule for splitting an amount between parties with
+another, every candidate rule agrees on symmetric inputs. Three people with
 the same entitlement split a pot the same way under *equal shares*, *weighted by
 entitlement*, and most of the wrong rules in between. A case built on those
 inputs exercises the code path and settles nothing about which rule is running.
@@ -128,23 +128,36 @@ This is not principle 5. A case like that genuinely fails on the reverted diff �
 the old behaviour really was broken — so it passes the revert test, reads as
 strong, and still cannot distinguish the fix from a different wrong answer.
 
-**The asymmetry usually has to be built, and often only appears on the second
-record.** A first claim, allocation or draw-down leaves every participant equal;
-it is the second one, against partly-consumed balances, where their remaining
-amounts differ and the rules separate. A single-record case cannot reach that
-state at all.
+**Where the asymmetry comes from.** Two places, and either one is enough:
+participants whose entitlements differ to begin with, or balances an earlier
+record has already partly spent. A first claim between unequal entitlements
+discriminates exactly as well as a second claim between equal ones — so use
+whichever the data allows. A run that cannot create a second record has no
+reason to drop the case; it should pick unequal entitlements instead.
 
-**Do:** pick inputs where the candidate rules give DIFFERENT answers, and put
-both numbers in the expected result — "under equal shares this is X per person,
-under shares proportional to the remaining limit it is Y and Z; expect Y and Z".
-A case that cannot say what a wrong rule would have produced is not testing the
-rule. Then add the second-record case explicitly: one participant whose balance
-is untouched beside others whose balance is already partly spent.
+**Do:** choose inputs where the candidate rules give DIFFERENT answers, and say
+which rule the other answer would mean. `expected` is the oracle a later phase
+grades against verbatim, so it holds the value you expect and nothing else —
+name the losing value as the fail signal beside it: *"expect 200 to A and 400 to
+B; 300 each means the amount is still being split evenly rather than in
+proportion to the remaining limit."* A case that cannot say what a wrong rule
+would have produced is not testing the rule.
 
-And check the remainder separately. Where the paid total falls short of the
-entitlement total, how the shortfall is spread — equally, or in proportion — is a
-second decision the same code makes, and a case whose numbers divide exactly
-never asks it.
+**Two further decisions live in the same code, and each needs its own setup:**
+
+- **A shortfall** — the paid total is less than the entitlements add up to. How
+  is the gap spread: equally, or in proportion? Set it up by paying less than
+  the total.
+- **An indivisible remainder** — the amount does not divide evenly between the
+  parties. Who gets the odd unit? Set it up with an amount that leaves one.
+
+These are different conditions, not one. A payment can be short and still divide
+evenly, so a case can exercise the first and never ask the second.
+
+This principle is about splitting between parties. A change that only alters how
+a single figure is rounded or formatted has no second party for a rule to treat
+differently, so none of this applies to it — principle 2 is the one that covers
+a displayed value diverging from a stored one.
 
 ---
 
