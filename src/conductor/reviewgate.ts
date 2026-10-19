@@ -1162,6 +1162,21 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
     return hit;
   };
 
+  /**
+   * A hedge is not a decision. "maybe a real bug", "might be pre-existing",
+   * "probably invalid" all parsed as the verdict itself — so a reviewer thinking
+   * aloud settled a case, or started a fix cycle they had not asked for. Leaving
+   * the case pending is the safe outcome: the gate asks again, and the
+   * suppression is logged.
+   */
+  const hedged = (s: string, m: RegExpExecArray | null): boolean => {
+    if (!m) return false;
+    const hit = /\b(?:maybe|might|may|possibly|probably|perhaps|could|seems?|appears?|unsure|not\s+sure|think|guess|likely)\b[^.;,\n]{0,40}$/i
+      .test(s.slice(0, m.index));
+    if (hit) log.warn('verify-case gate: a hedged verdict was not read as a decision', { fragment: s.trim().slice(0, 120) });
+    return hit;
+  };
+
   const verdictOf = (s: string): VerifyVerdict | null => {
     // Terminal verdicts FIRST, which is the documented rule: a fragment that
     // says both "skip" and "missing steps" is a reviewer settling the case, so
@@ -1171,13 +1186,13 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
     // negation guard below is what makes ordering unnecessary: "not
     // pre-existing" no longer matches `pre-existing`, so it falls through.
     const pe = /pre[\s-]?exist|existing\s+(issue|bug)/i.exec(s);
-    if (pe && !negated(s, pe)) return 'pre-existing';
+    if (pe && !negated(s, pe) && !hedged(s, pe)) return 'pre-existing';
     const inv = /\binvalid\b/i.exec(s);
-    if (inv && !negated(s, inv)) return 'invalid';
+    if (inv && !negated(s, inv) && !hedged(s, inv)) return 'invalid';
     const exp = /\bexpected\b/i.exec(s);
-    if (exp && !negated(s, exp)) return 'expected';
+    if (exp && !negated(s, exp) && !hedged(s, exp)) return 'expected';
     const sk = /\bskip\b/i.exec(s);
-    if (sk && !negated(s, sk)) return 'skip';
+    if (sk && !negated(s, sk) && !hedged(s, sk)) return 'skip';
     // Only on phrases that cannot mean anything else; `\bvalid\b` is
     // deliberately not one, because `invalid` is. Guarded like the rest — this
     // is the verdict that COSTS the most to invert, since a misread "no" starts
@@ -1189,7 +1204,7 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
     // because the gate always presents several cases, so the plural is the form
     // a reviewer actually writes.
     const cf = /\bconfirmed\b|\b(?:actual|real|genuine|legitimate|legit)\s+(?:bug|issue|failure|defect|problem)s?\b|\bfix\s+(?:it|this)\s+in\s+this\s+ticket\b/i.exec(s);
-    if (cf && !negated(s, cf)) return 'confirmed';
+    if (cf && !negated(s, cf) && !hedged(s, cf)) return 'confirmed';
     if (/missing\s+steps?|steps?\s+(are\s+|were\s+)?(missing|incomplete|wrong|insufficient)|incomplete\s+steps?|wrong\s+steps?/i.test(s)) {
       return 'missing-steps';
     }
@@ -1197,7 +1212,14 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
   };
   const out: VerifyDirective[] = [];
   const claimed = new Set<string>();
-  const fragments = text.split(/[\n;,]+/);
+  // Newlines, semicolons and commas — plus a SENTENCE boundary, but only where
+  // the period cannot be an abbreviation. `.` was excluded outright because
+  // "skip test case no. 14" depends on the period after "no", and the cost was
+  // that a sentence-joined reply stayed one fragment: "TC-14: skip. TC-09 is a
+  // real bug" took the terminal verdict and applied it to BOTH, skipping the
+  // case the reviewer had called a bug. Requiring a capital or a case word after
+  // the period keeps "no. 14" intact, since a digit follows it.
+  const fragments = text.split(/[\n;,]+|\.\s+(?=[A-Z#]|tc\b|case\b)/i);
   const numbersIn = (s: string): string[] =>
     [...s.matchAll(/(?:tc[-\s]?|case\s*|no\.?\s*|#)?0*(\d{1,5})/gi)].map((x) => String(Number(x[1])));
 
@@ -1304,6 +1326,10 @@ export function verifyCasesRequestBody(failing: VerifyFailingCase[]): string {
     '',
     '_The run reads this from the ticket. Five of these settle a case; `actual bug` is the one '
     + 'that asks for the fix instead, so the run keeps working rather than waiting._',
+    '',
+    '_Answer definitely: a negated or hedged verdict ("not really pre-existing", "maybe a real '
+    + 'bug") is deliberately NOT read as a decision, and the case stays open rather than being '
+    + 'settled or sent back on a maybe._',
   ].join('\n');
 }
 

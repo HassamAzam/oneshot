@@ -398,6 +398,37 @@ test('a clause between two cases still stops one verdict spreading across both',
   assert.deepEqual(got.map((x) => [x.caseId, x.verdict]), [['TC-14', 'confirmed']]);
 });
 
+test('a sentence boundary separates verdicts, without breaking "no. 14"', () => {
+  // `.` was excluded from the splitter because "skip test case no. 14" depends
+  // on that period — at the cost of a sentence-joined reply staying one
+  // fragment, where the terminal verdict claimed every case in it.
+  assert.deepEqual(
+    parseVerifyDirectives('TC-14: skip. TC-09 is a real bug', FAILING)
+      .map((x) => [x.caseId, x.verdict]).sort(),
+    [['TC-09', 'confirmed'], ['TC-14', 'skip']],
+  );
+  // The abbreviation that forced the original exclusion still parses.
+  assert.deepEqual(parseVerifyDirectives('skip test case no. 14', FAILING)
+    .map((x) => [x.caseId, x.verdict]), [['TC-14', 'skip']]);
+  assert.deepEqual(parseVerifyDirectives('skip no. 14 and no. 9', FAILING)
+    .map((x) => x.caseId).sort(), ['TC-09', 'TC-14']);
+});
+
+test('a hedge is not a decision, for any verdict', () => {
+  // Thinking aloud settled a case, or started a fix cycle nobody asked for.
+  for (const s of [
+    'TC-14 maybe a real bug, let me check',
+    'TC-14 might be pre-existing',
+    'TC-14 probably invalid',
+    'TC-14 seems expected',
+  ]) {
+    assert.deepEqual(parseVerifyDirectives(s, FAILING), [], s);
+  }
+  // The definite forms are untouched.
+  assert.equal(parseVerifyDirectives('TC-14 is pre-existing', FAILING)[0]?.verdict, 'pre-existing');
+  assert.equal(parseVerifyDirectives('TC-14: actual bug', FAILING)[0]?.verdict, 'confirmed');
+});
+
 test('a terminal verdict still wins over a confirmation in the same breath', () => {
   // The resolver prefers a terminal verdict when both are present; the parser's
   // job is only to not swallow the terminal one. First verdict wins per case,
