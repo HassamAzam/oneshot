@@ -1551,7 +1551,7 @@ export async function runTicket(
       const gate = await checkApprovalGate({
         iid,
         gate: 'design',
-        requestBody: designApprovalRequestBody(design),
+        requestBody: designApprovalRequestBody(iid, design),
         subject: design,
         attachments: designAttachments(iid, design),
         onApproved: async () => { await addIssueNote(iid, designApprovedRecordBody(design)); },

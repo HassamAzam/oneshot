@@ -1281,8 +1281,10 @@ journey. Draw each state of that flow as its own screen, in order, and then addi
   ~1.5s, then click. Keep it under 60 seconds and to one flow. The file is only written when the
   browser context closes, so close it before you read \`page.video().path()\`.
 - Report both in \`prototype\` (\`entry\` and \`video\`). Your answer is REFUSED until both are on
-  disk and good: a self-contained prototype with something to click, and a real recording. Spend
-  the turns on them; there is no way to finish a flow change without them.
+  disk and good: a self-contained prototype with something to click, and a real recording. The
+  first refusal RECORDS the obligation, and nothing you answer afterwards revises it away — not
+  re-describing the change, not dropping a field. Spend the turns on building them; there is no
+  other way to finish a flow change.
 
 Annotating is right HERE and wrong in \`ui-evidence\`, and the difference is worth holding on to:
 this video argues for a design, so labelling it helps; that phase's screenshots are evidence that

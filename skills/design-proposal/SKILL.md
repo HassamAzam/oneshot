@@ -117,11 +117,14 @@ only written when the browser context closes, so close it before you read
   then click, then remove it.
 
 Report both in `prototype`. **This is enforced, not requested:**
-`hooks/design-flow-guard.cjs` refuses your final answer while `flowChange` is
-true and either file is missing, the prototype loads a file it will not have
-once downloaded, or the video is not a real recording. After three refusals it
-lets the answer through and the conductor fails the phase instead — so a
-missing walkthrough costs a whole design round, never just a line in review.
+`hooks/design-flow-guard.cjs` refuses your final answer while either file is
+missing, the prototype loads a file it will not have once downloaded, or the
+video is not a real recording. The first refusal **records** the obligation, so
+answering again with the change described differently does not clear it — the
+only way past the guard is to build both. After three refusals it lets the
+answer through and the conductor fails the phase instead, reading the same
+record, so a missing walkthrough costs a whole design round rather than a line
+in review.
 
 Annotating is right here and forbidden in `ui-evidence`, and the difference is
 worth holding on to. This video argues for a design, so labelling it helps. That

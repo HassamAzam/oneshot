@@ -4,7 +4,7 @@ import {
   approverLine, designApprovalRequestBody, designApprovedRecordBody, designAttachments,
   designDeliverableRefusal, designGateApplies,
 } from './reviewgate.js';
-import { artifactDir, phases } from '../lib/config.js';
+import { artifactDir, designFlowOwedFile, phases } from '../lib/config.js';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -52,7 +52,7 @@ test('the gate arms on the label, case-insensitively, and not otherwise', () => 
 });
 
 test('the request renders screens, decisions, new patterns and open questions', () => {
-  const body = designApprovalRequestBody(design);
+  const body = designApprovalRequestBody(0, design);
   assert.match(body, /\*\*Screens\*\* \(1\)/);
   assert.match(body, /\*\*Approvals inbox\*\* — A manager clears pending requests/);
   assert.match(body, /_\(default, empty\)_/);
@@ -68,17 +68,39 @@ test('the product owner may sign off a design, and not a plan', () => {
   assert.doesNotMatch(approverLine('plan'), /muhammad\.nouman/);
 });
 
-test('a flow change offers the walkthrough and the prototype, and a single screen does not', () => {
-  const flow = designApprovalRequestBody(design);
-  assert.match(flow, /silent walkthrough is attached/);
-  assert.match(flow, /clickable\s+prototype/);
-  assert.doesNotMatch(flow, /follow in a later change/);
-  const flat = designApprovalRequestBody({ ...design, flowChange: false, prototype: null });
-  assert.match(flat, /no flow change, so there is no prototype/);
+test('the request offers the walkthrough and the prototype only while both are on disk', () => {
+  const dir = artifactDir(TMP_IID);
+  try {
+    mkdirSync(join(dir, 'design'), { recursive: true });
+    [design.prototype.entry, design.prototype.video].forEach((rel) => writeFileSync(join(dir, rel), 'x'));
+    const flow = designApprovalRequestBody(TMP_IID, design);
+    assert.match(flow, /silent walkthrough is attached/);
+    assert.match(flow, /clickable\s+prototype/);
+    assert.doesNotMatch(flow, /follow in a later change/);
+
+    // The sentence used to render from `flowChange` alone, so a design.json
+    // whose prototype was never built promised a reviewer two files that
+    // `designAttachments` silently drops — which is what any re-arm of such a
+    // gate still does, since the deliverable check only runs on a fresh result.
+    rmSync(join(dir, design.prototype.video), { force: true });
+    assert.match(designApprovalRequestBody(TMP_IID, design), /no\s+walkthrough recording/);
+    rmSync(join(dir, design.prototype.entry), { force: true });
+    assert.match(designApprovalRequestBody(TMP_IID, design), /no prototype or walkthrough attached/);
+  } finally {
+    rmSync(join(dir, '..'), { recursive: true, force: true });
+  }
+});
+
+test('a design with no prototype does not call itself a single screen', () => {
+  const flat = designApprovalRequestBody(0, {
+    ...design, flowChange: false, prototype: null, screens: [screen, { ...screen, id: 'second' }],
+  });
+  assert.match(flat, /no prototype or walkthrough attached/);
+  assert.doesNotMatch(flat, /[Ss]ingle screen/);
 });
 
 test('an empty or absent design does not throw and renders nothing invented', () => {
-  const body = designApprovalRequestBody(null);
+  const body = designApprovalRequestBody(0, null);
   assert.match(body, /\*\*Screens\*\* \(0\)/);
   assert.match(body, /_\(none recorded\)_/);
   assert.doesNotMatch(body, /New — needs approval/);
@@ -86,7 +108,7 @@ test('an empty or absent design does not throw and renders nothing invented', ()
 });
 
 test('HTML in model-authored fields is escaped, not rendered', () => {
-  const body = designApprovalRequestBody({
+  const body = designApprovalRequestBody(0, {
     ...design,
     decisions: ['Wrap the total in a <strong> so it reads first'],
   });
@@ -201,8 +223,8 @@ test('a design whose renders ARE on disk passes', () => {
   }
 });
 
-// What 8774 shipped: a flow change drawn as five stills, no prototype and no
-// walkthrough, and a gate that armed on them anyway.
+// A flow change drawn as stills, with no prototype and no walkthrough, and a
+// gate that armed on them anyway.
 test('a flow change with every render but no prototype is refused, naming both files', () => {
   const dir = artifactDir(TMP_IID);
   try {
@@ -212,6 +234,37 @@ test('a flow change with every render but no prototype is refused, naming both f
     assert.match(refusal ?? '', /flow change, and its clickable prototype and walkthrough video are not on disk/);
   } finally {
     rmSync(join(dir, '..'), { recursive: true, force: true });
+  }
+});
+
+test('a flow change reporting no screens at all is still refused for its deliverables', () => {
+  // `screens: []` is schema-valid — there is no `minItems` — and it used to
+  // return early from the screen check before the flow check could be reached,
+  // so this answer recorded the phase `ok`.
+  const refusal = designDeliverableRefusal(TMP_IID, { ...design, screens: [], prototype: null });
+  assert.match(refusal ?? '', /flow change, and its clickable prototype and walkthrough video are not on disk/);
+});
+
+test('dropping the flow-change claim after the guard refused it does not clear the debt', () => {
+  const dir = artifactDir(TMP_IID);
+  const owed = designFlowOwedFile(TMP_IID);
+  try {
+    mkdirSync(join(dir, 'design'), { recursive: true });
+    writeFileSync(join(dir, screen.screenshot), 'x');
+    const withdrawn = { ...design, flowChange: false, prototype: null };
+    // On its own this is a complete answer, and must stay one.
+    assert.equal(designDeliverableRefusal(TMP_IID, withdrawn), null);
+    // With the guard's record of a refusal, clearing the field buys nothing —
+    // which is the whole point, since the field is the session's to write.
+    mkdirSync(dirname(owed), { recursive: true });
+    writeFileSync(owed, '1');
+    assert.match(designDeliverableRefusal(TMP_IID, withdrawn) ?? '',
+      /then stopped reporting one, and its clickable prototype and walkthrough video are not on disk/);
+    // `applicable: false` is still a complete answer: there is no design.
+    assert.equal(designDeliverableRefusal(TMP_IID, { ...withdrawn, applicable: false }), null);
+  } finally {
+    rmSync(join(dir, '..'), { recursive: true, force: true });
+    rmSync(owed, { force: true });
   }
 });
 
@@ -249,7 +302,11 @@ test('a partial render is still refused, and names only the screens that are mis
 test('nothing to deliver is not a refusal — applicable:false and an empty list both pass', () => {
   // A design that correctly found no UI to draw is a complete answer, and
   // refusing it would block exactly the runs the phase is meant to wave through.
+  // An empty list owes nothing of its OWN accord; paired with a flow change it
+  // still owes the flow, which the test above covers.
   assert.equal(designDeliverableRefusal(TMP_IID, { ...design, applicable: false }), null);
-  assert.equal(designDeliverableRefusal(TMP_IID, { ...design, screens: [] }), null);
+  assert.equal(designDeliverableRefusal(
+    TMP_IID, { ...design, screens: [], flowChange: false, prototype: null },
+  ), null);
   assert.equal(designDeliverableRefusal(TMP_IID, null), null);
 });

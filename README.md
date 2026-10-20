@@ -301,10 +301,12 @@ rather than adding a guard around one.
 
 Put `Design` on a ticket alongside `Loop` and a `design` phase runs between `research` and
 `plan`. It reads the tokens out of the real frontend, captures the screens this ticket touches
-as they are **today**, draws each one as a self-contained mockup against those tokens, and — when
-the change spans more than one screen or adds a step — builds a clickable prototype and records a
-**silent, annotated** walkthrough of it. `hooks/design-flow-guard.cjs` refuses the phase's answer
-until both are on disk, so a flow change cannot reach the ticket as stills alone. The conductor
+as they are **today**, and draws each one as a self-contained mockup against those tokens. When
+the change spans more than one screen or adds a step, every state of that journey is drawn as its
+own screen **and** built into a clickable prototype with a **silent, annotated** walkthrough
+recorded of it — the prototype is what the stills cannot be walked through, not a replacement for
+them. `hooks/design-flow-guard.cjs` refuses the phase's answer until both are on disk, so a flow
+change cannot reach the ticket as stills alone. The conductor
 posts all of that to the ticket as one comment, and the run **parks**.
 
 ```

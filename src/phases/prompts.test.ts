@@ -947,6 +947,10 @@ test('design is told a flow change owes a self-contained prototype and a walkthr
   assert.match(p, /paste `tokens\.css` into a `<style>`/);
   assert.match(p, /`recordVideo`/);
   assert.match(p, /Your answer is REFUSED until both are on\s+disk/);
+  // The guard's trigger is a field this session writes, so the prompt says
+  // plainly that a second answer cannot revise the obligation away.
+  assert.match(p, /first refusal RECORDS the obligation/);
+  assert.match(p, /not dropping a field/);
 });
 
 test('plan is pointed at the approved prototype when the design has one', () => {

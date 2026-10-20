@@ -20,7 +20,11 @@ import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { DRY_RUN, localTestsConfig } from '../lib/config.js';
+import { existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  DRY_RUN, ONESHOT_HOME, STATE, designFlowOwedFile, localTestsConfig,
+} from '../lib/config.js';
 import { editIssueLabels, issuesWithLabel, readToken } from '../lib/gitlab.js';
 import { scratchHome } from '../lib/test-scratch-home.js';
 import { AUTOMATION_PHASE, readinessFromHookOutput } from '../automation/readiness.js';
@@ -226,5 +230,37 @@ test('editIssueLabels adds and removes in one PUT as this desk, and an empty cha
     assert.deepEqual(calls, []);
   } finally {
     restore();
+  }
+});
+
+/**
+ * `designDeliverableRefusal` refuses a flow change whose deliverables are not
+ * on disk even when the answer no longer claims one, by reading a record the
+ * guard writes as it refuses. Two processes, one path, and nothing fails loudly
+ * if they drift: the guard would keep refusing, the conductor would keep
+ * passing, and the escape this guard exists to close would be open again. So
+ * the guard is driven through the registry it really runs under and the record
+ * is looked for exactly where `designFlowOwedFile` says it is.
+ */
+test("the guard records a ticket's flow debt exactly where the conductor reads it", async () => {
+  const iid = 999998;
+  const session = `pin-${process.pid}`;
+  const owed = designFlowOwedFile(iid);
+  const entries = hooksFor({
+    ONESHOT_PHASE: 'design', ONESHOT_TICKET: String(iid), ONESHOT_HOME,
+  }).PreToolUse as Entry[];
+  const guard = entries.find((e) => e.matcher === '^StructuredOutput$')?.hooks[0];
+  assert.ok(guard, 'design-flow-guard is not registered on StructuredOutput');
+  try {
+    const out = await guard({
+      tool_name: 'StructuredOutput',
+      session_id: session,
+      tool_input: { applicable: true, flowChange: true, screens: [], prototype: null },
+    });
+    assert.match(denial(out) ?? '', /clickable prototype and a walkthrough video/);
+    assert.ok(existsSync(owed), `the guard recorded the debt somewhere other than ${owed}`);
+  } finally {
+    rmSync(owed, { force: true });
+    rmSync(join(STATE, 'hook-state', 'design-flow-guard', `${session}.count`), { force: true });
   }
 });

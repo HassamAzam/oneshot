@@ -26,11 +26,27 @@
  *     bytes, larger than an empty recording, and small enough that the gate's
  *     upload does not silently drop it.
  *
+ * THE OBLIGATION IS STICKY, and that is the whole guard. Both triggers above
+ * are fields the session writes, so a refusal that named one would be answered
+ * by clearing it: `flowChange: false` with the same five stills owes nothing,
+ * and the conductor's check keys on the same field, so nothing downstream
+ * notices. So a refusal is RECORDED — against the session, and against the
+ * ticket in `hook-state/` where no phase has write scope — and from then on
+ * this guard stops reading `flowChange` and `applicable` at all. An answer
+ * that withdraws the obligation is refused on that ground, and the deny text
+ * never names the field to flip.
+ *
  * GIVES UP after MAX_REFUSALS in one session and lets the output through,
  * logged. A guard that refuses forever turns an environment that cannot record
  * (no ffmpeg, a dead browser) into a session that burns its whole turn cap
- * calling StructuredOutput. Released, the output meets the conductor's check,
- * which fails the phase with a reason a person can act on.
+ * calling StructuredOutput. Released, the output meets the conductor's check —
+ * which reads the same recorded obligation, so it still fails the phase with a
+ * reason a person can act on even when the answer now claims no flow change.
+ *
+ * A WITHDRAWAL IS NOT RELEASED, and does not spend the release budget. The
+ * budget exists for a desk that cannot record, which is not the same thing as
+ * a session declining to try; leaving the three rounds unspent keeps the
+ * honest path open at full depth.
  *
  * FAILS OPEN on its own errors, like every guard here.
  */
@@ -149,6 +165,13 @@ function prototypeProblems(entry) {
   return problems;
 }
 
+/**
+ * Everything wrong with the recording, in one list. A file that is not there
+ * yet can only be reported as missing, but once it is on disk its header and
+ * its size are judged together: each refusal spends one of three rounds, and
+ * surfacing the wrong container only to report the empty recording next round
+ * spends two on one file.
+ */
 function videoProblems(video) {
   const full = resolveArtifact(video);
   if (!full) return [`prototype.video "${video || ''}" is not a path inside the artifact directory`];
@@ -160,43 +183,78 @@ function videoProblems(video) {
   if (st.size > MAX_UPLOAD_BYTES) {
     return [`prototype.video "${video}" is ${st.size} bytes, over the ${MAX_UPLOAD_BYTES}-byte upload limit, so it would never reach the ticket — keep it under 60 seconds`];
   }
+  const problems = [];
   const head = Buffer.alloc(8);
   const fd = fs.openSync(full, 'r');
   try { fs.readSync(fd, head, 0, 8, 0); } finally { fs.closeSync(fd); }
-  if (!magic(head)) return [`prototype.video "${video}" is not a real ${ext} file`];
+  if (!magic(head)) problems.push(`prototype.video "${video}" is not a real ${ext} file`);
   if (st.size < MIN_VIDEO_BYTES) {
-    return [`prototype.video "${video}" is ${st.size} bytes — an empty recording, not a walkthrough. Was the context closed before the page was driven?`];
+    problems.push(`prototype.video "${video}" is ${st.size} bytes — an empty recording, not a walkthrough. Was the context closed before the page was driven?`);
   }
-  return [];
+  return problems;
 }
 
-function problemsWith(design) {
-  if (!design || typeof design !== 'object' || design.applicable === false) return [];
-  const proto = design.prototype && typeof design.prototype === 'object' ? design.prototype : null;
-  if (!proto) {
-    return design.flowChange === true
-      ? ['flowChange is true but prototype is null — a flow change owes the reviewer a clickable prototype and a walkthrough video']
-      : [];
+/** The prototype this answer claims it owes, or null for an answer that owes nothing. */
+function reportedPrototype(design) {
+  if (!design || typeof design !== 'object' || design.applicable === false) return null;
+  if (design.prototype && typeof design.prototype === 'object') return design.prototype;
+  return design.flowChange === true ? {} : null;
+}
+
+const WITHDRAWN =
+  'this design already owes the reviewer a clickable prototype and a walkthrough video — that was '
+  + 'recorded when the answer was first refused, and answering differently does not withdraw it. '
+  + 'Build both, report them, and answer again.';
+
+function problemsWith(design, owed) {
+  const proto = reportedPrototype(design);
+  if (!proto) return owed ? [WITHDRAWN] : [];
+  if (proto.entry === undefined && proto.video === undefined) {
+    return ['this design changes a flow, and owes the reviewer a clickable prototype and a walkthrough video it does not report'];
   }
   return [...prototypeProblems(proto.entry), ...videoProblems(proto.video)];
 }
 
-function counterFile(session) {
+function stateFile(session) {
   return path.join(C.STATE, 'hook-state', 'design-flow-guard', `${String(session).replace(/[^\w-]/g, '_')}.count`);
 }
 
-/** Refusals already given to this session, counting this one. */
-function countRefusal(session) {
-  if (!session) return 1;
-  const file = counterFile(session);
-  let n = 0;
-  try { n = Number(fs.readFileSync(file, 'utf8')) || 0; } catch { n = 0; }
-  n += 1;
+/**
+ * The ticket's recorded obligation, read by the conductor's own check
+ * (`flowDeliverableRefusal`). It sits in `hook-state/` rather than the run
+ * directory because `design` holds `writes: ['run', 'artifacts']`, so a marker
+ * under the run would be inside the write scope of the session it judges.
+ */
+function owedFile() {
+  return path.join(C.STATE, 'hook-state', 'design-flow-guard', `${C.ticket().replace(/[^\w-]/g, '_')}.owed`);
+}
+
+/** Refusals already spent by this session, and whether one was ever given. */
+function readState(session) {
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, String(n));
+    const raw = fs.readFileSync(stateFile(session), 'utf8');
+    const n = Number(raw) || 0;
+    return { refusals: n, owed: n > 0 };
+  } catch {
+    return { refusals: 0, owed: false };
+  }
+}
+
+function writeState(session, refusals) {
+  if (!session) return;
+  try {
+    fs.mkdirSync(path.dirname(stateFile(session)), { recursive: true });
+    fs.writeFileSync(stateFile(session), String(refusals));
   } catch (err) { C.logFailure('design-flow-guard', err); }
-  return n;
+}
+
+function setOwed(on) {
+  if (!C.ticket()) return;
+  try {
+    if (!on) { fs.rmSync(owedFile(), { force: true }); return; }
+    fs.mkdirSync(path.dirname(owedFile()), { recursive: true });
+    fs.writeFileSync(owedFile(), '1');
+  } catch (err) { C.logFailure('design-flow-guard', err); }
 }
 
 try {
@@ -204,21 +262,30 @@ try {
   const input = C.readInput();
   if (input.tool_name !== 'StructuredOutput') C.allow();
 
-  const problems = problemsWith(input.tool_input);
+  const state = readState(input.session_id);
+  const problems = problemsWith(input.tool_input, state.owed);
   if (problems.length === 0) {
-    if (input.tool_input?.flowChange === true) C.event('design_flow_ok', { prototype: input.tool_input.prototype });
+    setOwed(false);
+    if (reportedPrototype(input.tool_input)) {
+      C.event('design_flow_ok', { prototype: input.tool_input.prototype });
+    }
     C.allow();
   }
 
-  const n = countRefusal(input.session_id);
-  if (n > MAX_REFUSALS) {
-    C.event('design_flow_released', { refusals: n - 1, problems });
+  const withdrawn = problems[0] === WITHDRAWN;
+  setOwed(true);
+  const refusals = state.refusals + (withdrawn ? 0 : 1);
+  writeState(input.session_id, Math.max(refusals, 1));
+
+  if (!withdrawn && refusals > MAX_REFUSALS) {
+    C.event('design_flow_released', { refusals: refusals - 1, problems });
     C.allow();
   }
-  C.event('design_flow_refused', { attempt: n, problems });
+  C.event('design_flow_refused', { attempt: refusals, problems, withdrawn });
   C.deny(
     `Not finished — this design changes a flow, and the reviewer gets the flow as a clickable prototype `
-    + `and a walkthrough video, not only as stills (refusal ${n} of ${MAX_REFUSALS}):\n`
+    + `and a walkthrough video, not only as stills`
+    + `${withdrawn ? '' : ` (refusal ${refusals} of ${MAX_REFUSALS})`}:\n`
     + `${problems.map((p) => `  - ${p}`).join('\n')}\n\n${RECIPE}`,
   );
 } catch (err) {
