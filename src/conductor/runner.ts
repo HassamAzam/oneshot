@@ -98,7 +98,7 @@ import { schemaFor } from './schemas.js';
 import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
-  rearmGate,
+  MAX_CONFIRMATIONS, rearmGate,
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
@@ -959,6 +959,51 @@ export function testcaseGateRoute(
   // act on it, which beats silently treating a revision as an approval.
   if (verdict === 'feedback' && canCycle) return 'revise';
   return 'park';
+}
+
+/**
+ * The failure window `failedLapsOf` is measured from — 0 normally, or the start
+ * of an active MR-feedback fix round, so a case that failed before the reviewer
+ * asked for a change does not count against the fix lap's budget.
+ *
+ * A `confirmed` verdict rebases VERIFY's window the same way a fix round rebases
+ * every phase's, and for the same reason: the laps already spent were spent
+ * before anyone had said the failure was real, so charging them against the fix
+ * QA has just asked for is charging the wrong work.
+ *
+ * It must be the window BOTH readers use — the gate-entry test and
+ * `afterFailure`. While only the gate knew about it, a confirmed run walked past
+ * the gate (1 lap since the confirmation, needs 2) into `afterFailure`, which
+ * counted from zero, saw 3 laps against a budget of 2 and hard-blocked: one
+ * implement attempt after a confirmation, and the cap could never be reached.
+ */
+export function lapWindow(j: RunJournal, phase: string): number {
+  const round = activeRound(j.mrFeedback);
+  const feedback = round?.status === 'fixing' ? round.startedAt : 0;
+  return phase === 'verify' ? Math.max(feedback, j.verifyConfirmedAt ?? 0) : feedback;
+}
+
+/**
+ * Where the verify-case gate sends the run, given what QA's replies produced.
+ *
+ * A reply can both confirm a real bug and supply corrected steps for a
+ * different case. `confirmed` wins the routing because it is the one that needs
+ * code to change; the corrected steps are written onto the case either way and
+ * the full verify after the fix exercises them. Returning on whichever branch
+ * came first in the function is what used to bank a confirmation round and then
+ * discard it, leaving the case pending forever with one of its two rounds gone.
+ */
+export function verifyGateRoute(gate: {
+  confirmed: unknown[]; rescope: unknown[];
+}): 'refix' | 'reverify' | 'settle' {
+  if (gate.confirmed.length) return 'refix';
+  if (gate.rescope.length) return 'reverify';
+  return 'settle';
+}
+
+/** Whether a scoped re-run is safe: only when no confirmation is about to change the code. */
+export function verifyRescopeIsScoped(gate: { confirmed: unknown[]; rescope: unknown[] }): boolean {
+  return gate.rescope.length > 0 && gate.confirmed.length === 0;
 }
 
 export function nextIndex(
@@ -2123,7 +2168,7 @@ export async function runTicket(
           claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.out.blocked}` }, r.cfg.name);
         } else if (
           r.cfg.name === 'verify' && caseFail
-          && failedLapsOf(iid, 'verify', fixingSince()) >= (r.cfg.maxLaps ?? 2)
+          && failedLapsOf(iid, 'verify', lapWindowFor('verify')) >= (r.cfg.maxLaps ?? 2)
         ) {
           // Verify spent its full lap budget and still records failing cases.
           // Where afterFailure would block, ask QA what each one means instead.
@@ -2150,6 +2195,23 @@ export async function runTicket(
               vIdx === -1
                 ? { kind: 'stop', status: 'blocked', reason: 'verify: cannot re-run — verify is not in the phase list' }
                 : { kind: 'cycle', jumpTo: vIdx, windowEnd: vIdx },
+              r.cfg.name,
+            );
+          } else if (outcome === 'refix') {
+            // QA confirmed the failure is a real bug for this ticket: cycle to
+            // `implement`, not to verify. This is the one outcome that asks for
+            // a code change, so every phase between implement and here re-runs
+            // — the same path a first-lap verify failure takes, which is why it
+            // reuses `cycleTo` rather than naming implement itself.
+            const iIdx = list.findIndex((q) => q.name === r.cfg.cycleTo);
+            prior[r.cfg.name] = null;
+            claim(
+              iIdx === -1
+                ? {
+                    kind: 'stop', status: 'blocked',
+                    reason: `verify: QA confirmed a real bug but cycleTo '${r.cfg.cycleTo}' is not in the phase list`,
+                  }
+                : { kind: 'cycle', jumpTo: iIdx, windowEnd: r.index },
               r.cfg.name,
             );
           } else {
@@ -2501,10 +2563,11 @@ export async function runTicket(
 
     // Inside an MR review round's fix lap the retry and cycle budgets start
     // over: a review that failed twice before the MR opened has not spent the
-    // budget for revising a reviewer's requested change.
-    const round = activeRound(j.mrFeedback);
-    const since = round?.status === 'fixing' ? round.startedAt : 0;
-    const failed = failedLapsOf(iid, p.name, since);
+    // budget for revising a reviewer's requested change. Same for verify after
+    // a `confirmed` verdict — `lapWindowFor` is the one place both that and the
+    // gate-entry test read the window from, so they cannot disagree about when
+    // the budget began.
+    const failed = failedLapsOf(iid, p.name, lapWindowFor(p.name));
 
     if (p.onFail === 'retry') {
       const budget = p.maxRetries ?? 1;
@@ -2538,16 +2601,8 @@ export async function runTicket(
     return { kind: 'stop', status: 'blocked', reason: `${p.name}: ${why}` };
   }
 
-  /**
-   * The failure window `failedLapsOf` is measured from — 0 normally, or the
-   * start of an active MR-feedback fix round, so a case that failed before the
-   * reviewer asked for a change does not count against the fix lap's budget.
-   * The same reckoning `afterFailure` uses, named so the verify-case gate agrees
-   * with it on when the laps are spent.
-   */
-  function fixingSince(): number {
-    const round = activeRound(j.mrFeedback);
-    return round?.status === 'fixing' ? round.startedAt : 0;
+  function lapWindowFor(phase: string): number {
+    return lapWindow(j, phase);
   }
 
   /**
@@ -2559,7 +2614,7 @@ export async function runTicket(
    */
   async function verifyCaseGate(
     r: PhaseResult,
-  ): Promise<'resolved' | 'reverify' | { park: string } | { block: string }> {
+  ): Promise<'resolved' | 'reverify' | 'refix' | { park: string } | { block: string }> {
     let caseResults = (r.out.data?.results ?? []) as CaseResult[];
     const meta = new Map(
       (readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases ?? []).map((c) => [c.id, c]),
@@ -2618,9 +2673,17 @@ export async function runTicket(
       caseResults = applied;
     }
 
+    // One reply can both confirm a real bug and supply corrected steps for a
+    // different case — that is the ordinary multi-case reply, not an edge case.
+    // Both are applied here before either decides where the run goes, because
+    // returning on the first branch reached is what used to bank a confirmation
+    // round and then throw it away.
+    const confirmedCases = verifyGateRoute(gate) === 'refix';
+    const scoped = verifyRescopeIsScoped(gate);
+
     // QA supplied corrected steps for a `missing-steps` case: write them onto the
-    // case, scope the next verify run to it, mark the correction spent, and go
-    // re-run verify on only that case (no code changed, so nothing else re-runs).
+    // case and mark the correction spent. Scoping the next verify run to only
+    // that case is safe ONLY when nothing else changes the code — see below.
     if (gate.rescope.length) {
       const data = readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json');
       const cases = (data?.cases ?? []).map((c) => {
@@ -2639,32 +2702,84 @@ export async function runTicket(
       }));
       j = updateJournal(iid, {
         verifyMissingSteps: missing,
-        verifyRescopeCases: gate.rescope.map((x) => x.caseId),
+        // A scoped re-run tells the verify prompt "no code has changed since
+        // the last lap, every other case keeps its verdict". When the same
+        // reply also confirmed a bug, `implement` is about to run and that
+        // premise is false, so the list is NOT scoped: the corrected steps are
+        // already on the case and the full verify after the fix exercises them.
+        ...(scoped ? { verifyRescopeCases: gate.rescope.map((x) => x.caseId) } : {}),
         verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
       }) ?? j;
-      await addIssueNote(iid,
-        `Re-running ${gate.rescope.map((x) => `**${x.caseId}**`).join(', ')} with the corrected steps `
-        + '— only that case, since no code changed.');
-      // Snapshot the FULL current list before the scoped re-run. The scoped
-      // verify session runs only the rescoped case(s), and phase.ts writes its
-      // output straight to verify.json the instant it returns — so by the time
-      // the merge below runs, verify.json holds only the rescoped case. The
-      // merge reads this snapshot instead, so every other case (passes and
-      // still-unsettled fails alike) survives.
-      writeArtifact(iid, 'verify-prescope.json', r.out.data);
+      await addIssueNote(iid, confirmedCases
+        ? `Corrected steps recorded for ${gate.rescope.map((x) => `**${x.caseId}**`).join(', ')} — they `
+          + 'will run with the rest of the list after the confirmed fix below.'
+        : `Re-running ${gate.rescope.map((x) => `**${x.caseId}**`).join(', ')} with the corrected steps `
+          + '— only that case, since no code changed.');
+      // Only a SCOPED re-run needs the snapshot. That session runs the rescoped
+      // case(s) alone and phase.ts writes its output straight to verify.json the
+      // instant it returns, so without this the merge would see a one-case list;
+      // reading the snapshot instead keeps every other case (passes and
+      // still-unsettled fails alike). An unscoped re-run after a confirmed fix
+      // re-executes the whole list, so there is nothing to preserve.
+      if (scoped) writeArtifact(iid, 'verify-prescope.json', r.out.data);
       log.phase(`verify re-running ${gate.rescope.length} case(s) with QA's corrected steps`, {
-        iid, cases: gate.rescope.map((x) => x.caseId).join(', '),
+        iid, cases: gate.rescope.map((x) => x.caseId).join(', '), scoped,
       });
-      return 'reverify';
     }
+
+    // QA confirmed one or more cases are real bugs belonging to this ticket. The
+    // results stay as they are — a confirmed failure is still a failure, and
+    // `qualityGate` must keep refusing the merge over it. What changes is the lap
+    // window: `verifyConfirmedAt` rebases `failedLapsOf`, which is what lets
+    // verify cycle through `implement` again instead of blocking here.
+    if (confirmedCases) {
+      const decisions = gate.confirmed.map((d) => ({
+        caseId: d.caseId, verdict: 'confirmed' as const, by: d.by ?? 'unknown',
+        note: 'QA confirmed a real bug in this ticket; going back to implement',
+      }));
+      // The round is spent HERE, on the branch that acts on it, together with
+      // the lap-window rebase and the decisions. `checkVerifyGate` only reads
+      // it; committing it there is what let a mixed reply lose a round.
+      j = updateJournal(iid, {
+        verifyConfirmedAt: Date.now(),
+        verifyConfirmed: { ...(j.verifyConfirmed ?? {}), ...gate.confirmSpend },
+        verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
+      }) ?? j;
+      // Re-arm the gate. Without this the second round is unreachable even
+      // though the lap arithmetic allows it: `requestNoteId` stays set, so the
+      // next entry posts no new comment and pings nobody, the confirmation is
+      // correctly not re-consumed, every case lands in `pending` — and the run
+      // parks, which `finish()` deliberately alerts nobody about. Nothing would
+      // tell QA their round was spent or that another is wanted.
+      j = rearmGate(iid, 'verifyCases') ?? j;
+      // Per case, not one number across all of them: confirming TC-14 for the
+      // second time and TC-09 for the first told QA both were on "round 2 of 2".
+      const roundOf = (caseId: string): number =>
+        (j.verifyConfirmed ?? {})[caseId]?.rounds ?? 1;
+      const named = gate.confirmed
+        .map((d) => `**${d.caseId}** (round ${roundOf(d.caseId)} of ${MAX_CONFIRMATIONS})`)
+        .join(', ');
+      await addIssueNote(iid,
+        `${named} confirmed as real bug(s) for this ticket — going back to \`implement\` to fix `
+        + 'them. The case(s) stay recorded as failures until they pass, so the merge is still '
+        + 'blocked on them. If they still fail afterwards I will ask again here.');
+      log.phase(`verify-case gate: ${gate.confirmed.length} case(s) confirmed — cycling to implement`, {
+        iid, cases: gate.confirmed.map((d) => d.caseId).join(', '),
+      });
+      return 'refix';
+    }
+
+    // Corrected steps and nothing else: re-run verify scoped to those cases.
+    if (gate.rescope.length) return 'reverify';
 
     // No failing cases remain → verify completes. Otherwise wait on QA.
     const stillFailing = ((r.out.data?.results ?? []) as CaseResult[]).filter(countsAsFailure);
     if (!stillFailing.length) return 'resolved';
     return {
       park: 'awaiting a QA decision on the verify case(s) still failing after two laps — a QA reviewer '
-        + 'classifies each on the ticket (`skip`, `invalid`, `expected`, `pre-existing`, or `missing steps` '
-        + 'to supply corrected steps) and the run continues once every one is settled',
+        + 'classifies each on the ticket (`skip`, `invalid`, `expected`, `pre-existing`, `missing steps` '
+        + 'to supply corrected steps, or `actual bug` to send it back to implement) and the run '
+        + 'continues once every one is settled',
     };
   }
 

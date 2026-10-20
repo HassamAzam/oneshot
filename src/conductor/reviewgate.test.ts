@@ -384,6 +384,206 @@ test('pre-existing is recognised from "existing issue" phrasing too', () => {
   assert.equal(parseVerifyDirectives('TC-14 is an existing issue', FAILING)[0]?.verdict, 'pre-existing');
 });
 
+test('confirms a real bug from the phrases a reviewer actually types', () => {
+  for (const text of [
+    'TC-14: actual bug',
+    'TC-14 is a real bug',
+    'TC-14 — genuine issue',
+    'TC-14: confirmed',
+    'TC-14 is a legitimate failure',
+    'TC-14: fix it in this ticket',
+  ]) {
+    assert.equal(parseVerifyDirectives(text, FAILING)[0]?.verdict, 'confirmed', text);
+  }
+});
+
+test('"not pre-existing, it is an actual bug" confirms rather than reading as its opposite', () => {
+  // The natural way to say this contains `pre-existing`, whose pattern would
+  // otherwise claim the fragment and record the exact inverse of the verdict.
+  // This is why `confirmed` is tested first.
+  assert.equal(
+    parseVerifyDirectives('TC-14 is not pre-existing, it is an actual bug', FAILING)[0]?.verdict,
+    'confirmed',
+  );
+});
+
+test('a negated terminal verdict is not read as that verdict', () => {
+  // `/pre[\s-]?exist/` matched "not pre-existing", so this sentence recorded the
+  // exact inverse of what the reviewer said — and `pre-existing` is the verdict
+  // with a side effect, opening a bug on another ticket.
+  assert.notEqual(
+    parseVerifyDirectives('TC-09 is not pre-existing', FAILING)[0]?.verdict,
+    'pre-existing',
+  );
+  assert.notEqual(parseVerifyDirectives('TC-09 is not invalid', FAILING)[0]?.verdict, 'invalid');
+  assert.notEqual(parseVerifyDirectives('TC-09 is not expected', FAILING)[0]?.verdict, 'expected');
+  assert.notEqual(parseVerifyDirectives("TC-09 don't skip", FAILING)[0]?.verdict, 'skip');
+  // A negation far from the keyword leaves the verdict alone.
+  assert.equal(
+    parseVerifyDirectives('TC-09 is not something I have seen before and it is pre-existing', FAILING)[0]?.verdict,
+    'pre-existing',
+  );
+});
+
+test('confirming does not collide with invalid, which contains "valid"', () => {
+  assert.equal(parseVerifyDirectives('TC-14: invalid', FAILING)[0]?.verdict, 'invalid');
+  assert.equal(parseVerifyDirectives('TC-09 is a real bug', FAILING)[0]?.verdict, 'confirmed');
+});
+
+test('a confirmation respects negation, like every other verdict', () => {
+  // The guard went on the other four and not on this one — the verdict that
+  // costs the most to invert, since a misread "no" starts a fix cycle.
+  assert.deepEqual(parseVerifyDirectives('TC-14 is not a real bug', FAILING), []);
+  assert.deepEqual(parseVerifyDirectives('TC-14: not confirmed', FAILING), []);
+});
+
+test('a terminal word wins inside one fragment, not just on its own line', () => {
+  // `confirmed` was tested ahead of the terminal verdicts to make the "not
+  // pre-existing, it's an actual bug" sentence work, which broke the documented
+  // rule the other way round. The negation guard is what makes the order
+  // unnecessary.
+  assert.equal(parseVerifyDirectives("TC-14: invalid — don't fix it", FAILING)[0]?.verdict, 'invalid');
+  assert.equal(
+    parseVerifyDirectives('TC-09 pre-existing — fix it in the other ticket', FAILING)[0]?.verdict,
+    'pre-existing',
+  );
+});
+
+test('a line naming two cases does not confirm the one it defers', () => {
+  const got = parseVerifyDirectives(
+    "TC-09 — I'll come back to this one, TC-14 is a real bug", FAILING,
+  );
+  assert.deepEqual(got.map((x) => [x.caseId, x.verdict]), [['TC-14', 'confirmed']]);
+});
+
+test('a negation qualifying something other than the verdict leaves it alone', () => {
+  // A character window let an unrelated clause disarm the verdict, and the case
+  // then parked with nothing in the output naming the sentence thrown away.
+  assert.equal(
+    parseVerifyDirectives('TC-14 is not worth chasing — skip', FAILING)[0]?.verdict, 'skip',
+  );
+  // Still adjacent-negated, which is the case the guard is for.
+  assert.deepEqual(parseVerifyDirectives('TC-14 is not invalid', FAILING), []);
+});
+
+test('an adverb between the negation and the keyword does not restore the inverse read', () => {
+  // Pure adjacency let these through, which is the inverse read again on the
+  // verdict that opens a bug on another ticket.
+  for (const s of [
+    'TC-14 is not really pre-existing',
+    'TC-14 is not actually pre-existing',
+    'TC-14 is not necessarily invalid',
+    "TC-14 isn't really expected",
+  ]) {
+    assert.deepEqual(parseVerifyDirectives(s, FAILING), [], s);
+  }
+});
+
+test('a reviewer declining a fix is not read as confirming one', () => {
+  // `fix it` on its own matched every one of these, and each would have spent a
+  // confirmation round and cycled the run for work nobody asked for.
+  for (const s of [
+    'TC-14 — no need to fix it',
+    'TC-14: leave it, we will fix it in a follow-up ticket',
+    'TC-14: QA will fix it offline',
+    "TC-14 — I'll fix this myself, no need to cycle",
+  ]) {
+    assert.deepEqual(parseVerifyDirectives(s, FAILING), [], s);
+  }
+  // The explicit form still confirms.
+  assert.equal(
+    parseVerifyDirectives('TC-14: fix it in this ticket', FAILING)[0]?.verdict, 'confirmed',
+  );
+});
+
+test('the plural is the form a reviewer writes, since the gate presents several cases', () => {
+  assert.equal(parseVerifyDirectives('TC-14: real bugs here', FAILING)[0]?.verdict, 'confirmed');
+  assert.equal(
+    parseVerifyDirectives('TC-14: these are genuine issues', FAILING)[0]?.verdict, 'confirmed',
+  );
+  assert.deepEqual(
+    parseVerifyDirectives('TC-14 and TC-09 are not pre-existing, they are actual bugs', FAILING)
+      .map((x) => x.caseId).sort(),
+    ['TC-09', 'TC-14'],
+  );
+});
+
+test('a bare case reference takes the verdict of the list it belongs to, either direction', () => {
+  // Splitting on `,` put the cases and the verdict in different fragments, so
+  // every verdict lost all but one case of a plain comma-separated reply. This
+  // was true before the confirm route existed.
+  for (const [text, want] of [
+    ['skip 14, 9', 'skip'],
+    ['TC-14, TC-09: skip', 'skip'],
+    ['TC-14, TC-09: invalid', 'invalid'],
+    ['TC-14, TC-09: actual bug', 'confirmed'],
+  ] as const) {
+    const got = parseVerifyDirectives(text, FAILING);
+    assert.deepEqual(got.map((x) => x.caseId).sort(), ['TC-09', 'TC-14'], text);
+    assert.ok(got.every((x) => x.verdict === want), text);
+  }
+});
+
+test('a clause between two cases still stops one verdict spreading across both', () => {
+  // The protection the single-case guard gave, kept while comma lists work: a
+  // fragment carrying prose inherits nothing, and a line whose cases are not a
+  // plain list is left alone.
+  const got = parseVerifyDirectives(
+    "TC-09 — I'll come back to this one, TC-14 is a real bug", FAILING,
+  );
+  assert.deepEqual(got.map((x) => [x.caseId, x.verdict]), [['TC-14', 'confirmed']]);
+});
+
+test('a sentence boundary separates verdicts, without breaking "no. 14"', () => {
+  // `.` was excluded from the splitter because "skip test case no. 14" depends
+  // on that period — at the cost of a sentence-joined reply staying one
+  // fragment, where the terminal verdict claimed every case in it.
+  assert.deepEqual(
+    parseVerifyDirectives('TC-14: skip. TC-09 is a real bug', FAILING)
+      .map((x) => [x.caseId, x.verdict]).sort(),
+    [['TC-09', 'confirmed'], ['TC-14', 'skip']],
+  );
+  // The abbreviation that forced the original exclusion still parses.
+  assert.deepEqual(parseVerifyDirectives('skip test case no. 14', FAILING)
+    .map((x) => [x.caseId, x.verdict]), [['TC-14', 'skip']]);
+  assert.deepEqual(parseVerifyDirectives('skip no. 14 and no. 9', FAILING)
+    .map((x) => x.caseId).sort(), ['TC-09', 'TC-14']);
+});
+
+test('a hedge is not a decision, for any verdict', () => {
+  // Thinking aloud settled a case, or started a fix cycle nobody asked for.
+  for (const s of [
+    'TC-14 maybe a real bug, let me check',
+    'TC-14 might be pre-existing',
+    'TC-14 probably invalid',
+    'TC-14 seems expected',
+  ]) {
+    assert.deepEqual(parseVerifyDirectives(s, FAILING), [], s);
+  }
+  // The definite forms are untouched.
+  assert.equal(parseVerifyDirectives('TC-14 is pre-existing', FAILING)[0]?.verdict, 'pre-existing');
+  assert.equal(parseVerifyDirectives('TC-14: actual bug', FAILING)[0]?.verdict, 'confirmed');
+});
+
+test('a terminal verdict still wins over a confirmation in the same breath', () => {
+  // The resolver prefers a terminal verdict when both are present; the parser's
+  // job is only to not swallow the terminal one. First verdict wins per case,
+  // so a reviewer who classifies a case has settled it.
+  const got = parseVerifyDirectives('TC-14: skip\nTC-14 is a real bug', FAILING);
+  assert.deepEqual(got.map((x) => x.verdict), ['skip']);
+});
+
+test('the request comment offers the confirm route alongside the four that settle a case', () => {
+  const body = verifyCasesRequestBody([{ id: 'TC-14', evidence: 'expected 3 rows, got 4' }]);
+  assert.match(body, /actual bug/);
+  assert.match(body, /stays a FAIL/);
+  assert.match(body, /back to `implement`/);
+  // And it still offers every verdict that ends the case.
+  for (const v of ['skip', 'invalid', 'expected', 'pre-existing', 'missing steps']) {
+    assert.ok(body.includes(v), v);
+  }
+});
+
 test('first verdict wins when a case is named twice', () => {
   const got = parseVerifyDirectives('skip 14\nTC-14: invalid', FAILING);
   assert.equal(got.length, 1);

@@ -261,9 +261,27 @@ export interface RunJournal {
    * the case that split off its own tracked bug.
    */
   verifyCaseDecisions?: Array<{
-    caseId: string; verdict: 'skip' | 'invalid' | 'expected' | 'pre-existing' | 'missing-steps';
+    caseId: string;
+    verdict: 'skip' | 'invalid' | 'expected' | 'pre-existing' | 'missing-steps' | 'confirmed';
     by: string; note?: string; issueIid?: number;
   }>;
+  /**
+   * Per-case state for the `confirmed` verdict — QA calling a still-failing case
+   * a real bug that belongs to this ticket.
+   *
+   * `rounds` is why it is counted rather than a flag: `confirmed` is the only
+   * verdict that buys more work instead of settling the case, so without a count
+   * a reviewer and `implement` could trade rounds until the run's budget is
+   * gone. `capNoted` keeps the "that budget is spent" comment to one posting
+   * rather than one per poll.
+   */
+  verifyConfirmed?: Record<string, { rounds: number; lastNoteId?: number; capNoted?: boolean }>;
+  /**
+   * When the most recent `confirmed` verdict was applied. `failedLapsOf` counts
+   * from it, which is what hands verify a fresh lap budget — the laps it already
+   * spent were spent before anyone had said the failure was real.
+   */
+  verifyConfirmedAt?: number;
   /**
    * The `missing-steps` route's per-case state. When QA says a still-failing
    * case's steps are incomplete, the gate posts the steps verify followed and

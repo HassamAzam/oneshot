@@ -356,12 +356,12 @@ pytest is unaffected and is fine to run.
 
 ## When a case still fails after the second lap — the QA gate
 
-A `fail` sends the run back to `implement` and verify re-runs. That happens at
-most **twice**. If a case is still `fail` after the second lap — the fix did not
-work and no further code change is going to be tried automatically — the run
-does **not** block. It arms a **QA decision gate**: the still-failing case(s) are
-posted on the ticket and a QA reviewer (config/reviewers.json `qa`) rules on each
-one. Your job is unchanged — record the honest `fail` with actual-vs-expected
+A `fail` sends the run back to `implement` and verify re-runs. That happens
+**twice** on the run's own initiative. If a case is still `fail` after the second
+lap — the fix did not work and no further code change is going to be tried
+unprompted — the run does **not** block. It arms a **QA decision gate**: the
+still-failing case(s) are posted on the ticket and a QA reviewer
+(config/reviewers.json `qa`) rules on each one. Your job is unchanged — record the honest `fail` with actual-vs-expected
 evidence and a screenshot. The evidence you leave is exactly what QA reads to
 decide, so make it specific.
 
@@ -380,10 +380,21 @@ A reviewer answers each failing case on the ticket with one of:
   when QA replies with them, **only that one case** is re-run with the new steps
   (nothing else re-executes, because no code changed). If it passes, it's done;
   if it still fails, QA settles it with one of the verdicts above.
+- **`TC-N: actual bug`** — the failure is real and belongs to this ticket. This
+  is the one verdict that does not settle the case: it sends the run back to
+  `implement` for another fix and the case stays recorded as a `fail`, so the
+  merge is still blocked on it. A reviewer may do this **twice** per case; after
+  that the budget is spent and the case needs one of the verdicts above instead.
 
-The run continues the moment **every** still-failing case is settled, and each
-decision — who made it and why — is recorded on the MR for its reviewer. Until
-then the run waits on QA; it never merges a case that is actually `fail`.
+So a case can cost more than the two automatic laps. A confirmation rebases
+verify's lap budget rather than granting a single lap, so the case gets the full
+two again — up to **six** laps across two confirmations. That is the point: the
+run had given up, and a person said the failure was worth attempting again.
+
+The run continues once every still-failing case is **settled** — a confirmed case
+is not settled, it is back in the fix cycle. Each decision, who made it and why,
+is recorded on the MR for its reviewer. Until then the run waits on QA; it never
+merges a case that is actually `fail`.
 
 This is why the steps you record matter beyond your own run: on a `missing steps`
 case they are exactly what QA reads to see what you did and to hand back a
