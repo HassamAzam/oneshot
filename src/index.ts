@@ -295,8 +295,8 @@ let followExitCode = 0;
  * - `refused` — this pass lost a race for ownership (another conductor holds
  *   the run, or a block's cooldown has not elapsed). Not a failure of the
  *   ticket itself. Not terminal — unless `refusalIsFinal()` says only a person
- *   can clear it (assigned to someone else, or carrying the automation mode's
- *   trigger label): then terminal, exit 1.
+ *   can clear it (assigned to someone else, already carrying the exit label,
+ *   or carrying the automation mode's trigger label): then terminal, exit 1.
  */
 function handleFollowOutcome(outcome: RunOutcome): void {
   // A shutdown signal already sets `stopping`, which ends the loop regardless
