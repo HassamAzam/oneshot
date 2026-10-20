@@ -133,10 +133,11 @@ edit the mode makes is conductor code.
 A ticket is ready when `Ready for Automation Testing` (`labels.localTestsTrigger`, which the Loop
 puts on beside `Merged` when it merges the ticket) is on it — or the operator passed
 `--assume-label`, which a dry run alone accepts — **and** a merge request linked to it is merged
-into `branches.base` and is the ticket's own change, not a promotion or a backmerge (source
-`stage`/`master`/`main`/`dev` or a branch matching `localTests.releaseBranchPattern`, or a title
-like `stage -> dev` or `Backmerge`).
-That MR's merge commit is the code under test, and its first parent is the base. A labelled
+into one of `localTests.targetBranches` (`dev` or `stage`; absent, `branches.base`) and is the
+ticket's own change, not a promotion or a backmerge (source `stage`/`master`/`main`/`dev` or a
+branch matching `localTests.releaseBranchPattern`, or a title like `stage -> dev` or `Backmerge`).
+That MR's merge commit is the code under test, on whichever of those branches it went into, and
+its first parent is the base. A labelled
 ticket whose change is not merged yet waits quietly, with no comment, and is checked again on
 later ticks. Anything the check cannot answer is a hold, never a start: nothing is spent and
 nothing is posted.

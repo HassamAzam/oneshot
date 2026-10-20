@@ -76,6 +76,13 @@ test('the report opens with the impacted modules and what will run, then what ch
   assert.equal(one, '**Impacted module: Leaves — Oneshot will run 1 automation test locally once QA approves.**');
 });
 
+test('what changed names the branch the MR went into: dev, or stage for a fix merged there', () => {
+  const stage = localTestsFoundNote(scope(), info({ targetBranch: 'stage' })).body.split('\n\n')[1];
+  assert.equal(stage, '**What changed:** Leave form: rename the submit button (MR !11042, merged into `stage` as `abcdef1`).');
+  const none = localTestsNotFoundNote(scope({ specs: [] }), info({ targetBranch: 'dev' })).body;
+  assert.ok(none.includes('(MR !11042, merged into `dev` as `abcdef1`).'), none);
+});
+
 test('the table is by module: the tests that check the change first, then each module\'s main functionality', () => {
   const { body } = localTestsFoundNote(scope(), info());
   assert.ok(body.includes('| Module | | Test | Why it runs |\n|---|---|---|---|'));
@@ -428,6 +435,19 @@ test('failed results are marked done too, and a failure dev does not share menti
   const devToo = run({ status: 'failed', results: [res('cypress/e2e/c.ts', 'three', 'failed', { failingOnDev: true })] });
   assert.doesNotMatch(localTestsResultsNote(devToo, ctx, { mrAuthor: 'usman.nasir' }).body, /FYI/,
     'a failure dev shares is not the author\'s');
+});
+
+test('a stage merge\'s results ask whether each failure fails on stage too, and tell the author so', () => {
+  const failed = run({
+    status: 'failed',
+    totals: { specs: 1, tests: 1, passed: 0, failed: 1, skipped: 0 },
+    results: [res('cypress/e2e/b.ts', 'two', 'failed', { error: 'expected Apply', failingOnDev: false })],
+  });
+  const { body } = localTestsResultsNote(failed, ctx, { mrAuthor: 'usman.nasir', branch: 'stage' });
+  assert.ok(body.includes('| Spec | Result | Failing on stage too? | Reason |'), body);
+  assert.ok(body.includes('FYI @usman.nasir: 1 failed test does not fail on stage, so this change likely caused it.'));
+  const plain = localTestsResultsNote(failed, ctx, { mrAuthor: 'usman.nasir' }).body;
+  assert.ok(plain.includes('Failing on dev too?') && plain.includes('does not fail on dev'), 'no branch named: the base branch');
 });
 
 test('the videos stay last, beside their uploads, after the closing line', () => {

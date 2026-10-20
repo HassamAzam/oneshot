@@ -11,26 +11,30 @@
  *      asked a dry run to assume it (`--assume-label`, which src/index.ts
  *      accepts only with DRY_RUN=1, so a rehearsal can be run on any merged
  *      ticket);
- *   B. the ticket's change is MERGED into the base branch (branches.base,
- *      `dev`). Only merge requests GitLab links to it (related or closing), in
- *      the same project, that are a real change count — never a branch
- *      promotion or a backmerge (a protected or release source branch, or a
- *      title like `stage -> dev` or `Backmerge …`). Of those, the ticket's OWN
- *      MRs are the ones that close it or name its number in their source
- *      branch, in any state; a `#N` in a title is a mention, not ownership.
- *      When it has any, only an own MR merged into the base proves the change:
- *      an own MR still open with another ticket's MR (one that only mentions
- *      this one) merged is `not-ready`. Only when no linked MR closes the
- *      ticket or names it in its source branch does any linked MR merged into
- *      the base stand in for it.
- * The latest such merge is the commit the tests run against (`mergedMr`); every
- * own MR merged into the base comes back too, oldest first, as `ranges` — the
- * commit before each change and the commit it left — so the scope can cover a
- * follow-up's earlier MRs as well. `base` is null when the commit before is
- * the merged commit's first parent, which git answers and GitLab does not; a
- * merge that left no merge or squash commit (a fast-forward, or a branch that
- * reached the base by a direct push) has its diff base from GitLab instead, or
- * its head's first parent covers only its last commit.
+ *   B. the ticket's change is MERGED into one of the target branches
+ *      (`localTests.targetBranches` — ERP's `dev` and `stage`; absent, the
+ *      base branch alone). Only merge requests GitLab links to it (related or
+ *      closing), in the same project, that are a real change count — never a
+ *      branch promotion or a backmerge (a protected or release source branch,
+ *      or a title like `stage -> dev` or `Backmerge …`), so a fix merged into
+ *      stage and carried to dev later is one change, tested once. Of those,
+ *      the ticket's OWN MRs are the ones that close it or name its number in
+ *      their source branch, in any state; a `#N` in a title is a mention, not
+ *      ownership. When it has any, only an own MR merged into a target branch
+ *      proves the change: an own MR still open with another ticket's MR (one
+ *      that only mentions this one) merged is `not-ready`. Only when no linked
+ *      MR closes the ticket or names it in its source branch does any linked
+ *      MR merged into a target branch stand in for it.
+ * The latest such merge is the commit the tests run against (`mergedMr`),
+ * whichever target branch it went into; every own MR merged into a target
+ * branch comes back too, oldest first, as `ranges` — the commit before each
+ * change and the commit it left, and `otherBranch` when it went into another
+ * branch than the tested one — so the scope can cover a follow-up's earlier MRs
+ * as well. `base` is null when the commit before is the merged commit's first
+ * parent, which git answers and GitLab does not; a merge that left no merge or
+ * squash commit (a fast-forward, or a branch that reached its target by a
+ * direct push) has its diff base from GitLab instead, or its head's first
+ * parent covers only its last commit.
  * Labelled but not merged is `not-ready`, which the runner waits on quietly and
  * checks again later: a merge does not touch the ticket, so there is nothing
  * to tell anybody yet. Open leftovers, MRs merged into another branch and
@@ -55,8 +59,8 @@
  * ONESHOT_TICKET, ONESHOT_LOCAL_TESTS_API, ONESHOT_LOCAL_TESTS_PROJECT and
  * ONESHOT_LOCAL_TESTS_TOKEN (sent as a header, never printed, logged or put in
  * a URL), plus the policy the conductor already resolved —
- * ONESHOT_LOCAL_TESTS_TRIGGER, _BASE, _PROTECTED (JSON) and _RELEASE (a regex
- * source) — each falling back to config/project.json, and
+ * ONESHOT_LOCAL_TESTS_TRIGGER, _TARGETS (JSON), _PROTECTED (JSON) and _RELEASE
+ * (a regex source) — each falling back to config/project.json, and
  * ONESHOT_LOCAL_TESTS_ASSUME_LABEL=1.
  *
  * Module shape: this file only defines and exports functions; every network
@@ -93,6 +97,25 @@ class ReadyError extends Error {
 }
 
 const sha7 = (s) => String(s || '').slice(0, 7);
+
+/** A branch name as src/lib/config.ts accepts one (BRANCH_NAME_RE): never an option, never `..`. */
+const BRANCH_NAME = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
+
+/** The target branches a decision reads: `targets`, or the one `base` a caller from before them passes. */
+function targetsOf(f) {
+  return Array.isArray(f.targets) && f.targets.length ? f.targets : [f.base || 'dev'];
+}
+
+/** `dev`, `dev or stage`, `dev, stage or master`: the target branches, as a reason names them. */
+function branchesText(targets) {
+  return targets.length < 2 ? String(targets[0] || '') : `${targets.slice(0, -1).join(', ')} or ${targets[targets.length - 1]}`;
+}
+
+/** The branches these merged MRs went into, each once: `stage`, or `dev and stage`. */
+function intoText(list) {
+  const branches = [...new Set(list.map((m) => String(m.target_branch || '')))];
+  return branches.length < 2 ? branches.join('') : `${branches.slice(0, -1).join(', ')} and ${branches[branches.length - 1]}`;
+}
 
 /** A commit id as GitLab gives one. Anything else is never passed on: the runner hands these to git. */
 const isSha = (s) => typeof s === 'string' && /^[0-9a-f]{7,64}$/i.test(s);
@@ -167,15 +190,17 @@ function mergeLinked(related, closing) {
  * whose source branch names its number — are decided across every state,
  * because another ticket's MR that says "see also #N" is linked too and may
  * merge first, and it says so in its title as often as in its description:
- * while the ticket has an own MR, only an own MR merged INTO the base can be
- * its change, and none merged yet is a wait, never a fallback. Only a ticket
- * with no own MR at all falls back to any linked MR merged into the base (a
- * branch named after something else). The latest merge in the pool wins: it
- * is the newest code. `ranged` is what the runner scopes, oldest first: every
- * own MR merged into the base, or, in the fallback, the chosen MR alone.
+ * while the ticket has an own MR, only an own MR merged INTO a target branch
+ * can be its change, and none merged yet is a wait, never a fallback. Only a
+ * ticket with no own MR at all falls back to any linked MR merged into a
+ * target branch (a branch named after something else). The latest merge in
+ * the pool wins, whichever target it went into: it is the newest code.
+ * `ranged` is what the runner scopes, oldest first: every own MR merged into a
+ * target branch, or, in the fallback, the chosen MR alone.
  */
 function chooseMerged(f) {
-  const { issue, base, protectedBranches, releaseBranch } = f;
+  const { issue, protectedBranches, releaseBranch } = f;
+  const targets = targetsOf(f);
   const mrs = Array.isArray(f.mrs) ? f.mrs : [];
   const same = mrs.filter((m) => m && (m.project_id === undefined || m.project_id === issue.project_id));
   // A delimited run of the iid in the source branch (`<user>/<iid>-<slug>`),
@@ -191,21 +216,28 @@ function chooseMerged(f) {
   const promotions = same.filter(isPromo);
   const real = same.filter((m) => !isPromo(m));
   const time = (m) => Date.parse(m.merged_at) || 0;
-  const intoBase = real.filter((m) => m.state === 'merged' && m.target_branch === base)
+  const intoTargets = real.filter((m) => m.state === 'merged' && targets.includes(m.target_branch))
     .sort((a, b) => time(a) - time(b) || a.iid - b.iid);
-  const elsewhere = real.filter((m) => m.state === 'merged' && m.target_branch !== base);
+  const elsewhere = real.filter((m) => m.state === 'merged' && !targets.includes(m.target_branch));
   const open = real.filter((m) => m.state === 'opened').sort((a, b) => a.iid - b.iid);
   const own = real.filter(isOwn).sort((a, b) => a.iid - b.iid);
   const fallback = own.length === 0;
-  const pool = fallback ? intoBase : intoBase.filter(isOwn);
+  const pool = fallback ? intoTargets : intoTargets.filter(isOwn);
   const chosen = pool[pool.length - 1] || null;
   const ranged = fallback ? (chosen ? [chosen] : []) : pool;
-  return { same, promotions, real, intoBase, elsewhere, open, own, fallback, pool, ranged, chosen, isOwn };
+  return { same, promotions, real, intoTargets, elsewhere, open, own, fallback, pool, ranged, chosen, isOwn };
 }
 
-/** One merged MR as the runner scopes it: the commit before its change (null: the commit's first parent) and the commit it left. */
-function rangeOf(mr) {
-  return { mrIid: mr.iid, base: baseOf(mr), head: mergeShaOf(mr) };
+/**
+ * One merged MR as the runner scopes it: the commit before its change (null:
+ * the commit's first parent) and the commit it left — and, when it went into
+ * another target branch than `tested` did, that branch, so the list can say
+ * the tested code may not hold its change.
+ */
+function rangeOf(mr, tested) {
+  const r = { mrIid: mr.iid, base: baseOf(mr), head: mergeShaOf(mr) };
+  if (tested && mr.target_branch && mr.target_branch !== tested.target_branch) r.otherBranch = String(mr.target_branch);
+  return r;
 }
 
 /** `!12 is still open`, `!13 was merged into stage`, … one per MR, by number. */
@@ -222,7 +254,8 @@ const listIids = (list) => list.map((m) => `!${m.iid}`).join(', ');
  * Returns the LocalTestsReadiness shape declared in src/localtests/readiness.ts.
  */
 function decideReadiness(f) {
-  const { issue, trigger, base } = f;
+  const { issue, trigger } = f;
+  const where = branchesText(targetsOf(f));
   const labels = Array.isArray(issue.labels) ? issue.labels : [];
   const labelled = Boolean(f.assumeLabel) || labels.includes(trigger);
   const c = chooseMerged(f);
@@ -236,14 +269,14 @@ function decideReadiness(f) {
   if (chosen) {
     const mergeSha = mergeShaOf(chosen);
     if (!mergeSha) {
-      reasons.push(`!${chosen.iid} is merged into ${base}, but GitLab names no commit for it`);
+      reasons.push(`!${chosen.iid} is merged into ${chosen.target_branch}, but GitLab names no commit for it`);
     } else {
       // Every scoped merge, oldest first; one GitLab names no commit for cannot be scoped.
       const ranges = [];
       for (const m of c.ranged) {
-        const r = rangeOf(m);
+        const r = rangeOf(m, chosen);
         if (r.head) ranges.push(r);
-        else warnings.push(`!${m.iid} is merged into ${base}, but GitLab names no commit for it, so its change is not scoped`);
+        else warnings.push(`!${m.iid} is merged into ${m.target_branch}, but GitLab names no commit for it, so its change is not scoped`);
       }
       const tested = rangeOf(chosen);
       mergedMr = {
@@ -261,7 +294,7 @@ function decideReadiness(f) {
       if (!isSha(chosen.merge_commit_sha)) {
         warnings.push(isSha(chosen.squash_commit_sha)
           ? `!${chosen.iid} has no merge commit (a squash merge), so its squash commit ${sha7(mergeSha)} is tested`
-          : `!${chosen.iid} has no merge commit (a fast-forward merge, or its branch reached ${base} by a direct push), `
+          : `!${chosen.iid} has no merge commit (a fast-forward merge, or its branch reached ${chosen.target_branch} by a direct push), `
             + `so its head commit ${sha7(mergeSha)} is tested, ${tested.base
               ? `against its diff base ${sha7(tested.base)}`
               : 'and GitLab gave no diff base: only its last commit is scoped'}`);
@@ -274,35 +307,35 @@ function decideReadiness(f) {
     }
     const earlier = c.pool.filter((m) => m !== chosen);
     if (c.fallback) {
-      warnings.push(`nothing linked closes #${issue.iid} or names it in its source branch, so !${chosen.iid}, the latest linked merge into ${base}, `
-        + `is taken as its change${earlier.length ? ` (${listIids(earlier)} also merged into ${base})` : ''}`);
+      warnings.push(`nothing linked closes #${issue.iid} or names it in its source branch, so !${chosen.iid}, the latest linked merge into ${where}, `
+        + `is taken as its change${earlier.length ? ` (${listIids(earlier)} also merged into ${intoText(earlier)})` : ''}`);
     } else {
       if (earlier.length) {
-        warnings.push(`${listIids(earlier)} also merged into ${base}; !${chosen.iid}, the latest of the ticket's own, `
+        warnings.push(`${listIids(earlier)} also merged into ${intoText(earlier)}; !${chosen.iid}, the latest of the ticket's own, `
           + `is the commit tested, and all ${c.pool.length} are scoped`);
       }
-      const mentions = c.intoBase.filter((m) => !c.isOwn(m));
+      const mentions = c.intoTargets.filter((m) => !c.isOwn(m));
       if (mentions.length) {
-        warnings.push(`${listIids(mentions)} also merged into ${base} but only ${mentions.length === 1 ? 'mentions' : 'mention'} `
+        warnings.push(`${listIids(mentions)} also merged into ${intoText(mentions)} but only ${mentions.length === 1 ? 'mentions' : 'mention'} `
           + 'the ticket, so not tested');
       }
     }
     for (const m of c.open) warnings.push(`!${m.iid} is still open — not merged, so not tested`);
-    for (const m of c.elsewhere) warnings.push(`!${m.iid} was merged into ${m.target_branch}, not ${base}, so it is not the change tested`);
+    for (const m of c.elsewhere) warnings.push(`!${m.iid} was merged into ${m.target_branch}, not ${where}, so it is not the change tested`);
   } else if (c.real.length === 0 && c.promotions.length) {
     const hops = [...new Set(c.promotions.map((m) => `${m.source_branch} → ${m.target_branch}`))];
     reasons.push(`no merge request is linked to this ticket — only branch promotions (${hops.slice(0, 3).join(', ')}`
       + `${hops.length > 3 ? ' …' : ''}) mention it`);
   } else if (c.real.length === 0) {
     reasons.push('no merge request is linked to this ticket');
-  } else if (!c.fallback && c.intoBase.length) {
+  } else if (!c.fallback && c.intoTargets.length) {
     // The ticket's own MR is not merged, but another ticket's MR that mentions it is: that is not its change.
-    const one = c.intoBase.length === 1;
-    reasons.push(`no merge request of the ticket's own is merged into ${base} yet: ${describeStates(c.own).join('; ')} `
-      + `(${listIids(c.intoBase)} ${one ? 'is' : 'are'} merged into ${base} but only ${one ? 'mentions' : 'mention'} the ticket, `
+    const one = c.intoTargets.length === 1;
+    reasons.push(`no merge request of the ticket's own is merged into ${where} yet: ${describeStates(c.own).join('; ')} `
+      + `(${listIids(c.intoTargets)} ${one ? 'is' : 'are'} merged into ${intoText(c.intoTargets)} but only ${one ? 'mentions' : 'mention'} the ticket, `
       + `so ${one ? 'it is' : 'they are'} not its change)`);
   } else {
-    reasons.push(`no linked merge request is merged into ${base} yet: ${describeStates(c.real).join('; ')}`);
+    reasons.push(`no linked merge request is merged into ${where} yet: ${describeStates(c.real).join('; ')}`);
   }
 
   const ready = reasons.length === 0 && mergedMr !== null;
@@ -385,6 +418,25 @@ function asArray(body, what) {
   return body;
 }
 
+/**
+ * The target branches: the conductor's (ONESHOT_LOCAL_TESTS_TARGETS, JSON),
+ * else config/project.json `localTests.targetBranches`, else `branches.base`
+ * alone — as localTestsTargetBranches() in src/lib/config.ts reads them. Null
+ * when what is set is not a list of branch names.
+ */
+function targetBranchesFrom(env, cfg) {
+  let v;
+  if (env.ONESHOT_LOCAL_TESTS_TARGETS) {
+    try { v = JSON.parse(env.ONESHOT_LOCAL_TESTS_TARGETS); } catch { return null; }
+  } else if (cfg.localTests && cfg.localTests.targetBranches !== undefined) {
+    v = cfg.localTests.targetBranches;
+  } else {
+    v = [(cfg.branches && cfg.branches.base) || 'dev'];
+  }
+  if (!Array.isArray(v) || !v.length || !v.every((b) => typeof b === 'string' && BRANCH_NAME.test(b.trim()))) return null;
+  return [...new Set(v.map((b) => b.trim()))];
+}
+
 /** Everything the check needs, or the first thing missing. Environment first, config/project.json second. */
 function settings() {
   const env = process.env;
@@ -397,7 +449,8 @@ function settings() {
   const cfg = C.loadConfig('project.json') || {};
   const trigger = env.ONESHOT_LOCAL_TESTS_TRIGGER || (cfg.labels && cfg.labels.localTestsTrigger);
   if (!trigger) return missing('the trigger label (config/project.json labels.localTestsTrigger)');
-  const base = env.ONESHOT_LOCAL_TESTS_BASE || (cfg.branches && cfg.branches.base) || 'dev';
+  const targets = targetBranchesFrom(env, cfg);
+  if (!targets) return missing('a list of branch names in config/project.json localTests.targetBranches');
   let protectedBranches = cfg.branches && Array.isArray(cfg.branches.protected) ? cfg.branches.protected : null;
   if (env.ONESHOT_LOCAL_TESTS_PROTECTED) {
     try { protectedBranches = JSON.parse(env.ONESHOT_LOCAL_TESTS_PROTECTED); } catch { protectedBranches = null; }
@@ -416,7 +469,7 @@ function settings() {
     project,
     issue: `${project}/issues/${iid}`,
     trigger,
-    base,
+    targets,
     protectedBranches,
     releaseBranch,
     assumeLabel: env.ONESHOT_LOCAL_TESTS_ASSUME_LABEL === '1',
@@ -440,7 +493,7 @@ async function check() {
     }
     let mrs = mergeLinked(asArray(related, 'the linked merge requests'), asArray(closing, 'the closing merge requests'));
     const facts = {
-      issue, trigger: s.trigger, base: s.base, protectedBranches: s.protectedBranches,
+      issue, trigger: s.trigger, targets: s.targets, protectedBranches: s.protectedBranches,
       releaseBranch: s.releaseBranch, assumeLabel: s.assumeLabel,
     };
     // The list endpoints may leave out the merge commit, the author and the
@@ -488,7 +541,7 @@ async function main() {
 
 module.exports = {
   decideReadiness, chooseMerged, isPromotion, mergeShaOf, baseOf, mergeLinked, renderOutput, unknownReadiness,
-  classifyHttp, DEADLINE_MS, PROMOTION_TITLE,
+  classifyHttp, targetBranchesFrom, DEADLINE_MS, PROMOTION_TITLE,
 };
 
 if (require.main === module) {

@@ -510,7 +510,7 @@ function modeDeps(f: Fake, over: Partial<ModeDeps> = {}): Partial<ModeDeps> {
     dryCypress: false,
     config: () => CFG,
     qa: () => QA,
-    baseBranch: () => 'dev',
+    targetBranches: () => ['dev', 'stage'],
     workRepo: '/nowhere/erp',
     gitlab: {
       getIssue: async (iid) => (iid === f.iid ? ok({ ...f.issue, labels: [...f.issue.labels] }) : notFound()),
@@ -754,6 +754,37 @@ test('real: list → QA approved → Running → run on the merge commit → res
   assert.equal(again.state, 'done');
   assert.match(again.did, /already Automation Testing Done/);
   assert.equal(runs(f), 1);
+});
+
+test('real: a fix merged into stage is tested on stage — the prompt, the list and the report all say stage', async () => {
+  const f = fake();
+  f.readiness = ready(f.iid, { targetBranch: 'stage' });
+  await pass(f);
+  const prompt = f.sessions[0]!.prompt;
+  assert.match(prompt, /now merged into\nstage: the modules/);
+  assert.match(prompt, /the change as it landed on stage\)/);
+  assert.match(prompt, /stage just before this change\)/);
+  assert.match(notes(f)[0]!, /\(MR !321, merged into `stage` as `aaaaaaa`\)/);
+
+  qaSays(f, 'arsal.tariq', 'approved');
+  const done = await pass(f);
+  assert.equal(done.state, 'done', done.did);
+  const call = f.cliCalls.find((a) => a[0] === 'run')!;
+  assert.equal(call[call.indexOf('--ref') + 1], MERGE, 'the stage merge commit');
+  assert.equal(call[call.indexOf('--base') + 1], BASE, 'and stage just before it, for the re-run of a failure');
+  const results = notes(f)[2]!;
+  assert.match(results, /\| Spec \| Result \| Failing on stage too\? \| Reason \|/);
+  assert.match(results, /FYI @hira\.ijaz: \d+ failed tests? do(?:es)? not fail on stage, so this change likely caused/);
+});
+
+test('a merge the ERP clone has not seen is fetched from every target branch, stage included', async () => {
+  const f = fake();
+  f.readiness = ready(f.iid, { targetBranch: 'stage' });
+  f.parents.delete(MERGE);
+  const o = await pass(f);
+  assert.match(o.did, /the merge commit aaaaaaa is not in \/nowhere\/erp, even after a fetch/);
+  assert.ok(f.git.some((a) => a.join(' ') === 'fetch --quiet origin dev stage'), 'one fetch, both branches');
+  assert.equal(f.sessions.length, 0, 'no session for a commit the clone cannot name');
 });
 
 test('real: no test found, QA approved — marked done in one edit, a short record, nothing run', async () => {
@@ -1323,7 +1354,7 @@ test('ranges: the scope covers each of the ticket\'s own merged MRs, and the not
   assert.equal(r1.estimatedMinutes, 4 + 3);
   const n = notes(f)[0]!;
   assert.match(n, /^\*\*Impacted modules: Leaves, Training — Oneshot will run 3 automation tests/);
-  assert.match(n, /\*\*What changed:\*\* Fix the leave total, together with this ticket's earlier merged MR !310 \(MR !321, merged as `aaaaaaa`\)\./);
+  assert.match(n, /\*\*What changed:\*\* Fix the leave total, together with this ticket's earlier merged MR !310 \(MR !321, merged into `dev` as `aaaaaaa`\)\./);
   assert.match(n, /\*\*Not checked:\*\* !305, also merged for this ticket — its change could not be read/);
   assert.match(n, /From !310: imports cypress\/Pages\/Training\.ts/);
 
@@ -1332,6 +1363,20 @@ test('ranges: the scope covers each of the ticket\'s own merged MRs, and the not
   await pass(f);
   assert.equal(f.impactCalls.filter((a) => a[0] === '--erp').length, 2);
   assert.deepEqual(readLtJournal(f.iid)!.lists[1]!.scopedMrs, [310, 321]);
+});
+
+test('ranges: an earlier MR merged into the other target branch is named with its branch', async () => {
+  const f = fake();
+  f.parents.set(EARLY, EARLY_BASE);
+  f.parents.set(EARLY_BASE, '');
+  f.readiness = ready(f.iid, {
+    ranges: [{ mrIid: 310, base: null, head: EARLY, otherBranch: 'stage' }, { mrIid: 321, base: null, head: MERGE }],
+  });
+  await pass(f);
+  assert.equal(readLtJournal(f.iid)!.merged!.ranges![0]!.otherBranch, 'stage');
+  assert.deepEqual(readLtJournal(f.iid)!.lists[0]!.scopedMrs, [310, 321]);
+  assert.match(notes(f)[0]!,
+    /together with this ticket's earlier merged MR !310 on stage \(MR !321, merged into `dev` as `aaaaaaa`\)\./);
 });
 
 test('ranges: every merged MR of the ticket is analysed, and the main tests of each module it touched join the list', async () => {

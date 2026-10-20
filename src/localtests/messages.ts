@@ -34,7 +34,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { localTestsConfig } from '../lib/config.js';
+import { localTestsConfig, projectConfig } from '../lib/config.js';
 import { codeSpan, mdText, tableCell } from '../lib/gitlabmd.js';
 import { MAX_UPLOAD_BYTES, localTestsReportNote, mimeFor, type PublishCtx } from '../lib/publish.js';
 import type { LocalTestsRun, LocalTestsScope } from '../phases/types.js';
@@ -56,8 +56,10 @@ export interface LocalTestsNoteInfo {
   /** The merge commit of the ticket's MR: the code the tests run against. */
   mergeSha: string;
   mrIid?: number;
+  /** The branch that MR went into — dev, or stage for a fix merged there — named beside the merge commit. */
+  targetBranch?: string;
   /**
-   * Every one of the ticket's own MRs merged into the base that the list was
+   * Every one of the ticket's own MRs merged into a target branch that the list was
    * chosen for, oldest first, the tested one (`mrIid`, `mergeSha`) among them.
    * Absent or only the tested one: the note names that MR alone, as before.
    */
@@ -156,7 +158,7 @@ function automationRefName(): string {
   return localTestsConfig().automationRef.replace(/^origin\//, '') || 'master';
 }
 
-type ChangeInfo = Pick<LocalTestsNoteInfo, 'mergeSha' | 'mrIid' | 'mrTitle' | 'mrs'>;
+type ChangeInfo = Pick<LocalTestsNoteInfo, 'mergeSha' | 'mrIid' | 'mrTitle' | 'mrs' | 'targetBranch'>;
 
 /**
  * The ticket's other merged MRs the list was also chosen for, oldest first:
@@ -182,7 +184,8 @@ function earlierMrs(info: ChangeInfo): ScopedMr[] {
  * named after it, so QA can see every change the list stands for.
  */
 function whatChanged(s: Partial<LocalTestsScope>, info: ChangeInfo): string {
-  const where = `${info.mrIid ? `MR !${info.mrIid}` : 'the MR'}, merged as ${sha7(info.mergeSha)}`;
+  const branch = String(info.targetBranch ?? '').trim();
+  const where = `${info.mrIid ? `MR !${info.mrIid}` : 'the MR'}, merged ${branch ? `into ${codeSpan(branch)} ` : ''}as ${sha7(info.mergeSha)}`;
   const what = clause(info.mrTitle) || clause(s.reason);
   const head = `**What changed:** ${what ? `${what} (${where}).` : `the change in ${where}.`}`;
   const earlier = earlierMrs(info);
@@ -525,8 +528,9 @@ const VIDEOS_HEAD = '**Videos of the failed specs:**';
  * The results, rendered by the same code as the Loop's report
  * (`localTestsReportNote`), closed with the label the mode puts on: the ticket
  * is done whether the tests passed or failed, because the results are the
- * deliverable. When a failure does not fail on dev too, the MR's author is
- * mentioned: theirs is likely the change that broke it.
+ * deliverable. When a failure does not fail on the tested branch too (`branch`,
+ * the one the MR went into: dev or stage), the MR's author is mentioned:
+ * theirs is likely the change that broke it.
  *
  * A run with status `error` never happened, so it is a setup error and is
  * rendered as one — a note claiming the ticket done over a run that did not
@@ -535,11 +539,12 @@ const VIDEOS_HEAD = '**Videos of the failed specs:**';
 export function localTestsResultsNote(
   run: Partial<LocalTestsRun> | Record<string, unknown>,
   ctx: PublishCtx,
-  extra: { mrAuthor?: string } = {},
+  extra: { mrAuthor?: string; branch?: string } = {},
 ): LocalTestsNote {
   const r = run as Partial<LocalTestsRun>;
   if (r.status === 'error') return localTestsSetupErrorNote(String(r.reason ?? ''));
-  const report = localTestsReportNote(run as Record<string, unknown>, ctx);
+  const branch = String(extra.branch ?? '').trim() || projectConfig().branches.base || 'dev';
+  const report = localTestsReportNote(run as Record<string, unknown>, ctx, { branch });
   let body = report?.body ?? '**Local automation results:** the run recorded no result.';
   const videos = body.endsWith(`\n\n${VIDEOS_HEAD}`);
   if (videos) body = body.slice(0, -(VIDEOS_HEAD.length + 2));
@@ -549,7 +554,7 @@ export function localTestsResultsNote(
   const parts = [
     body,
     ...(theirs && author
-      ? [`FYI ${at(author)}: ${plural(theirs, 'failed test')} ${theirs === 1 ? 'does' : 'do'} not fail on dev, `
+      ? [`FYI ${at(author)}: ${plural(theirs, 'failed test')} ${theirs === 1 ? 'does' : 'do'} not fail on ${mdText(branch)}, `
         + `so this change likely caused ${theirs === 1 ? 'it' : 'them'}.`]
       : []),
     `Marked **${labels().done}**.`,

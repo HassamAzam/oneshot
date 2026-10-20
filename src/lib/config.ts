@@ -231,6 +231,12 @@ export interface LocalTestsPolicy {
    * absent, only branches.protected marks a promotion.
    */
   releaseBranchPattern?: string;
+  /**
+   * The branches a ticket's own MR may be merged into for its local tests to
+   * start (ERP: dev and stage). Optional: absent, `branches.base` alone. Read
+   * through localTestsTargetBranches().
+   */
+  targetBranches?: string[];
 }
 
 /**
@@ -702,6 +708,36 @@ export function mergeTriggerLabel(
   const set = (field: string): string => (typeof labels[field] === 'string' ? (labels[field] as string).trim() : '');
   if (!set('localTestsRunning') || !set('localTestsDone')) return null;
   return set('localTestsTrigger') || null;
+}
+
+/**
+ * A branch name this file hands to git as an argument: no leading dash (git
+ * would read an option), no `..`, nothing but the characters branch names use.
+ * hooks/local-tests-ready.cjs checks the same pattern.
+ */
+const BRANCH_NAME_RE = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
+
+/**
+ * The branches a ticket's own merge request may be merged into for its local
+ * automation tests to start: config/project.json `localTests.targetBranches`
+ * (ERP: `dev` and `stage`), else `branches.base` alone. The tests run against
+ * that merge, on whichever of them it went into. A promotion or a backmerge
+ * between two of them is never the change (hooks/local-tests-ready.cjs), so a
+ * fix merged into stage and carried to dev later is tested once.
+ *
+ * Null when the field is there but is not a list of branch names; the
+ * readiness check then holds every ticket with the field named, as it does for
+ * an unusable releaseBranchPattern. Never throws.
+ */
+export function localTestsTargetBranches(
+  cfg: Pick<ProjectConfig, 'localTests'> & Partial<Pick<ProjectConfig, 'branches'>> = projectConfig(),
+): string[] | null {
+  const block = cfg.localTests as unknown;
+  const v = block && typeof block === 'object' ? (block as { targetBranches?: unknown }).targetBranches : undefined;
+  if (v === undefined) return [cfg.branches?.base || 'dev'];
+  if (!Array.isArray(v) || v.length === 0
+    || !v.every((b) => typeof b === 'string' && BRANCH_NAME_RE.test(b.trim()))) return null;
+  return [...new Set((v as string[]).map((b) => b.trim()))];
 }
 
 /**

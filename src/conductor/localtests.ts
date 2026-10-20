@@ -672,6 +672,8 @@ export interface ScopeInputs {
   /** The merge commit and the MR that made it, named in the prompt. */
   mergeSha?: string;
   mrIid?: number;
+  /** The branch that MR went into (dev or stage), named in the prompt. Absent: the base branch. */
+  branch?: string;
 }
 
 /** The scope's spec files, de-duplicated, in the order the scope listed them. */

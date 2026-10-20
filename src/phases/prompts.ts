@@ -2529,6 +2529,8 @@ broke>", "attempts": <n> }\`. The conductor reads \`webm\` and attaches that fil
     const base = inputs?.base ?? (merge ? `${merge}^1` : `origin/${baseBranch()}`);
     const head = inputs?.head ?? (merge || 'HEAD');
     const mr = inputs?.mrIid ? `MR !${inputs.mrIid}` : 'the ticket\'s MR';
+    // The branch the MR went into: dev, or stage for a fix merged there.
+    const branch = inputs?.branch?.trim() || baseBranch();
     const patchFile = inputs?.patchFile ?? localTestsPatchFile(iid);
     const automationRef = automationRefName();
     // Absolute, from this checkout: under DRY_RUN $ONESHOT_HOME is state-dry,
@@ -2537,8 +2539,8 @@ broke>", "attempts": <n> }\`. The conductor reads \`webm\` and attaches that fil
     const allowed = lt.allowedPaths.map((p) => `\`${p}\``).join(', ') || '(none configured — make no edits)';
     const mins = budgetMin('local-tests-scope', 30);
     const commits = merge
-      ? `    base                  ${base}   (first parent of the merge commit: ${baseBranch()} just before this change)
-    head                  ${head}   (the merge commit of ${mr}: the change as it landed on ${baseBranch()})`
+      ? `    base                  ${base}   (first parent of the merge commit: ${branch} just before this change)
+    head                  ${head}   (the merge commit of ${mr}: the change as it landed on ${branch})`
       : `    base                  ${base}   (merge-base of HEAD with origin/${baseBranch()})
     head                  ${head}`;
 
@@ -2546,7 +2548,7 @@ broke>", "attempts": <n> }\`. The conductor reads \`webm\` and attaches that fil
 ${localTestsRequestBlock(ctx, wsa, patchFile)}
 ## What this phase decides
 Which workstream-automation (Cypress) specs run for this ticket's change, now merged into
-${baseBranch()}: the modules the change touched, and in each one the tests that see the change — the
+${branch}: the modules the change touched, and in each one the tests that see the change — the
 ones a testid links to it, and up to ${SCREEN_PICKS} that go through the screen it changed — plus the
 module's main-functionality tests. Your list goes on the ticket as the impacted-module report, a QA
 reviewer approves it before anything runs, and then conductor code (\`local-tests-run\`) runs exactly

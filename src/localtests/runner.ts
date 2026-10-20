@@ -10,8 +10,9 @@
  * The flow, one ticket at a time:
  *
  *   1. START when the ticket carries `Ready for Automation Testing` AND a merge
- *      request linked to it is merged into the base branch and is its real
- *      change, not a promotion (hooks/local-tests-ready.cjs). The Loop puts the
+ *      request linked to it is merged into one of the target branches (dev or
+ *      stage, localTests.targetBranches) and is its real change, not a
+ *      promotion (hooks/local-tests-ready.cjs). The Loop puts the
  *      label on itself, beside `Merged`, when it merges the ticket (runner.ts
  *      doneLabelSwap); a person can put it on any other merged ticket. Labelled
  *      but not merged is a quiet wait, re-checked on later ticks. Any assignee.
@@ -71,8 +72,8 @@ import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:
 import { join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, PAUSE, ROOT, WORK_REPO, envFlag, localTestsConfig, phaseByName, projectConfig, reviewersConfig, runDir,
-  type LocalTestsConfig,
+  DRY_RUN, PAUSE, ROOT, WORK_REPO, envFlag, localTestsConfig, localTestsTargetBranches, phaseByName, reviewersConfig,
+  runDir, type LocalTestsConfig,
 } from '../lib/config.js';
 import { currentProjectKey } from '../lib/journalproject.js';
 import {
@@ -170,8 +171,12 @@ export interface ModeDeps {
   config(): LocalTestsConfig;
   /** config/reviewers.json `qa`: who may answer the list. */
   qa(): string[];
-  /** branches.base: the branch a change must be merged into. */
-  baseBranch(): string;
+  /**
+   * localTests.targetBranches: the branches a change may be merged into (dev
+   * and stage), else branches.base alone. Empty when the field is unusable,
+   * which the readiness check names and holds on.
+   */
+  targetBranches(): string[];
   /** The ERP clone every checkout and run is cut from (WORK_REPO). */
   workRepo: string;
   gitlab: {
@@ -274,7 +279,7 @@ export function defaultModeDeps(): ModeDeps {
     dryCypress: DRY_RUN && envFlag('ONESHOT_LOCAL_TESTS_DRY_CYPRESS'),
     config: () => localTestsConfig(),
     qa: () => reviewersConfig().qa,
-    baseBranch: () => projectConfig().branches.base || 'dev',
+    targetBranches: () => localTestsTargetBranches() ?? [],
     workRepo: WORK_REPO,
     gitlab: {
       getIssue,
@@ -795,8 +800,9 @@ async function switchedOff(ctx: Ctx): Promise<string | null> {
 
 /**
  * The merge commit in the ERP clone, and the commit before the change learned.
- * A merge the clone has not seen yet is fetched from origin's base branch
- * once; a clone that still cannot name it is a hold, tried again next tick.
+ * A merge the clone has not seen yet is fetched from origin's target branches
+ * (dev and stage) once; a clone that still cannot name it is a hold, tried
+ * again next tick.
  *
  * The base is readiness's when it named one (for a merge that made no merge
  * commit it is the MR's own base, where `^1` would be the MR's previous commit),
@@ -811,11 +817,7 @@ async function ensureCommits(ctx: Ctx): Promise<{ ok: true; m: MergedRef & { bas
     try { await ctx.deps.git(['cat-file', '-e', `${m.mergeSha}^{commit}`], repo); return true; } catch { return false; }
   };
   if (!await has()) {
-    try {
-      await ctx.deps.git(['fetch', '--quiet', 'origin', ctx.deps.baseBranch()], repo, FETCH_MS);
-    } catch (err) {
-      log.warn(`${tag(ctx.iid)} could not fetch origin/${ctx.deps.baseBranch()} in ${repo}: ${errText(err).slice(0, 200)}`);
-    }
+    await fetchTargets(ctx, repo);
     if (!await has()) {
       return { ok: false, did: `hold — the merge commit ${sha7(m.mergeSha)} is not in ${repo}, even after a fetch` };
     }
@@ -843,6 +845,22 @@ async function ensureCommits(ctx: Ctx): Promise<{ ok: true; m: MergedRef & { bas
   return { ok: true, m: m as MergedRef & { base: string } };
 }
 
+/**
+ * `git fetch origin <every target branch>` in the ERP clone, for a commit it
+ * has not seen: a stage merge is on origin/stage, not dev. The names are the
+ * config's, checked by localTestsTargetBranches(), never GitLab's. A failure
+ * is logged; the caller finds the commit still missing and holds.
+ */
+async function fetchTargets(ctx: Ctx, repo: string): Promise<void> {
+  const branches = ctx.deps.targetBranches();
+  if (!branches.length) return;
+  try {
+    await ctx.deps.git(['fetch', '--quiet', 'origin', ...branches], repo, FETCH_MS);
+  } catch (err) {
+    log.warn(`${tag(ctx.iid)} could not fetch ${branches.join(', ')} from origin in ${repo}: ${errText(err).slice(0, 200)}`);
+  }
+}
+
 /** One change the analysis script reads: `base..head`, both in the ERP clone. */
 interface Range { mrIid: number; base: string; head: string }
 
@@ -865,8 +883,15 @@ async function rangesToScope(
   const present = async (sha: string): Promise<boolean> => {
     try { await ctx.deps.git(['cat-file', '-e', `${sha}^{commit}`], repo); return true; } catch { return false; }
   };
+  // An earlier MR merged into the other target branch (stage, with dev's
+  // merge tested) may be on a branch the clone was not fetched for.
+  let fetched = false;
   for (const r of listed) {
     try {
+      if (!await present(r.head) && !fetched) {
+        fetched = true;
+        await fetchTargets(ctx, repo);
+      }
       if (!await present(r.head)) throw new Error(`${sha7(r.head)} is not in ${repo}`);
       const base = r.base && await present(r.base) ? r.base : await ctx.deps.git(['rev-parse', '--verify', `${r.head}^1`], repo);
       earlier.push({ mrIid: r.mrIid, base, head: r.head });
@@ -899,8 +924,14 @@ const mrList = (ns: number[]): string => andList(ns.map((n) => `!${n}`));
 function changeTitle(m: MergedRef, rec: ListRecord): string {
   if ((m.ranges ?? []).length < 2) return m.title;
   const earlier = (rec.scopedMrs ?? [m.mrIid]).filter((n) => n !== m.mrIid);
+  // An earlier MR merged into the other target branch says so: the code under
+  // test is the tested MR's branch, which may not hold that change.
+  const named = earlier.map((n) => {
+    const other = m.ranges?.find((r) => r.mrIid === n)?.otherBranch;
+    return other ? `!${n} on ${other}` : `!${n}`;
+  });
   return `${m.title || `the change in !${m.mrIid}`}${earlier.length
-    ? `, together with this ticket's earlier merged ${earlier.length === 1 ? 'MR' : 'MRs'} ${mrList(earlier)}` : ''}`;
+    ? `, together with this ticket's earlier merged ${earlier.length === 1 ? 'MR' : 'MRs'} ${andList(named)}` : ''}`;
 }
 
 /** The ticket's own merged MRs a list was NOT chosen for: their commits or their analysis could not be read. */
@@ -927,6 +958,7 @@ function noteInfo(ctx: Ctx, rec: ListRecord, scope: Record<string, unknown> | nu
     : '';
   return {
     automationSha: rec.automationSha, mergeSha: m.mergeSha, mrIid: m.mrIid, qa: ctx.qa,
+    ...(m.targetBranch ? { targetBranch: m.targetBranch } : {}),
     ...(title ? { mrTitle: title } : {}),
     ...(rec.patchFile && rec.patchSha ? { patchFile: rec.patchFile } : {}),
     ...(moved ? { patchNote: moved } : {}),
@@ -1007,7 +1039,10 @@ function rangesOf(v: unknown): MergedRange[] {
     const x = r as Record<string, unknown>;
     if (typeof x.mrIid !== 'number' || !Number.isInteger(x.mrIid) || !isSha(x.head)) continue;
     if (out.some((o) => o.mrIid === x.mrIid)) continue;
-    out.push({ mrIid: x.mrIid, base: isSha(x.base) ? x.base : null, head: x.head });
+    out.push({
+      mrIid: x.mrIid, base: isSha(x.base) ? x.base : null, head: x.head,
+      ...(typeof x.otherBranch === 'string' && x.otherBranch.trim() ? { otherBranch: x.otherBranch.trim() } : {}),
+    });
   }
   return out;
 }
@@ -1020,7 +1055,7 @@ async function stepCheck(ctx: Ctx, reason: 'first' | 'changed' | 'cadence'): Pro
     writeLtJournal(ctx.j);
   }
   const j = ctx.j;
-  const r = await deps.readiness(iid, { trigger: cfg.labels.trigger, base: deps.baseBranch(), assumeLabel: ctx.opts.assumeLabel });
+  const r = await deps.readiness(iid, { trigger: cfg.labels.trigger, targets: deps.targetBranches(), assumeLabel: ctx.opts.assumeLabel });
   deps.event('local_tests_readiness', { iid, reason, verdict: r.verdict, mr: r.mergedMr?.iid ?? null }, j.runId);
   if (r.verdict === 'unknown') {
     log.warn(`${tag(iid)} hold — ${r.reason}`);
@@ -1246,6 +1281,7 @@ async function stepScope(ctx: Ctx, request: 'first' | 'feedback'): Promise<StepR
     ...prep.data,
     mergeSha: m.mergeSha,
     mrIid: m.mrIid,
+    ...(m.targetBranch ? { branch: m.targetBranch } : {}),
     ...(request === 'feedback' ? { request } : {}),
     ...(request === 'feedback' && j.request?.feedback ? { feedback: j.request.feedback } : {}),
   };
@@ -1765,8 +1801,10 @@ async function stepReport(ctx: Ctx): Promise<StepResult> {
   const run = mine(fromRun) ? fromRun : mine(kept) ? kept : null;
   if (!run) return stop(`hold — state/runs/${iid}/${RUN_ARTIFACT} is missing or is another run's`);
   if (j.resultsPostedAt == null) {
-    const note = localTestsResultsNote(run, { iid, runId: j.runId, journal: promptJournal(ctx) },
-      j.merged?.author ? { mrAuthor: j.merged.author } : {});
+    const note = localTestsResultsNote(run, { iid, runId: j.runId, journal: promptJournal(ctx) }, {
+      ...(j.merged?.author ? { mrAuthor: j.merged.author } : {}),
+      ...(j.merged?.targetBranch ? { branch: j.merged.targetBranch } : {}),
+    });
     const post = await postOnce(ctx, `results-${run.cacheKey.slice(0, 12)}`, note);
     if (!post.ok) return stop(`hold — the results could not be posted (${post.error})`);
     j.resultsPostedAt = Date.now();

@@ -58,8 +58,10 @@ export type LocalTestsState =
 /**
  * One of the ticket's own merged MRs: `base..head` is its change. `base` null:
  * the readiness check could not say, and it is `head^1`, learned from git.
+ * `otherBranch`: the branch it went into, when that is not the tested MR's
+ * (stage, with a dev merge tested), so the list can say so.
  */
-export interface MergedRange { mrIid: number; base: string | null; head: string }
+export interface MergedRange { mrIid: number; base: string | null; head: string; otherBranch?: string }
 
 /**
  * The change under test, as readiness proved it. `base` is the commit before
@@ -79,8 +81,8 @@ export interface MergedRef {
   author: string | null;
   url: string;
   /**
-   * Every MR that is the ticket's own and merged into the base branch, oldest
-   * first, the tested one last. Set only when there is more than one: the scope
+   * Every MR that is the ticket's own and merged into a target branch (dev or
+   * stage), oldest first, the tested one last. Set only when there is more than one: the scope
    * and the re-check then look at each one's change, not only the last.
    */
   ranges?: MergedRange[];

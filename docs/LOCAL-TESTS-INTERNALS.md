@@ -51,14 +51,19 @@ One ticket at a time, in this order. The mode keeps its own journal at
    to any other merged ticket.
 1. **Ready?** `hooks/local-tests-ready.cjs`, run by the conductor (docs/HOOKS.md, "Not a hook:
    `local-tests-ready`"): the trigger label, and the ticket's own merge request (one that closes it,
-   or names its iid in the source branch; a title only mentions it) merged into `branches.base`, never
-   a promotion or a backmerge. Own MRs that are all still open mean not ready, quietly; only a ticket
-   with no linked MR that closes it or names it in its source branch falls back to any linked MR merged into the base. The latest own
-   merged MR is the one tested: its merge (or squash) commit is `--ref`, and `mergedMr.base` is
-   `--base` — `diff_refs.base_sha` for an MR merged with no merge commit, else the merge commit's
-   first parent (`<mergeSha>^1` when the hook could not say). `mergedMr.ranges` lists every own MR
-   merged into the base, oldest first, as `{mrIid, base, head}`; the scope covers all of them and
-   the list comment names each.
+   or names its iid in the source branch; a title only mentions it) merged into one of
+   `localTests.targetBranches` (`dev` or `stage`; absent, `branches.base`), never a promotion or a
+   backmerge — so a hotfix merged into stage and backmerged into dev is tested once, on stage. Own
+   MRs that are all still open mean not ready, quietly; only a ticket with no linked MR that closes
+   it or names it in its source branch falls back to any linked MR merged into a target branch. The
+   latest own merged MR, on whichever target branch, is the one tested: its merge (or squash) commit
+   is `--ref`, and `mergedMr.base` is `--base` — `diff_refs.base_sha` for an MR merged with no merge
+   commit, else the merge commit's first parent (`<mergeSha>^1` when the hook could not say), so a
+   failure is re-run on the same branch just before the merge. A merge commit the ERP clone has not
+   seen is fetched from every target branch. `mergedMr.ranges` lists every own MR merged into a
+   target branch, oldest first, as `{mrIid, base, head}` (plus `otherBranch` for one merged into
+   another branch than the tested MR); the scope covers all of them and the list comment names
+   each, with the branch of any merged elsewhere.
    Only one desk per team runs the mode: the per-ticket `lock` is an O_EXCL file under
    `state/localtests/<iid>/` and does not reach other machines, and a desk skips a ticket whose
    notes already carry another desk's list.

@@ -11,7 +11,9 @@
  *
  * Every iid, MR number and sha is invented. The shapes mirror real tickets: a
  * merged fix beside a `stage → dev` backmerge, a fix still open, a fix merged
- * into stage instead of dev, two fixes merged one after the other, the
+ * into stage (a wait with dev the only target, ready with stage one too), a
+ * hotfix on stage and a fix on dev for one ticket, two fixes merged one after
+ * the other, the
  * ticket's own fix still open while another ticket's MR that mentions it is
  * merged, and a squash or fast-forward merge with no merge commit.
  */
@@ -37,6 +39,8 @@ interface Facts {
   mrs: Mr[];
   trigger: string;
   base: string;
+  /** The target branches; absent, `base` alone, as before there were several. */
+  targets?: string[];
   protectedBranches: string[];
   releaseBranch: RegExp | null;
   assumeLabel?: boolean;
@@ -49,6 +53,7 @@ interface ReadyHook {
   mergeLinked(related: Mr[], closing: Mr[]): Mr[];
   renderOutput(r: LocalTestsReadiness): Record<string, unknown>;
   classifyHttp(status: number): string;
+  targetBranchesFrom(env: Record<string, string>, cfg: Record<string, unknown>): string[] | null;
 }
 
 const hook = createRequire(import.meta.url)('../../hooks/local-tests-ready.cjs') as ReadyHook;
@@ -116,6 +121,72 @@ test('an open or unmerged fix is a quiet wait, with what is missing named', () =
   const stage = hook.decideReadiness(facts({ mrs: [fix({ target_branch: 'stage' })] }));
   assert.equal(stage.verdict, 'not-ready', 'merged, but not into the base');
   assert.match(stage.reason, /!301 was merged into stage/);
+});
+
+test('with dev and stage as targets, a fix merged into stage is ready, and stage is the code tested', () => {
+  const r = hook.decideReadiness(facts({ targets: ['dev', 'stage'], mrs: [fix({ target_branch: 'stage' })] }));
+  assert.equal(r.verdict, 'ready', r.reason);
+  assert.equal(r.mergedMr?.targetBranch, 'stage');
+  assert.equal(r.mergedMr?.mergeSha, SHA('a'));
+  assert.deepEqual(r.mergedMr?.ranges, [{ mrIid: 301, base: null, head: SHA('a') }], 'the tested merge names no other branch');
+  assert.match(r.reason, /!301 \(oneshot\/ticket-990601-leave-form → stage\) is merged as aaaaaaa/);
+  assert.deepEqual(r.warnings, []);
+
+  // With dev alone as the target, the same merge is the wait it always was.
+  assert.equal(hook.decideReadiness(facts({ mrs: [fix({ target_branch: 'stage' })] })).verdict, 'not-ready');
+});
+
+test('with dev and stage as targets, a promotion between them is still never the change, so a fix is tested once', () => {
+  const both = ['dev', 'stage'];
+  for (const promo of [
+    fix({ iid: 302, source_branch: 'stage', target_branch: 'dev', title: 'stage -> dev' }),
+    fix({ iid: 303, source_branch: 'dev', target_branch: 'stage', title: 'dev -> stage' }),
+    fix({ iid: 304, source_branch: 'sync-stage', target_branch: 'dev', title: 'Backmerge stage into dev' }),
+    fix({ iid: 305, source_branch: 'Adhoc-2026-10-01', target_branch: 'stage', title: 'release' }),
+  ]) {
+    const r = hook.decideReadiness(facts({ targets: both, mrs: [promo] }));
+    assert.equal(r.verdict, 'not-ready', promo.title);
+    assert.match(r.reason, /only branch promotions/, promo.title);
+  }
+  // A hotfix merged into stage, carried to dev later by a backmerge: the hotfix is the change.
+  const hotfix = fix({ iid: 306, target_branch: 'stage', merged_at: '2026-10-08T09:00:00Z', merge_commit_sha: SHA('5') });
+  const backmerge = fix({ iid: 307, source_branch: 'stage', target_branch: 'dev', title: 'stage -> dev', merged_at: '2026-10-09T09:00:00Z', merge_commit_sha: SHA('6') });
+  const r = hook.decideReadiness(facts({ targets: both, mrs: [hotfix, backmerge] }));
+  assert.equal(r.mergedMr?.iid, 306);
+  assert.equal(r.mergedMr?.targetBranch, 'stage');
+  assert.deepEqual(r.mergedMr?.ranges, [{ mrIid: 306, base: null, head: SHA('5') }]);
+});
+
+test('own MRs merged into stage and into dev: the latest is tested, both are scoped, and the other branch is named', () => {
+  const onStage = fix({ iid: 310, source_branch: 'hira/990601-hotfix', target_branch: 'stage', merged_at: '2026-10-08T09:00:00Z', merge_commit_sha: SHA('1') });
+  const onDev = fix({ iid: 311, source_branch: 'hira/990601-fix', target_branch: 'dev', merged_at: '2026-10-08T12:00:00Z', merge_commit_sha: SHA('2') });
+  const r = hook.decideReadiness(facts({ targets: ['dev', 'stage'], mrs: [onStage, onDev] }));
+  assert.equal(r.mergedMr?.iid, 311, 'the latest merge is the newest code');
+  assert.equal(r.mergedMr?.targetBranch, 'dev');
+  assert.deepEqual(r.mergedMr?.ranges, [
+    { mrIid: 310, base: null, head: SHA('1'), otherBranch: 'stage' },
+    { mrIid: 311, base: null, head: SHA('2') },
+  ], 'the stage MR is scoped, and says it is on stage: dev\'s code may not hold it');
+  assert.ok(r.warnings.some((w) => /!310 also merged into stage; !311, the latest of the ticket's own/.test(w)));
+  assert.ok(!r.warnings.some((w) => /was merged into stage, not/.test(w)), 'stage is a target now, not elsewhere');
+});
+
+test('a merge into a branch that is not a target is still a wait, and the reason names the targets', () => {
+  const r = hook.decideReadiness(facts({ targets: ['dev', 'stage'], mrs: [fix({ target_branch: 'master' })] }));
+  assert.equal(r.verdict, 'not-ready');
+  assert.match(r.reason, /no linked merge request is merged into dev or stage yet: !301 was merged into master/);
+});
+
+test('the target branches: the conductor\'s list, else the config\'s, else the base branch; anything else is none', () => {
+  const cfg = { branches: { base: 'dev' }, localTests: { targetBranches: ['dev', 'stage'] } };
+  assert.deepEqual(hook.targetBranchesFrom({ ONESHOT_LOCAL_TESTS_TARGETS: '["stage"]' }, cfg), ['stage']);
+  assert.deepEqual(hook.targetBranchesFrom({}, cfg), ['dev', 'stage']);
+  assert.deepEqual(hook.targetBranchesFrom({}, { branches: { base: 'develop' } }), ['develop'], 'absent: the base alone');
+  assert.deepEqual(hook.targetBranchesFrom({}, { localTests: { targetBranches: [' dev ', 'dev', 'stage'] } }), ['dev', 'stage']);
+  for (const bad of ['[]', '["-x"]', '["a..b"]', '["dev stage"]', '"dev"', 'not json', '[1]']) {
+    assert.equal(hook.targetBranchesFrom({ ONESHOT_LOCAL_TESTS_TARGETS: bad }, cfg), null, bad);
+  }
+  assert.equal(hook.targetBranchesFrom({}, { localTests: { targetBranches: 'dev' } }), null, 'one name is not a list');
 });
 
 test('the trigger is required, unless a dry run assumes it; the merged check applies either way', () => {
@@ -365,7 +436,7 @@ test('the real script: a merged fix found through the closing list, its merge co
   world.details.set(320, fix({ iid: 320, merge_commit_sha: SHA('e'), author: { username: 'usman.nasir' } }));
   world.requests = [];
 
-  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, base: 'dev' }, env());
+  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, targets: ['dev'] }, env());
 
   assert.equal(r.verdict, 'ready', r.reason);
   assert.equal(r.mergedMr?.iid, 320);
@@ -387,7 +458,7 @@ test('the real script: two own merges, each read in full, the latest tested and 
   world.details.set(381, fix({ iid: 381, merged_at: '2026-10-08T12:00:00Z', merge_commit_sha: SHA('5') }));
   world.requests = [];
 
-  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, base: 'dev' }, env());
+  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, targets: ['dev'] }, env());
 
   assert.equal(r.verdict, 'ready', r.reason);
   assert.equal(r.mergedMr?.iid, 381);
@@ -402,7 +473,7 @@ test('the real script: a fast-forward merge reads its diff base from the MR itse
   world.related = [fix({ iid: 390, merge_commit_sha: null })];
   world.closing = [];
   world.details.set(390, fix({ iid: 390, merge_commit_sha: null, squash_commit_sha: null, sha: SHA('c'), diff_refs: { base_sha: SHA('b'), head_sha: SHA('c') } }));
-  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, base: 'dev' }, env());
+  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, targets: ['dev'] }, env());
   assert.equal(r.verdict, 'ready', r.reason);
   assert.equal(r.mergedMr?.mergeSha, SHA('c'));
   assert.equal(r.mergedMr?.base, SHA('b'));
@@ -415,23 +486,46 @@ test('the real script: the ticket\'s own MR open and a mention merged is a wait,
   ];
   world.closing = [];
   world.requests = [];
-  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, base: 'dev' }, env());
+  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, targets: ['dev'] }, env());
   assert.equal(r.verdict, 'not-ready');
   assert.equal(r.mergedMr, null);
   assert.match(r.reason, /!395 is still open \(!396 is merged into dev but only mentions the ticket/);
   assert.ok(!world.requests.some((u) => /\/merge_requests\/\d+$/.test(u)), 'nothing to read in full');
 });
 
+test('the real script: with dev and stage as targets, a fix merged into stage is ready on stage', async () => {
+  world.related = [fix({ iid: 400, target_branch: 'stage', merge_commit_sha: null })];
+  world.closing = [];
+  world.details.set(400, fix({ iid: 400, target_branch: 'stage', merge_commit_sha: SHA('7') }));
+  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, targets: ['dev', 'stage'] }, env());
+  assert.equal(r.verdict, 'ready', r.reason);
+  assert.equal(r.mergedMr?.targetBranch, 'stage');
+  assert.equal(r.mergedMr?.mergeSha, SHA('7'), 'its merge commit, read from the MR itself');
+
+  const devOnly = await checkLocalTestsReady(990601, { trigger: TRIGGER, targets: ['dev'] }, env());
+  assert.equal(devOnly.verdict, 'not-ready');
+  assert.match(devOnly.reason, /no linked merge request is merged into dev yet: !400 was merged into stage/);
+});
+
+test('the real script: no usable target branch is `unknown`, naming the field to fix', async () => {
+  world.related = [fix({ iid: 401 })];
+  world.closing = [];
+  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, targets: [] }, env());
+  assert.equal(r.verdict, 'unknown');
+  assert.equal(r.errorKind, 'config');
+  assert.match(r.reason, /localTests\.targetBranches/);
+});
+
 test('the real script: labelled, not merged, and an old GitLab without closed_by', async () => {
   world.related = [fix({ iid: 330, state: 'opened', merged_at: null, merge_commit_sha: null })];
   world.closing = null;
-  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, base: 'dev' }, env());
+  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, targets: ['dev'] }, env());
   assert.equal(r.verdict, 'not-ready');
   assert.match(r.reason, /!330 is still open/);
 });
 
 test('the real script: a refused token is `unknown`, never a verdict', async () => {
-  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, base: 'dev' }, env({ ONESHOT_LOCAL_TESTS_TOKEN: 'wrong' }));
+  const r = await checkLocalTestsReady(990601, { trigger: TRIGGER, targets: ['dev'] }, env({ ONESHOT_LOCAL_TESTS_TOKEN: 'wrong' }));
   assert.equal(r.verdict, 'unknown');
   assert.equal(r.errorKind, 'auth');
   assert.doesNotMatch(JSON.stringify(r), /wrong/, 'the token is never repeated');
@@ -443,10 +537,10 @@ test('the real script: --assume-label stands in for the trigger only', async () 
   world.closing = [];
   world.details.set(340, fix({ iid: 340 }));
   try {
-    const plain = await checkLocalTestsReady(990601, { trigger: TRIGGER, base: 'dev' }, env());
+    const plain = await checkLocalTestsReady(990601, { trigger: TRIGGER, targets: ['dev'] }, env());
     assert.equal(plain.verdict, 'not-ready');
     assert.equal(plain.labelled, false);
-    const assumed = await checkLocalTestsReady(990601, { trigger: TRIGGER, base: 'dev', assumeLabel: true }, env());
+    const assumed = await checkLocalTestsReady(990601, { trigger: TRIGGER, targets: ['dev'], assumeLabel: true }, env());
     assert.equal(assumed.verdict, 'ready');
   } finally {
     world.issue.labels = [TRIGGER];

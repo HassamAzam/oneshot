@@ -196,6 +196,8 @@ test('the report leads with the counts, then the failures and whether dev fails 
   const { body } = localTestsReportNote(run(), ltCtx)!;
   assert.equal(body.split('\n\n')[0], '**Local automation results** — 3 passed, 2 failed (6 tests, 4 min)');
   assert.ok(body.includes('| Spec | Result | Failing on dev too? | Reason |'));
+  assert.ok(localTestsReportNote(run(), ltCtx, { branch: 'stage' })!.body.includes('| Spec | Result | Failing on stage too? | Reason |'),
+    'a fix merged into stage is re-run on stage');
   assert.ok(body.includes('| `cypress/e2e/b.cy.ts`<br>approves | :x: failed | no — likely caused by this ticket | '
     + 'AssertionError: expected Approved |'), 'the reason is the assertion, not the stack');
   assert.ok(body.includes('| :x: failed | yes — not caused by this ticket | Timed out |'));

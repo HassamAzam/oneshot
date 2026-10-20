@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { ROOT, localTestsConfig, mergeTriggerLabel, projectConfig, requiredLabels } from './config.js';
+import { ROOT, localTestsConfig, localTestsTargetBranches, mergeTriggerLabel, projectConfig, requiredLabels } from './config.js';
 
 const risk = JSON.parse(readFileSync(join(ROOT, 'config', 'risk-modules.json'), 'utf8')) as {
   modules: Array<{ name: string; paths?: string[] }>;
@@ -120,6 +120,19 @@ test('the trigger is required on a desk with the mode off when its merges put it
   const got = requiredLabels(l, [], false, false, LT_LABELS.localTestsTrigger);
   assert.deepEqual(names(got).filter((n) => Object.values(LT_LABELS).includes(n)), [LT_LABELS.localTestsTrigger]);
   assert.match(got.find((x) => x.name === LT_LABELS.localTestsTrigger)?.why ?? '', /at merge/);
+});
+
+test('localTestsTargetBranches: the config\'s branches, else the base alone; anything but branch names is null', () => {
+  type Cfg = Parameters<typeof localTestsTargetBranches>[0];
+  const withTargets = (targetBranches: unknown): Cfg => ({ branches: { base: 'dev' }, localTests: { targetBranches } } as unknown as Cfg);
+  assert.deepEqual(localTestsTargetBranches(withTargets(['dev', 'stage'])), ['dev', 'stage']);
+  assert.deepEqual(localTestsTargetBranches(withTargets([' stage ', 'stage'])), ['stage'], 'trimmed, each once');
+  assert.deepEqual(localTestsTargetBranches({ branches: { base: 'develop' }, localTests: {} } as unknown as Cfg), ['develop'],
+    'absent: the base branch alone');
+  for (const bad of [[], ['-x'], ['a..b'], ['dev stage'], 'dev', [1]]) {
+    assert.equal(localTestsTargetBranches(withTargets(bad)), null, JSON.stringify(bad));
+  }
+  assert.deepEqual(localTestsTargetBranches(), ['dev', 'stage'], 'the team config: a merge into dev or stage starts the tests');
 });
 
 test('mergeTriggerLabel is the team\'s switch: the trigger while localTests is enabled, null otherwise', () => {

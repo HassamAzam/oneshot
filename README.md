@@ -399,7 +399,7 @@ placed after every phase the Loop runs, so `ui-evidence` and `mr` still batch ex
  Loop merges the ticket ──▶ ONE label edit: "Merged" + "Ready for Automation Testing"
    │   (a person can put the label on any other merged ticket too)
    ▼ next tick of the desk that runs the mode
- "Ready for Automation Testing" + the ticket's own MR merged into dev (any assignee)
+ "Ready for Automation Testing" + the ticket's own MR merged into dev or stage (any assignee)
    │   labelled, not merged yet ──▶ no comment; checked again on later ticks
    ▼
  throwaway ERP worktree at the merge commit ──▶ local-tests-scope picks the tests:
@@ -421,11 +421,13 @@ placed after every phase the Loop runs, so `ui-evidence` and `mr` still batch ex
   label. A person can still put the label on any other merged ticket to ask for a run.
 - **When it runs.** The ticket carries `Ready for Automation Testing` **and** the ticket's own MR
   — one that closes it, or names its number in its source branch (a title only mentions it) — is merged into
-  `branches.base`; a promotion or a backmerge (source `stage`/`master`/`main`/`dev`, a release
+  one of `localTests.targetBranches` (`dev` or `stage`; absent, `branches.base`), and is tested on
+  the branch it went into; a promotion or a backmerge (source `stage`/`master`/`main`/`dev`, a release
   branch matching `localTests.releaseBranchPattern`, or a title like `stage -> dev` or `Backmerge`)
-  never counts. A ticket whose own MRs are all still open waits quietly, even when an MR that only
-  mentions it is merged; only a ticket with no linked MR that closes it or names it in its source
-  branch falls back to any linked MR merged into the base. `hooks/local-tests-ready.cjs` decides,
+  never counts, so a stage hotfix backmerged into dev is tested once. A ticket whose own MRs are all
+  still open waits quietly, even when an MR that only mentions it is merged; only a ticket with no
+  linked MR that closes it or names it in its source branch falls back to any linked MR merged into
+  a target branch. `hooks/local-tests-ready.cjs` decides,
   run by the conductor before any session (it is not a session hook:
   [docs/HOOKS.md](docs/HOOKS.md)). The code under test is the latest own merged MR's merge (or
   squash) commit; the base is the commit before the change — the merge commit's first parent, or
@@ -468,13 +470,13 @@ placed after every phase the Loop runs, so `ui-evidence` and `mr` still batch ex
   committed `cypress.env.json` into a mode-600 `cypress.env.json` in that throwaway worktree,
   written before the app build and removed with it at cleanup. A failing spec is re-run once on
   the same code; a test that passes the second time is reported as flaky, and only tests that fail
-  twice are re-run on the base to say whether they fail on dev too. Then it posts the automation
+  twice are re-run on the base to say whether they fail on that branch (dev or stage) too. Then it posts the automation
   report and drops the copy, the worktrees and the browser whatever happened. One Cypress run per
   desk at a time (`src/lib/cypresslease.ts`): a busy desk (the lease, the ports, the baseline)
   makes the run wait for a later tick, not record an error.
 - **The automation report finishes the ticket.** The results comment ends "Marked **Automation
   Testing Done**." and the label moves from `Running TestCases Locally` to `Automation Testing
-  Done`, passed or failed; a failure that does not also fail on dev @mentions the MR's author. A
+  Done`, passed or failed; a failure that does not also fail on the tested branch @mentions the MR's author. A
   run that could not happen at all (a setup error) puts `Ready for Automation Testing` back and is
   not marked done. Tests that could not be chosen at all (the scope kept failing) change no label:
   the comment says so, @mentions QA, and any comment from a QA reviewer makes Oneshot try again.

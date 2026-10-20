@@ -7,7 +7,7 @@ description: Pick the workstream-automation (Cypress) specs to run for a merged 
 
 Oneshot runs the automation specs a ticket's change can break AFTER that change is merged. When
 the Loop merges a ticket it puts `Ready for Automation Testing` on it beside `Merged` (a person can
-put it on any other merged ticket); once one of its merge requests is merged into the base branch,
+put it on any other merged ticket); once one of its merge requests is merged into dev or stage,
 Oneshot checks out that MR's merge commit and runs this session to decide WHICH specs and prepare
 them. The list goes on the ticket as the impacted-module report, a QA reviewer approves it, and only
 then does `local-tests-run` (plain code) run exactly that list on a private copy of the automation

@@ -184,7 +184,7 @@ These are the same for everyone. Change them in a PR, not per desk.
 Oneshot merges the ticket ──▶ "Merged" + "Ready for Automation Testing"  (one label edit)
    │     (or a person puts the label on any other merged ticket)
    ▼     the desk that runs this mode, on its next tick
-"Ready for Automation Testing"  +  the ticket's MR is merged into dev
+"Ready for Automation Testing"  +  the ticket's MR is merged into dev or stage
    │     (labelled, not merged yet: Oneshot waits quietly and checks again later)
    ▼
 throwaway ERP checkout at the MR's merge commit
@@ -212,15 +212,21 @@ automation report ──▶ label "Running TestCases Locally" ──▶ "Automat
    this mode sees every merged ticket. A person can put the label on any other
    merged ticket. Then both must hold:
    - the ticket carries **`Ready for Automation Testing`**, and
-   - the ticket's own merge request is **merged into `dev`** (`branches.base`).
+   - the ticket's own merge request is **merged into `dev` or `stage`**
+     (`localTests.targetBranches`). The tests run on the branch it went into: a
+     hotfix merged into `stage` is tested on stage's merge commit, and a failure
+     is re-run on stage just before it.
      Its own MR is one that closes the ticket, or has the ticket number in its
      branch name; a `#N` in another MR's title only mentions it. A promotion or backmerge (from `stage`, `master`,
-     `main` or `dev`, a release branch like `Adhoc-2026-10-19`, or titled like `stage -> dev` or `Backmerge`) never counts.
+     `main` or `dev`, a release branch like `Adhoc-2026-10-19`, or titled like `stage -> dev` or `Backmerge`) never counts,
+     so a fix merged into stage and backmerged into dev later is tested once. A ticket with its own MRs
+     merged into both has the latest one tested, and the tests chosen for all of them; the list names
+     an MR that went into the other branch.
 
    If the ticket has its own MR but it is not merged yet, Oneshot posts nothing
    and checks again on later passes — even when some other MR that only
    mentions the ticket is merged. Only when no linked MR closes the ticket or
-   names it in its branch does any linked MR merged into `dev` count.
+   names it in its branch does any linked MR merged into `dev` or `stage` count.
 
    Any assignee, on the one desk that runs this mode (see the note at the top;
    a desk also skips a ticket another desk has already posted a list for).
@@ -295,12 +301,13 @@ automation report ──▶ label "Running TestCases Locally" ──▶ "Automat
    later pass.
 6. **The automation report.** **"Local automation results"** shows pass/fail
    counts (and says so in the first line if Cypress was stopped at the time
-   limit), a table with a reason for each failure and whether it fails on dev too,
+   limit), a table with a reason for each failure and whether it fails on the
+   tested branch too (dev, or stage for a fix merged there),
    the tests that passed only on a retry, videos of failed tests, tests that can't
    run locally, and any notes from the run. It ends with "Marked **Automation
    Testing Done**." and the label moves from `Running TestCases Locally` to
    `Automation Testing Done` — **whether the tests passed or failed**. A failure
-   that does *not* also fail on dev @mentions the MR's author, for their
+   that does *not* also fail on that branch @mentions the MR's author, for their
    information. This is the last thing Oneshot does on the ticket.
 7. **If the run could not happen** (a setup error: no baseline, a patch that no
    longer applies, the app would not build), Oneshot posts the error, takes

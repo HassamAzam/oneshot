@@ -1242,6 +1242,15 @@ test('the scope session is handed the conductor\'s facts: worktree, commits, aut
   assert.ok(p.includes(SCOPE_INPUTS.patchFile), 'told where its edits are saved');
 });
 
+test('the scope prompt names the branch the MR went into: stage for a fix merged there, else the base', () => {
+  const merged = { ...SCOPE_INPUTS, mergeSha: 'aaaa2222', mrIid: 11200 };
+  const stage = scopePrompt({ localTests: { ...merged, branch: 'stage' } });
+  assert.match(stage, /now merged into\nstage: the modules/);
+  assert.match(stage, /first parent of the merge commit: stage just before this change/);
+  assert.match(stage, /the merge commit of MR !11200: the change as it landed on stage/);
+  assert.match(scopePrompt({ localTests: merged }), /now merged into\ndev: the modules/, 'no branch named: the base branch');
+});
+
 test('the analysis script is named by an absolute path that exists, never through $ONESHOT_HOME', () => {
   // Under DRY_RUN $ONESHOT_HOME is state-dry, which has no skills/: a path built
   // from it fails with module-not-found instead of a named JSON code.
