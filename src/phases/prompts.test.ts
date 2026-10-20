@@ -747,6 +747,30 @@ test('review sees the plan\'s reuse verdicts one per line, under a heading that 
   ));
 });
 
+test('design settles intent, entry points and affordance before drawing \u2014 in the prompt, not only the skill', () => {
+  // `SKILL_LINE` promises the prompt body always carries enough method to
+  // proceed without the skill, and design's list resolves from the worktree:
+  // where `design-proposal` does not resolve, the prompt IS the method. Three
+  // skill edits were once silently contradicted by prompts.ts carrying its own
+  // compressed copy of the same rule, and nothing flagged it \u2014 so the two
+  // copies of \u00a72 are asserted against one vocabulary here.
+  const prompt = promptFor(cfg('design'), ctx(ticket({ iid: 424244, labels: ['Design'] })));
+  const skill = readFileSync(join(ROOT, 'skills', 'design-proposal', 'SKILL.md'), 'utf8');
+  for (const marker of ['inference task', 'openQuestion', 'entry point', 'affordance', 'uiPath']) {
+    assert.ok(prompt.includes(marker), `the design prompt is missing '${marker}'`);
+    assert.ok(skill.includes(marker), `the design-proposal skill is missing '${marker}'`);
+  }
+  // The reading has to outlive the gate. `openQuestions` and `decisions` are
+  // rendered for the ticket and never forwarded, so both copies send it to a
+  // screen's `purpose` \u2014 which approvedDesignBlock() does hand on.
+  for (const [where, text] of [['prompt', prompt], ['skill', skill]] as const) {
+    assert.match(text, /`purpose`/, `the design ${where} does not route the reading into \`purpose\``);
+    // DESIGN_SCHEMA.screens.items is additionalProperties:false with no
+    // `after`, so asking for one spends SDK schema retries on every screen.
+    assert.doesNotMatch(text, /`after`/, `the design ${where} names an \`after\` field the schema has no slot for`);
+  }
+});
+
 // ---------------------------------------------------------------- design tokens
 
 test('design is told the tokens are generated, where they are, and not to redo them', () => {

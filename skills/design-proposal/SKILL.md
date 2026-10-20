@@ -1,6 +1,6 @@
 ---
 name: design-proposal
-description: Draw what a ticket's UI should look like, before anyone plans or builds it, and hand a human something they can approve — mockups grounded in the real product's tokens, before/after captures, and for a flow change each state of that journey drawn as its own screen. Use when asked to "design this before we build it", "what should this look like", "mock this up for sign-off", or when Oneshot's design phase runs on a ticket labelled Design. Draws only; never implements, never edits application code.
+description: Draw what a ticket's UI should look like, before anyone plans or builds it, and hand a human something they can approve — the feature's purpose and entry points settled before the first pixel, mockups grounded in the real product's tokens, before/after captures, and for a flow change each state of that journey drawn as its own screen. Use when asked to "design this before we build it", "what should this look like", "mock this up for sign-off", or when Oneshot's design phase runs on a ticket labelled Design. Draws only; never implements, never edits application code.
 ---
 
 # Design Proposal
@@ -33,29 +33,43 @@ anything in tokens, settle two things the ticket usually does not spell out:
 what the feature is *for*, and where in the app it surfaces.
 
 **A terse ticket is an inference task, not a literal one.** A one- or two-line
-description names a thing; it does not specify it. The noun in the title —
-"announcement module", "activity feed", "dashboard" — is where you start
-reading, not where you stop. Derive, before drawing: who posts and who reads
-this, and what behaviour it formalises or replaces. "Everyone can add an
-announcement about their work" is not a CRUD list — it can be a company-wide
-feed people use to broadcast their own achievements, a formal alternative to
-doing it ad-hoc in chat. Design the literal reading and you spend a reviewer's
-round being told what the feature was always for. So state the interpretation
-you are designing to as the **first `openQuestion`, carrying a default** — a
-wrong reading then costs one comment, not a re-rendered lap.
+description names a thing; it does not specify it. The noun in the title is
+where you start reading, not where you stop. Derive, before drawing: who acts
+and who reads, and what existing behaviour this formalises, replaces, or moves
+in-product from wherever people improvise it today. A sentence granting everyone
+the ability to add a record is rarely a request for a CRUD list — read what the
+record is *for* before you draw the table that holds it. Design the literal
+reading and you spend a reviewer's round being told what the feature was always
+for.
+
+So make that reading reviewable, and make it survive. State it as the **first
+`openQuestion`, carrying a recommendation**: the gate posts open questions with
+their recommendation and says the recommendation is used absent an answer, so a
+reading stated there is one a reviewer can veto before approving anything. Then
+put it in the primary screen's **`purpose`** as well — `openQuestions` and
+`decisions` reach the gate and stop there, while a screen's `purpose` and `note`
+are the only prose `plan` and `implement` are handed. An `approved` makes your
+stated reading the specification; a comment correcting it re-runs this phase
+with their words appended, the same as any other feedback.
 
 **A feature has entry points in the app it joins, not just a page of its own.**
-Where does someone already mid-flow meet this — a card on the homepage, a
-slider, a nav entry, a badge on a screen they already open? That surface is part
-of the design, and the existing screen it lands on gets its own `before`/`after`
-the same as the feature's own page. A feature reachable only from its own URL is
-a design that drew half the ticket and left the reviewer to name the other half.
+Where does someone already mid-flow meet this — the surface they are already on
+when it becomes relevant to them? That surface is part of the design, not a
+follow-up. Draw the **one** entry point a user is most likely to arrive
+through, as its own screen with its own `before` capture and its own
+`screenshot`, and name any others in `decisions` rather than drawing each — one
+is what this phase's budget covers. Use research's `uiPath` to find that screen;
+where `uiPath` never traced it, a handful of targeted reads, not a survey. A
+feature reachable only from its own URL is a design that drew half the ticket
+and left the reviewer to name the other half.
 
-**Match the input affordance to the content.** Expressive, long-form or
-attachment-bearing content gets a rich-text editor and an upload, not a
-single-line text field; a one-off choice gets a control, not free text. The
-affordance is a decision the reviewer will argue with, so it belongs in
-`decisions`, not defaulted silently to a bare input.
+**Match the input affordance to the content.** Size the control to what goes
+into it: expressive, long-form or attachment-bearing content needs more than a
+single-line field, and a choice from a fixed set needs a control rather than
+free text. Where that sizing is genuinely contested — the ticket implies one
+thing and the surrounding product does another — it earns a `decisions` entry.
+Where it is obvious, draw it and spend the slot on something a reviewer would
+actually argue with.
 
 ## 3. Ground it in the real product, not in taste
 
