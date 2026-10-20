@@ -65,7 +65,7 @@ Normal Oneshot verification needs this too.
 cd ~/Desktop/workstream-repo     # anywhere you like
 git clone git@gitlab.arbisoft.com:arbisoft/workstream-automation.git
 cd workstream-automation
-npm ci
+npm install                      # not `npm ci` — this repo ships no lockfile
 npx cypress verify               # downloads/checks the Cypress 14.5.4 binary
 ```
 
@@ -97,6 +97,15 @@ pg_restore -h 127.0.0.1 -p 5432 -d hrdb_automation_baseline_20261002 \
   run (`oneshot_lt_<ticket>_<n>`, about 20 s for 5.4 GB) and drops the copy
   afterwards. Postgres refuses the copy while anything is connected to the baseline.
 - **Your Postgres user needs the `CREATEDB` right.** A local superuser has it.
+- **No dump to hand?** You can build the baseline from a database you already have
+  (`createdb -T <source> hrdb_automation_baseline_20261002`), with two catches.
+  Postgres refuses `-T` while **anything at all** is connected to the source, and a
+  `manage.py runserver` left up by another run holds `hrdb` open for hours — so
+  either close it or dump and restore instead (`pg_dump -Fd -j6` then
+  `pg_restore -j6`, which needs no exclusive access). And run `pg_dump` from the
+  **same major version as the server**: Postgres.app 18 with Homebrew's `pg_dump` 14
+  on `PATH` aborts with `server version mismatch`, so put
+  `/Applications/Postgres.app/Contents/Versions/18/bin` first.
 
 ### 4. Save the Cypress logins file
 
@@ -355,13 +364,13 @@ older branches.
 | `E_NO_BASELINE` | The baseline database doesn't exist under that name | Step 3, or set `ONESHOT_LOCAL_TESTS_BASELINE_DB` |
 | `E_PG` / `E_DB_COPY` | Postgres not reachable, or your user can't create databases | Check host/port in `.env`; grant `CREATEDB` |
 | `E_NO_CREDS` / `E_CREDS_INVALID` | Logins file missing, or not valid JSON | Step 4. (A file that isn't `chmod 600` still works, but fix it: doctor warns about it) |
-| `E_NO_NODE_MODULES` | The automation clone has no `node_modules` | `cd workstream-automation && npm ci && npx cypress verify` |
-| `E_NO_CYPRESS` | The automation clone has no Cypress in `node_modules` | `cd workstream-automation && npm ci && npx cypress verify` |
+| `E_NO_NODE_MODULES` | The automation clone has no `node_modules` | `cd workstream-automation && npm install && npx cypress verify` |
+| `E_NO_CYPRESS` | The automation clone has no Cypress in `node_modules` | `cd workstream-automation && npm install && npx cypress verify` |
 | `E_PORT_BUSY` | Something uses 8030/9030. If it's another local-tests run or its app, Oneshot waits and tries again later | Otherwise stop it, or set `ONESHOT_LOCAL_TESTS_PORT` / `_FE_PORT` |
 | `E_RUN_IN_PROGRESS` | A local-tests run for this ticket is still going. Oneshot waits and tries again later | Nothing, unless that process is stuck: then stop it and run `gc` (below) |
 | `E_MIGRATE_FAILED` | The database copy couldn't be updated to the ticket's code | Usually a migration error in the ticket; read the run log |
 | `E_APP_FAILED` | The ticket's app didn't start | See the harness logs under `state/runs/<ticket>/lt-harness/` |
-| `E_STALE_RESOURCES` / leftovers after a crash | A previous run didn't finish cleaning up | `node scripts/localtests.cjs gc --dry-run`, then without `--dry-run`. **While a conductor is running**, add `--keep <ticket>,<ticket>` listing every ticket it has in flight: plain `gc` also removes the throwaway folder of a planning (scope) session that is still working, and that plan is then refused. `gc` only removes `oneshot_lt_*` copies and throwaway folders, and never those of a run that is still active |
+| `E_STALE_RESOURCES` / leftovers after a crash | A previous run didn't finish cleaning up | `node scripts/localtests.cjs gc --dry-run`, then without `--dry-run`. **While a conductor is running**, add `--keep <ticket>,<ticket>` listing every ticket it has in flight: plain `gc` also removes the throwaway folder of a planning (scope) session that is still working, and that plan is then refused. `gc` only removes `oneshot_lt_*` copies and throwaway folders, and never those of a run that is still active. If a run was killed between de-registering a worktree and deleting its files, what is left is a plain directory with no `.git`, which neither `gc` nor the run itself will remove ("nothing deletes a directory it cannot prove it made") — check it is under `state/runs/<ticket>/` and in no `git worktree list`, then delete it by hand |
 
 ---
 

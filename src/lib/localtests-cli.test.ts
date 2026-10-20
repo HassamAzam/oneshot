@@ -1371,7 +1371,10 @@ test('run: the automation clone\'s node_modules is checked against package.json 
     const out = JSON.parse(r.stdout) as { code: string; message: string; hint: string };
     assert.equal(out.code, 'E_NODE_MODULES_DRIFT');
     assert.match(out.message, /cypress 14\.5\.4, wants \^15\.0\.0/);
-    assert.match(out.hint, /run npm ci in /);
+    // The clone, not the seed: workstream-automation ships no lockfile, so a
+    // hint telling the operator to run `npm ci` there hands them a command
+    // that exits with usage.
+    assert.match(out.hint, /run npm install in /);
     assert.deepEqual(lines(join(f.logs, 'createdb.log')), []);
     assertReleased(f, 7575);
   } finally {
