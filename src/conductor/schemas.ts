@@ -684,26 +684,28 @@ export const UI_EVIDENCE_SCHEMA = phaseSchema({
 /**
  * The local automation tests plan (skill: local-tests-impact), made for a
  * merged ticket by the post-merge mode (src/localtests/runner.ts). Read by
- * code, not by a later session: the ticket note is rendered from it, QA
- * approves that list before every run, and the run executes `specs` as listed.
- * So a spec missing from `specs` is a spec that does not run.
+ * code, not by a later session: the ticket note — the impacted-module report —
+ * is rendered from it, QA approves that list before every run, and the run
+ * executes `specs` as listed. So a spec missing from `specs` is a spec that
+ * does not run.
  *
- * An empty `specs` is posted as "Oneshot found no automation test for this
- * ticket", with the `add` proposals as the suggested tests, and the mode waits
- * for QA's reply. The descriptions below say so, so the session's picture of
- * what happens next matches the mode's.
+ * The list is the specs that see the change plus every impacted module's
+ * main-functionality specs; nothing in it is new, because only tests that
+ * exist in workstream-automation run. An empty `specs` is posted as "nothing to
+ * run" with `reason`, and the mode waits for QA's reply. The descriptions below
+ * say so, so the session's picture of what happens next matches the mode's.
  */
 export const LOCAL_TESTS_SCOPE_SCHEMA = phaseSchema({
   applicable: {
     type: 'boolean',
     description:
-      'False when nothing a workstream-automation spec could observe changed (a backend path no screen ' +
-      'reaches, say). Say why in `reason` and send empty lists. True when the change is observable, even ' +
-      'if no existing spec reaches it: then `specs` is empty, `proposals` names the suggested test, and ' +
-      'the ticket is told "Oneshot found no automation test" and QA decides what happens next.',
+      'False only when no automation module is impacted and no spec reaches the change (a backend path no ' +
+      'screen reaches, an area no module covers). Say why in `reason` and send empty lists: the ticket is ' +
+      'told there is nothing to run and QA decides what happens next. True otherwise, with the impacted ' +
+      'modules\' main-functionality specs in `specs` even when no spec reaches the change itself.',
   },
   reason: str('Why applicable is what it is, in one sentence a non-developer can read.'),
-  modules: strArr('The automation modules the chosen specs belong to, e.g. "Leaves", "Payroll".'),
+  modules: strArr('The impacted cypress/e2e module folders the chosen specs belong to, e.g. "leaves", "payroll".'),
   specs: {
     type: 'array',
     description:
@@ -717,7 +719,7 @@ export const LOCAL_TESTS_SCOPE_SCHEMA = phaseSchema({
         module: str('Its module, one of `modules`'),
         cases: { type: 'number', description: 'How many test cases (it blocks) the file holds.' },
         ciSeconds: { type: 'number', description: 'Its last CI duration in seconds, when spec-timings.json records one.' },
-        why: str('What in the diff this spec exercises, in one plain line. Start a health-check spec with "Health check:"'),
+        why: str('What this spec checks in this change, in one plain line. Start a main-functionality spec with "Main functionality:"'),
       },
       required: ['file', 'module', 'cases', 'why'],
     },
@@ -725,14 +727,15 @@ export const LOCAL_TESTS_SCOPE_SCHEMA = phaseSchema({
   edits: {
     type: 'array',
     description:
-      'Every temporary change you made to a spec, page object or fixture in the throwaway worktree so ' +
-      'the suite matches what the ticket changed on purpose. Never committed. Empty when you changed nothing.',
+      'Every temporary change you made to an EXISTING spec, page object or fixture in the throwaway worktree ' +
+      'so the suite matches what the ticket changed on purpose. Never committed, and never a new file. Empty ' +
+      'when you changed nothing.',
     items: {
       type: 'object',
       additionalProperties: false,
       properties: {
         file: str('Repo-relative path in workstream-automation'),
-        kind: { type: 'string', enum: ['update', 'add'], description: 'update: an existing file. add: a new one.' },
+        kind: { type: 'string', enum: ['update'], description: 'update: an existing file. A new file is never written.' },
         why: str('What the change does, in one plain line'),
         erpEvidence: str('The ERP file:line in this diff that makes the change necessary'),
       },
@@ -742,17 +745,16 @@ export const LOCAL_TESTS_SCOPE_SCHEMA = phaseSchema({
   proposals: {
     type: 'array',
     description:
-      'Changes to the team\'s test list worth QA\'s attention: a new test worth adding, or an existing one ' +
-      'this ticket makes obsolete. QA approves every list before it runs, these included. When `specs` is ' +
-      'empty, the `add` entries here are the suggested tests on the "no automation test found" note. ' +
-      'Empty when the existing tests are enough.',
+      'Specs to take out of this list, for QA to decide: one you drop from the specs that see the change ' +
+      'or from the main-functionality specs, or a trim to fit the limits. Removals only — no new test is ' +
+      'ever proposed. Usually empty.',
     items: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        action: { type: 'string', enum: ['add', 'remove'] },
-        title: str('The test, as a QA would name it: "Verify that …"'),
-        file: str('The spec file it lives in, or would. Omit when not known.'),
+        action: { type: 'string', enum: ['remove'] },
+        title: str('What goes, as a QA would say it, e.g. "Trim to fit the limits: …"'),
+        file: str('The spec file that goes. Omit for a trim that names several.'),
         why: str('Why, in one plain line'),
       },
       required: ['action', 'title', 'why'],

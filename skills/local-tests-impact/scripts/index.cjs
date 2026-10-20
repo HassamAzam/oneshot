@@ -31,6 +31,15 @@
  *     A generic testid - selected by page objects in GENERIC_FOLDERS or more Pages
  *     folders, or defined by the testIds files of two or more ERP folders - only matches
  *     inside the Pages folders of the area that referenced it; see the map's own `_why`.
+ *
+ * THE MAIN FUNCTIONALITY OF A MODULE
+ * ----------------------------------
+ * `mainSpecs` is what runs for every module the change maps to, whether or not a spec
+ * reaches the change itself: the module's own `smoke`-tagged specs (the team's mark, in
+ * `TestFilters(['regression', 'smoke'], …)`), lowest case number first, at most
+ * MAIN_SPECS_PER_MODULE of them. A module that tags none gives its first cases instead,
+ * which open its screens. Picked here and not by the session, so one module always gives
+ * the same tests.
  */
 'use strict';
 
@@ -59,6 +68,8 @@ class ImpactError extends Error {
  * `evidence-notice-banner`. Two ERP folders defining a value makes it generic as well.
  */
 const GENERIC_FOLDERS = 3;
+/** How many main-functionality specs each impacted module adds to the list (`mainSpecs`). */
+const MAIN_SPECS_PER_MODULE = 5;
 /** estimatedMinutes = ceil((sum ciSeconds * CI_FACTOR + specs * SPEC_OVERHEAD_S) / 60). */
 const CI_FACTOR = 1.15;
 const SPEC_OVERHEAD_S = 8;
@@ -187,6 +198,41 @@ function stripComments(src, blankStrings = false) {
 
 /** `it(`, `it (`, `it.only(`, `it.skip(` and `it.each(`: each one is a case Cypress reports. */
 const countIts = (src) => (stripComments(src, true).match(/\bit(?:\.(?:only|skip|each))?\s*\(/g) || []).length;
+
+/**
+ * The tags a spec is filtered by: the list in `TestFilters(['regression', 'smoke'], () => …)`,
+ * the repo's own way of saying which runs a spec belongs to. `smoke` marks a module's main
+ * functionality. Comments are stripped first, so a commented-out wrapper tags nothing.
+ */
+function specTags(src) {
+  const m = stripComments(src).match(/\bTestFilters\s*\(\s*\[([^\]]*)\]/);
+  if (!m) return [];
+  return uniq([...m[1].matchAll(/['"`]([^'"`]+)['"`]/g)].map((x) => x[1].trim()).filter(Boolean));
+}
+
+/** The case number a spec's file name carries (`LV_04.1_…` 4.1, `trainings_01_…` 1); Infinity without one. */
+function caseNumber(file) {
+  const m = path.basename(file).match(/(\d+(?:\.\d+)?)/);
+  return m ? Number(m[1]) : Infinity;
+}
+
+/** Lowest case number first, then by name: `LV_06` before `LV_06.1` before `LV_13`, and `PRL_02` before `PRL_10`. */
+const byCase = (a, b) => (caseNumber(a) - caseNumber(b)) || a.localeCompare(b);
+
+/**
+ * The main-functionality specs of each module in `modules`: its `smoke`-tagged specs,
+ * else its first cases, at most MAIN_SPECS_PER_MODULE, in case order. `basis` says which.
+ */
+function mainSpecsOf(modules, specFiles, tagsOf) {
+  const out = [];
+  for (const mod of modules) {
+    const own = specFiles.filter((f) => f.split('/')[2] === mod).sort(byCase);
+    const smoke = own.filter((f) => (tagsOf.get(f) || []).includes('smoke'));
+    const basis = smoke.length ? 'smoke' : 'first';
+    for (const file of (smoke.length ? smoke : own).slice(0, MAIN_SPECS_PER_MODULE)) out.push({ file, module: mod, basis });
+  }
+  return out;
+}
 
 /**
  * Calls an API helper (`ExpenseApi.clearAllExpenses(`), an e2e endpoint, or a raw
@@ -544,9 +590,12 @@ function analyze({ erp, base, head, automation, mapFile }) {
   const specFiles = walk(automation, 'cypress/e2e', (r) => /\.[jt]s$/.test(r)).sort();
   const selected = [];
   const importsOf = new Map();
+  const tagsOf = new Map();
   for (const file of specFiles) {
     const mod = file.split('/')[2];
-    const imports = directImports(automation, file, fs.readFileSync(path.join(automation, file), 'utf8'), index);
+    const src = fs.readFileSync(path.join(automation, file), 'utf8');
+    tagsOf.set(file, specTags(src));
+    const imports = directImports(automation, file, src, index);
     importsOf.set(file, imports);
     const reasons = [];
     if (modules.includes(mod)) {
@@ -559,9 +608,17 @@ function analyze({ erp, base, head, automation, mapFile }) {
     if (reasons.length) selected.push({ file, module: mod, reasons });
   }
   const cost = costOf(automation, selected.map((x) => x.file));
+  const main = mainSpecsOf(modules, specFiles, tagsOf);
+  const isMain = new Set(main.map((m) => m.file));
   const specs = selected.map((x, i) => {
     const { its, ciSeconds, destructive } = cost.specs[i];
-    return { file: x.file, module: x.module, its, ciSeconds, destructive, reasons: x.reasons };
+    const smoke = (tagsOf.get(x.file) || []).includes('smoke');
+    return { file: x.file, module: x.module, its, ciSeconds, destructive, smoke, main: isMain.has(x.file), reasons: x.reasons };
+  });
+  const byFile = new Map(specs.map((x) => [x.file, x]));
+  const mainSpecs = main.map((m) => {
+    const x = byFile.get(m.file);
+    return { file: m.file, module: m.module, basis: m.basis, its: x.its, ciSeconds: x.ciSeconds, destructive: x.destructive };
   });
   const specsImporting = (pageObjects) => specFiles.filter((s) => pageObjects.some((p) => importsOf.get(s).has(p)));
 
@@ -604,6 +661,8 @@ function analyze({ erp, base, head, automation, mapFile }) {
       generic: uniq([...provenance.keys()].filter(isGeneric)),
     },
     specs,
+    mainSpecs,
+    mainTotals: costOf(automation, mainSpecs.map((m) => m.file)).totals,
     removedTestidStillUsed,
     addedTestidUnused,
     totals: cost.totals,
@@ -656,6 +715,8 @@ function summary(r) {
     `testids: +${r.testids.added.length} -${r.testids.removed.length} ~${r.testids.changed.length}, `
       + `${r.testids.referenced.length} referenced, ${r.testids.unresolved.length} unresolved, ${r.testids.generic.length} generic`,
     `specs: ${r.totals.specs} (${r.totals.its} it blocks, ${r.totals.ciSeconds}s in CI, ${r.totals.untimed} untimed) ~${r.totals.estimatedMinutes} min`,
+    `main functionality: ${r.mainSpecs.length} spec(s) ~${r.mainTotals.estimatedMinutes} min`,
+    ...r.mainSpecs.map((m) => `  ${m.file} [${m.basis === 'smoke' ? 'smoke' : 'first in module'}]`),
     `removed but still selected: ${r.removedTestidStillUsed.map((x) => `${x.value} (${x.specs.length} specs)`).join(', ') || 'none'}`,
     `added, selected by no page object: ${r.addedTestidUnused.map((x) => x.value).join(', ') || 'none'}`,
     ...r.warnings.map((w) => `warning: ${w}`),
@@ -689,7 +750,7 @@ module.exports = {
   analyze, checkMap, estimate, costOf, ImpactError,
   /** Internals, exported for src/lib/local-tests-impact.test.ts. */
   stripComments, countIts, isDestructive, parseTestIds, selectorTestids, referencesIn, resolverFor, areaOf, loadMap,
-  GENERIC_FOLDERS,
+  specTags, caseNumber, mainSpecsOf, GENERIC_FOLDERS, MAIN_SPECS_PER_MODULE,
 };
 
 function main() {

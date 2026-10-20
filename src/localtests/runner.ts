@@ -1,34 +1,40 @@
 /**
  * The local automation tests mode: scan, state machine, and the scope session.
  *
- * A third, independent mode in the same conductor process, beside the Loop and
- * the Ready For Automation mode, and modelled on the latter. It runs AFTER the
- * merge, never inside the Loop: the Loop ends at the merge, and the code worth
- * testing against workstream-automation is what actually landed.
+ * An independent mode in the same conductor process, beside the Loop. It runs
+ * AFTER the merge, never inside the Loop: the Loop ends at the merge, and the
+ * code worth testing against workstream-automation is what actually landed.
+ * Its last post — the automation report — is the last thing Oneshot does on a
+ * ticket.
  *
  * The flow, one ticket at a time:
  *
  *   1. START when the ticket carries `Ready for Automation Testing` AND a merge
  *      request linked to it is merged into the base branch and is its real
- *      change, not a promotion (hooks/local-tests-ready.cjs). Labelled but not
- *      merged is a quiet wait, re-checked on later ticks. Any assignee.
+ *      change, not a promotion (hooks/local-tests-ready.cjs). The Loop puts the
+ *      label on itself, beside `Merged`, when it merges the ticket (runner.ts
+ *      doneLabelSwap); a person can put it on any other merged ticket. Labelled
+ *      but not merged is a quiet wait, re-checked on later ticks. Any assignee.
  *   2. SCOPE: a read-only ERP checkout at the merge commit, a throwaway
  *      automation worktree, and ONE `local-tests-scope` session that picks the
- *      specs. Its edits are captured as a patch and both checkouts removed.
- *      With no spec reaching the change it writes nothing of its own: the list
- *      comes back empty with a suggested test.
- *   3. ASK: one note, the list (or "none found") with QA @mentioned. QA
- *      approves EVERY local run.
+ *      specs: the ones that see the change, plus the main-functionality specs
+ *      of every module it touched (the analysis script's `mainSpecs`, which
+ *      the code adds back if the session left one out). Its edits are captured
+ *      as a patch and both checkouts removed. It never writes or suggests a
+ *      test: only tests that exist in workstream-automation run.
+ *   3. ASK: one note, the impacted-module report (or "nothing to run") with QA
+ *      @mentioned. QA approves EVERY local run.
  *   4. QA's first decisive reply after the note: `approved` runs the list (or,
- *      with nothing found, marks the ticket done without local tests);
- *      `disapproved:` asks to check master again (a deterministic re-check, no
- *      session), names added files (looked up on the automation ref), asks for
- *      a temporary test, or says what to change (both a new scope session).
+ *      with nothing to run, marks the ticket done without local tests);
+ *      `added <files>` names files QA added (looked up on the automation ref,
+ *      then the list goes back to QA); `disapproved:` says what to change (a new
+ *      scope session, then the list goes back to QA).
  *   5. RUN: scripts/localtests.cjs against the merge commit, under the desk's
  *      Cypress lease; a busy desk parks.
- *   6. RESULTS on the ticket, and the ticket marked `Automation Testing Done`
- *      whether the tests passed or failed. A run that could not happen puts the
- *      trigger back, says why, and puts the list to QA again.
+ *   6. REPORT: the automation results on the ticket, and the ticket marked
+ *      `Automation Testing Done` whether the tests passed or failed. A run that
+ *      could not happen puts the trigger back, says why, and puts the list to
+ *      QA again.
  *
  * What it never touches, by construction: the Loop's run journal and claim
  * table, the port pool and the `running` map. Its own state is
@@ -38,8 +44,7 @@
  * session's write scope is that directory; nothing here reads or writes the
  * Loop's run.json there.
  *
- * The shape of every function follows from the Ready For Automation mode's
- * three rules (src/automation/runner.ts):
+ * The shape of every function follows from three rules:
  *
  * 1. The journal is the local source of truth, and each tick recomputes the
  *    next step from it and the scanned issue (`nextStep`, pure).
@@ -62,8 +67,8 @@
  */
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve, sep } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import {
   DRY_RUN, PAUSE, ROOT, WORK_REPO, envFlag, localTestsConfig, phaseByName, projectConfig, reviewersConfig, runDir,
@@ -77,7 +82,6 @@ import {
 import { readArtifact, writeArtifact, type RunJournal } from '../lib/artifacts.js';
 import { isMachineNote } from '../lib/claims.js';
 import { codeSpan } from '../lib/gitlabmd.js';
-import { MAX_UPLOAD_BYTES, mimeFor } from '../lib/publish.js';
 import { activeRunsFleet, logEvent } from '../lib/db.js';
 import { log } from '../lib/log.js';
 import { checkQuota, quotaParked } from '../lib/quota.js';
@@ -91,16 +95,16 @@ import {
 } from '../conductor/phase.js';
 import { repliesAfter } from '../conductor/reviewgate.js';
 import {
-  RUN_ARTIFACT, SCOPE_ARTIFACT, captureOf, captureScope, captureScopeSession, cliErrorText, gcLocalTests,
-  notRunnableOf, parseCliObject, prepareScope, prepareScopeAt, runApprovedTests, specFiles, weakenedFiles,
+  RUN_ARTIFACT, SCOPE_ARTIFACT, captureOf, captureScopeSession, cliErrorText, gcLocalTests,
+  notRunnableOf, parseCliObject, prepareScopeAt, runApprovedTests, specFiles,
   type CliResult, type LocalTestsDeps, type ScopeInputs,
 } from '../conductor/localtests.js';
 import { promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import type { LocalTestsRun, Ticket } from '../phases/types.js';
 import {
-  localTestsApprovedWithoutTestsNote, localTestsFoundNote, localTestsNotFoundNote, localTestsRecheckNote,
+  localTestsApprovedWithoutTestsNote, localTestsFoundNote, localTestsNotFoundNote,
   localTestsResultsNote, localTestsSetupErrorNote, localTestsStuckNote,
-  type Attachment, type LocalTestsNote, type LocalTestsNoteInfo,
+  type LocalTestsNote, type LocalTestsNoteInfo,
 } from './messages.js';
 import { classifyLocalTestsReply, type LocalTestsReply } from './replies.js';
 import {
@@ -364,8 +368,7 @@ export type Step =
   | { kind: 'skip'; why: string }
   | { kind: 'hold'; why: string }
   | { kind: 'check'; reason: 'first' | 'changed' | 'cadence' }
-  | { kind: 'scope'; request: 'first' | 'write-temporary' | 'feedback' }
-  | { kind: 'recheck' }
+  | { kind: 'scope'; request: 'first' | 'feedback' }
   | { kind: 'add' }
   | { kind: 'post'; round: number }
   | { kind: 'review' }
@@ -439,8 +442,10 @@ export function nextStep(
   const latest = latestList(jj);
   if (latest && latest.postedAt === null) return { kind: 'post', round: latest.round };
   switch (jj.state) {
-    case 'scoping': return { kind: 'scope', request: jj.request?.kind ?? 'first' };
-    case 'rechecking': return { kind: 'recheck' };
+    // An older journal's `write-temporary` request is a fresh scope: no test is written any more.
+    case 'scoping': return { kind: 'scope', request: jj.request?.kind === 'feedback' ? 'feedback' : 'first' };
+    // The retired "check again": a fresh scope works on a fresh checkout of the automation ref.
+    case 'rechecking': return { kind: 'scope', request: 'first' };
     case 'adding': return jj.addFiles ? { kind: 'add' } : { kind: 'review' };
     case 'awaiting-qa': return latest ? { kind: 'review' } : { kind: 'scope', request: 'first' };
     case 'approved': return { kind: 'start' };
@@ -473,8 +478,8 @@ const FOREIGN_MARKER_RE = /<!--\s*oneshot:(?!local-tests)/i;
 /**
  * Pure. Another Oneshot request posted after this mode's list and before a QA
  * reply, or null. The notes carry no thread, so a bare `approved` after, say,
- * the Ready For Automation mode's cases cannot be told apart from one for this
- * list; it is not read as a decision for either.
+ * the Loop's test-case gate cannot be told apart from one for this list; it is
+ * not read as a decision for either.
  */
 export function foreignRequestBetween(notes: IssueNote[], after: number, before: number): IssueNote | null {
   return notes.find((n) => !n.system && n.id > after && n.id < before && FOREIGN_MARKER_RE.test(n.body ?? '')) ?? null;
@@ -542,6 +547,45 @@ export function foundSpecs(analysis: Record<string, unknown> | null | undefined)
     });
   }
   return out;
+}
+
+/** A main-functionality spec the analysis picked for an impacted module (index.cjs `mainSpecs`). */
+export interface MainSpec { file: string; module: string; basis: 'smoke' | 'first'; its?: number; ciSeconds?: number | null }
+
+/**
+ * Pure. The main-functionality specs the analysis picked for the modules the
+ * change touched: each module's `smoke`-tagged specs, or its first cases when
+ * it tags none. Malformed entries are dropped, and each file is named once.
+ */
+export function mainSpecsOf(analysis: Record<string, unknown> | null | undefined): MainSpec[] {
+  const list = Array.isArray(analysis?.mainSpecs) ? analysis.mainSpecs as unknown[] : [];
+  const out: MainSpec[] = [];
+  for (const m of list) {
+    if (!m || typeof m !== 'object') continue;
+    const x = m as Record<string, unknown>;
+    if (typeof x.file !== 'string' || !isSpecPath(x.file) || out.some((o) => o.file === x.file)) continue;
+    out.push({
+      file: x.file,
+      module: typeof x.module === 'string' && x.module ? x.module : x.file.split('/')[2] ?? '',
+      basis: x.basis === 'first' ? 'first' : 'smoke',
+      ...(typeof x.its === 'number' ? { its: x.its } : {}),
+      ...(typeof x.ciSeconds === 'number' ? { ciSeconds: x.ciSeconds } : {}),
+    });
+  }
+  return out;
+}
+
+/** The one-line `why` a main-functionality spec the code adds to the list carries. */
+export function mainSpecWhy(m: Pick<MainSpec, 'module' | 'basis'>): string {
+  return `Main functionality: ${m.basis === 'first' ? `one of the first tests of ${m.module}, which tags none as smoke`
+    : `one of ${m.module}'s smoke tests`}`;
+}
+
+/** Pure. The spec files a scope drops on purpose, each with a `remove` proposal naming it. */
+export function proposedRemovals(scope: Record<string, unknown> | null | undefined): string[] {
+  const list = Array.isArray(scope?.proposals) ? scope.proposals as Array<Record<string, unknown>> : [];
+  return list.filter((p) => p && p.action === 'remove' && typeof p.file === 'string' && p.file.trim())
+    .map((p) => String(p.file).trim());
 }
 
 /** A spec path QA may name: under cypress/, a .ts or .js file, no `..`. */
@@ -823,34 +867,50 @@ function unscopedMrs(m: MergedRef | undefined, rec: ListRecord): number[] {
   return all.filter((n) => n !== m.mrIid && !scoped.includes(n));
 }
 
-/** What the found and not-found notes need besides the list. */
-function noteInfo(ctx: Ctx, rec: ListRecord): LocalTestsNoteInfo {
+/**
+ * What the list notes need besides the list: the change, QA, the patch — and,
+ * for QA's added files, the paths not on the automation ref and whether the
+ * earlier round's patch is applied on top of a newer automation commit than it
+ * was cut against.
+ */
+function noteInfo(ctx: Ctx, rec: ListRecord, scope: Record<string, unknown> | null): LocalTestsNoteInfo {
   const m = ctx.j!.merged!;
   const title = changeTitle(m, rec);
+  const cut = captureOf(scope)?.automationSha ?? '';
+  const moved = rec.source !== 'scope' && rec.patchSha && cut && cut !== rec.automationSha
+    ? `kept from round ${rec.patchFromRound ?? '?'}, cut against workstream-automation ${codeSpan(sha7(cut))} and applied on `
+      + `top of ${codeSpan(sha7(rec.automationSha))}; if it no longer applies there, the run says so`
+    : '';
   return {
     automationSha: rec.automationSha, mergeSha: m.mergeSha, mrIid: m.mrIid, qa: ctx.qa,
     ...(title ? { mrTitle: title } : {}),
     ...(rec.patchFile && rec.patchSha ? { patchFile: rec.patchFile } : {}),
+    ...(moved ? { patchNote: moved } : {}),
+    ...(rec.unknown?.length ? { unknown: rec.unknown } : {}),
   };
 }
 
 /**
  * The scope object a list was made from: the session's own for a scope list,
- * one written here for a re-check or QA's added files. Saved beside the
- * journal, and written as the run's local-tests-scope.json when the list runs,
- * so the report names the temporary changes that really ran.
+ * one written here for QA's added files (each new row says who added it).
+ * Saved beside the journal, and written as the run's local-tests-scope.json
+ * when the list runs, so the report names the temporary changes that really ran.
  */
-function listScope(rec: ListRecord, scope: Record<string, unknown> | null, why: (file: string) => string): Record<string, unknown> {
+function listScope(
+  rec: ListRecord, scope: Record<string, unknown> | null, why: (file: string) => string, addedBy?: string,
+): Record<string, unknown> {
   if (rec.source === 'scope' && scope) return scope;
   const earlier = new Map(
     (Array.isArray(scope?.specs) ? scope.specs as Array<Record<string, unknown>> : [])
       .filter((s) => s && typeof s.file === 'string').map((s) => [s.file as string, s]),
   );
+  const specs = rec.specs.map((file) => earlier.get(file)
+    ?? { file, module: file.split('/')[2] ?? '', cases: 0, why: why(file), ...(addedBy ? { addedBy } : {}) });
   return {
     applicable: rec.specs.length > 0,
     reason: typeof scope?.reason === 'string' ? scope.reason : '',
-    modules: [],
-    specs: rec.specs.map((file) => earlier.get(file) ?? { file, module: file.split('/')[2] ?? '', cases: 0, why: why(file) }),
+    modules: [...new Set(specs.map((x) => String((x as { module?: unknown }).module ?? '')).filter(Boolean))],
+    specs,
     edits: rec.patchSha && Array.isArray(scope?.edits) ? scope.edits : [],
     proposals: [],
     notRunnable: rec.notRunnable,
@@ -1056,8 +1116,16 @@ async function releaseHolding(ctx: Ctx): Promise<void> {
  * `scope`: the trigger read fresh, the merge commit in the clone, a read-only
  * ERP checkout at it and a throwaway automation worktree, then ONE session.
  * Both checkouts are gone again whatever it concluded.
+ *
+ * Around the session, the analysis script runs over every merged MR of the
+ * ticket's own: the specs each earlier MR's change reaches, and the
+ * main-functionality specs of every module the ticket's change touched, join
+ * the session's list when it left them out — unless it kept one out on purpose
+ * (`notRunnable`, or a `remove` proposal naming it). Not in a feedback round:
+ * that list is QA's, edited as they asked, and a spec they had removed must
+ * not come back.
  */
-async function stepScope(ctx: Ctx, request: 'first' | 'write-temporary' | 'feedback'): Promise<StepResult> {
+async function stepScope(ctx: Ctx, request: 'first' | 'feedback'): Promise<StepResult> {
   const j = ctx.j!;
   const { iid, deps } = ctx;
   const hold = deps.sessionHold(j.runId, j.sessions);
@@ -1074,7 +1142,7 @@ async function stepScope(ctx: Ctx, request: 'first' | 'write-temporary' | 'feedb
   const ticket = await deps.ticket(iid);
   if (!ticket) return stop('hold — cannot read the ticket from GitLab');
   // A feedback round edits the whole previous list, which already covers the
-  // ticket's earlier MRs; every other round looks at each of them again.
+  // ticket's earlier MRs and its modules; every other round looks at each MR again.
   const ranges = await rangesToScope(ctx, m);
   const multi = (m.ranges?.length ?? 0) > 1;
   const earlier = request === 'feedback' ? [] : ranges.earlier;
@@ -1099,21 +1167,32 @@ async function stepScope(ctx: Ctx, request: 'first' | 'write-temporary' | 'feedb
   }
   j.holding = { erp, wsa: prep.data.wsa, since: j.holding.since };
 
-  // The deterministic analysis of each earlier MR, while the automation
-  // worktree is still as the ref left it; its specs join the session's list.
-  const extra: Array<{ mrIid: number; spec: ImpactSpec }> = [];
+  // The deterministic analysis, while the automation worktree is still as the
+  // ref left it: the specs each earlier MR's change reaches, and the
+  // main-functionality specs of every module the ticket's change touched.
+  const extra: Array<{ spec: ImpactSpec; why: string }> = [];
+  const push = (spec: ImpactSpec, why: string): void => {
+    if (!extra.some((e) => e.spec.file === spec.file)) extra.push({ spec, why });
+  };
   const scopedEarlier: number[] = [];
   const missed = [...ranges.missed];
-  for (const r of earlier) {
+  for (const r of request === 'feedback' ? [] : [ranges.own, ...earlier]) {
     const a = await analyse(ctx, r, prep.data.wsa);
     if (!a.ok) {
-      missed.push(r.mrIid);
-      log.warn(`${tag(iid)} !${r.mrIid} is not checked — the analysis failed: ${cliErrorText(a.error)}`);
+      // The tested MR's own failure is the session's to report: it runs the same script.
+      if (r !== ranges.own) missed.push(r.mrIid);
+      log.warn(`${tag(iid)} !${r.mrIid}: the analysis failed — ${cliErrorText(a.error)}`);
       continue;
     }
-    scopedEarlier.push(r.mrIid);
-    for (const spec of foundSpecs(a.data)) {
-      if (!extra.some((e) => e.spec.file === spec.file)) extra.push({ mrIid: r.mrIid, spec });
+    if (r !== ranges.own) {
+      scopedEarlier.push(r.mrIid);
+      for (const spec of foundSpecs(a.data)) {
+        push(spec, `From !${r.mrIid}: ${spec.reasons.find((x) => !x.startsWith('module ')) ?? 'reaches its change'}`);
+      }
+    }
+    for (const main of mainSpecsOf(a.data)) {
+      push({ file: main.file, module: main.module, reasons: [`main functionality of ${main.module}`],
+        ...(main.its !== undefined ? { its: main.its } : {}) }, mainSpecWhy(main));
     }
   }
 
@@ -1123,7 +1202,7 @@ async function stepScope(ctx: Ctx, request: 'first' | 'write-temporary' | 'feedb
     ...prep.data,
     mergeSha: m.mergeSha,
     mrIid: m.mrIid,
-    ...(request !== 'first' ? { request } : {}),
+    ...(request === 'feedback' ? { request } : {}),
     ...(request === 'feedback' && j.request?.feedback ? { feedback: j.request.feedback } : {}),
   };
   // The lap is claimed before the session starts, so a crash mid-session can
@@ -1157,8 +1236,11 @@ async function stepScope(ctx: Ctx, request: 'first' | 'write-temporary' | 'feedb
       infra: true, error: `the session could not start: ${errText(err)}`,
     };
   }
-  // The earlier MRs' specs the session did not list, priced while the worktree is still there.
-  const adds = out.ok && out.data ? extra.filter((e) => !specFiles(out.data).includes(e.spec.file)) : [];
+  // What the session left out — and did not keep out on purpose — priced while the worktree is still there.
+  const kept = out.ok && out.data
+    ? new Set([...specFiles(out.data), ...notRunnableOf(out.data).map((n) => n.spec), ...proposedRemovals(out.data)])
+    : new Set<string>();
+  const adds = out.ok && out.data ? extra.filter((e) => !kept.has(e.spec.file)) : [];
   let addMinutes = 0;
   if (adds.length) {
     const priced = await deps.impact(['estimate', '--automation', inputs.wsa, ...adds.map((e) => e.spec.file)]);
@@ -1192,15 +1274,17 @@ async function stepScope(ctx: Ctx, request: 'first' | 'write-temporary' | 'feedb
   if (blocked) return charge(ctx, `the session was blocked: ${blocked}`);
   if (adds.length) {
     const listed = Array.isArray(scope.specs) ? scope.specs as unknown[] : [];
+    const modules = Array.isArray(scope.modules) ? (scope.modules as unknown[]).filter((x): x is string => typeof x === 'string') : [];
     scope = {
       ...scope,
       applicable: true,
+      modules: [...new Set([...modules, ...adds.map((e) => e.spec.module ?? '').filter(Boolean)])],
       specs: [...listed, ...adds.map((e) => ({
-        file: e.spec.file, module: e.spec.module ?? e.spec.file.split('/')[2] ?? '', cases: e.spec.its ?? 0,
-        why: `From !${e.mrIid}: ${e.spec.reasons.find((r) => !r.startsWith('module ')) ?? 'reaches its change'}`,
+        file: e.spec.file, module: e.spec.module ?? e.spec.file.split('/')[2] ?? '', cases: e.spec.its ?? 0, why: e.why,
       }))],
       estimatedMinutes: (Number(scope.estimatedMinutes) || 0) + addMinutes,
     };
+    log.info(`${tag(iid)} added ${plural(adds.length, 'spec')} the session left out: ${adds.map((e) => e.spec.file).join(', ')}`);
   }
   const scopedMrs = !multi ? undefined
     : request === 'feedback' ? prev?.scopedMrs
@@ -1226,86 +1310,8 @@ async function stepScope(ctx: Ctx, request: 'first' | 'write-temporary' | 'feedb
   j.attempts = 0;
   j.freeRetries = 0;
   writeLtJournal(j);
-  log.ok(`${tag(iid)} round ${rec.round}: ${specs.length ? `${specs.length} test file(s) found` : 'no automation test found'}`
+  log.ok(`${tag(iid)} round ${rec.round}: ${specs.length ? `${specs.length} test file(s) to run` : 'nothing to run'}`
     + `${scopedMrs ? ` across ${mrList(scopedMrs)}` : ''}${missed.length ? ` (not checked: ${mrList(missed)})` : ''}`);
-  return go;
-}
-
-/**
- * `recheck`: QA says a test for the change is on master now. Deterministic and
- * cheap — no session, nothing earlier repeated: a fresh automation worktree at
- * the automation ref (prepare-scope fetches the clone first), the analysis
- * script — once per merged MR of the ticket's own, their specs together — and
- * the worktree captured away again whatever the script said.
- */
-async function stepRecheck(ctx: Ctx): Promise<StepResult> {
-  const j = ctx.j!;
-  const { iid, deps } = ctx;
-  const commits = await ensureCommits(ctx);
-  if (!commits.ok) return stop(commits.did);
-  const { m } = commits;
-  const off = await switchedOff(ctx);
-  if (off) return stop(off);
-  const { own, earlier, missed } = await rangesToScope(ctx, m);
-  const prep = await prepareScope(iid, deps.config(), ltDeps(deps));
-  if (!prep.ok) return stop(`hold — could not prepare the automation worktree for the re-check — ${cliErrorText(prep.error)}`);
-  j.holding = { wsa: prep.data.wsa, since: Date.now() };
-  writeLtJournal(j);
-  let analysis: CliResult<Record<string, unknown>> = { ok: true, data: {} };
-  let priced: CliResult<Record<string, unknown>> | null = null;
-  const found: ImpactSpec[] = [];
-  /** A spec only an earlier MR reaches, and which one: its row says so. */
-  const fromEarlier = new Map<string, number>();
-  try {
-    // The tested MR first, then each earlier one: one failure is the re-check's.
-    for (const r of [own, ...earlier]) {
-      analysis = await analyse(ctx, r, prep.data.wsa);
-      if (!analysis.ok) break;
-      for (const spec of foundSpecs(analysis.data)) {
-        if (found.some((f) => f.file === spec.file)) continue;
-        found.push(spec);
-        if (r !== own) fromEarlier.set(spec.file, r.mrIid);
-      }
-    }
-    const files = analysis.ok ? found.map((s) => s.file) : [];
-    if (files.length) priced = await deps.impact(['estimate', '--automation', prep.data.wsa, ...files]);
-  } finally {
-    const cap = await captureScope(iid, ltDeps(deps));
-    if (!cap.ok) log.warn(`${tag(iid)} the re-check's worktree was not captured — ${cliErrorText(cap.error)}; gc removes it`);
-    delete j.holding;
-    writeLtJournal(j);
-  }
-  if (!analysis.ok) {
-    const why = `the re-check's analysis failed — ${cliErrorText(analysis.error)}`;
-    log.warn(`${tag(iid)} hold — ${why}`);
-    await alertOnce(ctx, `recheck:${analysis.error.code}`, `Oneshot's local automation tests for #${iid}: ${why}`);
-    return stop(`hold — ${why}`);
-  }
-  const multi = (m.ranges?.length ?? 0) > 1;
-  const scopedMrs = multi ? [...earlier.map((r) => r.mrIid), own.mrIid] : undefined;
-  const minutes = priced?.ok ? Number((priced.data.totals as { estimatedMinutes?: unknown } | undefined)?.estimatedMinutes) || 0 : 0;
-  const prev = latestList(j);
-  const rec: Omit<ListRecord, 'round' | 'noteId' | 'postedAt'> = {
-    source: 'recheck',
-    kind: found.length ? 'found' : 'recheck-not-found',
-    specs: found.map((s) => s.file),
-    notRunnable: [],
-    automationSha: prep.data.automationSha,
-    patchFile: null,
-    patchSha: null,
-    tests: found.reduce((n, s) => n + (s.its ?? 0), 0),
-    ...(minutes ? { estimatedMinutes: minutes } : {}),
-    ...(scopedMrs ? { scopedMrs } : {}),
-  };
-  const scope = listScope({ ...rec, round: 0, noteId: null, postedAt: null }, prev ? readList(iid, prev.round) : null, (file) => {
-    const why = found.find((s) => s.file === file)?.reasons.find((r) => !r.startsWith('module ')) ?? 'reaches the change';
-    const mr = fromEarlier.get(file);
-    return mr ? `From !${mr}: ${why}` : why;
-  });
-  const saved = pushList(ctx, rec, scope);
-  log.ok(`${tag(iid)} round ${saved.round}: re-checked ${sha7(prep.data.automationSha)} — `
-    + `${found.length ? `${found.length} test file(s) found` : 'still none'}`
-    + `${missed.length ? ` (not checked: ${mrList(missed)})` : ''}`);
   return go;
 }
 
@@ -1366,7 +1372,7 @@ async function stepAdd(ctx: Ctx): Promise<StepResult> {
   const specs = [...new Set([...kept, ...existing])];
   const rec: Omit<ListRecord, 'round' | 'noteId' | 'postedAt'> = {
     source: 'added',
-    kind: specs.length ? 'found' : 'recheck-not-found',
+    kind: specs.length ? 'found' : 'not-found',
     specs,
     notRunnable: prev?.kind === 'found' ? prev.notRunnable : [],
     automationSha,
@@ -1377,7 +1383,7 @@ async function stepAdd(ctx: Ctx): Promise<StepResult> {
     ...(unknown.length ? { unknown } : {}),
   };
   const scope = listScope({ ...rec, round: 0, noteId: null, postedAt: null }, prevScope,
-    () => `added to workstream-automation by @${ask.by}`);
+    () => `Added to workstream-automation by @${ask.by}`, ask.by);
   // The earlier specs keep the cases the scope counted; a file QA added has
   // no count yet, so the start note says at least what is known.
   rec.tests = (scope.specs as Array<{ cases?: unknown }>).reduce((n, s) => n + (Number(s?.cases) || 0), 0);
@@ -1390,60 +1396,20 @@ async function stepAdd(ctx: Ctx): Promise<StepResult> {
 
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 
-/**
- * The temporary changes a re-check or an `added` list keeps from an earlier
- * round, with the patch attached: that note has no line of its own for them,
- * and QA approve what runs. Anything capture flagged as weakening a test, or
- * outside localTests.allowedPaths, is named in bold.
- */
-function keptChanges(rec: ListRecord, scope: Record<string, unknown> | null): { lines: string[]; attachments: Attachment[] } {
-  const cap = captureOf(scope);
-  const files = cap?.changedFiles.length ? cap.changedFiles
-    : (Array.isArray(scope?.edits) ? scope.edits as Array<{ file?: unknown }> : [])
-      .map((e) => (typeof e?.file === 'string' ? e.file : '')).filter(Boolean);
-  const cut = cap?.automationSha ?? '';
-  const moved = cut && cut !== rec.automationSha
-    ? ` — cut against workstream-automation ${codeSpan(sha7(cut))} and applied on top of ${codeSpan(sha7(rec.automationSha))}; `
-      + 'if it no longer applies there, the run says so' : '';
-  let attachments: Attachment[] = [];
-  let attached = 'The patch is attached.';
-  const file = rec.patchFile ?? '';
-  try {
-    if (!file || !existsSync(file)) attached = 'The patch was not found, so it is not attached.';
-    else if (statSync(file).size > MAX_UPLOAD_BYTES) attached = 'The patch is over 25 MB, so it is not attached.';
-    else attachments = [{ name: basename(file), content: readFileSync(file), mime: mimeFor(file) }];
-  } catch {
-    attached = 'The patch could not be read, so it is not attached.';
-  }
-  const lines = [`**Temporary changes kept${rec.patchFromRound ? ` from round ${rec.patchFromRound}` : ''}:** ${files.length
-    ? `${plural(files.length, 'file')} (${files.map((f) => codeSpan(f)).join(', ')})` : 'the earlier patch'}, never committed${moved}. ${attached}`];
-  const flagged = weakenedFiles(cap);
-  if (flagged.length) {
-    lines.push('**Temporary changes that weaken a test, reach outside the browser, or touch files outside '
-      + `localTests.allowedPaths — read the patch before approving:** ${flagged.map((f) => codeSpan(f)).join(', ')}`);
-  }
-  return { lines, attachments };
-}
-
-/** `lines` as paragraphs after the first paragraph that starts with `before`, or after the headline when there is none. */
-function insertParagraphs(body: string, lines: string[], before?: string): string {
+/** `lines` as paragraphs right after the headline. */
+function insertParagraphs(body: string, lines: string[]): string {
   if (!lines.length) return body;
-  const at = before ? body.indexOf(`\n\n${before}`) : -1;
-  const cut = at >= 0 ? at : body.indexOf('\n\n');
+  const cut = body.indexOf('\n\n');
   return cut < 0 ? `${body}\n\n${lines.join('\n\n')}` : `${body.slice(0, cut)}\n\n${lines.join('\n\n')}${body.slice(cut)}`;
 }
 
 /**
- * What a list note says besides the list. Under the headline: that it is put
+ * What a list note says besides the list, under the headline: that it is put
  * to QA again because a reply was ambiguous, and which of the ticket's merged
- * MRs could not be checked. Before the approval ask: the temporary changes a
- * re-check or an `added` list keeps from an earlier round.
+ * MRs could not be checked.
  */
-function annotate(
-  note: LocalTestsNote, rec: ListRecord, scope: Record<string, unknown> | null, m: MergedRef | undefined,
-): LocalTestsNote {
+function annotate(note: LocalTestsNote, rec: ListRecord, m: MergedRef | undefined): LocalTestsNote {
   const top: string[] = [];
-  const attachments = [...note.attachments];
   if (rec.askedAgain) {
     top.push(`**Asked again:** the reply from ${codeSpan(`@${rec.askedAgain.by}`)} came after another Oneshot request on `
       + 'this ticket, so it may have been meant for that one. Reply under this note to decide these tests.');
@@ -1453,17 +1419,11 @@ function annotate(
     top.push(`**Not checked:** ${mrList(missed)}, also merged for this ticket — ${missed.length === 1 ? 'its' : 'their'} `
       + 'change could not be read, so no test was chosen for it. Name any test it needs in your reply.');
   }
-  let lower: string[] = [];
-  if (rec.source !== 'scope' && rec.patchSha && rec.patchFile) {
-    const kept = keptChanges(rec, scope);
-    lower = kept.lines;
-    attachments.push(...kept.attachments);
-  }
-  if (!top.length && !lower.length) return note;
-  return { body: insertParagraphs(insertParagraphs(note.body, lower, '**Why approval:**'), top), attachments };
+  if (!top.length) return note;
+  return { body: insertParagraphs(note.body, top), attachments: note.attachments };
 }
 
-/** `post`: the list note — found, not found, or what the re-check found — marker-checked. */
+/** `post`: the list note — the impacted-module report, or "nothing to run" — marker-checked. */
 async function stepPost(ctx: Ctx, round: number): Promise<StepResult> {
   const j = ctx.j!;
   const { iid } = ctx;
@@ -1482,23 +1442,10 @@ async function stepPost(ctx: Ctx, round: number): Promise<StepResult> {
     if (elsewhere) return stop(elsewhere);
   }
   const scope = readList(iid, round);
-  const info = noteInfo(ctx, rec);
-  let note: LocalTestsNote;
-  if (rec.source === 'scope') {
-    note = rec.kind === 'found' ? localTestsFoundNote(scope, info) : localTestsNotFoundNote(scope, info);
-  } else {
-    const specs = Array.isArray(scope?.specs) ? scope.specs as Array<{ file?: unknown; why?: unknown }> : [];
-    note = localTestsRecheckNote({
-      found: rec.specs.map((file) => {
-        const why = specs.find((s) => s.file === file)?.why;
-        return typeof why === 'string' && why ? { file, why } : file;
-      }),
-      automationSha: rec.automationSha,
-      ...(rec.unknown?.length ? { unknown: rec.unknown } : {}),
-      ...(rec.estimatedMinutes ? { estimatedMinutes: rec.estimatedMinutes } : {}),
-    }, info);
-  }
-  const post = await postOnce(ctx, `list-r${round}`, annotate(note, rec, scope, j.merged), current);
+  const info = noteInfo(ctx, rec, scope);
+  // The found note falls back to "nothing to run" itself when the list has no rows.
+  const note = rec.specs.length ? localTestsFoundNote(scope, info) : localTestsNotFoundNote(scope, info);
+  const post = await postOnce(ctx, `list-r${round}`, annotate(note, rec, j.merged), current);
   if (!post.ok) {
     log.warn(`${tag(iid)} could not post round ${round} (${post.error}) — retrying next tick`);
     return stop(`hold — could not post round ${round}`);
@@ -1519,7 +1466,7 @@ async function stepPost(ctx: Ctx, round: number): Promise<StepResult> {
  * which a dry run never retries by itself.
  *
  * A reply posted after another Oneshot request that itself came after the list
- * (the Ready For Automation mode's cases, say) may answer that request instead:
+ * (a Loop gate's request, say) may answer that request instead:
  * the notes carry no thread to tell. It is not taken as a decision and the
  * watermark stays where it is; the same list is put to QA again, saying why, so
  * the next reply is unambiguously to it.
@@ -1562,20 +1509,10 @@ async function stepReview(ctx: Ctx): Promise<StepResult> {
       j.state = 'approved';
       log.ok(`${tag(iid)} round ${latest.round} approved by ${said}`);
       break;
-    case 'check-again':
-      j.state = 'rechecking';
-      log.info(`${tag(iid)} ${said} asked to check workstream-automation again`);
-      break;
     case 'added':
       j.addFiles = { files: d.reply.files, noteId: d.id, by: d.by };
       j.state = 'adding';
       log.info(`${tag(iid)} ${said} added ${d.reply.files.join(', ')}`);
-      break;
-    case 'write-temporary':
-      j.request = { kind: 'write-temporary', noteId: d.id, by: d.by };
-      j.state = 'scoping';
-      j.attempts = 0;
-      log.info(`${tag(iid)} ${said} asked for a temporary test`);
       break;
     case 'feedback':
       j.request = { kind: 'feedback', feedback: d.reply.text, noteId: d.id, by: d.by };
@@ -1895,7 +1832,6 @@ function runStep(ctx: Ctx, step: Step): Promise<StepResult> | StepResult {
     case 'hold': return stop(`hold — ${step.why}`);
     case 'check': return stepCheck(ctx, step.reason);
     case 'scope': return stepScope(ctx, step.request);
-    case 'recheck': return stepRecheck(ctx);
     case 'add': return stepAdd(ctx);
     case 'post': return stepPost(ctx, step.round);
     case 'review': return stepReview(ctx);

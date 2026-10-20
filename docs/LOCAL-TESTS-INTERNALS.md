@@ -45,6 +45,10 @@ One ticket at a time, in this order. The mode keeps its own journal at
 `localTestsPatchFile()` in `src/lib/config.ts` name. Under `DRY_RUN` both live under
 `state-dry/state/`.
 
+0. **The label.** The Loop's merge puts `labels.localTestsTrigger` on beside `labels.exit`, in one
+   label edit (`doneLabelSwap` in `src/conductor/runner.ts`), while `localTests.enabled` is true
+   (`mergeTriggerLabel`). That is what hands every merged ticket to this mode; a person can add it
+   to any other merged ticket.
 1. **Ready?** `hooks/local-tests-ready.cjs`, run by the conductor (docs/HOOKS.md, "Not a hook:
    `local-tests-ready`"): the trigger label, and the ticket's own merge request (one that closes it,
    or names its iid in the source branch; a title only mentions it) merged into `branches.base`, never
@@ -58,17 +62,19 @@ One ticket at a time, in this order. The mode keeps its own journal at
    Only one desk per team runs the mode: the per-ticket `lock` is an O_EXCL file under
    `state/localtests/<iid>/` and does not reach other machines, and a desk skips a ticket whose
    notes already carry another desk's list.
-2. **Scope.** A throwaway ERP worktree at the merge commit, `prepare-scope`, the
-   `local-tests-scope` session (`runPhase`, the phase is `onDemand`), `capture`. When no existing
-   spec reaches the change the session returns no specs and an `add` proposal; it writes a temporary
-   spec only when QA asked for one (`request: 'write-temporary'` in its prompt context).
-3. **Ask QA**, and wait for the first reply from `config/reviewers.json` `qa`. The quick re-check
-   behind `disapproved: please check again` runs no session: `git fetch` in the clone, a fresh
-   throwaway worktree at `origin/<automationRef>`, then
-   `node skills/local-tests-impact/scripts/index.cjs --erp <erp worktree> --base <first parent>
-   --head <merge sha> --automation <worktree> --json`; a spec reached for any reason but `module`
-   counts as found. `disapproved: added <path>` is checked with
-   `git cat-file -e origin/<automationRef>:<path>` in the clone.
+2. **Scope.** A throwaway ERP worktree at the merge commit, `prepare-scope`, then
+   `node skills/local-tests-impact/scripts/index.cjs --erp <erp clone> --base <first parent>
+   --head <merge sha> --automation <wsa> --json` over each of the ticket's own merged MRs (the
+   impacted modules' `mainSpecs`, and an earlier MR's specs that reach its change), the
+   `local-tests-scope` session (`runPhase`, the phase is `onDemand`), and `capture`. Any of those
+   specs the session left out — and did not keep out in `notRunnable` or with a `remove` proposal
+   naming it — is added to its list, priced with `index.cjs estimate`; not in a feedback round,
+   whose list is QA's. A capture that finds a new spec file (`addedSpecs`) refuses the list: only
+   tests that exist in workstream-automation run, and nothing is ever written or suggested.
+3. **Ask QA** with the impacted-module report, and wait for the first reply from
+   `config/reviewers.json` `qa`: `approved`, `added <path>` (checked with
+   `git cat-file -e origin/<automationRef>:<path>` in the clone after a fetch), or `disapproved:`
+   with what to change (a new scope round with QA's text in its prompt).
 4. **Run** the approved list: `run --iid N --worktree <erp worktree> --ref <merge sha>
    --specs-file F --patch P --patch-sha S --base <base> --until <deadline>`, under the
    desk-wide Cypress lease (`src/lib/cypresslease.ts`). A dry run stops before this step unless

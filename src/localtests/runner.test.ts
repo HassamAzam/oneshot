@@ -13,11 +13,14 @@
  * - DRY_RUN goes through a whole ticket in one pass with NO GitLab write at
  *   all, approval assumed and Cypress skipped — unless
  *   ONESHOT_LOCAL_TESTS_DRY_CYPRESS asks for a real local run.
- * - A real ticket: list → QA `approved` → Running label → run against the merge
- *   commit → results → Automation Testing Done; with no test found, `approved`
- *   marks it done without a run; check again, added files, a temporary test and
+ * - A real ticket: the impacted-module report → QA `approved` → Running label →
+ *   run against the merge commit → results → Automation Testing Done; with
+ *   nothing to run, `approved` marks it done without a run; added files and
  *   feedback each lead back to a new list; a setup error puts the trigger back
  *   and asks again; a busy desk parks; a crash adopts its own note.
+ * - The list always carries every impacted module's main-functionality specs:
+ *   the code adds back one the session left out, never one it kept out on
+ *   purpose or one QA removed, and a scope that writes a new spec is refused.
  * - What goes wrong around those: a start label edit whose answer is lost (or
  *   a crash after it) is finished from the ticket's labels; a reply after
  *   another Oneshot request is not a decision; an approval withdrawn before
@@ -44,8 +47,9 @@ import type { PhaseInput, PhaseOutput } from '../conductor/phase.js';
 import { runDeadlineMs, type CliDeps, type CliResult } from '../conductor/localtests.js';
 import type { LocalTestsRun } from '../phases/types.js';
 import {
-  OTHER_DESK_STALE_MS, advanceTicket, foreignRequestBetween, foundSpecs, isSpecPath, localTestsGc, localTestsTick, nextStep,
-  otherDeskRun, outcomeLine, postMarker, qaDecision, runLocalTestsOnce, sessionCharge, type ModeDeps, type StepOpts,
+  OTHER_DESK_STALE_MS, advanceTicket, foreignRequestBetween, foundSpecs, isSpecPath, localTestsGc, localTestsTick,
+  mainSpecWhy, mainSpecsOf, nextStep, otherDeskRun, outcomeLine, postMarker, proposedRemovals, qaDecision,
+  runLocalTestsOnce, sessionCharge, type ModeDeps, type StepOpts,
 } from './runner.js';
 import {
   acquireLtLock, erpCheckoutDir, localTestsDir, localTestsHome, newLtJournal, readLtJournal, readRunRecord, saveList,
@@ -153,13 +157,14 @@ test('nextStep: an unmerged change waits quietly, and is checked again on change
   assert.deepEqual(nextStep({ ...waiting, readiness: undefined }, labelled, OPTS), { kind: 'check', reason: 'first' });
 });
 
-test('nextStep: scoping, re-checking and adding run their steps; an unposted list is posted first', () => {
+test('nextStep: scoping and adding run their steps; an unposted list is posted first', () => {
   assert.deepEqual(nextStep(journal({ state: 'scoping' }), labelled, OPTS), { kind: 'scope', request: 'first' });
-  assert.deepEqual(nextStep(journal({ state: 'scoping', request: { kind: 'write-temporary', noteId: 1, by: 'x' } }), labelled, OPTS),
-    { kind: 'scope', request: 'write-temporary' });
   assert.deepEqual(nextStep(journal({ state: 'scoping', request: { kind: 'feedback', feedback: '- remove LV_21', noteId: 1, by: 'x' } }), labelled, OPTS),
     { kind: 'scope', request: 'feedback' });
-  assert.deepEqual(nextStep(journal({ state: 'rechecking', lists: [list()] }), labelled, OPTS), { kind: 'recheck' });
+  // An older journal's retired requests are a fresh scope, which checks master as it is now and writes no test.
+  assert.deepEqual(nextStep(journal({ state: 'scoping', request: { kind: 'write-temporary', noteId: 1, by: 'x' } }), labelled, OPTS),
+    { kind: 'scope', request: 'first' });
+  assert.deepEqual(nextStep(journal({ state: 'rechecking', lists: [list()] }), labelled, OPTS), { kind: 'scope', request: 'first' });
   assert.deepEqual(nextStep(journal({ state: 'adding', lists: [list()], addFiles: { files: ['cypress/e2e/a.cy.ts'], noteId: 1, by: 'x' } }), labelled, OPTS),
     { kind: 'add' });
   assert.deepEqual(nextStep(journal({ state: 'adding', lists: [list()] }), labelled, OPTS), { kind: 'review' });
@@ -208,11 +213,11 @@ test('qaDecision: the first decisive reply from QA after the list wins; everyone
     note(502, 'anosha.saeed', 'looking at it now'),                        // QA, but no decision
     note(503, 'arsal.tariq', 'Oneshot stopped: something'),                // the Loop's unmarked note on a QA token
     note(504, 'gitlab', 'added ~label', { system: true }),
-    note(505, 'anosha.saeed', 'disapproved: please check again'),
+    note(505, 'anosha.saeed', 'disapproved: remove LV_21'),
     note(506, 'arsal.tariq', 'approved'),
   ];
   const d = qaDecision(notes, { since: 500, qa: QA });
-  assert.deepEqual(d?.reply, { kind: 'check-again' });
+  assert.deepEqual(d?.reply, { kind: 'feedback', text: 'remove LV_21' });
   assert.equal(d?.id, 505);
   assert.equal(d?.by, 'anosha.saeed');
   assert.deepEqual(qaDecision(notes, { since: 505, qa: QA })?.reply, { kind: 'approved' });
@@ -224,7 +229,7 @@ test('foreignRequestBetween: another Oneshot request between the list and the re
     note(500, 'desk', 'list <!-- oneshot:local-tests:found -->'),
     note(501, 'desk', 'started <!-- oneshot:local-tests-start:l-x -->'),
     note(502, 'gitlab', 'added ~label', { system: true }),
-    note(503, 'desk', 'cases <!-- oneshot:automation:cases:v1:abc -->'),
+    note(503, 'desk', 'evidence <!-- oneshot:publish:verify -->'),
     note(504, 'arsal.tariq', 'approved'),
   ];
   assert.equal(foreignRequestBetween(notes, 500, 504)?.id, 503);
@@ -260,6 +265,36 @@ test('foundSpecs: only specs reached through the change itself, never through th
   assert.deepEqual(found.map((s) => s.file), ['cypress/e2e/leaves/a.cy.ts', 'cypress/e2e/leaves/b.cy.ts']);
   assert.equal(found[0]!.its, 3);
   assert.deepEqual(foundSpecs(null), []);
+});
+
+test('mainSpecsOf: the analysis\'s main-functionality picks, well formed and named once', () => {
+  const picks = mainSpecsOf({
+    mainSpecs: [
+      { file: 'cypress/e2e/leaves/LV_13_submit.ts', module: 'leaves', basis: 'smoke', its: 2, ciSeconds: 30 },
+      { file: 'cypress/e2e/payroll/PRL_01_nav.ts', module: 'payroll', basis: 'first', its: 1, ciSeconds: null },
+      { file: 'cypress/e2e/leaves/LV_13_submit.ts', module: 'leaves', basis: 'smoke' },
+      { file: '../escape.ts', module: 'x', basis: 'smoke' }, { module: 'x' }, null, 'cypress/e2e/a.ts',
+    ],
+  });
+  assert.deepEqual(picks, [
+    { file: 'cypress/e2e/leaves/LV_13_submit.ts', module: 'leaves', basis: 'smoke', its: 2, ciSeconds: 30 },
+    { file: 'cypress/e2e/payroll/PRL_01_nav.ts', module: 'payroll', basis: 'first', its: 1 },
+  ]);
+  assert.deepEqual(mainSpecsOf(null), []);
+  assert.deepEqual(mainSpecsOf({ specs: [] }), [], 'an analysis from before the picks gives none');
+  assert.equal(mainSpecWhy(picks[0]!), 'Main functionality: one of leaves\'s smoke tests');
+  assert.equal(mainSpecWhy(picks[1]!), 'Main functionality: one of the first tests of payroll, which tags none as smoke');
+});
+
+test('proposedRemovals: only a remove that names its file', () => {
+  assert.deepEqual(proposedRemovals({
+    proposals: [
+      { action: 'remove', title: 'x', file: 'cypress/e2e/a.ts', why: 'y' },
+      { action: 'remove', title: 'Trim to fit the limits: a, b', why: 'over' },
+      { action: 'add', title: 'Verify that', file: 'cypress/e2e/b.ts', why: 'z' },
+    ],
+  }), ['cypress/e2e/a.ts']);
+  assert.deepEqual(proposedRemovals(null), []);
 });
 
 test('the small judgements: spec paths, session charges, the outcome line, the post marker', () => {
@@ -303,10 +338,20 @@ const scope = (over: Record<string, unknown> = {}): Record<string, unknown> => (
   notRunnable: [], estimatedMinutes: 4, summary: '2 specs, 9 cases', ...over,
 });
 
+/** Nothing to run. The `add` proposal is what an older session returned: it must never reach the ticket. */
 const NOT_FOUND = scope({
-  specs: [], reason: 'no spec opens the new banner',
+  applicable: false, specs: [], modules: [], reason: 'only apps/core changed, which no automation module reaches',
   proposals: [{ action: 'add', title: 'Verify that the banner can be dismissed for a week', why: 'nothing covers it' }],
 });
+
+/** The analysis as the fake script answers it, with the impacted modules' main-functionality picks. */
+const MAIN = [
+  { file: 'cypress/e2e/leaves/LV_13_submit.ts', module: 'leaves', basis: 'smoke', its: 2, ciSeconds: 40 },
+  { file: SPECS[1]!.file, module: 'leaves', basis: 'smoke', its: 3, ciSeconds: 20 },
+];
+const withMain = (args: string[]): CliResult<Record<string, unknown>> => (args[0] === 'estimate'
+  ? { ok: true, data: { totals: { estimatedMinutes: 2 } } }
+  : { ok: true, data: { specs: [], mainSpecs: MAIN } });
 
 function runAnswer(over: Partial<LocalTestsRun> = {}): LocalTestsRun {
   return {
@@ -347,6 +392,8 @@ interface Fake {
   /** Commits the ERP clone has, and each one's first parent. */
   parents: Map<string, string>;
   alerts: string[];
+  /** New spec files the capture finds in the scope's worktree. */
+  addedSpecs: string[];
 }
 
 const ok = <T>(data: T): GitlabResult<T> => ({ ok: true, kind: 'ok', status: 200, data });
@@ -390,6 +437,7 @@ function fake(over: Partial<Fake> = {}): Fake {
     writePatch: false,
     parents: new Map([[MERGE, BASE], [BASE, '']]),
     alerts: [],
+    addedSpecs: [],
     ...over,
   };
 }
@@ -410,7 +458,8 @@ function fakeCli(f: Fake): CliDeps {
             }
             return reply(child, {
               patchFile, patchSha: PATCH,
-              automationSha: AUTO, changedFiles: ['cypress/Pages/LeavePage.ts'], outsideAllowed: [], weakened: [], addedSpecs: [], removedSpecs: [],
+              automationSha: AUTO, changedFiles: ['cypress/Pages/LeavePage.ts'], outsideAllowed: [], weakened: [],
+              addedSpecs: f.addedSpecs, removedSpecs: [],
             });
           }
           case 'run': { const a = f.runAnswer(); return reply(child, a.obj, a.code); }
@@ -545,7 +594,7 @@ test('DRY_RUN: a whole ticket in one pass — the session runs, nothing reaches 
   assert.ok(kept.some((n) => /note-results/.test(n)));
   assert.equal(kept.filter((n) => /labels\.json$/.test(n)).length, 2, 'Running on, then Done on — both only kept');
   const listNote = readFileSync(join(localTestsDir(f.iid), 'dry-run', kept.find((n) => /note-list-r1/.test(n))!), 'utf8');
-  assert.match(listNote, /Oneshot found 2 automation tests for this ticket — waiting for QA approval/);
+  assert.match(listNote, /^\*\*Impacted module: Leaves — Oneshot will run 2 automation tests locally once QA approves\.\*\*/);
   assert.match(listNote, /@anosha\.saeed/);
 });
 
@@ -574,8 +623,9 @@ test('DRY_RUN, no test found: approval assumed, marked done without a run — al
   assert.equal(runs(f), 0);
   const kept = dryFiles(f);
   const nf = readFileSync(join(localTestsDir(f.iid), 'dry-run', kept.find((n) => /note-list-r1/.test(n))!), 'utf8');
-  assert.match(nf, /Oneshot found no automation test for this ticket/);
-  assert.match(nf, /Verify that the banner can be dismissed for a week/);
+  assert.match(nf, /Oneshot found no automation test to run locally for this ticket/);
+  assert.match(nf, /\*\*Why:\*\* only apps\/core changed, which no automation module reaches\./);
+  assert.doesNotMatch(nf, /Verify that the banner can be dismissed for a week|Suggested/, 'no test is ever suggested');
   assert.ok(kept.some((n) => /note-approved-without-tests/.test(n)));
 });
 
@@ -629,7 +679,9 @@ test('real: list → QA approved → Running → run on the merge commit → res
   assert.match(first.did, /round 1 waiting on QA/);
   assert.equal(notes(f).length, 1);
   const list1 = notes(f)[0]!;
-  assert.match(list1, /^\*\*Oneshot found 2 automation tests for this ticket — waiting for QA approval to run them locally\.\*\*/);
+  assert.match(list1, /^\*\*Impacted module: Leaves — Oneshot will run 2 automation tests locally once QA approves\.\*\*/);
+  assert.match(list1, /\| Leaves \| ✔️ \| `cypress\/e2e\/leaves\/apply_leave\.cy\.ts` \|/);
+  assert.match(list1, /\| Leaves \| ⭐ \| `cypress\/e2e\/leaves\/half_day\.cy\.ts` \|/);
   assert.match(list1, /@anosha\.saeed/);
   assert.match(list1, /@arsal\.tariq/);
   assert.ok(list1.includes(postMarker('list-r1', readLtJournal(f.iid)!.runId)));
@@ -676,7 +728,7 @@ test('real: list → QA approved → Running → run on the merge commit → res
 test('real: no test found, QA approved — marked done in one edit, a short record, nothing run', async () => {
   const f = fake({ sessionOut: () => ({ ok: true, data: NOT_FOUND, blocked: null, summary: '', turns: 9, weighted: 500, sessionId: 's', rateLimited: false }) });
   await pass(f);
-  assert.match(notes(f)[0]!, /^\*\*Oneshot found no automation test for this ticket\.\*\*/);
+  assert.match(notes(f)[0]!, /^\*\*Oneshot found no automation test to run locally for this ticket\.\*\*/);
   assert.match(notes(f)[0]!, /Checked: workstream-automation master \(commit `ccccccc`\)/);
 
   qaSays(f, 'anosha.saeed', 'approved');
@@ -687,38 +739,79 @@ test('real: no test found, QA approved — marked done in one edit, a short reco
   assert.equal(runs(f), 0);
 });
 
-test('real: "check again" re-checks master with no session, and the list goes back to QA', async () => {
+test('real: every impacted module\'s main-functionality specs are on the list, added back when the session left them out', async () => {
+  // The session lists the spec that sees the change and leaves the module's smoke tests out.
+  const f = fake({
+    impact: withMain,
+    sessionOut: () => ({ ok: true, data: scope({ specs: [SPECS[0]] }), blocked: null, summary: '', turns: 9, weighted: 500, sessionId: 's', rateLimited: false }),
+  });
+  await pass(f);
+  const own = f.impactCalls.filter((a) => a[0] === '--erp');
+  assert.equal(own.length, 1, 'the code runs the analysis over the tested MR too');
+  assert.deepEqual(own[0]!.slice(0, 6), ['--erp', '/nowhere/erp', '--base', BASE, '--head', MERGE]);
+  const r1 = readLtJournal(f.iid)!.lists[0]!;
+  assert.deepEqual(r1.specs, [SPECS[0]!.file, ...MAIN.map((m) => m.file)], 'the session\'s list, then the main tests it left out');
+  assert.equal(r1.tests, 6 + 2 + 3);
+  assert.equal(r1.estimatedMinutes, 4 + 2);
+  assert.deepEqual(f.impactCalls.find((a) => a[0] === 'estimate')!.slice(3), MAIN.map((m) => m.file));
+  const n = notes(f)[0]!;
+  assert.match(n, /^\*\*Impacted module: Leaves — Oneshot will run 3 automation tests locally once QA approves\.\*\*/);
+  assert.match(n, /\| Leaves \| ⭐ \| `cypress\/e2e\/leaves\/LV_13_submit\.ts` \| One of leaves's smoke tests \|/);
+  assert.match(n, /\*\*Counts:\*\* 1 test that checks the change · 2 main-functionality tests/);
+});
+
+test('real: a main-functionality spec the session kept out on purpose stays out', async () => {
+  const f = fake({
+    impact: withMain,
+    sessionOut: () => ({
+      ok: true, blocked: null, summary: '', turns: 9, weighted: 500, sessionId: 's', rateLimited: false,
+      data: scope({
+        specs: [SPECS[0]],
+        notRunnable: [{ spec: MAIN[0]!.file, why: 'needs a real mailbox' }],
+        proposals: [{ action: 'remove', title: 'Half day cannot run here', file: MAIN[1]!.file, why: 'the module flag is off' }],
+      }),
+    }),
+  });
+  await pass(f);
+  assert.deepEqual(readLtJournal(f.iid)!.lists[0]!.specs, [SPECS[0]!.file], 'notRunnable and a named removal are respected');
+  assert.ok(!f.impactCalls.some((a) => a[0] === 'estimate'), 'nothing added, nothing to price');
+});
+
+test('real: nothing reaches the change, so the module\'s main-functionality specs alone are the list', async () => {
+  const f = fake({
+    impact: withMain,
+    sessionOut: () => ({ ok: true, data: scope({ specs: [], applicable: false }), blocked: null, summary: '', turns: 9, weighted: 500, sessionId: 's', rateLimited: false }),
+  });
+  await pass(f);
+  const r1 = readLtJournal(f.iid)!.lists[0]!;
+  assert.equal(r1.kind, 'found');
+  assert.deepEqual(r1.specs, MAIN.map((m) => m.file));
+  assert.match(notes(f)[0]!, /Oneshot will run 2 automation tests locally once QA approves/);
+  assert.equal(readLtJournal(f.iid)!.lists.length, 1);
+});
+
+test('real: a scope that writes a new spec file is refused and charged; only existing tests run', async () => {
+  const f = fake({ addedSpecs: ['cypress/e2e/leaves/LV_LOCAL_banner.ts'] });
+  const o = await pass(f);
+  assert.equal(o.state, 'scoping', o.did);
+  assert.match(o.did, /scope attempt 1 of 2 failed — retrying next tick: the scope created a new spec file \(cypress\/e2e\/leaves\/LV_LOCAL_banner\.ts\); only tests that exist in workstream-automation run/);
+  assert.deepEqual(f.writes, [], 'nothing posted for a list that cannot run');
+  f.addedSpecs = [];
+  assert.equal((await pass(f)).state, 'awaiting-qa', 'the next session that writes none is posted');
+});
+
+test('real: the retired "check again" is feedback — the scope runs again on a fresh checkout of master', async () => {
   const f = fake({ sessionOut: () => ({ ok: true, data: NOT_FOUND, blocked: null, summary: '', turns: 9, weighted: 500, sessionId: 's', rateLimited: false }) });
   await pass(f);
-
-  // Still nothing on master.
-  f.impact = (args) => (args[0] === 'estimate' ? { ok: true, data: { totals: { estimatedMinutes: 1 } } }
-    : { ok: true, data: { specs: [{ file: 'cypress/e2e/leaves/smoke.cy.ts', reasons: ['module leaves (leaves)'] }] } });
+  f.sessionOut = () => ({ ok: true, data: scope({ specs: [SPECS[0]] }), blocked: null, summary: '', turns: 9, weighted: 500, sessionId: 's2', rateLimited: false });
   qaSays(f, 'arsal.tariq', 'disapproved: please check again');
-  const still = await pass(f);
-  assert.equal(still.state, 'awaiting-qa');
-  assert.equal(f.sessions.length, 1, 'no second session');
-  assert.match(notes(f)[1]!, /^\*\*Checked workstream-automation master again \(commit `ccccccc`\): still no automation test reaches this change\.\*\*/);
-  const analysis = f.impactCalls[0]!;
-  assert.deepEqual(analysis.slice(0, 6), ['--erp', '/nowhere/erp', '--base', BASE, '--head', MERGE]);
-  assert.equal(analysis[analysis.indexOf('--automation') + 1], join(runDir(f.iid), 'wsa'));
-  assert.deepEqual(f.cliCalls.slice(-2).map((a) => a[0]), ['prepare-scope', 'capture'], 'never a worktree left behind');
-
-  // QA has pushed one now.
-  f.impact = (args) => (args[0] === 'estimate' ? { ok: true, data: { totals: { estimatedMinutes: 2 } } }
-    : { ok: true, data: { specs: [{ file: 'cypress/e2e/leaves/banner.cy.ts', its: 2, reasons: ['imports cypress/Pages/Banner.ts, which selects \'banner\''] }] } });
-  qaSays(f, 'arsal.tariq', 'disapproved: check again please');
-  await pass(f);
-  assert.match(notes(f)[2]!, /Oneshot found 1 automation test for this ticket — waiting for QA approval/);
-  assert.match(notes(f)[2]!, /banner\.cy\.ts/);
-  const j = readLtJournal(f.iid)!;
-  assert.deepEqual(j.lists[2]!.specs, ['cypress/e2e/leaves/banner.cy.ts']);
-  assert.equal(j.lists[2]!.patchSha, null);
-
-  qaSays(f, 'arsal.tariq', 'approved');
-  assert.equal((await pass(f)).state, 'done');
-  const call = f.cliCalls.find((a) => a[0] === 'run')!;
-  assert.deepEqual(JSON.parse(readFileSync(call[call.indexOf('--specs-file') + 1]!, 'utf8')).specs, ['cypress/e2e/leaves/banner.cy.ts']);
+  const o = await pass(f);
+  assert.equal(o.state, 'awaiting-qa', o.did);
+  assert.equal(f.sessions.length, 2, 'a session, on a fresh automation worktree');
+  assert.match(f.sessions[1]!.prompt, /## QA asked for changes to an earlier version of this list/);
+  assert.match(f.sessions[1]!.prompt, /please check again/);
+  assert.deepEqual(f.cliCalls.filter((a) => a[0] === 'prepare-scope').length, 2);
+  assert.match(notes(f)[1]!, /Oneshot will run 1 automation test locally once QA approves/);
 });
 
 test('real: "added <file>" looks each path up on master; the ones there join the list, the rest are named', async () => {
@@ -739,10 +832,11 @@ test('real: "added <file>" looks each path up on master; the ones there join the
   assert.equal(r2.patchFile, j.lists[0]!.patchFile);
   assert.equal(r2.patchFromRound, 1);
   const n2 = notes(f)[1]!;
-  assert.match(n2, /Oneshot found 3 automation tests/);
-  assert.match(n2, /typo\.cy\.ts/);
-  assert.match(n2, /\*\*Temporary changes kept from round 1:\*\* 1 file \(`cypress\/Pages\/LeavePage\.ts`\), never committed — cut against workstream-automation `ccccccc` and applied on top of `eeeeeee`/);
-  assert.match(n2, /The patch is attached\./);
+  assert.match(n2, /^\*\*Impacted module: Leaves — Oneshot will run 3 automation tests locally once QA approves\.\*\*/);
+  assert.match(n2, /\| Leaves \| ➕ \| `cypress\/e2e\/leaves\/LV_23_total\.cy\.ts` \| Added to workstream-automation by @anosha\.saeed \|/);
+  assert.match(n2, /\*\*Not on master:\*\* `cypress\/e2e\/leaves\/typo\.cy\.ts` — check the path and reply again\./);
+  assert.match(n2, /\*\*Temporary changes:\*\* 1 file updated, never committed \(kept from round 1, cut against workstream-automation `ccccccc` and applied on top of `eeeeeee`; if it no longer applies there, the run says so\) — the patch is attached\./);
+  assert.equal(n2.match(/Temporary changes/g)?.length, 1, 'said once');
   assert.match(n2, /\[patch-r1\.patch\]/, 'the patch itself goes with the note');
   assert.equal(f.sessions.length, 1, 'no session for a lookup');
 
@@ -753,24 +847,33 @@ test('real: "added <file>" looks each path up on master; the ones there join the
   assert.equal(call[call.indexOf('--automation-sha') + 1], AUTO2, 'on top of master as QA left it');
 });
 
-test('real: "write a temporary test" and plain feedback each run the scope session again, with what QA asked', async () => {
-  const f = fake({ sessionOut: () => ({ ok: true, data: NOT_FOUND, blocked: null, summary: '', turns: 9, weighted: 500, sessionId: 's', rateLimited: false }) });
+test('real: "added <file>" without disapproved: works the same', async () => {
+  const f = fake();
   await pass(f);
-  assert.doesNotMatch(f.sessions[0]!.prompt, /QA asked for a temporary test/, 'a first round writes no test of its own');
+  f.onMaster.add('cypress/e2e/leaves/LV_23_total.cy.ts');
+  qaSays(f, 'arsal.tariq', 'added cypress/e2e/leaves/LV_23_total.cy.ts');
+  assert.equal((await pass(f)).state, 'awaiting-qa');
+  assert.deepEqual(readLtJournal(f.iid)!.lists[1]!.specs, [...SPECS.map((x) => x.file), 'cypress/e2e/leaves/LV_23_total.cy.ts']);
+  assert.equal(f.sessions.length, 1);
+});
 
-  f.sessionOut = () => ({ ok: true, data: scope({ edits: [{ file: 'cypress/e2e/leaves/LV_LOCAL_banner.ts', kind: 'add', why: 'QA asked', erpEvidence: 'x:1' }] }), blocked: null, summary: '', turns: 20, weighted: 1500, sessionId: 's2', rateLimited: false });
-  qaSays(f, 'arsal.tariq', 'disapproved: write a temporary test');
+test('real: feedback runs the scope session again with what QA asked; QA\'s removal of a main test sticks', async () => {
+  const f = fake({ impact: withMain });
+  await pass(f);
+  assert.doesNotMatch(f.sessions[0]!.prompt, /QA asked for changes/, 'a first round has no feedback block');
+  const calls = f.impactCalls.length;
+
+  // QA removed a main-functionality test; the session returns the list without it.
+  f.sessionOut = () => ({ ok: true, data: scope({ specs: [SPECS[0]] }), blocked: null, summary: '', turns: 9, weighted: 500, sessionId: 's2', rateLimited: false });
+  qaSays(f, 'anosha.saeed', 'disapproved:\n- also run LV_23\n- remove LV_13 and the half day test');
   await pass(f);
   assert.equal(f.sessions.length, 2);
-  assert.match(f.sessions[1]!.prompt, /QA asked for a temporary test/);
-  assert.match(notes(f)[1]!, /Oneshot found 2 automation tests/);
-
-  qaSays(f, 'anosha.saeed', 'disapproved:\n- also run LV_23\n- remove LV_21');
-  await pass(f);
-  assert.equal(f.sessions.length, 3);
-  assert.match(f.sessions[2]!.prompt, /also run LV_23/);
-  assert.match(f.sessions[2]!.prompt, /remove LV_21/);
-  assert.equal(readLtJournal(f.iid)!.lists.length, 3);
+  assert.match(f.sessions[1]!.prompt, /also run LV_23/);
+  assert.match(f.sessions[1]!.prompt, /remove LV_13/);
+  assert.equal(f.impactCalls.length, calls, 'a feedback round runs no analysis of its own');
+  const lists = readLtJournal(f.iid)!.lists;
+  assert.equal(lists.length, 2);
+  assert.deepEqual(lists[1]!.specs, [SPECS[0]!.file], 'nothing QA removed comes back');
 });
 
 test('real: a setup error puts the trigger back, says why, and asks QA again; their next approval retries', async () => {
@@ -787,7 +890,7 @@ test('real: a setup error puts the trigger back, says why, and asks QA again; th
   assert.deepEqual(labelEdits(f), [{ remove: [TRIGGER, DONE], add: [RUNNING] }, { remove: [RUNNING], add: [TRIGGER] }]);
   const posted = notes(f);
   assert.match(posted[posted.length - 2]!, /Oneshot could not run the local automation tests:\*\* E_MIGRATE_FAILED: leaves\.0042 failed/);
-  assert.match(posted[posted.length - 1]!, /waiting for QA approval to run them locally/, 'the same list, put to QA again');
+  assert.match(posted[posted.length - 1]!, /Oneshot will run 2 automation tests locally once QA approves/, 'the same list, put to QA again');
   assert.ok(!f.issue.labels.includes(DONE), 'not marked done');
 
   qaSays(f, 'arsal.tariq', 'approved');
@@ -1011,7 +1114,7 @@ test('real: an approval withdrawn before the start step is never acted on, thoug
 test('real: a reply after another Oneshot request is not read as approval; the list is put to QA again', async () => {
   const f = fake();
   await pass(f);
-  f.notes.push(note(f.nextNote++, 'desk', '**Automation test cases**\n\n<!-- oneshot:automation:cases:v1:abc -->'));
+  f.notes.push(note(f.nextNote++, 'desk', '**Verify results**\n\n<!-- oneshot:publish:verify -->'));
   qaSays(f, 'arsal.tariq', 'approved');
   const o = await pass(f);
   assert.equal(o.state, 'awaiting-qa', o.did);
@@ -1023,7 +1126,7 @@ test('real: a reply after another Oneshot request is not read as approval; the l
   assert.deepEqual(j.lists[1]!.askedAgain?.by, 'arsal.tariq');
   assert.deepEqual(j.lists[1]!.specs, j.lists[0]!.specs, 'the same list');
   const again = notes(f)[1]!;
-  assert.match(again, /^\*\*Oneshot found 2 automation tests for this ticket — waiting for QA approval/, 'the headline stays first');
+  assert.match(again, /^\*\*Impacted module: Leaves — Oneshot will run 2 automation tests locally once QA approves/, 'the headline stays first');
   assert.match(again, /\*\*Asked again:\*\* the reply from `@arsal\.tariq` came after another Oneshot request on this ticket/);
 
   qaSays(f, 'arsal.tariq', 'approved');
@@ -1172,9 +1275,10 @@ test('ranges: the scope covers each of the ticket\'s own merged MRs, and the not
   const f = fake();
   threeMrs(f);
   await pass(f);
-  const earlier = f.impactCalls.filter((a) => a[0] === '--erp');
-  assert.equal(earlier.length, 1, 'the analysis for the earlier MR; the session scopes the tested one');
-  assert.deepEqual(earlier[0]!.slice(0, 6), ['--erp', '/nowhere/erp', '--base', EARLY_BASE, '--head', EARLY]);
+  const analyses = f.impactCalls.filter((a) => a[0] === '--erp');
+  assert.deepEqual(analyses.map((a) => a[a.indexOf('--head') + 1]), [MERGE, EARLY],
+    'the tested MR (for its modules\' main tests), then the earlier one');
+  assert.deepEqual(analyses[1]!.slice(0, 6), ['--erp', '/nowhere/erp', '--base', EARLY_BASE, '--head', EARLY]);
   assert.deepEqual(f.impactCalls.find((a) => a[0] === 'estimate')!.slice(3), ['cypress/e2e/training/evaluator.cy.ts']);
   const j = readLtJournal(f.iid)!;
   assert.deepEqual(j.merged!.ranges!.map((r) => r.mrIid), [305, 310, 321]);
@@ -1184,7 +1288,7 @@ test('ranges: the scope covers each of the ticket\'s own merged MRs, and the not
   assert.equal(r1.tests, 9 + 4);
   assert.equal(r1.estimatedMinutes, 4 + 3);
   const n = notes(f)[0]!;
-  assert.match(n, /Oneshot found 3 automation tests/);
+  assert.match(n, /^\*\*Impacted modules: Leaves, Training — Oneshot will run 3 automation tests/);
   assert.match(n, /\*\*What changed:\*\* Fix the leave total, together with this ticket's earlier merged MR !310 \(MR !321, merged as `aaaaaaa`\)\./);
   assert.match(n, /\*\*Not checked:\*\* !305, also merged for this ticket — its change could not be read/);
   assert.match(n, /From !310: imports cypress\/Pages\/Training\.ts/);
@@ -1192,24 +1296,23 @@ test('ranges: the scope covers each of the ticket\'s own merged MRs, and the not
   // QA's feedback edits the whole list, which already covers !310: no analysis again.
   qaSays(f, 'anosha.saeed', 'disapproved:\n- remove LV_21');
   await pass(f);
-  assert.equal(f.impactCalls.filter((a) => a[0] === '--erp').length, 1);
+  assert.equal(f.impactCalls.filter((a) => a[0] === '--erp').length, 2);
   assert.deepEqual(readLtJournal(f.iid)!.lists[1]!.scopedMrs, [310, 321]);
 });
 
-test('ranges: the quick re-check analyses every merged MR of the ticket and lists their specs together', async () => {
+test('ranges: every merged MR of the ticket is analysed, and the main tests of each module it touched join the list', async () => {
   const f = fake({ sessionOut: () => ({ ok: true, data: NOT_FOUND, blocked: null, summary: '', turns: 9, weighted: 500, sessionId: 's', rateLimited: false }) });
   threeMrs(f);
+  const early = f.impact;
+  f.impact = (args) => (args[0] !== 'estimate' && args[args.indexOf('--head') + 1] === EARLY
+    ? { ok: true, data: { specs: [], mainSpecs: [{ file: 'cypress/e2e/trainings/trainings_01_nav.ts', module: 'trainings', basis: 'first', its: 1 }] } }
+    : early(args));
   await pass(f);
-  const before = f.impactCalls.length;
-  qaSays(f, 'arsal.tariq', 'disapproved: please check again');
-  await pass(f);
-  const analyses = f.impactCalls.slice(before).filter((a) => a[0] === '--erp');
-  assert.deepEqual(analyses.map((a) => a[a.indexOf('--head') + 1]), [MERGE, EARLY], 'the tested MR, then the earlier one');
-  const r2 = readLtJournal(f.iid)!.lists[1]!;
-  assert.equal(r2.source, 'recheck');
-  assert.deepEqual(r2.specs, ['cypress/e2e/training/evaluator.cy.ts', SPECS[0]!.file]);
-  assert.deepEqual(r2.scopedMrs, [310, 321]);
-  assert.match(notes(f)[1]!, /together with this ticket's earlier merged MR !310/);
+  const r1 = readLtJournal(f.iid)!.lists[0]!;
+  assert.deepEqual(r1.specs, ['cypress/e2e/trainings/trainings_01_nav.ts'], 'the earlier MR\'s module, though the tested one touched none');
+  assert.deepEqual(r1.scopedMrs, [310, 321]);
+  assert.match(notes(f)[0]!, /^\*\*Impacted module: Trainings — /);
+  assert.match(notes(f)[0]!, /together with this ticket's earlier merged MR !310/);
 });
 
 test('the tick: the scan\'s tickets, the journals that owe writes, never one the Loop is running', async () => {

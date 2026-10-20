@@ -3,9 +3,9 @@
  *
  * The mode runs after the ticket's change is merged and talks to QA through
  * the ticket alone, so every step it takes is one comment rendered here: the
- * tests it found (or that it found none), what a re-check turned up, the record
- * of going on without tests, the results, a run that could not happen, and
- * tests that could not be chosen at all.
+ * impacted-module report (or that there is nothing to run), the record of
+ * going on without tests, the automation report with the results, a run that
+ * could not happen, and tests that could not be chosen at all.
  *
  * Four rules shape every body:
  *
@@ -49,7 +49,7 @@ export interface LocalTestsNote {
 /** One of the ticket's own merged MRs the list was chosen for: its iid, and its merge (or squash) commit. */
 export interface ScopedMr { iid: number; sha: string }
 
-/** What the found and not-found notes need besides the scope. */
+/** What the list notes need besides the scope. */
 export interface LocalTestsNoteInfo {
   /** The workstream-automation commit the list was chosen against. */
   automationSha: string;
@@ -68,23 +68,16 @@ export interface LocalTestsNoteInfo {
   mrTitle?: string;
   /** The scope's saved temporary changes (ScopeInputs.patchFile). Attached when the file is there. */
   patchFile?: string;
-}
-
-/** What the quick re-check (or a `disapproved: added …` reply) produced. */
-export interface LocalTestsRecheck {
-  /** The spec files QA is now asked to approve, optionally with what each checks. Empty: still none. */
-  found: Array<string | { file: string; why?: string }>;
-  automationSha: string;
+  /** More about that patch, in one clause: kept from an earlier round, applied on a newer commit. */
+  patchNote?: string;
   /** Paths an `added` reply named that are not on the automation ref. */
   unknown?: string[];
-  /** The found list priced by the analysis script's `estimate`, when the caller ran it. */
-  estimatedMinutes?: number;
 }
 
 // ------------------------------------------------------------------- markers
 
 export type LocalTestsMarkerKind =
-  | 'found' | 'not-found' | 'recheck' | 'approved-without-tests' | 'results' | 'setup-error' | 'stuck';
+  | 'found' | 'not-found' | 'approved-without-tests' | 'results' | 'setup-error' | 'stuck';
 
 /** The hidden last line that makes a note this mode's own, one kind per builder. */
 export function localTestsMarker(kind: LocalTestsMarkerKind): string {
@@ -200,55 +193,77 @@ function whatChanged(s: Partial<LocalTestsScope>, info: ChangeInfo): string {
 
 // --------------------------------------------------------------- the list
 
-type Mark = 'new' | 'checks' | 'health';
+type Mark = 'checks' | 'added' | 'main';
 
-const MARK: Record<Mark, string> = { new: '🆕', checks: '✔️', health: '🩺' };
+const MARK: Record<Mark, string> = { checks: '✔️', added: '➕', main: '⭐' };
 
 const LEGEND: Record<Mark, string> = {
-  new: '🆕 new temporary test, for this run only',
-  checks: '✔️ existing test that checks the change',
-  health: '🩺 health check of the module',
+  checks: '✔️ checks the change',
+  added: '➕ added by QA',
+  main: '⭐ main functionality of the module',
 };
 
 /**
- * How the scope marks a health-check spec: its `why` starts `Health check:`
- * (the prompt asks for exactly that). `smoke` is accepted too, the word the
- * analysis script tags those specs with. A dash counts only with a space after
- * it, so "smoke-tagged spec that…" is not read as the prefix.
+ * How the scope marks a main-functionality spec: its `why` starts
+ * `Main functionality:` (the prompt asks for exactly that, and the code that
+ * adds one the session left out writes it). `Health check:` and `smoke`, the
+ * words of lists made before the main-functionality picks, read the same. A
+ * dash counts only with a space after it, so "smoke-tagged spec that…" is not
+ * read as the prefix.
  */
-const HEALTH_RE = /^\s*(?:health[\s-]*checks?|smoke(?:\s+tests?)?)\s*(?::|[—–-]\s)\s*/i;
+const MAIN_RE = /^\s*(?:main[\s-]*functionality|health[\s-]*checks?|smoke(?:\s+tests?)?)\s*(?::|[—–-]\s)\s*/i;
 
-interface Row { mark: Mark; file: string; what: string }
+interface Row { mark: Mark; module: string; file: string; what: string }
+
+/** A module folder as people say it: `finalSettlement` is "Final Settlement", `podA` "Pod A". */
+export function moduleName(folder: string): string {
+  const f = String(folder ?? '').trim();
+  return f ? f.replace(/([a-z\d])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase()) : 'Other';
+}
+
+/** The module a spec belongs to: its own `module`, else its folder under cypress/e2e. */
+function moduleOf(spec: { module?: unknown; file: string }): string {
+  const own = typeof spec.module === 'string' ? spec.module.trim() : '';
+  if (own) return own;
+  const parts = spec.file.split('/');
+  return parts[0] === 'cypress' && parts[1] === 'e2e' && parts.length > 3 ? parts[2]! : '';
+}
 
 /**
- * One row per spec file, de-duplicated: the new temporary tests first, then the
- * existing tests that check the change, then the health checks. A spec the
- * scope created is new whatever its `why` says.
+ * One row per spec file, de-duplicated: the tests that check the change first,
+ * then the files QA added, then each module's main-functionality tests — so
+ * the rows that matter most are the ones the table always shows. Within each
+ * group, by module.
  */
 function rowsOf(s: Partial<LocalTestsScope>): Row[] {
-  const created = new Set(listOf<{ file?: unknown; kind?: unknown }>(s.edits)
-    .filter((e) => e.kind === 'add').map((e) => String(e.file ?? '').trim()));
   const seen = new Set<string>();
   const rows: Row[] = [];
-  for (const spec of listOf<{ file?: unknown; why?: unknown }>(s.specs)) {
+  for (const spec of listOf<{ file?: unknown; why?: unknown; module?: unknown; addedBy?: unknown }>(s.specs)) {
     const file = String(spec.file ?? '').trim();
     if (!file || seen.has(file)) continue;
     seen.add(file);
     const why = flat(spec.why);
-    const health = HEALTH_RE.test(why);
-    const bare = why.replace(HEALTH_RE, '');
-    const what = health ? `${bare.charAt(0).toUpperCase()}${bare.slice(1)}` : bare;
-    rows.push({ mark: created.has(file) ? 'new' : health ? 'health' : 'checks', file, what });
+    const main = MAIN_RE.test(why);
+    const bare = why.replace(MAIN_RE, '');
+    const what = main ? `${bare.charAt(0).toUpperCase()}${bare.slice(1)}` : bare;
+    const mark: Mark = typeof spec.addedBy === 'string' && spec.addedBy ? 'added' : main ? 'main' : 'checks';
+    rows.push({ mark, module: moduleOf({ module: spec.module, file }), file, what });
   }
-  const order: Mark[] = ['new', 'checks', 'health'];
-  return order.flatMap((m) => rows.filter((r) => r.mark === m));
+  const order: Mark[] = ['checks', 'added', 'main'];
+  return order.flatMap((m) => rows.filter((r) => r.mark === m)
+    .map((r, i) => ({ r, i })).sort((a, b) => a.r.module.localeCompare(b.r.module) || a.i - b.i).map((x) => x.r));
 }
 
-const TABLE_HEAD = '| | Test | What it checks |\n|---|---|---|';
+/** The impacted modules, in the order the table shows them. */
+function modulesOf(rows: Row[]): string[] {
+  return [...new Set(rows.map((r) => moduleName(r.module)))];
+}
+
+const TABLE_HEAD = '| Module | | Test | Why it runs |\n|---|---|---|---|';
 
 function row(r: Row): string {
   const what = clip(r.what.replace(/[.\s]+$/, ''), WHY_CHARS);
-  return `| ${MARK[r.mark]} | ${tableCell(pathText(r.file))} | ${what ? tableCell(what) : '—'} |`;
+  return `| ${tableCell(moduleName(r.module))} | ${MARK[r.mark]} | ${tableCell(pathText(r.file))} | ${what ? tableCell(what) : '—'} |`;
 }
 
 /** The first TABLE_ROWS rows as the table; any beyond stay one click away, never dropped. */
@@ -268,9 +283,9 @@ function legend(rows: Row[]): string {
 function countsLine(rows: Row[], minutes: unknown, cases = 0): string {
   const n = (m: Mark): number => rows.filter((r) => r.mark === m).length;
   const est = Number(minutes);
-  return `**Counts:** ${plural(n('checks'), 'existing test')} found · ${n('new')} added for this run · ${
-    plural(n('health'), 'health check')} · ${Number.isFinite(est) && est > 0
-    ? `about ${Math.max(1, Math.round(est))} min` : 'time not estimated'}${
+  return `**Counts:** ${plural(n('checks'), 'test')} that ${n('checks') === 1 ? 'checks' : 'check'} the change · ${
+    plural(n('main'), 'main-functionality test')}${n('added') ? ` · ${n('added')} added by QA` : ''} · ${
+    Number.isFinite(est) && est > 0 ? `about ${Math.max(1, Math.round(est))} min` : 'time not estimated'}${
     cases > 0 ? ` (${plural(cases, 'test case')})` : ''}`;
 }
 
@@ -281,44 +296,37 @@ function notRunnableItems(v: unknown): string[] {
     .map((n) => `${pathText(String(n.spec).trim())}${clause(n.why) ? ` (${clause(n.why)})` : ''}`);
 }
 
-function suggestion(p: { title?: unknown; file?: unknown; why?: unknown }): string {
-  const file = String(p.file ?? '').trim();
-  const why = flat(p.why);
-  return `${clause(p.title)}${file ? ` (${pathText(file)})` : ''}.${why ? ` ${italic(`Why: ${why}`)}` : ''}`;
-}
-
 /**
- * The proposals a found list carries, each saying which way it goes. A remove
- * names the file when there is one: "REMOVE: Verify that…" alone would not say
- * which test goes.
+ * The tests the scope proposes to take out — one it drops, or a trim to fit
+ * the limits — each naming the file when there is one: "REMOVE: Verify that…"
+ * alone would not say which test goes. Only removals: Oneshot proposes no new
+ * test, so an `add` an older list carried is not shown.
  */
 function proposalLines(s: Partial<LocalTestsScope>): string {
-  return listOf<{ action?: unknown; title?: unknown; file?: unknown; why?: unknown }>(s.proposals).map((p) => {
-    if (p.action === 'remove') {
+  return listOf<{ action?: unknown; title?: unknown; file?: unknown; why?: unknown }>(s.proposals)
+    .filter((p) => p.action === 'remove').map((p) => {
       const file = String(p.file ?? '').trim();
       const why = flat(p.why);
       return `- REMOVE: ${file ? `${pathText(file)} — ` : ''}${clause(p.title)}.${why ? ` ${italic(`Why: ${why}`)}` : ''}`;
-    }
-    return `- ADD to the suite: ${suggestion(p)}`;
-  }).join('\n');
+    }).join('\n');
 }
 
 /**
  * The scope's temporary changes, counted, with the patch attached: "a spec was
- * updated to match" is a claim, and the diff is the evidence.
+ * updated to match" is a claim, and the diff is the evidence. `note` says more
+ * about the patch (kept from an earlier round, applied on a newer commit).
  */
-function temporaryChanges(s: Partial<LocalTestsScope>, patchFile: string | undefined): {
+function temporaryChanges(s: Partial<LocalTestsScope>, patchFile: string | undefined, note?: string): {
   line: string; attachments: Attachment[];
 } {
-  const edits = listOf<{ kind?: unknown }>(s.edits);
+  // The session's own account of its edits, else the files the capture found changed.
+  const captured = (s as { capture?: { changedFiles?: unknown } }).capture?.changedFiles;
+  const files = listOf<{ kind?: unknown }>(s.edits).length
+    || (Array.isArray(captured) ? captured.filter((f) => typeof f === 'string' && f).length : 0);
   const present = Boolean(patchFile && existsSync(patchFile));
-  if (!edits.length && !present) return { line: '**Temporary changes:** none.', attachments: [] };
-  const added = edits.filter((e) => e.kind === 'add').length;
-  const kinds = [
-    ...(edits.length - added ? [`${edits.length - added} updated`] : []),
-    ...(added ? [`${added} new`] : []),
-  ].join(', ');
-  const what = edits.length ? `${plural(edits.length, 'file')} (${kinds}), never committed` : 'never committed';
+  if (!files && !present) return { line: '**Temporary changes:** none.', attachments: [] };
+  const what = `${files ? `${plural(files, 'file')} updated, never committed` : 'never committed'}${
+    note ? ` (${clause(note)})` : ''}`;
   if (!present || !patchFile) {
     return { line: `**Temporary changes:** ${what}. The patch was not saved, so it is not attached.`, attachments: [] };
   }
@@ -377,6 +385,15 @@ function flaggedBlock(s: Partial<LocalTestsScope>): string[] {
       flagged.map((f) => `- ${pathText(f.file)}: ${f.why.join('; ')}`).join('\n')}`];
 }
 
+/** Paths an `added` reply named that are not on the automation ref, named back so a typo is not silently dropped. */
+function unknownLine(unknown: string[] | undefined): string[] {
+  const list = [...new Set((unknown ?? []).map((u) => String(u ?? '').trim()).filter(Boolean))];
+  return list.length
+    ? [`**Not on ${automationRefName()}:** ${list.map(codeSpan).join(', ')} — check the ${
+      list.length === 1 ? 'path' : 'paths'} and reply again.`]
+    : [];
+}
+
 /** Who is asked: the QA reviewers, mentioned so they are notified, or a line saying nobody is configured. */
 function who(qa: string[]): string {
   return qa.length
@@ -386,28 +403,32 @@ function who(qa: string[]): string {
 
 const FIRST_REPLY = '_Only a reply from a QA reviewer counts, and the first one decides._';
 
+/** The three answers, as QA type them. */
 function askToRun(qa: string[]): string {
-  return `${who(qa)}reply \`approved\` to run them, or \`disapproved:\` with your changes, for example:\n\n`
-    + '```\ndisapproved:\n- also run LV_23\n- remove LV_21\n```\n\n'
+  return `${who(qa)}reply with one of:\n`
+    + '- `approved` — run exactly these tests.\n'
+    + '- `disapproved:` with what to change, for example:\n\n'
+    + '  ```\n  disapproved:\n  - also run LV_23\n  - remove LV_21\n  ```\n'
+    + `- \`added <test file>\` — a test file on workstream-automation ${automationRefName()} to run as well, for `
+    + 'example `added cypress/e2e/leaves/LV_99_my_case.ts`.\n\n'
     + FIRST_REPLY;
 }
 
 function askWhenNone(qa: string[]): string {
   return `${who(qa)}reply with one of:\n`
-    + `- \`disapproved: please check again\` — once a test for this change is on ${automationRefName()}, `
-    + 'Oneshot checks again.\n'
-    + '- `disapproved: added <test file>` — Oneshot runs that exact file, for example '
-    + '`disapproved: added cypress/e2e/reports/reports_25_x.ts`.\n'
-    + '- `disapproved: write a temporary test` — Oneshot writes one for this run only, and shows it to you '
-    + 'before anything runs.\n'
-    + `- \`approved\` — continue without local tests; the ticket is marked **${labels().done}**.\n\n`
+    + `- \`approved\` — go on without local tests; the ticket is marked **${labels().done}**.\n`
+    + `- \`added <test file>\` — Oneshot runs that exact file from workstream-automation ${automationRefName()}, for `
+    + 'example `added cypress/e2e/reports/reports_25_x.ts`.\n'
+    + '- `disapproved:` with what to change — for example a module whose main-functionality tests should run.\n\n'
     + FIRST_REPLY;
 }
 
 // ------------------------------------------------------------ the notes
 
 /**
- * The list Oneshot found, put to QA. QA approves every local run, so this is
+ * The impacted-module report, put to QA: every module the change touched, and
+ * in it the tests that will run — the ones that check the change and the
+ * module's main-functionality tests. QA approves every local run, so this is
  * posted for every list, whatever is in it. A scope with nothing to run is the
  * not-found note instead: a table of no rows asks QA nothing they can answer.
  *
@@ -423,18 +444,21 @@ export function localTestsFoundNote(scope: ScopeLike, info: LocalTestsNoteInfo):
   const cases = listOf<{ cases?: unknown }>(s.specs).reduce((n, x) => n + (Number(x.cases) || 0), 0);
   const notRunnable = notRunnableItems(s.notRunnable);
   const proposals = proposalLines(s);
-  const temp = temporaryChanges(s, info.patchFile);
+  const temp = temporaryChanges(s, info.patchFile, info.patchNote);
   // Clipped before it is escaped, so the cut can never land inside an entity.
   const raw = clip(flat(s.summary).replace(/[.\s]+$/, ''), SUMMARY_CHARS);
   const summary = raw ? `${mdText(raw)}${raw.endsWith('…') ? '' : '.'}` : '';
+  const modules = modulesOf(rows);
   const parts = [
-    `**Oneshot found ${plural(rows.length, 'automation test')} for this ticket — waiting for QA approval to run them locally.**`,
+    `**Impacted ${modules.length === 1 ? 'module' : 'modules'}: ${mdText(modules.join(', '))} — Oneshot will run `
+      + `${plural(rows.length, 'automation test')} locally once QA approves.**`,
     whatChanged(s, info),
     table(rows),
     legend(rows),
     countsLine(rows, s.estimatedMinutes, cases),
+    ...unknownLine(info.unknown),
     ...(notRunnable.length ? [`**Can't run on a local machine (not run):** ${notRunnable.join('; ')}.`] : []),
-    ...(proposals ? [`**Suggestions:**\n${proposals}`] : []),
+    ...(proposals ? [`**Proposed removals:**\n${proposals}`] : []),
     '**Why approval:** QA approves every local run.',
     temp.line,
     ...(summary ? [`<details><summary>How Oneshot chose these</summary>\n\n${summary}\n\n</details>`] : []),
@@ -447,26 +471,25 @@ export function localTestsFoundNote(scope: ScopeLike, info: LocalTestsNoteInfo):
 }
 
 /**
- * No test reaches the change. Says what was checked, so "none" is a fact about
- * one commit of the suite rather than a guess, offers the test the scope would
- * add, and lists the four answers QA can give. Specs that reach the change but
- * cannot run on a desk are named, so "none" is never read as "nothing covers it".
+ * Nothing to run: no automation module is impacted and no existing test
+ * reaches the change (a backend-only or shared change no screen with a module
+ * reaches, say), or the files QA named are not on the automation ref. Says what
+ * was checked, so "nothing" is a fact about one commit of the suite rather
+ * than a guess, and lists the three answers QA can give. Specs that reach the
+ * change but cannot run on a desk are named, so "nothing" is never read as
+ * "nothing covers it". No test is suggested: QA add one to the suite
+ * themselves and reply `added <file>`.
  */
 export function localTestsNotFoundNote(scope: ScopeLike, info: LocalTestsNoteInfo): LocalTestsNote {
   const s = scopeOf(scope);
-  const adds = listOf<{ action?: unknown; title?: unknown; file?: unknown; why?: unknown }>(s.proposals)
-    .filter((p) => p.action !== 'remove' && clause(p.title));
-  const suggested = adds.length === 0
-    ? `**Suggested test:** none — ${clause(s.reason) || 'nothing a test could observe changed'}.`
-    : adds.length === 1
-      ? `**Suggested test:** ${suggestion(adds[0]!)}`
-      : `**Suggested tests:**\n${adds.map((p) => `- ${suggestion(p)}`).join('\n')}`;
   const notRunnable = notRunnableItems(s.notRunnable);
+  const why = clause(s.reason);
   const parts = [
-    '**Oneshot found no automation test for this ticket.**',
+    '**Oneshot found no automation test to run locally for this ticket.**',
     whatChanged(s, info),
+    ...(why ? [`**Why:** ${why}.`] : []),
     `Checked: workstream-automation ${automationRefName()} (commit ${sha7(info.automationSha)})`,
-    suggested,
+    ...unknownLine(info.unknown),
     ...(notRunnable.length
       ? [`**Tests that reach it but can't run on a local machine (not run):** ${notRunnable.join('; ')}.`]
       : []),
@@ -474,59 +497,6 @@ export function localTestsNotFoundNote(scope: ScopeLike, info: LocalTestsNoteInf
     localTestsMarker('not-found'),
   ];
   return { body: parts.join('\n\n'), attachments: [] };
-}
-
-/**
- * What the quick re-check found — or a `disapproved: added …` reply, once its
- * paths were looked up. With tests, it is the found-list again, put to QA for
- * approval. Without, one bold line saying so, with the same four answers. A
- * path QA named that is not on the automation ref is named back, so a typo is
- * not silently dropped.
- */
-export function localTestsRecheckNote(
-  result: LocalTestsRecheck,
-  info: Pick<LocalTestsNoteInfo, 'qa' | 'mergeSha' | 'mrIid' | 'mrTitle' | 'mrs'>,
-): LocalTestsNote {
-  const ref = automationRefName();
-  const checked = `workstream-automation ${ref} again (commit ${sha7(result.automationSha)})`;
-  const unknown = [...new Set((result.unknown ?? []).map((u) => String(u ?? '').trim()).filter(Boolean))];
-  const missing = unknown.length
-    ? [`**Not on ${ref}:** ${unknown.map(codeSpan).join(', ')} — check the ${
-      unknown.length === 1 ? 'path' : 'paths'} and reply again.`]
-    : [];
-  const seen = new Set<string>();
-  const rows: Row[] = [];
-  for (const f of result.found ?? []) {
-    const file = String((typeof f === 'string' ? f : f?.file) ?? '').trim();
-    if (!file || seen.has(file)) continue;
-    seen.add(file);
-    rows.push({ mark: 'checks', file, what: typeof f === 'string' ? '' : flat(f.why) });
-  }
-  if (!rows.length) {
-    return {
-      body: [
-        `**Checked ${checked}: still no automation test reaches this change.**`,
-        ...missing,
-        askWhenNone(info.qa),
-        localTestsMarker('recheck'),
-      ].join('\n\n'),
-      attachments: [],
-    };
-  }
-  return {
-    body: [
-      `**Oneshot found ${plural(rows.length, 'automation test')} for this ticket — waiting for QA approval to run them locally.**`,
-      `Checked ${checked}.`,
-      whatChanged({}, info),
-      table(rows),
-      countsLine(rows, result.estimatedMinutes),
-      ...missing,
-      '**Why approval:** QA approves every local run.',
-      askToRun(info.qa),
-      localTestsMarker('recheck'),
-    ].join('\n\n'),
-    attachments: [],
-  };
 }
 
 /**

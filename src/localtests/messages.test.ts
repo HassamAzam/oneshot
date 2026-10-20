@@ -3,13 +3,13 @@
  * read.
  *
  * Each note is read by someone who has not seen the pipeline: a QA deciding
- * whether a list may run, or what to do about a change no test reaches, and a
- * developer reading results. These pin the wording they act on — the headline
- * first, the markers in the table, the counts, the reply options — and the
- * properties that keep a note honest: real mentions, a patch attached when
- * there is one, a flagged temporary change shown before the ask, model text
- * that cannot break a table or forge a marker, no "marked done" over a run
- * that never happened, and no "label changed" when none was.
+ * whether a list may run, and a developer reading results. These pin the
+ * wording they act on — the headline first naming the impacted modules, the
+ * table by module, the counts, the three reply options — and the properties
+ * that keep a note honest: real mentions, a patch attached when there is one,
+ * a flagged temporary change shown before the ask, model text that cannot
+ * break a table or forge a marker, no suggested test ever, no "marked done"
+ * over a run that never happened, and no "label changed" when none was.
  */
 import '../lib/test-project-env.js';
 import { test } from 'node:test';
@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   localTestsApprovedWithoutTestsNote, localTestsFoundNote, localTestsMarker, localTestsNotFoundNote,
-  localTestsRecheckNote, localTestsResultsNote, localTestsSetupErrorNote, localTestsStuckNote, type LocalTestsNoteInfo,
+  localTestsResultsNote, localTestsSetupErrorNote, localTestsStuckNote, moduleName, type LocalTestsNoteInfo,
 } from './messages.js';
 import { artifactDir, localTestsConfig } from '../lib/config.js';
 import { isMachineNote } from '../lib/claims.js';
@@ -37,20 +37,20 @@ const info = (over: Partial<LocalTestsNoteInfo> = {}): LocalTestsNoteInfo => ({
 const scope = (over: Record<string, unknown> = {}) => ({
   applicable: true,
   reason: 'The diff renames the leave form submit testid',
-  modules: ['Leaves'],
+  modules: ['leaves', 'payroll'],
   specs: [
-    { file: 'cypress/e2e/leaves/LV_02_smoke.ts', module: 'Leaves', cases: 3, why: 'Health check: opens the leave dashboard' },
-    { file: 'cypress/e2e/leaves/LV_21_apply.ts', module: 'Leaves', cases: 5, why: 'Submits a leave through the renamed button' },
-    { file: 'cypress/e2e/leaves/TR_LOCAL_submit_label.ts', module: 'Leaves', cases: 2, why: 'Checks the new button label' },
+    { file: 'cypress/e2e/leaves/LV_13_submit.ts', module: 'leaves', cases: 3, why: 'Main functionality: submits a leave request' },
+    { file: 'cypress/e2e/leaves/LV_21_apply.ts', module: 'leaves', cases: 5, why: 'Submits a leave through the renamed button' },
+    { file: 'cypress/e2e/payroll/PRL_01_nav.ts', module: 'payroll', cases: 2,
+      why: 'Main functionality: one of the first tests of payroll, which tags none as smoke' },
   ],
   edits: [
     { file: 'cypress/Pages/LeavePage.ts', kind: 'update', why: 'Follows the renamed testid', erpEvidence: 'a.js:3' },
-    { file: 'cypress/e2e/leaves/TR_LOCAL_submit_label.ts', kind: 'add', why: 'Covers the label', erpEvidence: 'a.js:9' },
   ],
   proposals: [],
   notRunnable: [],
   estimatedMinutes: 11.6,
-  summary: 'Runs the two specs that reach the submit button and one health check.',
+  summary: 'Runs the spec that reaches the submit button and the main tests of leaves and payroll.',
   ...over,
 });
 
@@ -65,42 +65,73 @@ const ctx = {
 };
 const clearRun = (): void => rmSync(dirname(artifactDir(LT_IID)), { recursive: true, force: true });
 
-// ------------------------------------------------------------- the found list
+// ------------------------------------------------------- the impacted-module report
 
-test('the found note opens with the headline, then what changed', () => {
+test('the report opens with the impacted modules and what will run, then what changed', () => {
   const { body } = localTestsFoundNote(scope(), info());
   const parts = body.split('\n\n');
-  assert.equal(parts[0], '**Oneshot found 3 automation tests for this ticket — waiting for QA approval to run them locally.**');
+  assert.equal(parts[0], '**Impacted modules: Leaves, Payroll — Oneshot will run 3 automation tests locally once QA approves.**');
   assert.equal(parts[1], '**What changed:** Leave form: rename the submit button (MR !11042, merged as `abcdef1`).');
+  const one = localTestsFoundNote(scope({ specs: scope().specs.slice(0, 1) }), info()).body.split('\n\n')[0];
+  assert.equal(one, '**Impacted module: Leaves — Oneshot will run 1 automation test locally once QA approves.**');
 });
 
-test('the table marks new, checking and health-check tests, in that order, with the prefix dropped', () => {
+test('the table is by module: the tests that check the change first, then each module\'s main functionality', () => {
   const { body } = localTestsFoundNote(scope(), info());
+  assert.ok(body.includes('| Module | | Test | Why it runs |\n|---|---|---|---|'));
   const rows = body.split('\n').filter((l) => l.startsWith('| ') && l.includes('cypress/'));
   assert.deepEqual(rows, [
-    '| 🆕 | `cypress/e2e/leaves/TR_LOCAL_submit_label.ts` | Checks the new button label |',
-    '| ✔️ | `cypress/e2e/leaves/LV_21_apply.ts` | Submits a leave through the renamed button |',
-    '| 🩺 | `cypress/e2e/leaves/LV_02_smoke.ts` | Opens the leave dashboard |',
+    '| Leaves | ✔️ | `cypress/e2e/leaves/LV_21_apply.ts` | Submits a leave through the renamed button |',
+    '| Leaves | ⭐ | `cypress/e2e/leaves/LV_13_submit.ts` | Submits a leave request |',
+    '| Payroll | ⭐ | `cypress/e2e/payroll/PRL_01_nav.ts` | One of the first tests of payroll, which tags none as smoke |',
   ]);
-  assert.ok(body.includes('_🆕 new temporary test, for this run only · ✔️ existing test that checks the change · '
-    + '🩺 health check of the module_'));
+  assert.ok(body.includes('_✔️ checks the change · ⭐ main functionality of the module_'));
+  assert.doesNotMatch(body, /🆕|🩺|temporary test, for this run only|health check/i, 'no new test, no health checks');
 });
 
-test('a health check is recognised by its prefix in the wordings a session uses, and only by its prefix', () => {
+test('a main-functionality test is recognised by its prefix, the older health-check words included, and only by it', () => {
   const mark = (why: string): string => localTestsFoundNote(scope({
-    specs: [{ file: 'cypress/e2e/a.ts', module: 'L', cases: 1, why }], edits: [],
-  }), info()).body.split('\n').find((l) => l.includes('cypress/e2e/a.ts'))!.split(' | ')[0]!;
-  assert.equal(mark('Health check: opens the dashboard'), '| 🩺');
-  assert.equal(mark('health-check — opens the dashboard'), '| 🩺');
-  assert.equal(mark('Smoke: opens the dashboard'), '| 🩺');
-  assert.equal(mark('smoke-tagged spec that submits the renamed button'), '| ✔️');
-  assert.equal(mark('Checks the health check banner'), '| ✔️');
+    specs: [{ file: 'cypress/e2e/leaves/a.ts', module: 'leaves', cases: 1, why }], edits: [],
+  }), info()).body.split('\n').find((l) => l.includes('cypress/e2e/leaves/a.ts'))!.split(' | ')[1]!;
+  assert.equal(mark('Main functionality: opens the dashboard'), '⭐');
+  assert.equal(mark('main-functionality — opens the dashboard'), '⭐');
+  assert.equal(mark('Health check: opens the dashboard'), '⭐', 'a list from before the main-functionality picks');
+  assert.equal(mark('Smoke: opens the dashboard'), '⭐');
+  assert.equal(mark('smoke-tagged spec that submits the renamed button'), '✔️');
+  assert.equal(mark('Checks the main functionality banner'), '✔️');
 });
 
-test('the counts line says found, added, health checks and minutes', () => {
+test('a file QA added is its own row, after the tests that check the change, and counted', () => {
+  const { body } = localTestsFoundNote(scope({
+    specs: [...scope().specs, { file: 'cypress/e2e/leaves/LV_99_new.ts', module: 'leaves', cases: 0,
+      why: 'Added to workstream-automation by @arsal.tariq', addedBy: 'arsal.tariq' }],
+  }), info());
+  const rows = body.split('\n').filter((l) => l.startsWith('| ') && l.includes('cypress/'));
+  assert.equal(rows[1], '| Leaves | ➕ | `cypress/e2e/leaves/LV_99_new.ts` | Added to workstream-automation by @arsal.tariq |');
+  assert.ok(body.includes('_✔️ checks the change · ➕ added by QA · ⭐ main functionality of the module_'));
+  assert.ok(body.includes('**Counts:** 1 test that checks the change · 2 main-functionality tests · 1 added by QA · '
+    + 'about 12 min (10 test cases)'));
+});
+
+test('module folders read as people say them, and a spec without a module takes its folder', () => {
+  assert.equal(moduleName('finalSettlement'), 'Final Settlement');
+  assert.equal(moduleName('podA'), 'Pod A');
+  assert.equal(moduleName('teamReviewB'), 'Team Review B');
+  assert.equal(moduleName('leaves'), 'Leaves');
+  assert.equal(moduleName(''), 'Other');
+  const { body } = localTestsFoundNote(scope({
+    specs: [{ file: 'cypress/e2e/jobRequisition/JR_01.ts', cases: 1, why: 'Main functionality: opens requisitions' }],
+  }), info());
+  assert.ok(body.startsWith('**Impacted module: Job Requisition — '));
+  assert.ok(body.includes('| Job Requisition | ⭐ | `cypress/e2e/jobRequisition/JR_01.ts` |'));
+});
+
+test('the counts line says what checks the change, the main-functionality tests and the minutes', () => {
   const { body } = localTestsFoundNote(scope(), info());
-  assert.ok(body.includes('**Counts:** 1 existing test found · 1 added for this run · 1 health check · about 12 min '
+  assert.ok(body.includes('**Counts:** 1 test that checks the change · 2 main-functionality tests · about 12 min '
     + '(10 test cases)'));
+  const none = localTestsFoundNote(scope({ specs: scope().specs.filter((x) => x.why.startsWith('Main')), estimatedMinutes: 0 }), info()).body;
+  assert.ok(none.includes('**Counts:** 0 tests that check the change · 2 main-functionality tests · time not estimated (5 test cases)'));
 });
 
 test('approval is always asked, and the reason is always the same', () => {
@@ -109,16 +140,21 @@ test('approval is always asked, and the reason is always the same', () => {
   assert.ok(body.includes('**Temporary changes:** none.'));
 });
 
-test('QA are mentioned for real, never in a code span, with how to reply', () => {
+test('QA are mentioned for real, never in a code span, with the three answers', () => {
   const { body } = localTestsFoundNote(scope(), info());
-  assert.ok(body.includes('@anosha.saeed @arsal.tariq — reply `approved` to run them, or `disapproved:` with your '
-    + 'changes, for example:\n\n```\ndisapproved:\n- also run LV_23\n- remove LV_21\n```'));
+  assert.ok(body.includes('@anosha.saeed @arsal.tariq — reply with one of:\n'
+    + '- `approved` — run exactly these tests.\n'
+    + '- `disapproved:` with what to change, for example:\n\n'
+    + '  ```\n  disapproved:\n  - also run LV_23\n  - remove LV_21\n  ```\n'
+    + `- \`added <test file>\` — a test file on workstream-automation ${REF} to run as well, for example `
+    + '`added cypress/e2e/leaves/LV_99_my_case.ts`.'));
   assert.doesNotMatch(body, /`@/, 'a mention in a code span notifies nobody');
+  assert.doesNotMatch(body, /check again|temporary test/, 'the retired answers are not offered');
 });
 
 test('with nobody configured the note says so instead of mentioning nobody', () => {
   const { body } = localTestsFoundNote(scope(), info({ qa: [] }));
-  assert.match(body, /_No QA reviewer is configured \(config\/reviewers\.json `qa`\)\._ A QA reviewer can reply `approved`/);
+  assert.match(body, /_No QA reviewer is configured \(config\/reviewers\.json `qa`\)\._ A QA reviewer can reply with one of/);
 });
 
 test('the temporary changes are counted and the patch is attached', () => {
@@ -127,8 +163,11 @@ test('the temporary changes are counted and the patch is attached', () => {
     const patch = join(dir, 'temporary-changes.patch');
     writeFileSync(patch, 'diff --git a/x b/x\n');
     const { body, attachments } = localTestsFoundNote(scope(), info({ patchFile: patch }));
-    assert.ok(body.includes('**Temporary changes:** 2 files (1 updated, 1 new), never committed — the patch is attached.'));
+    assert.ok(body.includes('**Temporary changes:** 1 file updated, never committed — the patch is attached.'));
     assert.deepEqual(attachments.map((a) => [a.name, a.mime]), [['temporary-changes.patch', 'text/x-diff']]);
+    const moved = localTestsFoundNote(scope(), info({ patchFile: patch, patchNote: 'kept from round 1, applied on a newer commit' })).body;
+    assert.ok(moved.includes('**Temporary changes:** 1 file updated, never committed (kept from round 1, applied on a newer '
+      + 'commit) — the patch is attached.'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -136,7 +175,7 @@ test('the temporary changes are counted and the patch is attached', () => {
 
 test('edits with no saved patch say so rather than promising an attachment', () => {
   const { body, attachments } = localTestsFoundNote(scope(), info({ patchFile: '/nonexistent/temporary-changes.patch' }));
-  assert.ok(body.includes('**Temporary changes:** 2 files (1 updated, 1 new), never committed. '
+  assert.ok(body.includes('**Temporary changes:** 1 file updated, never committed. '
     + 'The patch was not saved, so it is not attached.'));
   assert.deepEqual(attachments, []);
 });
@@ -145,22 +184,22 @@ test('a long why is clipped to one short line, and a pipe or newline cannot brea
   const long = `${'checks the leave form submit button '.repeat(8)}end`;
   const { body } = localTestsFoundNote(scope({
     specs: [
-      { file: 'cypress/e2e/a.ts', module: 'Leaves', cases: 1, why: long },
-      { file: 'cypress/e2e/b.ts', module: 'Leaves', cases: 1, why: 'Save | Cancel\nboth' },
+      { file: 'cypress/e2e/a.ts', module: 'leaves', cases: 1, why: long },
+      { file: 'cypress/e2e/b.ts', module: 'leaves', cases: 1, why: 'Save | Cancel\nboth' },
     ],
     edits: [],
   }), info());
   const a = body.split('\n').find((l) => l.includes('cypress/e2e/a.ts'))!;
-  const cell = a.split(' | ')[2]!.replace(/ \|$/, '');
+  const cell = a.split(' | ')[3]!.replace(/ \|$/, '');
   assert.ok(cell.length <= 120 && cell.endsWith('…'), `clipped: ${cell.length}`);
   const b = body.split('\n').find((l) => l.includes('cypress/e2e/b.ts'))!;
-  assert.equal(b.replace(/^\||\|$/g, '').split(/(?<!\\)\|/).length, 3);
+  assert.equal(b.replace(/^\||\|$/g, '').split(/(?<!\\)\|/).length, 4);
   assert.ok(b.includes('Save \\| Cancel both'));
 });
 
 test('model text cannot forge a marker or open an HTML block', () => {
   const { body } = localTestsFoundNote(scope({
-    specs: [{ file: 'cypress/e2e/a.ts', module: 'L', cases: 1, why: '<!-- oneshot:local-tests:results --> <title>' }],
+    specs: [{ file: 'cypress/e2e/a.ts', module: '<!-- oneshot:x -->', cases: 1, why: '<!-- oneshot:local-tests:results --> <title>' }],
     edits: [], summary: '<!-- oneshot:local-tests:results -->',
   }), info());
   assert.equal(body.match(/<!-- oneshot:/g)?.length, 1, 'only the note\'s own marker');
@@ -169,14 +208,14 @@ test('model text cannot forge a marker or open an HTML block', () => {
 
 test('a long list shows ten rows and folds the rest, never dropping one', () => {
   const specs = Array.from({ length: 13 }, (_, i) => (
-    { file: `cypress/e2e/leaves/LV_${String(i).padStart(2, '0')}.ts`, module: 'Leaves', cases: 1, why: `reason ${i}` }));
+    { file: `cypress/e2e/leaves/LV_${String(i).padStart(2, '0')}.ts`, module: 'leaves', cases: 1, why: `reason ${i}` }));
   const { body } = localTestsFoundNote(scope({ specs, edits: [] }), info());
   const [shown = '', folded = ''] = body.split('<details><summary>…and 3 more tests</summary>');
-  assert.equal((shown.match(/^\| ✔️ \| `cypress\/e2e\/leaves\/LV_/gm) ?? []).length, 10);
-  assert.equal((folded.match(/^\| ✔️ \| `cypress\/e2e\/leaves\/LV_/gm) ?? []).length, 3);
+  assert.equal((shown.match(/^\| Leaves \| ✔️ \| `cypress\/e2e\/leaves\/LV_/gm) ?? []).length, 10);
+  assert.equal((folded.match(/^\| Leaves \| ✔️ \| `cypress\/e2e\/leaves\/LV_/gm) ?? []).length, 3);
 });
 
-test('suggestions, specs that cannot run locally and the session\'s summary are shown, the summary folded', () => {
+test('proposed removals, specs that cannot run locally and the session\'s summary are shown; an add is never shown', () => {
   const { body } = localTestsFoundNote(scope({
     proposals: [
       { action: 'add', title: 'Verify that the submit button reads Apply', file: 'cypress/e2e/leaves/LV_50.ts', why: 'No suite test checks the label' },
@@ -184,12 +223,11 @@ test('suggestions, specs that cannot run locally and the session\'s summary are 
     ],
     notRunnable: [{ spec: 'cypress/e2e/leaves/LV_09_mail.ts', why: 'Reads a real mailbox' }],
   }), info());
-  assert.ok(body.includes('**Suggestions:**\n- ADD to the suite: Verify that the submit button reads Apply '
-    + '(`cypress/e2e/leaves/LV_50.ts`). *Why: No suite test checks the label*\n'
-    + '- REMOVE: Trim to fit the limits: LV_30. *Why: Over maxSpecs*'));
+  assert.ok(body.includes('**Proposed removals:**\n- REMOVE: Trim to fit the limits: LV_30. *Why: Over maxSpecs*'));
+  assert.doesNotMatch(body, /ADD to the suite|Verify that the submit button reads Apply|Suggest/);
   assert.ok(body.includes('**Can\'t run on a local machine (not run):** `cypress/e2e/leaves/LV_09_mail.ts` (Reads a real mailbox).'));
-  assert.ok(body.includes('<details><summary>How Oneshot chose these</summary>\n\nRuns the two specs that reach the '
-    + 'submit button and one health check.\n\n</details>'));
+  assert.ok(body.includes('<details><summary>How Oneshot chose these</summary>\n\nRuns the spec that reaches the '
+    + 'submit button and the main tests of leaves and payroll.\n\n</details>'));
 });
 
 test('without an MR title the scope\'s reason says what changed', () => {
@@ -211,7 +249,7 @@ test('temporary changes capture flagged are named with why, in a bold line just 
     },
   }), info());
   const parts = body.split('\n\n');
-  const ask = parts.findIndex((p) => p.startsWith('@anosha.saeed @arsal.tariq — reply `approved`'));
+  const ask = parts.findIndex((p) => p.startsWith('@anosha.saeed @arsal.tariq — reply with one of'));
   assert.equal(parts[ask - 1],
     '**Temporary changes that weaken a test, reach outside the browser, or touch files outside '
     + '`localTests.allowedPaths` — read the patch before approving:**\n'
@@ -247,82 +285,49 @@ test('several of the ticket\'s merged MRs are all named; the tested one alone re
   const one = '**What changed:** Leave form: rename the submit button (MR !11042, merged as `abcdef1`).';
   assert.equal(localTestsFoundNote(scope(), info({ mrs: [{ iid: 11042, sha: MERGE }] })).body.split('\n\n')[1], one);
   assert.equal(localTestsFoundNote(scope(), info({ mrs: [] })).body.split('\n\n')[1], one);
-  assert.ok(localTestsRecheckNote({ found: ['cypress/e2e/a.ts'], automationSha: WSA_SHA }, info({ mrs }))
-    .body.includes('Also checked: this ticket\'s earlier merged MRs !11001'));
+});
+
+test('paths QA named that are not on the automation ref are named back', () => {
+  const found = localTestsFoundNote(scope(), info({ unknown: ['cypress/e2e/reports/typo.ts', 'cypress/e2e/reports/typo.ts'] })).body;
+  assert.ok(found.includes(`**Not on ${REF}:** \`cypress/e2e/reports/typo.ts\` — check the path and reply again.`));
+  const none = localTestsNotFoundNote(scope({ specs: [] }), info({ unknown: ['cypress/e2e/a.ts', 'cypress/e2e/b.ts'] })).body;
+  assert.ok(none.includes(`**Not on ${REF}:** \`cypress/e2e/a.ts\`, \`cypress/e2e/b.ts\` — check the paths and reply again.`));
 });
 
 test('a found note with nothing to run is the not-found note instead', () => {
   const { body } = localTestsFoundNote(scope({ specs: [], edits: [] }), info());
-  assert.ok(body.startsWith('**Oneshot found no automation test for this ticket.**'));
+  assert.ok(body.startsWith('**Oneshot found no automation test to run locally for this ticket.**'));
 });
 
-// ------------------------------------------------------------- none found
+// ------------------------------------------------------------- nothing to run
 
-test('the not-found note names the commit it checked, the suggested test and the four answers', () => {
+test('the nothing-to-run note says why, names the commit it checked and the three answers, and suggests no test', () => {
   const { body, attachments } = localTestsNotFoundNote(scope({
+    applicable: false, reason: 'Only apps/core changed, which no screen with an automation module reaches.',
     specs: [], edits: [],
-    proposals: [{ action: 'add', title: 'Verify that the evidence banner can be dismissed for a week', why: 'No page object selects evidence-notice-dismiss' }],
+    // An older scope's suggestion is never shown.
+    proposals: [{ action: 'add', title: 'Verify that the evidence banner can be dismissed for a week', why: 'No page object selects it' }],
   }), info());
   const parts = body.split('\n\n');
-  assert.equal(parts[0], '**Oneshot found no automation test for this ticket.**');
+  assert.equal(parts[0], '**Oneshot found no automation test to run locally for this ticket.**');
   assert.equal(parts[1], '**What changed:** Leave form: rename the submit button (MR !11042, merged as `abcdef1`).');
-  assert.equal(parts[2], `Checked: workstream-automation ${REF} (commit \`c0ffee1\`)`);
-  assert.equal(parts[3], '**Suggested test:** Verify that the evidence banner can be dismissed for a week. '
-    + '*Why: No page object selects evidence-notice-dismiss*');
+  assert.equal(parts[2], '**Why:** Only apps/core changed, which no screen with an automation module reaches.');
+  assert.equal(parts[3], `Checked: workstream-automation ${REF} (commit \`c0ffee1\`)`);
   assert.ok(body.includes('@anosha.saeed @arsal.tariq — reply with one of:\n'
-    + `- \`disapproved: please check again\` — once a test for this change is on ${REF}, Oneshot checks again.\n`
-    + '- `disapproved: added <test file>` — Oneshot runs that exact file, for example '
-    + '`disapproved: added cypress/e2e/reports/reports_25_x.ts`.\n'
-    + '- `disapproved: write a temporary test` — Oneshot writes one for this run only, and shows it to you before anything runs.\n'
-    + '- `approved` — continue without local tests; the ticket is marked **Automation Testing Done**.'));
+    + '- `approved` — go on without local tests; the ticket is marked **Automation Testing Done**.\n'
+    + `- \`added <test file>\` — Oneshot runs that exact file from workstream-automation ${REF}, for example `
+    + '`added cypress/e2e/reports/reports_25_x.ts`.\n'
+    + '- `disapproved:` with what to change — for example a module whose main-functionality tests should run.'));
+  assert.doesNotMatch(body, /Suggested|evidence banner|temporary test|check again/);
   assert.ok(body.endsWith(localTestsMarker('not-found')));
   assert.deepEqual(attachments, []);
 });
 
-test('several suggested tests are a list; none says why there is nothing to suggest', () => {
-  const two = localTestsNotFoundNote(scope({ specs: [], proposals: [
-    { action: 'add', title: 'Verify that A', why: 'a' }, { action: 'add', title: 'Verify that B', why: 'b' },
-  ] }), info()).body;
-  assert.ok(two.includes('**Suggested tests:**\n- Verify that A. *Why: a*\n- Verify that B. *Why: b*'));
-  const none = localTestsNotFoundNote(scope({ applicable: false, reason: 'Only a Celery task changed.', specs: [] }), info()).body;
-  assert.ok(none.includes('**Suggested test:** none — Only a Celery task changed.'));
-});
-
-test('specs that reach the change but cannot run locally are named, so none is not read as uncovered', () => {
+test('specs that reach the change but cannot run locally are named, so nothing-to-run is not read as uncovered', () => {
   const { body } = localTestsNotFoundNote(scope({
     specs: [], notRunnable: [{ spec: 'cypress/e2e/payroll/PR_01.ts', why: 'Needs Odoo' }],
   }), info());
   assert.ok(body.includes('**Tests that reach it but can\'t run on a local machine (not run):** `cypress/e2e/payroll/PR_01.ts` (Needs Odoo).'));
-});
-
-// ------------------------------------------------------------- the re-check
-
-test('a re-check that still finds nothing says so in its headline and offers the same answers', () => {
-  const { body } = localTestsRecheckNote({ found: [], automationSha: WSA_SHA }, info());
-  assert.ok(body.startsWith(`**Checked workstream-automation ${REF} again (commit \`c0ffee1\`): `
-    + 'still no automation test reaches this change.**'));
-  assert.ok(body.includes('- `disapproved: write a temporary test`'));
-  assert.ok(body.includes('@anosha.saeed @arsal.tariq — reply with one of:'));
-  assert.ok(body.endsWith(localTestsMarker('recheck')));
-});
-
-test('a re-check that finds tests puts the found list to QA again, naming any path it could not find', () => {
-  const { body } = localTestsRecheckNote({
-    found: ['cypress/e2e/reports/reports_25_x.ts', { file: 'cypress/e2e/reports/reports_26_y.ts', why: 'Added by QA' },
-      'cypress/e2e/reports/reports_25_x.ts'],
-    unknown: ['cypress/e2e/reports/typo.ts'],
-    automationSha: WSA_SHA,
-    estimatedMinutes: 4.2,
-  }, info());
-  const parts = body.split('\n\n');
-  assert.equal(parts[0], '**Oneshot found 2 automation tests for this ticket — waiting for QA approval to run them locally.**');
-  assert.equal(parts[1], `Checked workstream-automation ${REF} again (commit \`c0ffee1\`).`);
-  assert.ok(body.includes('| ✔️ | `cypress/e2e/reports/reports_25_x.ts` | — |'));
-  assert.ok(body.includes('| ✔️ | `cypress/e2e/reports/reports_26_y.ts` | Added by QA |'));
-  assert.ok(body.includes('**Counts:** 2 existing tests found · 0 added for this run · 0 health checks · about 4 min'));
-  assert.ok(body.includes(`**Not on ${REF}:** \`cypress/e2e/reports/typo.ts\` — check the path and reply again.`));
-  assert.ok(body.includes('reply `approved` to run them'));
-  assert.ok(body.endsWith(localTestsMarker('recheck')));
 });
 
 // ------------------------------------------------------------- the records
@@ -446,7 +451,6 @@ test('every note ends with its own marker, and every marker is a machine note', 
   const bodies: Array<[string, string]> = [
     ['found', localTestsFoundNote(scope(), info()).body],
     ['not-found', localTestsNotFoundNote(scope({ specs: [] }), info()).body],
-    ['recheck', localTestsRecheckNote({ found: [], automationSha: WSA_SHA }, info()).body],
     ['approved-without-tests', localTestsApprovedWithoutTestsNote('anosha.saeed').body],
     ['results', localTestsResultsNote(run(), ctx).body],
     ['setup-error', localTestsSetupErrorNote('x').body],

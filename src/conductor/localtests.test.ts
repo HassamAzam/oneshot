@@ -660,19 +660,30 @@ test('a list with specs keeps its capture, with why each flagged file was flagge
   assert.equal(readJournal(iid), null);
 });
 
-test('a list of nothing comes back as it is — the "no test found" answer, with its suggestion', async () => {
+test('a list of nothing comes back as it is — the "nothing to run" answer', async () => {
   const iid = freshIid();
   const w = world();
-  const session = scopeWith({
-    capture: undefined, specs: [], reason: 'the banner has no spec yet',
-    proposals: [{ action: 'add', title: 'Verify that the banner can be dismissed for a week', why: 'gap' }],
-  });
+  const session = scopeWith({ capture: undefined, specs: [], reason: 'only apps/core changed' });
 
   const after = await captureScopeSession(iid, { ok: true, data: session }, INPUTS, w.deps);
 
   assert.equal(after.refusal, null);
   assert.deepEqual(after.data, session, 'nothing rewritten: the mode posts the not-found note from it');
   assert.equal(w.cli.calls.length, 1, 'the throwaway worktree is still captured and removed');
+});
+
+test('a scope that wrote a new spec file is refused: only tests that exist in workstream-automation run', async () => {
+  const iid = freshIid();
+  const w = world({}, fakeCli({
+    capture: (_a, c) => reply(c, captureAnswer({ addedSpecs: ['cypress/e2e/leaves/LV_LOCAL_banner.ts'] })),
+  }));
+
+  const after = await captureScopeSession(iid, { ok: true, data: scopeWith({ capture: undefined }) }, INPUTS, w.deps);
+
+  assert.equal(after.refusal,
+    'the scope created a new spec file (cypress/e2e/leaves/LV_LOCAL_banner.ts); only tests that exist in workstream-automation run');
+  assert.equal(readArtifact(iid, 'local-tests-scope.json'), null, 'a refused list is not the scope the run reads');
+  assert.equal(w.cli.calls.length, 1, 'still captured and removed');
 });
 
 test('a scope that made no edits is captured as no patch, and still runs', async () => {

@@ -24,9 +24,17 @@ const impact = require(SCRIPT) as {
   isDestructive: (src: string) => boolean;
   parseTestIds: (src: string) => Record<string, Record<string, string>>;
   selectorTestids: (src: string) => Set<string>;
+  specTags: (src: string) => string[];
+  caseNumber: (file: string) => number;
+  mainSpecsOf: (modules: string[], specFiles: string[], tagsOf: Map<string, string[]>) =>
+    Array<{ file: string; module: string; basis: 'smoke' | 'first' }>;
+  MAIN_SPECS_PER_MODULE: number;
 };
 
-interface Spec { file: string; module: string; its: number; ciSeconds: number | null; destructive: boolean; reasons: string[] }
+interface Spec {
+  file: string; module: string; its: number; ciSeconds: number | null; destructive: boolean; smoke: boolean; main: boolean; reasons: string[];
+}
+interface MainSpec { file: string; module: string; basis: 'smoke' | 'first'; its: number; ciSeconds: number | null; destructive: boolean }
 interface Dropped { value: string; source: string; renamedTo: string | null; pageObjects: string[]; specs: string[] }
 interface Impact {
   changedFiles: { frontend: string[]; backend: string[]; migrations: string[] };
@@ -40,6 +48,8 @@ interface Impact {
     generic: string[];
   };
   specs: Spec[];
+  mainSpecs: MainSpec[];
+  mainTotals: { specs: number; its: number; estimatedMinutes: number };
   removedTestidStillUsed: Dropped[];
   addedTestidUnused: Array<{ value: string; usedBy: string[] }>;
   totals: { specs: number; its: number; ciSeconds: number; untimed: number; estimatedMinutes: number };
@@ -359,4 +369,61 @@ test('a per-row testid function and a template selector meet on the same prefix'
 test('reading a spec is not running it: a raw delete request is destructive, a GET is not', () => {
   assert.equal(impact.isDestructive("cy.request({ method: 'DELETE', url: '/api/x' });"), true);
   assert.equal(impact.isDestructive("cy.request({ method: 'GET', url: '/api/x' });"), false);
+});
+
+/* ------------------------------------------------------------------ main functionality */
+
+test('every impacted module gives its main-functionality specs; a module with no smoke tag gives its first cases', () => {
+  // The fixture tags every spec `regression` only, so each mapped module falls back to its first cases.
+  assert.deepEqual(result.mainSpecs.map((m) => [m.module, m.file.split('/').pop(), m.basis]), [
+    ['expenses', 'EXP_01.ts', 'first'],
+    ['home', 'HOME_01.ts', 'first'],
+    ['teamReviewA', 'TR_01.ts', 'first'],
+    ['teamReviewB', 'TR_50.ts', 'first'],
+  ]);
+  assert.equal(result.mainSpecs.find((m) => m.file.endsWith('TR_50.ts'))?.its, 2, 'priced like every candidate');
+  assert.equal(result.mainTotals.specs, 4);
+  // A testid match outside the mapped modules is a candidate, never a module's main test.
+  const org = result.specs.find((x) => x.file.endsWith('ORG_01.ts'))!;
+  assert.equal(org.main, false);
+  assert.ok(result.specs.filter((x) => x.main).every((x) => result.mainSpecs.some((m) => m.file === x.file)));
+  assert.ok(result.specs.every((x) => x.smoke === false));
+});
+
+test('a spec\'s tags are the TestFilters list, and a commented-out wrapper tags nothing', () => {
+  assert.deepEqual(impact.specTags("TestFilters(['regression', 'smoke'], () => {"), ['regression', 'smoke']);
+  assert.deepEqual(impact.specTags('TestFilters( [ "smoke" ,\n "LV_480" ], () => {'), ['LV_480', 'smoke']);
+  assert.deepEqual(impact.specTags("// TestFilters(['smoke'], () => {\nTestFilters(['regression'], () => {"), ['regression']);
+  assert.deepEqual(impact.specTags("describe('no filter', () => {});"), []);
+});
+
+test('case numbers order a module\'s specs the way QA number them', () => {
+  assert.equal(impact.caseNumber('cypress/e2e/leaves/LV_04.1_team_on_leave.ts'), 4.1);
+  assert.equal(impact.caseNumber('cypress/e2e/trainings/trainings_01_dashboard.ts'), 1);
+  assert.equal(impact.caseNumber('cypress/e2e/leaves/no_number.ts'), Infinity);
+});
+
+test('main picks: smoke-tagged first in case order, capped per module, else the first cases', () => {
+  const files = [
+    'cypress/e2e/leaves/LV_29_calendar.ts', 'cypress/e2e/leaves/LV_13_submit.ts', 'cypress/e2e/leaves/LV_01_nav.ts',
+    'cypress/e2e/leaves/LV_06.1_modal.ts', 'cypress/e2e/leaves/LV_06_modal.ts', 'cypress/e2e/leaves/LV_14_dashboard.ts',
+    'cypress/e2e/leaves/LV_17.1_cancel.ts', 'cypress/e2e/leaves/LV_19_half_day.ts', 'cypress/e2e/leaves/LV_40_x.ts',
+    'cypress/e2e/payroll/PRL_10_report.ts', 'cypress/e2e/payroll/PRL_02_dashboard.ts', 'cypress/e2e/payroll/PRL_01_nav.ts',
+    'cypress/e2e/home/HOME_01.ts',
+  ];
+  const smoke = ['LV_13_submit', 'LV_14_dashboard', 'LV_17.1_cancel', 'LV_19_half_day', 'LV_29_calendar', 'LV_40_x'];
+  const tags = new Map(files.map((f) => [f, smoke.some((x) => f.includes(x)) ? ['regression', 'smoke'] : ['regression']]));
+  const picks = impact.mainSpecsOf(['leaves', 'payroll'], files, tags);
+  assert.equal(impact.MAIN_SPECS_PER_MODULE, 5);
+  assert.deepEqual(picks.map((m) => [m.module, m.file.split('/').pop(), m.basis]), [
+    ['leaves', 'LV_13_submit.ts', 'smoke'],
+    ['leaves', 'LV_14_dashboard.ts', 'smoke'],
+    ['leaves', 'LV_17.1_cancel.ts', 'smoke'],
+    ['leaves', 'LV_19_half_day.ts', 'smoke'],
+    ['leaves', 'LV_29_calendar.ts', 'smoke'],
+    ['payroll', 'PRL_01_nav.ts', 'first'],
+    ['payroll', 'PRL_02_dashboard.ts', 'first'],
+    ['payroll', 'PRL_10_report.ts', 'first'],
+  ], 'leaves: its smoke tests, the sixth left out; payroll tags none, so its first cases; home is not impacted');
+  assert.deepEqual(impact.mainSpecsOf([], files, tags), []);
 });

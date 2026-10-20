@@ -663,13 +663,11 @@ export interface ScopeInputs {
   /** Where the edits will be saved — and where the previous round's are, on a redo. */
   patchFile: string;
   /**
-   * What QA asked of this round, when it is not the first: `write-temporary`
-   * (no existing spec reaches the change, and QA wants one written for this
-   * run only) or `feedback` (QA's `disapproved:` text, in `feedback`). Absent,
-   * the session writes no test of its own: an uncovered change comes back as
-   * an empty list with an `add` proposal, and QA decides.
+   * What QA asked of this round, when it is not the first: `feedback`, their
+   * `disapproved:` text, in `feedback`. The session never writes a test, in
+   * any round: only tests that exist in workstream-automation run.
    */
-  request?: 'write-temporary' | 'feedback';
+  request?: 'feedback';
   feedback?: string;
   /** The merge commit and the MR that made it, named in the prompt. */
   mergeSha?: string;
@@ -782,14 +780,16 @@ export async function prepareScopeAt(
  * it: a scope that blocked or failed still leaves nothing on the desk. Then,
  * for a scope that finished:
  *
- *   - nothing to run: returned as it is. That is the "no automation test
- *     reaches this change" answer, and its `add` proposal is the suggested
- *     test QA reads; there is no patch worth keeping for a list of nothing;
+ *   - nothing to run: returned as it is. That is the "no automation test to
+ *     run" answer; there is no patch worth keeping for a list of nothing;
  *   - something to run: the capture is written into the scope as `capture`,
  *     where the run reads the patch and the commit it was cut against;
  *   - something to run but the edits could not be saved: a refusal, because
  *     running the specs without the edits the list depends on would report
- *     failures the list already explained.
+ *     failures the list already explained;
+ *   - something to run with a NEW spec file in the edits: a refusal. Only
+ *     tests that exist in workstream-automation run; a test Oneshot wrote
+ *     itself is the suggestion this mode no longer makes.
  */
 export async function captureScopeSession(
   iid: number,
@@ -809,6 +809,13 @@ export async function captureScopeSession(
       data: scope,
       refusal: `the temporary spec changes could not be saved (${cliErrorText(captured.error)}), `
         + 'so the listed tests cannot be run as chosen',
+    };
+  }
+  if (captured.data.addedSpecs.length) {
+    return {
+      data: scope,
+      refusal: `the scope created ${captured.data.addedSpecs.length === 1 ? 'a new spec file' : 'new spec files'} `
+        + `(${captured.data.addedSpecs.join(', ')}); only tests that exist in workstream-automation run`,
     };
   }
   // The commit capture says the patch was cut against wins over the one

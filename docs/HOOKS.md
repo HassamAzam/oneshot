@@ -121,46 +121,21 @@ that needed it.
 | `traps-brief` | Self-gates to `testcases` and injects `erp-ticket-test-plan`'s `refs/traps.md` as `additionalContext`. The skill already says to read it; an instruction to read a file is a request, and a phase under turn pressure drops reads first. | **P1** |
 | `repro-conditions` | Self-gates to `research` (and to `bugReproduction !== false`) and injects `bug-reproduction`'s `refs/why-it-did-not-reproduce.md`. Lands before the account is chosen and the options enumerated, which is the only point at which two of those conditions can still change the run. | **P1** |
 
-### Not a hook: `automation-ready`
-
-`hooks/automation-ready.cjs` lives here and speaks the guard contract, but `hooksFor()` registers
-it for **no** event. It is the Ready For Automation mode's readiness check, and its only caller
-is the conductor (`runAutomationReadyGuard` in `src/conductor/hooks.ts`), which runs it before
-it spends an automation session, before it posts each version for QA, and before it writes the
-sheet. A hook would be the wrong layer (§1): the `automation-testcases` session has no write
-scope, no GitLab server, no shell and no file reads, so there is no tool call for a hook to stand
-in front of, and every post, label edit and sheet write is conductor code.
-
-A ticket is ready when `Loop`, the entry label and master switch, is on it (reason
-`loop-missing`); `Ready For Automation` is on it (`rfa-missing`) and either `Ready For
-Deployment` was added before the latest trigger add or the ticket is closed (`rfd-order`);
-**and** a merge request linked to it is in the same project, merged, and not a branch promotion
-(source not a protected or `Adhoc-YYYY-MM-DD` branch) (`mr-not-merged`). Open leftover MRs are a
-warning. A missing `Loop` or `Ready For Automation` withdraws the request rather than leaving
-something to fix, so the conductor stops on `loop-missing`/`rfa-missing` without commenting and
-resumes when the label is back; a not-ready comment is posted only when both labels are on and
-`rfd-order` or `mr-not-merged` remains.
-
-It is not in `FAIL_CLOSED` and does not need to be. Every failure the script can catch — a
-missing token, GitLab down or answering 401/500, too many label events, a bug — answers
-`unknown` with the reason. What it cannot catch (not running, a timeout, empty or non-JSON
-output) resolves to `{}` like any guard, and the conductor reads `{}`, or anything short of a
-well-formed verdict for this ticket under `automationReadiness`, as `unknown` too. `unknown` is a
-hold: nothing is spent and nothing is posted.
-
 ### Not a hook: `local-tests-ready`
 
-`hooks/local-tests-ready.cjs` is the local automation tests mode's readiness check, and the same
-kind of thing as `automation-ready`: it speaks the guard contract, `hooksFor()` registers it for
-**no** event, and its only caller is the conductor (`src/localtests/readiness.ts`), which runs it
-on each tick before it spends a scope session on a ticket. A hook would be the wrong layer for the same reason (§1): what it
+`hooks/local-tests-ready.cjs` is the local automation tests mode's readiness check. It lives here
+and speaks the guard contract, but `hooksFor()` registers it for **no** event, and its only caller
+is the conductor (`src/localtests/readiness.ts`), which runs it on each tick before it spends a
+scope session on a ticket. A hook would be the wrong layer for the same reason (§1): what it
 decides is whether the mode starts at all, before any session exists, and every comment and label
 edit the mode makes is conductor code.
 
-A ticket is ready when `Ready for Automation Testing` (`labels.localTestsTrigger`) is on it —
-or the operator passed `--assume-label`, which a dry run alone accepts — **and** a merge request
-linked to it is merged into `branches.base` and is the ticket's own change, not a promotion or a
-backmerge (source `stage`/`master`/`main`/`dev`, or a title like `stage -> dev` or `Backmerge`).
+A ticket is ready when `Ready for Automation Testing` (`labels.localTestsTrigger`, which the Loop
+puts on beside `Merged` when it merges the ticket) is on it — or the operator passed
+`--assume-label`, which a dry run alone accepts — **and** a merge request linked to it is merged
+into `branches.base` and is the ticket's own change, not a promotion or a backmerge (source
+`stage`/`master`/`main`/`dev` or a branch matching `localTests.releaseBranchPattern`, or a title
+like `stage -> dev` or `Backmerge`).
 That MR's merge commit is the code under test, and its first parent is the base. A labelled
 ticket whose change is not merged yet waits quietly, with no comment, and is checked again on
 later ticks. Anything the check cannot answer is a hold, never a start: nothing is spent and

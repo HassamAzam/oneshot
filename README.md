@@ -5,19 +5,19 @@ One orchestrator. One label. Zero human gates.
 Oneshot takes a GitLab issue carrying the label **`Loop`** in the project `GITLAB_REPO_URL` names —
 today [`arbisoft/erp`](https://gitlab.arbisoft.com/arbisoft/erp) — and drives it, unattended, to
 **`Merged`**: recall prior art, research, plan, implement, brainstorm test cases, review, verify
-in a real browser, screenshot the result, open the MR, and merge it.
+in a real browser, screenshot the result, open the MR, and merge it. After the merge, the
+[local automation tests](#local-automation-tests) run the workstream-automation (Cypress) tests of
+the modules the change touched and post the **automation report** — the last thing Oneshot does
+on a ticket.
 
-**`Loop` is the master switch.** Neither scan picks up a ticket without it. `Loop` alone runs the
-pipeline below. `Loop` **and** `Ready For Automation` send the ticket to the
-[Ready For Automation mode](#ready-for-automation-mode) instead, and the pipeline never works a
-ticket carrying `Ready For Automation`: its scan leaves it out and `--ticket` refuses it.
-`npm start -- --ticket <iid>` on a ticket without `Loop` is an operator's explicit override, as
-before — except on a ticket carrying `Ready For Automation`, which it refuses with or without
-`Loop`.
+**`Loop` is the master switch.** The Loop picks up no ticket without it. `npm start -- --ticket
+<iid>` on a ticket without `Loop` is an operator's explicit override.
 
-**The pipeline ends at the merge.** Nothing is deployed, nothing is QA'd on a running build,
-and no demo is recorded — deploying is a person's job, and the ticket says so when it hands
-back.
+**The Loop ends at the merge.** Nothing is deployed, nothing is QA'd on a running build, and no
+demo is recorded — deploying is a person's job, and the ticket says so when it hands back. The
+merge's label edit puts **`Merged`** and **`Ready for Automation Testing`** on together; that
+second label is what starts the [local automation tests](#local-automation-tests), so a merged
+ticket goes on to its Cypress run with nobody adding a label.
 
 It is the successor to [`one-loop`](https://github.com/HassamAzam/one-loop), and it is a
 different shape on purpose.
@@ -282,7 +282,7 @@ the command by hand. `npm start -- --ticket <iid> --follow` closes that gap: it 
 alive and re-checks that SAME ticket — never anything else the board might also be claimable for —
 every three minutes (`FOLLOW_TICK_MS`) until the run reaches `done` (exit 0) or a genuine `blocked`
 (exit non-zero, reason printed), or is refused for a reason only a person can clear — the ticket is
-assigned to someone else, or carries `Ready For Automation` (exit non-zero, reason printed). A
+assigned to someone else (exit non-zero, reason printed). A
 `parked` run is re-checked on every one of those ticks and never gives up on its own: it keeps
 asking until the thread answers with `approved` or with feedback, which is what actually picks up
 a human's reply without a manual re-invoke. A transient failure to
@@ -387,65 +387,76 @@ of that phase together. The label has to exist on the project for anyone to appl
 
 ## Local automation tests
 
-Another independent mode in the same conductor, and like the
-[Ready For Automation mode](#ready-for-automation-mode) it runs **after the merge**. `verify` runs the ticket's own case list, not the team's automation suite —
-workstream-automation's Cypress specs — and a change that passes every one of its own cases can
-still break a spec somebody else wrote. This mode runs the specs that reach a merged change, on
-the desk, against the MR's merge commit, once QA has approved the list. The Loop pipeline does not
-run them and does not wait for them: the two local-tests phases are `onDemand`, placed after every
-phase the Loop runs, so `ui-evidence` and `mr` still batch exactly as before.
+The last part of a ticket's pipeline, in the same conductor, and it runs **after the merge**.
+`verify` runs the ticket's own case list, not the team's automation suite — workstream-automation's
+Cypress specs — and a change that passes every one of its own cases can still break a spec somebody
+else wrote. This mode runs the automation tests of the modules a merged change touched, on the desk,
+against the MR's merge commit, once QA has approved the list, and posts the **automation report**.
+The Loop does not run them and does not wait for them: the two local-tests phases are `onDemand`,
+placed after every phase the Loop runs, so `ui-evidence` and `mr` still batch exactly as before.
 
 ```
- "Ready for Automation Testing" + an MR linked to the ticket merged into dev (any assignee)
+ Loop merges the ticket ──▶ ONE label edit: "Merged" + "Ready for Automation Testing"
+   │   (a person can put the label on any other merged ticket too)
+   ▼ next tick of the desk that runs the mode
+ "Ready for Automation Testing" + the ticket's own MR merged into dev (any assignee)
    │   labelled, not merged yet ──▶ no comment; checked again on later ticks
    ▼
- throwaway ERP worktree at the merge commit ──▶ local-tests-scope picks the specs
+ throwaway ERP worktree at the merge commit ──▶ local-tests-scope picks the tests:
+   │      the ones that check the change + each impacted module's main-functionality tests
    ▼
- ONE comment: the list (or "no automation test found"), @QA ──▶ waits for QA
+ ONE comment: the impacted-module report (or "nothing to run"), @QA ──▶ waits for QA
    │
-   ├─ `disapproved: please check again`        ──▶ quick re-check on master, no session
-   ├─ `disapproved: added cypress/e2e/…`       ──▶ those files join the list
-   ├─ `disapproved: write a temporary test`    ──▶ the scope writes one, for this run only
-   ├─ `disapproved:` anything else             ──▶ the scope redoes the list
-   │                                                └─▶ a new comment, and it waits again
+   ├─ `added cypress/e2e/…`          ──▶ those files join the list ─┐
+   ├─ `disapproved:` what to change  ──▶ the scope redoes the list ──┴─▶ a new comment, waits again
    ▼ a QA reviewer comments `approved`
- "Running TestCases Locally" ──▶ local-tests-run ──▶ results ──▶ "Automation Testing Done"
-                                                               (passed or failed)
+ "Running TestCases Locally" ──▶ local-tests-run (Cypress) ──▶ automation report
+   ──▶ "Automation Testing Done" (passed or failed) — the last thing Oneshot does on the ticket
 ```
 
-- **When it starts.** The ticket carries `Ready for Automation Testing` **and** the ticket's own MR
+- **It starts by itself.** When the Loop merges a ticket, the same label edit that puts `Merged` on
+  puts `Ready for Automation Testing` on too (`doneLabelSwap`, `mergeTriggerLabel`), as long as the
+  team has `localTests.enabled`. Every Loop desk does this, the mode on there or not: the one desk
+  that runs the mode picks the ticket up on its next tick. Nobody has to run a command or add a
+  label. A person can still put the label on any other merged ticket to ask for a run.
+- **When it runs.** The ticket carries `Ready for Automation Testing` **and** the ticket's own MR
   — one that closes it, or names its number in its source branch (a title only mentions it) — is merged into
-  `branches.base`; a promotion or a backmerge (source `stage`/`master`/`main`/`dev`, or a title like
-  `stage -> dev` or `Backmerge`) never counts. A ticket whose own MRs are all still open waits
-  quietly, even when an MR that only mentions it is merged; only a ticket with no linked MR that
-  closes it or names it in its source branch falls back to any linked MR merged into the base.
-  `hooks/local-tests-ready.cjs` decides, run by the conductor before any session (it is not a
-  session hook: [docs/HOOKS.md](docs/HOOKS.md)). The code under test is the latest own merged MR's
-  merge (or squash) commit; the base is the commit before the change — the merge commit's first
-  parent, or the MR's `diff_refs.base_sha` when it was merged without a merge commit. With several
-  own MRs merged, the tests are chosen for every one of their changes and the comment names them.
-- **One desk per team.** The per-ticket lock is a local file (`state/localtests/<iid>/lock`) and
-  does not reach other machines, so switch the mode on for **one desk only**, as with the
-  [Ready For Automation mode](#ready-for-automation-mode): two desks would both scope the ticket,
-  and one `approved` would start a run on each. As a backstop, a desk skips a ticket another desk
-  has already posted a list for.
+  `branches.base`; a promotion or a backmerge (source `stage`/`master`/`main`/`dev`, a release
+  branch matching `localTests.releaseBranchPattern`, or a title like `stage -> dev` or `Backmerge`)
+  never counts. A ticket whose own MRs are all still open waits quietly, even when an MR that only
+  mentions it is merged; only a ticket with no linked MR that closes it or names it in its source
+  branch falls back to any linked MR merged into the base. `hooks/local-tests-ready.cjs` decides,
+  run by the conductor before any session (it is not a session hook:
+  [docs/HOOKS.md](docs/HOOKS.md)). The code under test is the latest own merged MR's merge (or
+  squash) commit; the base is the commit before the change — the merge commit's first parent, or
+  the MR's `diff_refs.base_sha` when it was merged without a merge commit. With several own MRs
+  merged, the tests are chosen for every one of their changes and the comment names them.
+- **One desk per team runs it.** The per-ticket lock is a local file
+  (`state/localtests/<iid>/lock`) and does not reach other machines, so switch the mode on for
+  **one desk only**: two desks would both scope the ticket, and one `approved` would start a run on
+  each. As a backstop, a desk skips a ticket another desk has already posted a list for.
 - **`local-tests-scope`** is a session (skill `local-tests-impact`), invoked by name. Its script
-  maps the merged change onto specs that reach it — a page object selecting a testid it touched —
-  plus at most 5 of the module's smoke specs as a health check, and never pads the list. When an
-  intended UI change has made a spec out of date (a renamed testid), it makes the smallest edit
-  that follows it, in a throwaway worktree of the automation clone (`state/runs/<iid>/wsa`), saved
-  as a patch and never committed. When no spec reaches the change it writes **no** test of its own
-  accord: the list comes back empty with a suggested test, and a temporary one is written only
-  when QA asks for it.
-- **QA approves every local run.** The comment lists what will run (🆕 a temporary test, ✔️ an
-  existing test that checks the change, and the health checks), the counts and minutes, the patch,
-  and @mentions `config/reviewers.json` `qa`. A temporary change that weakens a test, reaches
-  outside the browser (`cy.exec`, `cy.task`, `cy.writeFile`, `Cypress.env`) or touches a file
-  outside `localTests.allowedPaths` is named in a bold line just before the ask, file by file with
-  why, so QA reads the patch before approving. The first reply from one of them decides; anyone
-  else's is ignored. `approved` on a list with tests swaps the label to `Running TestCases Locally`
-  and runs exactly that list; `approved` on an empty list runs nothing, marks the ticket
-  `Automation Testing Done` and records who approved going on without local tests.
+  maps the merged change onto the modules it touched and the specs that reach it — a page object
+  selecting a testid it touched — and picks each impacted module's **main-functionality tests**:
+  the module's own `smoke`-tagged specs (at most 5, lowest case number first), or its first 5 cases
+  when it tags none. Those always run, even when no spec reaches the change itself; the code adds
+  back any the session left out without a reason. It never pads the list with other module specs,
+  and it **never writes or suggests a test**: a new spec file in its worktree is refused, so only
+  tests that exist in workstream-automation run. When an intended UI change has made an existing
+  spec out of date (a renamed testid), it makes the smallest edit that follows it, in a throwaway
+  worktree of the automation clone (`state/runs/<iid>/wsa`), saved as a patch and never committed.
+- **QA approves every local run.** The comment is the impacted-module report: the modules first
+  ("Impacted modules: Leaves, Payroll"), then a table by module of every test that will run — ✔️ a
+  test that checks the change, ⭐ one of the module's main-functionality tests, ➕ a file QA added —
+  the counts and minutes, the patch, and an @mention of `config/reviewers.json` `qa`. A temporary
+  change that weakens a test, reaches outside the browser (`cy.exec`, `cy.task`, `cy.writeFile`,
+  `Cypress.env`) or touches a file outside `localTests.allowedPaths` is named in a bold line just
+  before the ask, file by file with why, so QA reads the patch before approving. The first reply
+  from one of them decides; anyone else's is ignored. QA have three answers: `approved` swaps the
+  label to `Running TestCases Locally` and runs exactly that list (on an empty list it runs nothing,
+  marks the ticket `Automation Testing Done` and records who approved going on without local
+  tests); `added <test file>` looks that file up on workstream-automation master and puts the list
+  to QA again with it; `disapproved:` with what to change has the scope redo the list.
 - **`local-tests-run`** is code, not a session. It copies the baseline automation database
   (`CREATE DATABASE … TEMPLATE`, the baseline itself never written to), applies the patch to a
   fresh worktree (`state/runs/<iid>/wsa-run`), and runs exactly the approved specs against the merge
@@ -453,32 +464,34 @@ phase the Loop runs, so `ui-evidence` and `mr` still batch exactly as before.
   committed `cypress.env.json` into a mode-600 `cypress.env.json` in that throwaway worktree,
   written before the app build and removed with it at cleanup. A failing spec is re-run once on
   the same code; a test that passes the second time is reported as flaky, and only tests that fail
-  twice are re-run on the base to say whether they fail on dev too. Then it posts the results and
-  drops the copy, the worktrees and the browser whatever happened. One Cypress run per desk at a
-  time (`src/lib/cypresslease.ts`): a busy desk (the lease, the ports, the baseline) makes the run
-  wait for a later tick, not record an error.
-- **Results always finish the ticket.** The results comment ends "Marked **Automation Testing
-  Done**." and the label moves from `Running TestCases Locally` to `Automation Testing Done`,
-  passed or failed; a failure that does not also fail on dev @mentions the MR's author. A run that
-  could not happen at all (a setup error) puts `Ready for Automation Testing` back and is not
-  marked done. Tests that could not be chosen at all (the scope kept failing) change no label: the
-  comment says so, @mentions QA, and any comment from a QA reviewer makes Oneshot try again.
+  twice are re-run on the base to say whether they fail on dev too. Then it posts the automation
+  report and drops the copy, the worktrees and the browser whatever happened. One Cypress run per
+  desk at a time (`src/lib/cypresslease.ts`): a busy desk (the lease, the ports, the baseline)
+  makes the run wait for a later tick, not record an error.
+- **The automation report finishes the ticket.** The results comment ends "Marked **Automation
+  Testing Done**." and the label moves from `Running TestCases Locally` to `Automation Testing
+  Done`, passed or failed; a failure that does not also fail on dev @mentions the MR's author. A
+  run that could not happen at all (a setup error) puts `Ready for Automation Testing` back and is
+  not marked done. Tests that could not be chosen at all (the scope kept failing) change no label:
+  the comment says so, @mentions QA, and any comment from a QA reviewer makes Oneshot try again.
   Putting the trigger back on a done ticket is a new request: Cypress runs again, and an earlier
   request's results are never reused (`local-tests-run.json` records the request's run id, and
   only a crash inside the same request reuses it).
-- **Switching it on.** `config/project.json` `localTests` is the team's policy: the baseline
-  database, the paths a temporary edit may touch, and the selection budget (`maxSpecs`,
-  `maxRunMinutes`; each Cypress run is stopped at `maxRunMinutes`). A desk turns the mode on by
-  setting `ONESHOT_LOCAL_TESTS_REPO` in `.env` to its workstream-automation clone — one desk per
-  team, above; without it nothing about the conductor changes. `localTests.enabled: false` switches it off on every desk
-  at once, and so does leaving any of `labels.localTestsTrigger`, `localTestsRunning` or
-  `localTestsDone` empty.
+- **Switching it on.** `config/project.json` `localTests` is the team's policy: whether merges put
+  the trigger on (`enabled`), the baseline database, the paths a temporary edit may touch, the
+  release-branch pattern, and the selection budget (`maxSpecs`, `maxRunMinutes`; each Cypress run
+  is stopped at `maxRunMinutes`). A desk RUNS the mode by setting `ONESHOT_LOCAL_TESTS_REPO` in
+  `.env` to its workstream-automation clone — one desk per team, above; without it that desk only
+  puts the label on at merge. `localTests.enabled: false` switches the mode and the label at merge
+  off on every desk at once, and so does leaving any of `labels.localTestsTrigger`,
+  `localTestsRunning` or `localTestsDone` empty.
 - **`DRY_RUN`.** `DRY_RUN=1 npm start -- --local-tests <iid>` runs one pass for one ticket and
   exits: a real scope session, every GitLab write logged instead of made, QA's approval assumed,
   and no Cypress ("a dry run starts no Cypress") unless `ONESHOT_LOCAL_TESTS_DRY_CYPRESS=1`, which
   runs the list for real on the desk and still writes nothing to GitLab. `--assume-label` treats
   `Ready for Automation Testing` as present, so any merged ticket can be tried; it is refused
-  without `DRY_RUN=1`, and the merged check always applies.
+  without `DRY_RUN=1`, and the merged check always applies. On a real desk no command is needed:
+  the conductor already running (`npm start`) takes every labelled ticket on its own.
 - **State** lives in `state/localtests/<iid>/` (the mode's journal); the run's files stay in
   `state/runs/<iid>/`, where `scripts/localtests.cjs` keeps them.
 
@@ -532,106 +545,6 @@ on-demand `mr-feedback` phase, and the run takes one **review round**:
   after Oneshot answers, because its replies leave those threads open for a person to resolve.
 - `npm run mr-feedback:probe -- <mrIid> [ticketIid]` prints exactly which threads would be acted
   on right now. The feature is off under `DRY_RUN`.
-
-## Ready For Automation mode
-
-A second, independent mode in the same conductor. It writes **automation test cases** for tickets
-whose change has already shipped, gets them approved by QA on the ticket, and files the approved
-list in the team's Google Sheet. It is off unless a desk switches it on, and it never touches the
-Loop's runs, claims or ports. The one Loop label it writes is `Loop` itself, taken off when it
-finishes.
-
-A ticket is this mode's when it carries **both** `Loop` (the master switch) and
-`Ready For Automation`. `Loop` without `Ready For Automation` is the ordinary pipeline, exactly as
-before, and that pipeline never works a ticket carrying `Ready For Automation` — whether or not
-this mode is switched on at the desk. Its scan asks GitLab to leave those tickets out, so however
-long they wait on readiness or on QA they never crowd its one page of 50. The one exception is a
-`config/project.json` `automation` block that is not usable (boot names the field): this mode
-cannot run anywhere then, so there is no trigger to route on and the pipeline treats
-`Ready For Automation` tickets as it did before this mode existed, rather than leaving them to
-nobody.
-
-QA uses `Ready For Automation` in its own workflow, so the label can be on a ticket nobody meant
-for this mode. To have the pipeline fix such a ticket (a reopened bug still carrying it, say),
-remove `Ready For Automation` first; with `Loop` beside it, the ticket goes to test-case writing
-instead, and it reads as ready if an earlier fix merged. A Loop run that was parked or in flight
-when the label went on is no longer scanned either: its run and claim note stay as they were
-until someone removes the label or releases the run by hand.
-
-```
- "Loop" + "Ready For Automation" (open or closed, any assignee, not "Automation Done")
-   │
-   ├─ readiness hook ── not ready ──▶ one comment per distinct reason ("No merged MR — !400 is
-   │                                  still open"), labels untouched; re-checked when the ticket
-   │                                  changes and at least every 30 minutes
-   ▼ ready
- one session writes v1 ──▶ comment with the table + CSV, label "Automation Test Case Review"
-   │
-   ├─ a QA approver asks for changes ──▶ one session writes v2 with ONLY those changes, posted
-   │                                     as a comment with just the cases ──▶ back to review
-   ▼ a QA approver comments `approved`
- sheet (module tab + tracker row, read back) ──▶ "Automation Test Case Review" and "Loop" off,
-                                                  "Automation Done" on, a done comment with both links
-```
-
-- **Switching it on.** `ONESHOT_AUTOMATION=1` in `.env`, on **one desk only**: the per-ticket lock
-  is a local file, so two desks would each spend a session on the same ticket. Boot runs a
-  preflight (config, the service-account key, the phase and its schema, the readiness script, the
-  QA list, this desk's GitLab read token, a sheet id that is not the placeholder, and one read of
-  the sheet); any problem turns the mode off for that process and leaves the Loop as it was.
-  `npm start -- --automation <iid>` runs one pass for one ticket and exits, with or without the
-  switch, and refuses to start on a preflight problem; on a ticket missing `Loop` or
-  `Ready For Automation` it says there is nothing to do.
-- **Ready means `Loop` is on the ticket and both rules hold** (`hooks/automation-ready.cjs`):
-  `Ready For Deployment` was added before the latest `Ready For Automation`, or the ticket is
-  closed and still carries `Ready For Automation`; and at least one MR in the same project that is
-  not a branch promotion (`dev`/`stage`/`master`, `Adhoc-YYYY-MM-DD`) is merged. An open leftover
-  MR is a warning, never a blocker. The scan only asks GitLab for tickets carrying both labels, and
-  the check reads `Loop` itself too (reason `loop-missing`), for a label taken off after the scan.
-  The conductor runs the check before every session, again before it posts each version, and again
-  before the sheet write; it is not a session hook, because the session can post nothing (see
-  [docs/HOOKS.md](docs/HOOKS.md)). Any failure to check is `unknown`, a hold, never `ready`. The
-  other writes that follow a session in the same pass (the review label, a stuck comment) re-read
-  both labels first and wait while either is off; a no-change comment, best effort anyway, is
-  dropped instead. GitLab unreachable is a silent hold. Removing `Loop` or `Ready For Automation`
-  stops the mode for that ticket with no comment and keeps its state; adding the label back
-  resumes where it was.
-- **The session only reads, and only its prompt.** Before it starts, the conductor reads the
-  ticket, the comments people wrote on it and the diff of every merged fix MR over REST, and puts
-  them in the prompt, fenced as untrusted data. The diff is bounded: lockfiles, minified,
-  generated and binary files are named but not shown, a migration shows only its head, and each
-  file and the whole change are capped, every cut marked `[truncated N lines]`. The session runs
-  at the conductor root with the `automation-testcases` skill and **without** the GitLab MCP
-  server; it has no file, shell or web tools either. The conductor posts, labels and writes the
-  sheet in code. Every string it returns is redacted before anything is
-  posted, and a list holding a private key is refused. Two failed attempts in a row post one
-  "could not be written" comment and stop; a QA approver's comment (e.g. "retry") starts it again.
-- **Who approves.** Only `config/reviewers.json` `qa`, only comments posted after the current
-  version's, and only the single word `approved`. A change request in the same round wins over
-  `approved`. "Approved." or "approved ✅" gets a short reply explaining the one-word rule instead
-  of a session. Comments that arrive while a revision is being written go into the next version.
-  The cases comment @mentions every approver, but GitLab never notifies a person of their own
-  comment — the desk token posts as its operator, so on a desk whose operator is a QA approver
-  only the other approvers are notified.
-- **The sheet** is `automation.sheet` in `config/project.json`, written with the service account
-  in `ONESHOT_GOOGLE_SA_FILE` (default `~/.claude/google-service-account.json`), which must be an
-  **Editor** on it. Its `spreadsheetId` ships as the placeholder `REPLACE_ME`, which the preflight
-  refuses by name, so the mode cannot be switched on until someone chooses the sheet. Pointing it
-  at the team's sheet takes two values: the id, and `trackerTab` set to the team's
-  `Test Cases Updates [{year}]`. The cases go to the module's existing tab (matched by name,
-  whatever its prefix), or a new orange `TestCases_<Module>` tab; the year's tracker gets a row in
-  the module's section with the ticket link, `Done`, the automation status and a deep link to the
-  block. Oneshot tags the rows it writes with developer metadata, so a retried write never
-  duplicates them and the team's own rows for the same ticket are never mistaken for its own.
-  Everything is read back before the labels move. A failure that will not clear by waiting
-  (permission, a merged range in the way, a read-back mismatch) is reported on the ticket once,
-  with what to do.
-- **`DRY_RUN`** runs the whole ticket in one pass in `state-dry/`: a real session is still spent,
-  comments and label changes are logged instead of made, QA's approval is assumed, and the sheet
-  is read but not written.
-- **State** lives in `state/automation/<iid>/` (journal, each version as posted, transcripts),
-  never in `state/runs`. A finished ticket is not redone by itself: to redo one, move its
-  `state/automation/<iid>` aside and delete its block and tracker row from the sheet.
 
 ## Mobilizing agents
 
@@ -981,13 +894,12 @@ problem, and letting it trip the breaker would make a wrong `GITLAB_TOKEN` look 
 | `src/conductor/` | watcher, queue, phase runner, the `merge` code phase, schemas, hook wiring, teardown |
 | `src/phases/` | one module per phase: prompt, schema, tool policy |
 | `src/lib/` | config + session env, SQLite, GitLab, worktrees, promotion mutex, quota, reachability, memory |
-| `src/automation/` | the Ready For Automation mode — readiness verdict, state machine, comments, Google Sheets writer |
-| `src/localtests/` | the local automation tests mode — readiness, QA's replies, the comments it posts, the post-merge run |
+| `src/localtests/` | the local automation tests mode — readiness, QA's replies, the impacted-module report and the automation report it posts, the post-merge run |
 | `config/` | project + labels, per-phase model/tools/skills/groups, budgets, reviewers, Slack |
 | `hooks/` | guardrails — passed to the SDK in-process, never installed globally |
 | `scripts/` | hook verify, `doctor`, preflight, dependency probe, unblock, report, the local-tests runner (`localtests.cjs`) |
 | `docs/` | [PLAN.md](docs/PLAN.md) · [HOOKS.md](docs/HOOKS.md) · [LOCAL-TESTS.md](docs/LOCAL-TESTS.md) |
-| `state/` | gitignored — runs, artifacts, memory, SQLite, `automation/<iid>` for the Ready For Automation mode and `localtests/<iid>` for the local automation tests mode |
+| `state/` | gitignored — runs, artifacts, memory, SQLite, and `localtests/<iid>` for the local automation tests mode |
 
 ## Status
 
@@ -1018,7 +930,7 @@ then-current order of recall → research → plan → testcases:
 | M5 | ~~`deploy`, `qa`, `demo`~~ — **removed**: the pipeline ends at the merge | withdrawn |
 | M6 | `recall` — memory index and recall | built, unproven; merge writes the card and index line (src/lib/memory.ts), `npm run memory:backfill` for runs merged before that |
 | M7 | dashboard, replay, hardening hooks | not started |
-| M8 | local automation tests mode — after the merge, `local-tests-scope` picks the automation specs a merged change reaches, QA approves every run on the ticket, `local-tests-run` runs them on the desk against the merge commit | built, unproven; off unless a desk sets `ONESHOT_LOCAL_TESTS_REPO` |
+| M8 | local automation tests mode — the merge puts `Ready for Automation Testing` on beside `Merged`; `local-tests-scope` picks the tests of the modules the change touched (the ones that reach it plus each module's main-functionality tests), QA approves every run on the ticket, `local-tests-run` runs them on the desk against the merge commit and posts the automation report | built, unproven; runs only on a desk that sets `ONESHOT_LOCAL_TESTS_REPO` |
 
 `runner.ts` stops with an explicit `BLOCKED: not built yet: phase '<name>'` rather than skipping
 ahead — including for the `merge` code phase, so a run can never reach `merged` without having
