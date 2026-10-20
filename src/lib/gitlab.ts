@@ -1,7 +1,7 @@
 /**
  * GitLab REST helpers used by the conductor itself. Loop phase sessions talk to
- * GitLab through the MCP server instead (the automation session does not: the
- * conductor reads its ticket and diff here, src/automation/context.ts); this is
+ * GitLab through the MCP server instead (the local-tests scope session does
+ * not: the conductor reads its ticket here and puts it in the prompt); this is
  * the code path, and it is the only one that performs label writes, merges and
  * promotions.
  *
@@ -9,7 +9,7 @@
  * is wrong" and "that issue does not exist" demand completely different
  * responses, and a caller that blurs them retries forever against a dead link.
  */
-import { automationTriggerLabel, envOr, projectConfig, repoIdentity, DRY_RUN } from './config.js';
+import { envOr, projectConfig, repoIdentity, DRY_RUN } from './config.js';
 import type { GitlabRepo } from './repourl.cjs';
 import { resolveToken, setupHint, type ResolvedToken } from './token.js';
 import { log } from './log.js';
@@ -165,23 +165,12 @@ export async function createIssue(
   return call<Issue>('POST', `/projects/${projectId()}/issues`, body, true);
 }
 
-/**
- * Open issues carrying the entry label, oldest-updated first (rough FIFO), one
- * page of 50 — minus, server-side, those carrying the Ready For Automation
- * trigger (automationTriggerLabel). Those are the automation mode's, and they
- * keep `Loop` for as long as they wait on readiness or on QA, so read here they
- * would sort to the front of the only page this reads and could push every
- * ticket the Loop can work off it. The watcher still skips one if it slips
- * through (automationOwns). With no usable automation block there is nothing
- * to exclude and the read is what it always was.
- */
+/** Open issues carrying the entry label, oldest-updated first (rough FIFO), one page of 50. */
 export async function issuesWithEntryLabel(): Promise<GitlabResult<Issue[]>> {
   const label = encodeURIComponent(projectConfig().labels.entry);
-  const trigger = automationTriggerLabel();
-  const not = trigger ? `&not%5Blabels%5D=${encodeURIComponent(trigger)}` : '';
   return call<Issue[]>(
     'GET',
-    `/projects/${projectId()}/issues?state=opened&labels=${label}${not}&per_page=50&order_by=updated_at&sort=asc`,
+    `/projects/${projectId()}/issues?state=opened&labels=${label}&per_page=50&order_by=updated_at&sort=asc`,
   );
 }
 
@@ -302,9 +291,9 @@ export async function checkReadAccess(
  * them — newest-updated first, one page of 100.
  *
  * Unlike issuesWithEntryLabel this takes the label and the state as arguments:
- * the Ready For Automation mode reads CLOSED tickets too (a ticket is often
- * closed by the time QA asks for automation cases), and excludes its own done
- * label server-side with `not[labels]` so finished tickets never fill the page.
+ * the local automation tests mode reads CLOSED tickets too (a merged ticket is
+ * often closed by the time its tests run), and a caller can exclude a label
+ * server-side with `not[labels]` so finished tickets never fill the page.
  * `state` defaults to 'all'. GitLab's `labels=` is an AND over a comma list, so
  * each name is encoded on its own and the commas are left as separators.
  */

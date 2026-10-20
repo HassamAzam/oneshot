@@ -3,8 +3,7 @@
  * and the one call that asks for it.
  *
  * The verdict itself is made by hooks/local-tests-ready.cjs — dependency-free
- * CJS this module starts as its own process, the way the Ready For Automation
- * mode starts hooks/automation-ready.cjs. One implementation of "is this
+ * CJS this module starts as its own process. One implementation of "is this
  * ticket's change merged, and is it the real change" is the point: a second
  * copy here would drift. This module declares the shape that file prints under
  * `localTestsReadiness`, reads it back out of whatever the process printed, and
@@ -192,7 +191,7 @@ export function localTestsReadyEnv(iid: number, o: ReadyInputs): Record<string, 
   const cfg = projectConfig();
   let token = '';
   try { token = readToken(); } catch { token = ''; }
-  const release = cfg.automation?.releaseBranchPattern ?? '';
+  const release = cfg.localTests?.releaseBranchPattern ?? '';
   return {
     ONESHOT_HOME,
     ONESHOT_TICKET: String(iid),

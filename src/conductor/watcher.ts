@@ -13,7 +13,7 @@
  * run is skipped, and a ticket whose run died mid-phase is picked up from its
  * journal rather than restarted.
  */
-import { automationTriggerLabel, gitlabUsername, projectConfig } from '../lib/config.js';
+import { gitlabUsername, projectConfig } from '../lib/config.js';
 import { foreignOwner } from '../lib/claims.js';
 import { isClaimed, latestRunStatus, logEvent, seeTicket } from '../lib/db.js';
 import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
@@ -98,11 +98,6 @@ export async function triage(issues: Issue[]): Promise<WatchResult> {
         continue;
       }
     }
-    const owned = automationOwns(issue.labels);
-    if (owned) {
-      skipped.push({ iid: issue.iid, why: owned });
-      continue;
-    }
     if (isClaimed(issue.iid)) {
       skipped.push({ iid: issue.iid, why: 'run already in flight' });
       continue;
@@ -123,38 +118,6 @@ export async function triage(issues: Issue[]): Promise<WatchResult> {
   }
 
   return { candidates: orderCandidates(candidates, latestRunStatus), skipped };
-}
-
-/**
- * Why the Loop leaves a ticket to the Ready For Automation mode, or null when
- * it is the Loop's.
- *
- * The entry label is the master switch for both: beside the trigger label it
- * makes the ticket the automation job's (src/automation), alone it makes it
- * the Loop's. A ticket is never worked by both — the Loop would plan, build and
- * merge a change on a ticket QA only asked to have test cases written for. So
- * this holds whether or not the automation mode is on at this desk. With no
- * usable automation block there is no trigger to route on, and the Loop is as
- * it was. issuesWithEntryLabel already leaves these tickets out of the page it
- * reads; scan() asks again for one that slips through, and runTicket() asks
- * because `--ticket` reaches it without a scan.
- *
- * The trigger alone keeps the Loop off too, but then nobody owns the ticket:
- * the automation mode acts only on the entry label AND the trigger. QA puts
- * the trigger on tickets in its own workflow, so `--ticket` meets this case,
- * and "the automation mode owns it" sent the operator to wait on a mode that
- * would never pick the ticket up. The reason then names both ways out.
- */
-export function automationOwns(
-  labels: readonly string[],
-  trigger: string | null = automationTriggerLabel(),
-  entry: string = projectConfig().labels.entry,
-): string | null {
-  if (trigger === null || !labels.includes(trigger)) return null;
-  return labels.includes(entry)
-    ? `carries "${trigger}" — the automation mode owns it`
-    : `carries "${trigger}", which keeps the pipeline off it — add "${entry}" for automation test cases, `
-      + `or remove "${trigger}" to run the pipeline`;
 }
 
 /**

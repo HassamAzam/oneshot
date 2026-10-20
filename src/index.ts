@@ -12,18 +12,16 @@
  * which is what makes `concurrency` mean anything. --watch-only reports what it
  * would claim without claiming it.
  *
- * With ONESHOT_AUTOMATION=1 a tick also kicks the Ready For Automation pass
- * (src/automation/runner.ts): single-flight, not awaited, and outside the
- * Loop's bookkeeping entirely — no `running` entry, no port, no claim.
- * `--automation <iid>` runs one pass of it for one ticket and exits.
- *
  * On a desk where the local automation tests are on (localTestsConfig(): the
  * team's `localTests` block, its three labels and this desk's
- * ONESHOT_LOCAL_TESTS_REPO), a tick kicks that mode's pass the same way
- * (src/localtests/runner.ts): after the merge, label-triggered, single-flight
- * and outside the Loop's bookkeeping. `--local-tests <iid>` runs one pass of it
- * for one ticket and exits; `--assume-label` lets a DRY_RUN rehearse it on any
- * merged ticket.
+ * ONESHOT_LOCAL_TESTS_REPO), a tick also kicks that mode's pass
+ * (src/localtests/runner.ts): after the merge, label-triggered, single-flight,
+ * not awaited, and outside the Loop's bookkeeping entirely — no `running`
+ * entry, no port, no claim. The Loop puts the trigger label on itself when it
+ * merges a ticket (runner.ts finish), so a merged ticket reaches this mode with
+ * nobody adding anything. `--local-tests <iid>` runs one pass of it for one
+ * ticket and exits; `--assume-label` lets a DRY_RUN rehearse it on any merged
+ * ticket.
  *
  * Several of these may run at once, on purpose. A conductor registers in the
  * fleet at boot rather than refusing to start beside a sibling, and everything
@@ -40,7 +38,7 @@ import { join } from 'node:path';
 import {
   CONTEXT_REPO, DRY_RUN, FOLLOW_TICK_MS, GITLAB_USERNAME, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT,
   PROJECT_TARGET, TICK_MS, WORK_REPO, WT_ROOT,
-  auditAuth, automationConfig, automationEnabled, automationTriggerLabel, envFlag, envOr, localTestsConfig, pathSources,
+  auditAuth, envFlag, envOr, localTestsConfig, mergeTriggerLabel, pathSources,
   phaseByName, phases, portPool, projectConfig,
   repoIdentity, seedFrom, slackConfig,
 } from './lib/config.js';
@@ -53,11 +51,10 @@ import { ensureClaudeDir } from './lib/claudedir.js';
 import { probe, netState } from './lib/reachability.js';
 import { windowUsage, dayUsage, quotaParked } from './lib/quota.js';
 import { budgetConfig } from './lib/config.js';
-import { iidFlag, localTestsFlags } from './lib/cliargs.js';
+import { localTestsFlags } from './lib/cliargs.js';
 import { describe, scan } from './conductor/watcher.js';
 import { refusalIsFinal, runTicket, type RunOutcome } from './conductor/runner.js';
 import { killLiveLocalTests } from './conductor/localtests.js';
-import { automationPreflight, automationTick, outcomeLine, runAutomationOnce } from './automation/runner.js';
 import {
   SCOPE_PHASE, localTestsGc, localTestsTick, outcomeLine as localTestsOutcomeLine, runLocalTestsOnce,
 } from './localtests/runner.js';
@@ -128,21 +125,6 @@ const say = {
 const running = new Map<number, Promise<unknown>>();
 
 /**
- * The Ready For Automation mode's switch for THIS process: ONESHOT_AUTOMATION
- * set and its preflight clean. A failed preflight turns the mode off and
- * leaves the Loop exactly as it was.
- */
-let automationOn = false;
-
-/**
- * The automation pass in flight, if any. Single-flight: a pass can hold a
- * 30-minute authoring session, and a second pass started beside it would only
- * queue behind the same per-ticket locks. It is not in `running` — it holds no
- * dispatch slot, no port and no claim.
- */
-let automationInFlight: Promise<void> | null = null;
-
-/**
  * The local automation tests mode's switch for THIS process: the step is on
  * for this desk (localTestsConfig()), and this is a watching conductor — not
  * --watch-only, which changes nothing, and not one of the one-ticket passes.
@@ -151,9 +133,9 @@ let automationInFlight: Promise<void> | null = null;
 let localTestsOn = false;
 
 /**
- * The local-tests pass in flight, if any. Single-flight for the reason the
- * automation pass is: one scope session or one Cypress run at a time, and a
- * run can hold the pass for two hours. Not in `running` either.
+ * The local-tests pass in flight, if any. Single-flight: one scope session or
+ * one Cypress run at a time, and a run can hold the pass for two hours. It is
+ * not in `running` — it holds no dispatch slot, no port and no claim.
  */
 let localTestsInFlight: Promise<void> | null = null;
 
@@ -172,7 +154,7 @@ let wake: (() => void) | null = null;
 /**
  * Whether this process clears what local-tests runs and scope sessions leave
  * behind: any conductor that may start one (not --watch-only, which changes
- * nothing, nor --automation) on a desk where the step is on. gc keeps every
+ * nothing) on a desk where the step is on. gc keeps every
  * ticket a live advance holds (src/localtests/runner.ts localTestsGc), so a
  * second conductor's sweep never takes what this one is using.
  */
@@ -227,21 +209,6 @@ if (followArg && ticketArg === null) {
 }
 
 /**
- * `--automation <iid>` — one pass of the Ready For Automation state machine for one ticket, then exit. Works without ONESHOT_AUTOMATION: it is an operator's explicit act.
- * A malformed value is refused rather than read as no flag (iidFlag says why).
- */
-const automationFlag = iidFlag(process.argv, '--automation');
-const automationArg = automationFlag.iid;
-if (automationFlag.given && automationArg === null) {
-  log.error('--automation needs a positive ticket iid, e.g. --automation 8420 (no leading #, no =)');
-  process.exit(1);
-}
-if (automationArg !== null && (ticketArg !== null || followArg)) {
-  log.error('--automation <iid> runs on its own: it cannot be combined with --ticket or --follow');
-  process.exit(1);
-}
-
-/**
  * `--local-tests <iid>` — one pass of the local automation tests mode for one
  * ticket, then exit; `--assume-label` treats `Ready for Automation Testing` as
  * present, and only with DRY_RUN=1 (localTestsFlags says why). Works without
@@ -254,12 +221,12 @@ if (localTestsFlag.error) {
   log.error(localTestsFlag.error);
   process.exit(1);
 }
-if (localTestsArg !== null && (ticketArg !== null || followArg || automationArg !== null)) {
-  log.error('--local-tests <iid> runs on its own: it cannot be combined with --ticket, --follow or --automation');
+if (localTestsArg !== null && (ticketArg !== null || followArg)) {
+  log.error('--local-tests <iid> runs on its own: it cannot be combined with --ticket or --follow');
   process.exit(1);
 }
 
-const once = (process.argv.includes('--once') || ticketArg !== null || automationArg !== null || localTestsArg !== null)
+const once = (process.argv.includes('--once') || ticketArg !== null || localTestsArg !== null)
   && !followArg;
 
 /**
@@ -295,8 +262,7 @@ let followExitCode = 0;
  * - `refused` — this pass lost a race for ownership (another conductor holds
  *   the run, or a block's cooldown has not elapsed). Not a failure of the
  *   ticket itself. Not terminal — unless `refusalIsFinal()` says only a person
- *   can clear it (assigned to someone else, or carrying the automation mode's
- *   trigger label): then terminal, exit 1.
+ *   can clear it (assigned to someone else): then terminal, exit 1.
  */
 function handleFollowOutcome(outcome: RunOutcome): void {
   // A shutdown signal already sets `stopping`, which ends the loop regardless
@@ -361,26 +327,16 @@ async function banner(): Promise<void> {
   if (localTestsArg !== null) {
     log.info(`mode       --local-tests #${localTestsArg}${localTestsFlag.assumeLabel ? ' --assume-label' : ''}`
       + `${DRY_RUN ? ` (dry run${envFlag('ONESHOT_LOCAL_TESTS_DRY_CYPRESS') ? ', Cypress really runs' : ', no Cypress'})` : ''}`);
-  } else if (localTestsConfig().enabled && !watchOnly && automationArg === null && ticketArg === null) {
+  } else if (localTestsConfig().enabled && !watchOnly && ticketArg === null) {
     const l = localTestsConfig().labels;
     log.info(`localtests on — "${l.trigger}" + a merged MR → "${l.running}" → "${l.done}"`);
   }
-  if (automationArg !== null) {
-    log.info(`mode       --automation #${automationArg}`);
-  } else if (automationEnabled()) {
-    try {
-      const a = automationConfig();
-      log.info(`automation on — "${cfg.labels.entry}" + "${a.labels.trigger}" tickets → sheet ${a.sheet.spreadsheetId}`);
-    } catch {
-      log.info('automation on — but config/project.json has no usable automation block (preflight says why)');
-    }
-  }
-  if (cfg.automation !== undefined && automationTriggerLabel() === null) {
-    // Said on every desk, the mode on or off: the Loop's routing changes with it.
-    let why = 'config/project.json has no usable `automation` block';
-    try { automationConfig(); } catch (err) { why = (err as Error).message; }
-    log.warn(`routing    ${why} — so the Loop routes no ticket to the automation mode and works them all as before`);
-  }
+  const atMerge = mergeTriggerLabel();
+  // Said on every desk, the mode on here or not: a Loop desk puts the label on
+  // and the team's local-tests desk picks the ticket up.
+  log.info(atMerge
+    ? `at merge   "${cfg.labels.exit}" + "${atMerge}" — the local automation tests start from there`
+    : `at merge   "${cfg.labels.exit}" only — local automation tests are switched off for the team`);
   if (DRY_RUN) log.warn('DRY_RUN is on — every write will be refused, in its own state-dry home');
 }
 
@@ -576,7 +532,7 @@ function freeSlots(): { slots: number; mine: number; fleet: number; pool: number
   return { slots: Math.max(0, Math.min(mine, fleet)), mine, fleet, pool };
 }
 
-/** Single-flight and NOT awaited, like kickAutomation: a two-hour Cypress run must not stall the Loop's scan. */
+/** Single-flight and NOT awaited: a two-hour Cypress run must not stall the Loop's scan. No `running` entry, no port. */
 function kickLocalTests(): void {
   if (localTestsInFlight || stopping) return;
   localTestsInFlight = localTestsTick({ conductor: me, signal: aborter.signal })
@@ -585,17 +541,6 @@ function kickLocalTests(): void {
       logEvent('local_tests_threw', { error: (err as Error).message });
     })
     .finally(() => { localTestsInFlight = null; });
-}
-
-/** Single-flight and NOT awaited: a 20-minute authoring session must not stall the Loop's scan. No `running` entry, no port. */
-function kickAutomation(): void {
-  if (automationInFlight || stopping) return;
-  automationInFlight = automationTick({ conductor: me, signal: aborter.signal })
-    .catch((err) => {
-      say.error('automation tick threw', { error: (err as Error).message });
-      logEvent('automation_threw', { error: (err as Error).message });
-    })
-    .finally(() => { automationInFlight = null; });
 }
 
 /**
@@ -648,13 +593,6 @@ async function tick(): Promise<void> {
     return;
   }
 
-  // After the pause and quota checks, so both stop this mode too.
-  if (automationArg !== null) {
-    const o = await runAutomationOnce(automationArg, { conductor: me, signal: aborter.signal });
-    say.phase(outcomeLine(o));
-    return;
-  }
-
   if (ticketArg !== null) {
     const res = await getIssue(ticketArg);
     if (!res.ok || !res.data) {
@@ -693,7 +631,6 @@ async function tick(): Promise<void> {
 
   // Kicked, not awaited, before the Loop's own scan. --watch-only claims
   // nothing, and this mode's first act on a ticket can be a comment.
-  if (automationOn && !watchOnly) kickAutomation();
   if (localTestsOn) kickLocalTests();
 
   const result = await scan();
@@ -754,14 +691,10 @@ async function tick(): Promise<void> {
  * that reconcileForeignRuns() now has to bury on the way back up.
  */
 async function drain(): Promise<void> {
-  // The shutdown signal has already aborted any session this pass holds, so
-  // the wait is short, and a cancelled session is charged nothing.
-  if (automationInFlight) {
-    say.warn('waiting on the automation pass');
-    await automationInFlight;
-  }
-  // Its run, if any, was told to stop with everything else; the script's own
-  // cleanup is what this waits for.
+  // The shutdown signal has already aborted any scope session this pass holds,
+  // so the wait is short, and a cancelled session is charged nothing. Its run,
+  // if any, was told to stop with everything else; the script's own cleanup is
+  // what this waits for.
   if (localTestsInFlight) {
     say.warn('waiting on the local tests pass');
     await localTestsInFlight;
@@ -838,7 +771,7 @@ async function main(): Promise<void> {
   // After the reconcile, so the runs it just buried no longer count as in
   // flight and what they left on the desk goes with them.
   const localTestsCfg = localTestsConfig();
-  localTestsSweep = !watchOnly && automationArg === null && localTestsCfg.enabled;
+  localTestsSweep = !watchOnly && localTestsCfg.enabled;
   localTestsOn = localTestsSweep && localTestsArg === null && ticketArg === null;
   if (localTestsArg !== null) {
     // An operator's explicit pass on a desk that cannot make it is refused,
@@ -860,25 +793,13 @@ async function main(): Promise<void> {
 
   await banner();
   if (!(await preflight())) process.exit(1);
-  // The Ready For Automation mode checks itself only when it is asked for. A
-  // problem refuses `--automation`, and turns the switch off for this process
-  // with the Loop left exactly as it was.
-  if (automationArg !== null || automationEnabled()) {
-    const problems = await automationPreflight();
-    for (const p of problems) (automationArg !== null ? log.error : log.warn)(`automation  ${p}`);
-    if (automationArg !== null && problems.length) process.exit(1);
-    automationOn = automationEnabled() && !problems.length;
-    if (automationEnabled() && problems.length) log.warn('automation  off for this process — the Loop is unaffected');
-  }
   ensureCollector();
   // Before the first ticket is even looked at: one warm app for this loop, in its own
   // worktree. It is the shared babel cache under the seed repo's node_modules that
   // this is really keeping hot — every worktree on the machine symlinks it, and a warm
   // one is the difference between a two-minute first build and a twenty-minute one.
-  // Not for --automation: its one session runs at the conductor root and is
-  // handed the merged change in its prompt, so no app is ever needed. Nor for
-  // --local-tests, whose run builds its own app from the merge commit.
-  if (!watchOnly && !DRY_RUN && automationArg === null && localTestsArg === null) warmLoopApp(me);
+  // Not for --local-tests, whose run builds its own app from the merge commit.
+  if (!watchOnly && !DRY_RUN && localTestsArg === null) warmLoopApp(me);
 
   const b = budgetConfig();
   log.info(`quota      ${Math.round(windowUsage() / 1e6)}M / ${Math.round(b.window_tokens / 1e6)}M this window · ` +
@@ -887,15 +808,12 @@ async function main(): Promise<void> {
   log.banner(followArg
     ? `Following ticket #${ticketArg} every ${FOLLOW_TICK_MS / 1000}s until done or blocked. Ctrl-C to stop.`
     : once
-      ? (automationArg !== null
-        ? `Single automation pass: ticket #${automationArg}.`
-        : localTestsArg !== null
-          ? `Single local-tests pass: ticket #${localTestsArg}${DRY_RUN ? ' (dry run — nothing is written to GitLab)' : ''}.`
-          : ticketArg !== null ? `Single run: ticket #${ticketArg}.` : 'Single pass, then exit.')
+      ? (localTestsArg !== null
+        ? `Single local-tests pass: ticket #${localTestsArg}${DRY_RUN ? ' (dry run — nothing is written to GitLab)' : ''}.`
+        : ticketArg !== null ? `Single run: ticket #${ticketArg}.` : 'Single pass, then exit.')
       : `Watching every ${TICK_MS / 1000}s as ${me.slice(0, 6)}. Ctrl-C to stop.`);
   logEvent('conductor_start', {
     root: ROOT, watchOnly, conductor: me, solo, ticket: ticketArg, follow: followArg,
-    automation: automationArg ?? automationOn,
     localTests: localTestsArg ?? localTestsOn,
   });
 

@@ -133,11 +133,13 @@ export interface ProjectConfig {
     /**
      * The local automation tests mode (src/localtests), which runs after the
      * merge and never inside the Loop. `localTestsTrigger` is put on a ticket
-     * by a person and starts the mode once the ticket's change is merged;
+     * by the Loop itself when it merges it, next to `exit` (mergeTriggerLabel),
+     * or by a person, and starts the mode once the ticket's change is merged;
      * `localTestsRunning` replaces it while an approved list runs;
      * `localTestsDone` replaces either when the run is over, passed or failed.
      * Read through `localTestsConfig().labels`, which turns the mode off while
-     * any of the three is unset, and required only while that mode is on.
+     * any of the three is unset, and required wherever the mode is on or the
+     * Loop puts the trigger on at merge.
      */
     localTestsTrigger?: string;
     localTestsRunning?: string;
@@ -186,13 +188,6 @@ export interface ProjectConfig {
   zones?: { file: string; guardLabel: string; yellowLabel: string; testsLabel?: string };
   promotions: Array<{ from: string; to: string; auto: boolean }>;
   /**
-   * The Ready For Automation mode (src/automation). Optional: absent, the mode
-   * cannot be switched on. Read through `automationConfig()`, which checks it,
-   * never directly. The Loop reads only its trigger label, through
-   * `automationTriggerLabel()`, to leave those tickets to the mode.
-   */
-  automation?: AutomationConfig;
-  /**
    * The local automation tests mode's team policy (src/localtests, after the
    * merge). Read through `localTestsConfig()`, which merges it with this
    * desk's .env and the three `labels.localTests*` and checks it, never
@@ -229,6 +224,13 @@ export interface LocalTestsPolicy {
   devApproval: 'any' | 'all';
   /** Unused for the same reason: a finished run is marked done, passed or failed. */
   failuresBlock: boolean;
+  /**
+   * Regex SOURCE for the source branches that make an MR a branch PROMOTION,
+   * not a fix (release branches, `Adhoc-YYYY-MM-DD`). Read by
+   * hooks/local-tests-ready.cjs, which compiles it with the 'i' flag. Optional:
+   * absent, only branches.protected marks a promotion.
+   */
+  releaseBranchPattern?: string;
 }
 
 /**
@@ -259,20 +261,6 @@ export interface LocalTestsConfig {
    * what a finished one is marked. '' when unset, which turns the mode off.
    */
   labels: { trigger: string; running: string; done: string };
-}
-
-/**
- * config/project.json `automation`. The `_why` keys beside each field say what
- * it is for; this is the shape the code relies on.
- */
-export interface AutomationConfig {
-  /** Exact, case-sensitive GitLab label names. `deployed` is only read (by the readiness hook). */
-  labels: { trigger: string; deployed: string; review: string; done: string };
-  /** Regex SOURCE, e.g. '^Adhoc-\\d{4}-\\d{2}-\\d{2}$'. The hook compiles it with the 'i' flag. */
-  releaseBranchPattern: string;
-  sheet: { spreadsheetId: string; trackerTab: string; moduleTabPrefix: string; sectionAliases?: Record<string, string> };
-  /** A not-ready ticket is re-checked at least this often, since a merge does not touch the ticket. */
-  recheckMinutes: number;
 }
 
 /**
@@ -542,17 +530,21 @@ export interface RequiredLabel { name: string; why: string }
  * unset is not required — an empty string is "this gate is off", not a label
  * called "". `notABug` is required only while reproduction is on, for the same
  * reason, and the three local-tests labels only while the local automation
- * tests mode is on: on any other desk nothing ever reads or writes them.
+ * tests mode is on: on any other desk nothing ever reads them. The trigger is
+ * the exception: the Loop WRITES it at merge on every desk while the team has
+ * the mode on (`atMerge`, mergeTriggerLabel), so it is required there too.
  *
- * `localTests` defaults to whether THIS desk has that mode on, so doctor checks
- * the labels exactly where they will be read and written. A test passes it, so
- * the answer does not depend on the machine's .env.
+ * `localTests` defaults to whether THIS desk has that mode on, and `atMerge` to
+ * the label this desk's merges add, so doctor checks the labels exactly where
+ * they will be read and written. A test passes both, so the answer does not
+ * depend on the machine's .env.
  */
 export function requiredLabels(
   labels: ProjectConfig['labels'],
   phaseList: Pick<PhaseConfig, 'name' | 'labelSkills' | 'labelGated'>[],
   bugReproduction: boolean,
   localTests: boolean = localTestsConfig().enabled,
+  atMerge: string | null = mergeTriggerLabel(),
 ): RequiredLabel[] {
   const out = new Map<string, string>();
   const need = (name: string | undefined, why: string): void => {
@@ -566,6 +558,7 @@ export function requiredLabels(
   need(labels.designReview, 'design gate');
   need(labels.inReview, 'in-review marker');
   if (bugReproduction) need(labels.notABug, 'bug reproduction verdict');
+  if (atMerge) need(atMerge, 'local automation tests trigger — the Loop puts it on beside the exit label at merge');
   if (localTests) {
     need(labels.localTestsTrigger, 'local automation tests trigger — the mode never starts without it');
     need(labels.localTestsRunning, 'local automation tests running marker');
@@ -683,95 +676,24 @@ export function reviewersConfig(): ReviewersConfig {
 }
 
 /**
- * config/project.json `automation`, checked. Throws
- * 'config/project.json has no usable `automation` block: <what>' naming the
- * first field that is missing or of the wrong type.
+ * The label the Loop puts on a ticket beside `labels.exit` when it merges it:
+ * the local automation tests mode's trigger, so a merged ticket goes on to its
+ * Cypress run with nobody having to add anything (runner.ts finish).
  *
- * Checked field by field rather than cast, because every one of these is used
- * somewhere a wrong value is silent: an empty label name makes the scan find
- * nothing, a bad regex makes the readiness check hold every ticket as
- * `unknown`, and a non-numeric cadence makes a not-ready ticket re-check every
- * tick. Saying which field is wrong at boot is cheaper than any of those. Not cached, so a test or
- * a preflight always sees the file as it is. `cfg` is for tests; everything
- * else reads config/project.json.
+ * The TEAM's switch, not this desk's. A Loop desk with the mode off still puts
+ * it on, and the one desk that runs the mode (docs/LOCAL-TESTS.md) picks the
+ * ticket up on its next tick. Null — the merge adds `labels.exit` alone — when
+ * the team has the mode off: no `localTests` block, `localTests.enabled` not
+ * true, or `labels.localTestsTrigger` empty. Never throws: finish() and the
+ * banner call it.
  */
-export function automationConfig(cfg: Pick<ProjectConfig, 'automation'> = projectConfig()): AutomationConfig {
-  const bad = (what: string): never => {
-    throw new Error(`config/project.json has no usable \`automation\` block: ${what}`);
-  };
-  const a = cfg.automation as unknown;
-  if (!a || typeof a !== 'object') bad('it is missing');
-  const raw = a as Record<string, unknown>;
-  const str = (v: unknown, name: string): string => (typeof v === 'string' && v.trim() !== '' ? v : bad(`${name} must be a non-empty string`));
-
-  const labels = (raw.labels ?? {}) as Record<string, unknown>;
-  const sheet = (raw.sheet ?? {}) as Record<string, unknown>;
-  const releaseBranchPattern = str(raw.releaseBranchPattern, 'releaseBranchPattern');
-  try { new RegExp(releaseBranchPattern, 'i'); } catch { bad('releaseBranchPattern is not a valid regular expression'); }
-  const recheckMinutes = raw.recheckMinutes;
-  if (typeof recheckMinutes !== 'number' || !Number.isFinite(recheckMinutes) || recheckMinutes <= 0) {
-    bad('recheckMinutes must be a positive number');
-  }
-  const aliases = sheet.sectionAliases;
-  if (aliases !== undefined && (typeof aliases !== 'object' || aliases === null || Array.isArray(aliases)
-    || Object.values(aliases).some((v) => typeof v !== 'string'))) {
-    bad('sheet.sectionAliases must map module names to strings');
-  }
-  return {
-    labels: {
-      trigger: str(labels.trigger, 'labels.trigger'),
-      deployed: str(labels.deployed, 'labels.deployed'),
-      review: str(labels.review, 'labels.review'),
-      done: str(labels.done, 'labels.done'),
-    },
-    releaseBranchPattern,
-    sheet: {
-      spreadsheetId: str(sheet.spreadsheetId, 'sheet.spreadsheetId'),
-      trackerTab: str(sheet.trackerTab, 'sheet.trackerTab'),
-      moduleTabPrefix: str(sheet.moduleTabPrefix, 'sheet.moduleTabPrefix'),
-      ...(aliases ? { sectionAliases: aliases as Record<string, string> } : {}),
-    },
-    recheckMinutes: recheckMinutes as number,
-  };
-}
-
-/**
- * The Ready For Automation trigger label, for the LOOP's routing: a ticket
- * carrying it beside the entry label belongs to the automation mode, and the
- * Loop pipeline never works it (src/conductor/watcher.ts, automationOwns).
- *
- * The routing holds on every desk, the mode switched on here or not. Null when
- * the block is not usable — whenever automationConfig() would throw (missing,
- * or any field wrong, the sheet's included): the mode cannot run anywhere
- * then, so there is no trigger to route on and the Loop behaves as it did
- * before the mode existed, rather than leaving the ticket to nobody. Never
- * throws: the Loop's scan and runTicket call it.
- */
-export function automationTriggerLabel(cfg?: Pick<ProjectConfig, 'automation'>): string | null {
-  try {
-    return automationConfig(cfg ?? projectConfig()).labels.trigger;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * `.env` ONESHOT_AUTOMATION=1 turns the Ready For Automation tick on for THIS
- * desk. Off by default, and meant for one desk only: the per-ticket lock is a
- * local file, so two desks on the same ticket would each spend a session.
- * `--automation <iid>` works without it.
- */
-export function automationEnabled(): boolean {
-  return envFlag('ONESHOT_AUTOMATION');
-}
-
-/**
- * The Google service-account key the sheet writer signs with. Read by
- * conductor code only: it is not in BASE_ENV, so it reaches no session, and
- * the automation session is denied every file-reading tool besides.
- */
-export function googleServiceAccountFile(): string {
-  return expandPath(envOr('ONESHOT_GOOGLE_SA_FILE', '~/.claude/google-service-account.json'));
+export function mergeTriggerLabel(
+  cfg: Pick<ProjectConfig, 'localTests'> & Partial<Pick<ProjectConfig, 'labels'>> = projectConfig(),
+): string | null {
+  const block = cfg.localTests as unknown;
+  if (!block || typeof block !== 'object' || (block as { enabled?: unknown }).enabled !== true) return null;
+  const label = (cfg.labels as { localTestsTrigger?: unknown } | undefined)?.localTestsTrigger;
+  return typeof label === 'string' && label.trim() ? label.trim() : null;
 }
 
 /**
@@ -793,7 +715,7 @@ const PG_IDENT_RE = /^[a-z_][a-z0-9_]{0,62}$/;
  * true, ONESHOT_LOCAL_TESTS_REPO unset, a field of the wrong shape, or one of
  * the three labels unset (a mode with no trigger label has nothing to pick up,
  * and one with no done label could never finish a ticket). Checked
- * field by field rather than cast for the reason automationConfig() gives: the
+ * field by field rather than cast, because a wrong value here is silent: the
  * database names are written into SQL, and a non-numeric cap is a run that is
  * never stopped. Not cached. `cfg` and `env` are for tests.
  *

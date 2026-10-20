@@ -532,7 +532,6 @@ test('DRY_RUN: a whole ticket in one pass — the session runs, nothing reaches 
   const s = f.sessions[0]!;
   assert.equal(s.cfg.name, 'local-tests-scope');
   assert.equal(s.worktree, erpCheckoutDir(f.iid), 'it reads the ERP checkout at the merge commit');
-  assert.equal(s.stateDir, undefined, 'its write scope is state/runs/<iid>, where the automation worktree is');
   assert.equal(s.gitlabMcp, false, 'the ticket is in the prompt; no GitLab server, so no GitLab write');
   assert.match(s.prompt, new RegExp(MERGE), 'the merge commit is the head it scopes');
   assert.match(s.prompt, new RegExp(BASE), 'its first parent is the base');

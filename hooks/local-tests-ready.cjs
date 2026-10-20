@@ -6,9 +6,11 @@
  * conductor (src/localtests/readiness.ts), never by a session.
  *
  * A ticket is READY only when both hold:
- *   A. `Ready for Automation Testing` is on it — or the operator asked a dry run
- *      to assume it (`--assume-label`, which src/index.ts accepts only with
- *      DRY_RUN=1, so a rehearsal can be run on any merged ticket);
+ *   A. `Ready for Automation Testing` is on it — the Loop puts it there beside
+ *      `Merged` when it merges the ticket, or a person does — or the operator
+ *      asked a dry run to assume it (`--assume-label`, which src/index.ts
+ *      accepts only with DRY_RUN=1, so a rehearsal can be run on any merged
+ *      ticket);
  *   B. the ticket's change is MERGED into the base branch (branches.base,
  *      `dev`). Only merge requests GitLab links to it (related or closing), in
  *      the same project, that are a real change count — never a branch
@@ -34,9 +36,9 @@
  * to tell anybody yet. Open leftovers, MRs merged into another branch and
  * further merged fixes are warnings, never blockers.
  *
- * NOT A HOOK, though it lives here beside hooks/automation-ready.cjs for the
- * same reasons: dependency-free CJS, the shared _common.cjs, and a pure
- * decision function the tests reach with createRequire. No event registers it
+ * NOT A HOOK, though it lives here beside the hooks for their reasons:
+ * dependency-free CJS, the shared _common.cjs, and a pure decision function
+ * the tests reach with createRequire. No event registers it
  * (src/conductor/hooks.ts); its only caller spawns it before the mode spends a
  * scope session.
  *
@@ -402,7 +404,7 @@ function settings() {
   }
   if (!Array.isArray(protectedBranches)) return missing('the protected branches (config/project.json branches.protected)');
   const releaseSource = env.ONESHOT_LOCAL_TESTS_RELEASE
-    || (cfg.automation && typeof cfg.automation.releaseBranchPattern === 'string' ? cfg.automation.releaseBranchPattern : '');
+    || (cfg.localTests && typeof cfg.localTests.releaseBranchPattern === 'string' ? cfg.localTests.releaseBranchPattern : '');
   let releaseBranch = null;
   if (releaseSource) {
     try { releaseBranch = new RegExp(releaseSource, 'i'); } catch { return missing('a valid release branch pattern'); }
