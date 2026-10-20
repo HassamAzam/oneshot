@@ -786,6 +786,9 @@ test('real: nothing reaches the change, so the module\'s main-functionality spec
   const r1 = readLtJournal(f.iid)!.lists[0]!;
   assert.equal(r1.kind, 'found');
   assert.deepEqual(r1.specs, MAIN.map((m) => m.file));
+  assert.equal(r1.patchSha, PATCH, 'joined before the capture, so the session\'s edits are kept with the list');
+  assert.deepEqual(readArtifact<{ specs: Array<{ file: string }> }>(f.iid, 'local-tests-scope.json')?.specs.map((x) => x.file),
+    MAIN.map((m) => m.file), 'the scope the run reads is the whole list');
   assert.match(notes(f)[0]!, /Oneshot will run 2 automation tests locally once QA approves/);
   assert.equal(readLtJournal(f.iid)!.lists.length, 1);
 });

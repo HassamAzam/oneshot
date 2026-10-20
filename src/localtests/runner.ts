@@ -1241,13 +1241,32 @@ async function stepScope(ctx: Ctx, request: 'first' | 'feedback'): Promise<StepR
     ? new Set([...specFiles(out.data), ...notRunnableOf(out.data).map((n) => n.spec), ...proposedRemovals(out.data)])
     : new Set<string>();
   const adds = out.ok && out.data ? extra.filter((e) => !kept.has(e.spec.file)) : [];
-  let addMinutes = 0;
-  if (adds.length) {
+  // Joined to the session's list BEFORE the capture, which records the patch
+  // for a list with something to run: a session that listed nothing but edited
+  // a main-functionality spec to follow a rename must not see it run unpatched.
+  let listed = out;
+  if (adds.length && out.data) {
     const priced = await deps.impact(['estimate', '--automation', inputs.wsa, ...adds.map((e) => e.spec.file)]);
-    addMinutes = priced.ok ? Number((priced.data.totals as { estimatedMinutes?: unknown } | undefined)?.estimatedMinutes) || 0 : 0;
+    const addMinutes = priced.ok ? Number((priced.data.totals as { estimatedMinutes?: unknown } | undefined)?.estimatedMinutes) || 0 : 0;
+    const own = out.data;
+    const ownSpecs = Array.isArray(own.specs) ? own.specs as unknown[] : [];
+    const modules = Array.isArray(own.modules) ? (own.modules as unknown[]).filter((x): x is string => typeof x === 'string') : [];
+    listed = {
+      ...out,
+      data: {
+        ...own,
+        applicable: true,
+        modules: [...new Set([...modules, ...adds.map((e) => e.spec.module ?? '').filter(Boolean)])],
+        specs: [...ownSpecs, ...adds.map((e) => ({
+          file: e.spec.file, module: e.spec.module ?? e.spec.file.split('/')[2] ?? '', cases: e.spec.its ?? 0, why: e.why,
+        }))],
+        estimatedMinutes: (Number(own.estimatedMinutes) || 0) + addMinutes,
+      },
+    };
+    log.info(`${tag(iid)} added ${plural(adds.length, 'spec')} the session left out: ${adds.map((e) => e.spec.file).join(', ')}`);
   }
   // Whatever it concluded: the edits saved and the worktree removed, then the ERP checkout.
-  const after = await captureScopeSession(iid, out, inputs, ltDeps(deps));
+  const after = await captureScopeSession(iid, listed, inputs, ltDeps(deps));
   await releaseHolding(ctx);
   deps.event('local_tests_session', {
     iid, request, lap, ok: out.ok, turns: out.turns, weighted: out.weighted, blocked: out.blocked, error: out.error ?? null,
@@ -1269,23 +1288,9 @@ async function stepScope(ctx: Ctx, request: 'first' | 'feedback'): Promise<StepR
       : (out.error ?? 'the session failed without saying why').slice(0, 300));
   }
   if (after.refusal) return charge(ctx, after.refusal);
-  let scope = after.data ?? out.data;
+  const scope = after.data ?? listed.data ?? out.data;
   const blocked = typeof scope.blocked === 'string' ? scope.blocked.trim() : '';
   if (blocked) return charge(ctx, `the session was blocked: ${blocked}`);
-  if (adds.length) {
-    const listed = Array.isArray(scope.specs) ? scope.specs as unknown[] : [];
-    const modules = Array.isArray(scope.modules) ? (scope.modules as unknown[]).filter((x): x is string => typeof x === 'string') : [];
-    scope = {
-      ...scope,
-      applicable: true,
-      modules: [...new Set([...modules, ...adds.map((e) => e.spec.module ?? '').filter(Boolean)])],
-      specs: [...listed, ...adds.map((e) => ({
-        file: e.spec.file, module: e.spec.module ?? e.spec.file.split('/')[2] ?? '', cases: e.spec.its ?? 0, why: e.why,
-      }))],
-      estimatedMinutes: (Number(scope.estimatedMinutes) || 0) + addMinutes,
-    };
-    log.info(`${tag(iid)} added ${plural(adds.length, 'spec')} the session left out: ${adds.map((e) => e.spec.file).join(', ')}`);
-  }
   const scopedMrs = !multi ? undefined
     : request === 'feedback' ? prev?.scopedMrs
       : [...(m.ranges ?? []).map((r) => r.mrIid).filter((n) => scopedEarlier.includes(n)), m.mrIid];
