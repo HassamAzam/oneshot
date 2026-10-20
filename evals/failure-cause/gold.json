@@ -56,6 +56,19 @@
       "259": {
         "TC-15": {"cause": "pre-existing", "why": "The send succeeded but the backend annotation is_increment_processed (apps/core/utils/person.py) never flipped to true for the chosen people. That annotation keys off the latest increment's month and its is_emailed flag, and the diff does not touch it. The frontend correctly drew no badge for a false flag. On the base build the same row would also have stayed unprocessed (unblurred), so the same failure occurs without the change. I disagree with verify's 'fail', whose own evidence calls it likely pre-existing. The case was later removed from testcases.json, but verify.json still holds it."},
         "TC-17": {"cause": "untested", "why": "The test account's only accessible team had no project-log data, so the shared StatusTag on the Project Logs approver view was never rendered."}
+      },
+      "46": {
+        "TC-07": {"cause": "untested", "why": "The empty-column placeholder path was never exercised: an earlier verify session's TC-13 drag-and-drop moved an overflow card into Thursday and that mutation persisted in the shared DB, so Thursday no longer had zero entries. The precondition was broken by shared state, not the diff."},
+        "TC-10": {"cause": "untested", "why": "The seeded data never held a locked/approved entry, a past-team-end entry and a tagged entry together in one column, and fabricating that combination was out of scope for a read-only verify pass within budget."}
+      },
+      "200": {
+        "TC-07": {"cause": "untested", "why": "The verify session died at its turn cap before this case ran, so the Web Landing automated accessibility scan was never executed."},
+        "TC-11": {"cause": "untested", "why": "The verify session died at its turn cap before this case ran, so the footer control at the mobile/md breakpoint was never checked."},
+        "TC-12": {"cause": "untested", "why": "The verify session died at its turn cap before this case ran, so the focus ring against the dark theme surface was never checked."},
+        "TC-17": {"cause": "untested", "why": "The verify session died at its turn cap before this case ran, so the incomplete keyboard-submitted Contact Us validation was never exercised."},
+        "TC-18": {"cause": "untested", "why": "The verify session died at its turn cap before this case ran, so the unsaved-changes guard on a keyboard-opened dialog was never exercised."},
+        "TC-19": {"cause": "untested", "why": "Login could not be completed, so the authenticated redirect away from / and the header help button could not be verified."},
+        "TC-20": {"cause": "untested", "why": "The verify session died at its turn cap before this case ran, so the no-regression check on prior accessibility work was never executed."}
       }
     }
   }
