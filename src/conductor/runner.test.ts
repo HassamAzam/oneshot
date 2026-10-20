@@ -76,6 +76,32 @@ test('a cycle forces its whole window and leaves the pinned case list alone', ()
   assert.equal(skips(forced, ['implement', 'testcases', 'review'], 'testcases'), true);
 });
 
+/**
+ * The cycle a stale review verdict produces (reviewRegrade() -> merge ->
+ * runCodePhase), pinned to its window.
+ *
+ * `review` ALONE, because nothing about the code changed — only the verdict
+ * is out of date. Everything between review and merge still describes this
+ * branch, so forcing any of it back in would re-pay for a verify, an evidence
+ * pack and an MR that are all still true. They read as settled and skip, which
+ * is what brings the loop straight back to merge with a fresh verdict.
+ */
+test('a stale-verdict cycle re-runs review alone and skips everything after it', () => {
+  const forced = new Set<string>();
+  const i = nextIndex(
+    { kind: 'cycle', jumpTo: at('review'), windowEnd: at('review') },
+    at('merge'), at('merge'), LIST, forced,
+  );
+
+  assert.equal(i, at('review'));
+  assert.deepEqual([...forced], ['review']);
+  const settled = ['implement', 'testcases', 'review', 'verify', 'ui-evidence', 'mr'];
+  assert.equal(skips(forced, settled, 'review'), false, 'review is the one phase that re-runs');
+  for (const name of ['testcases', 'verify', 'ui-evidence', 'mr']) {
+    assert.equal(skips(forced, settled, name), true, `${name} must not be re-paid for`);
+  }
+});
+
 test('an advance steps past the last member of a group, not past the current index', () => {
   const forced = new Set<string>();
   // testcases+review dispatched together: the loop is at testcases, the group
