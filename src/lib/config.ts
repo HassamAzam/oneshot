@@ -684,12 +684,16 @@ export function reviewersConfig(): ReviewersConfig {
  * it on, and the one desk that runs the mode (docs/LOCAL-TESTS.md) picks the
  * ticket up on its next tick. Null — the merge adds `labels.exit` alone — when
  * the team has the mode off: no `localTests` block, `localTests.enabled` not
- * true, or `labels.localTestsTrigger` empty. Never throws: finish() and the
- * banner call it.
+ * true, or `labels.localTestsTrigger` empty; and on a project whose target
+ * has no `local-tests-scope` phase (config/phases.json `targets`), which has
+ * no automation suite to run. Never throws: finish() and the banner call it.
+ * `hasScopePhase` is for tests; it defaults to this target's phase list.
  */
 export function mergeTriggerLabel(
   cfg: Pick<ProjectConfig, 'localTests'> & Partial<Pick<ProjectConfig, 'labels'>> = projectConfig(),
+  hasScopePhase: boolean = phaseByName('local-tests-scope') !== undefined,
 ): string | null {
+  if (!hasScopePhase) return null;
   const block = cfg.localTests as unknown;
   if (!block || typeof block !== 'object' || (block as { enabled?: unknown }).enabled !== true) return null;
   const label = (cfg.labels as { localTestsTrigger?: unknown } | undefined)?.localTestsTrigger;

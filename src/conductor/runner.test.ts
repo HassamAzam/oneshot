@@ -9,7 +9,7 @@ import {
 import type { PhaseOutput } from './phase.js';
 import type { IssueNote } from '../lib/gitlab.js';
 import { ticketScopeIds, type CaseResult } from '../phases/types.js';
-import { MERGE_POLL_MS, phaseByName, projectConfig, type PhaseConfig } from '../lib/config.js';
+import { MERGE_POLL_MS, mergeTriggerLabel, phaseByName, projectConfig, type PhaseConfig } from '../lib/config.js';
 import type { RunJournal } from '../lib/artifacts.js';
 import type { JournalOwner } from '../lib/journalproject.js';
 
@@ -346,13 +346,15 @@ test('with the team\'s local tests off, a merged run adds the exit label alone',
   assert.deepEqual(doneLabelSwap(cfg, null).add, [cfg.labels.exit]);
 });
 
-test('the shipped config puts "Ready for Automation Testing" on beside "Merged" at every merge', () => {
+test('the shipped config puts "Ready for Automation Testing" on beside "Merged" at every erp merge', () => {
   // The team's switch, so a Loop desk with the mode off adds it too: the one
-  // desk that runs the mode picks the ticket up from the label.
+  // desk that runs the mode picks the ticket up from the label. (Passed the
+  // target's answer, so this machine's GITLAB_REPO_URL cannot change it.)
   const cfg = projectConfig();
   assert.equal(cfg.localTests?.enabled, true);
-  assert.deepEqual(doneLabelSwap(cfg).add, [cfg.labels.exit, cfg.labels.localTestsTrigger]);
+  assert.deepEqual(doneLabelSwap(cfg, mergeTriggerLabel(cfg, true)).add, [cfg.labels.exit, cfg.labels.localTestsTrigger]);
   assert.equal(cfg.labels.localTestsTrigger, 'Ready for Automation Testing');
+  assert.deepEqual(doneLabelSwap(cfg, mergeTriggerLabel(cfg, false)).add, [cfg.labels.exit], 'a target with no automation suite');
 });
 
 // ------------------------------------------------- the comments a phase reads

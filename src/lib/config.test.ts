@@ -125,12 +125,20 @@ test('the trigger is required on a desk with the mode off when its merges put it
 test('mergeTriggerLabel is the team\'s switch: the trigger while localTests is enabled, null otherwise', () => {
   const lab = labels(LT_LABELS);
   const block = projectConfig().localTests!;
-  assert.equal(mergeTriggerLabel({ localTests: block, labels: lab }), 'Ready for Automation Testing');
-  assert.equal(mergeTriggerLabel({ localTests: { ...block, enabled: false }, labels: lab }), null);
-  assert.equal(mergeTriggerLabel({ localTests: undefined, labels: lab }), null);
-  assert.equal(mergeTriggerLabel({ localTests: block, labels: labels({ ...LT_LABELS, localTestsTrigger: '  ' }) }), null);
+  assert.equal(mergeTriggerLabel({ localTests: block, labels: lab }, true), 'Ready for Automation Testing');
+  assert.equal(mergeTriggerLabel({ localTests: { ...block, enabled: false }, labels: lab }, true), null);
+  assert.equal(mergeTriggerLabel({ localTests: undefined, labels: lab }, true), null);
+  assert.equal(mergeTriggerLabel({ localTests: block, labels: labels({ ...LT_LABELS, localTestsTrigger: '  ' }) }, true), null);
   // The shipped config: the team has the mode on, so every desk's merge adds it.
-  assert.equal(mergeTriggerLabel(), projectConfig().labels.localTestsTrigger);
+  assert.equal(mergeTriggerLabel(projectConfig(), true), projectConfig().labels.localTestsTrigger);
+});
+
+test('a project with no local-tests phase in its target adds no trigger at merge: it has no automation suite', () => {
+  const lab = labels(LT_LABELS);
+  assert.equal(mergeTriggerLabel({ localTests: projectConfig().localTests!, labels: lab }, false), null);
+  // The shipped phases scope local-tests-scope to the erp target.
+  const raw = JSON.parse(readFileSync(join(ROOT, 'config', 'phases.json'), 'utf8')) as { phases: Array<{ name: string; targets?: string[] }> };
+  assert.deepEqual(raw.phases.find((p) => p.name === 'local-tests-scope')?.targets, ['erp']);
 });
 
 test('the retired TestCase Run Locally marker is not configured any more', () => {

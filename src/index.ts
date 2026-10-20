@@ -336,7 +336,7 @@ async function banner(): Promise<void> {
   // and the team's local-tests desk picks the ticket up.
   log.info(atMerge
     ? `at merge   "${cfg.labels.exit}" + "${atMerge}" — the local automation tests start from there`
-    : `at merge   "${cfg.labels.exit}" only — local automation tests are switched off for the team`);
+    : `at merge   "${cfg.labels.exit}" only — no local automation tests for this project (localTests off, or no local-tests phase for it)`);
   if (DRY_RUN) log.warn('DRY_RUN is on — every write will be refused, in its own state-dry home');
 }
 
