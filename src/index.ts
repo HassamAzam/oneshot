@@ -51,7 +51,7 @@ import { ensureClaudeDir } from './lib/claudedir.js';
 import { probe, netState } from './lib/reachability.js';
 import { windowUsage, dayUsage, quotaParked } from './lib/quota.js';
 import { budgetConfig } from './lib/config.js';
-import { localTestsFlags } from './lib/cliargs.js';
+import { localTestsFlags, retiredFlagError } from './lib/cliargs.js';
 import { describe, scan } from './conductor/watcher.js';
 import { refusalIsFinal, runTicket, type RunOutcome } from './conductor/runner.js';
 import { killLiveLocalTests } from './conductor/localtests.js';
@@ -215,6 +215,12 @@ if (followArg && ticketArg === null) {
  * the mode being scheduled: it is an operator's explicit act, but the desk
  * must have the step on, since the pass needs its clone and Postgres.
  */
+const retiredFlag = retiredFlagError(process.argv);
+if (retiredFlag) {
+  log.error(retiredFlag);
+  process.exit(1);
+}
+
 const localTestsFlag = localTestsFlags(process.argv, DRY_RUN);
 const localTestsArg = localTestsFlag.iid;
 if (localTestsFlag.error) {

@@ -25,7 +25,8 @@ const impact = require(SCRIPT) as {
   parseTestIds: (src: string) => Record<string, Record<string, string>>;
   selectorTestids: (src: string) => Set<string>;
   specTags: (src: string) => string[];
-  caseNumber: (file: string) => number;
+  caseNumber: (file: string) => number[] | null;
+  byCase: (a: string, b: string) => number;
   mainSpecsOf: (modules: string[], specFiles: string[], tagsOf: Map<string, string[]>) =>
     Array<{ file: string; module: string; basis: 'smoke' | 'first' }>;
   MAIN_SPECS_PER_MODULE: number;
@@ -397,10 +398,13 @@ test('a spec\'s tags are the TestFilters list, and a commented-out wrapper tags 
   assert.deepEqual(impact.specTags("describe('no filter', () => {});"), []);
 });
 
-test('case numbers order a module\'s specs the way QA number them', () => {
-  assert.equal(impact.caseNumber('cypress/e2e/leaves/LV_04.1_team_on_leave.ts'), 4.1);
-  assert.equal(impact.caseNumber('cypress/e2e/trainings/trainings_01_dashboard.ts'), 1);
-  assert.equal(impact.caseNumber('cypress/e2e/leaves/no_number.ts'), Infinity);
+test('case numbers order a module\'s specs the way QA number them: sub-cases are counted, not decimals', () => {
+  assert.deepEqual(impact.caseNumber('cypress/e2e/leaves/LV_04.1_team_on_leave.ts'), [4, 1]);
+  assert.deepEqual(impact.caseNumber('cypress/e2e/trainings/trainings_01_dashboard.ts'), [1]);
+  assert.equal(impact.caseNumber('cypress/e2e/leaves/no_number.ts'), null);
+  const files = ['x/TR_74.13_b.ts', 'x/no_number.ts', 'x/TR_74.2_a.ts', 'x/TR_74_c.ts', 'x/TR_10_d.ts', 'x/TR_9_e.ts'];
+  assert.deepEqual([...files].sort(impact.byCase),
+    ['x/TR_9_e.ts', 'x/TR_10_d.ts', 'x/TR_74_c.ts', 'x/TR_74.2_a.ts', 'x/TR_74.13_b.ts', 'x/no_number.ts']);
 });
 
 test('main picks: smoke-tagged first in case order, capped per module, else the first cases', () => {

@@ -50,16 +50,27 @@ const ADDED_RE = /\b(?:added|pushed|merged|committed|created)\b/i;
 const OPENS_ADDED_RE = /^[\s*_`]*(?:added|pushed|merged|committed|created)\b/i;
 
 /**
- * A spec path under `cypress/`, wherever it sits in the reply: bare, in a code
- * span, behind `./` or `workstream-automation/`, or inside a GitLab blob URL.
- * Case-sensitive, like the git lookup it feeds.
+ * A spec path under `cypress/`, bare in the reply: behind `./` or
+ * `workstream-automation/`, in angle brackets, or inside a GitLab blob URL.
+ * The suite's own names carry `&`, `(`, `%`, `$`, `<` and `>` (LV_19's
+ * `Causal&Sick`), so those are part of a path; a space or a comma ends one,
+ * because prose puts them between paths. Case-sensitive, like the git lookup
+ * it feeds.
  */
-const SPEC_PATH_RE = /(?<![\w-])cypress\/[\w.\-/]+\.(?:ts|js)(?!\w)/g;
+const SPEC_PATH_RE = /(?<![\w-])cypress\/[\w.\-/&()%$<>+@=!~#]+\.(?:ts|js)(?!\w)/g;
+
+/** A code span: the way to name a file whose name has a space or a comma (costing_15's `non billable`). */
+const CODE_SPAN_RE = /`([^`\n]+)`/g;
+
+/** In a code span, the path runs from `cypress/` to the end of the span. */
+const IN_SPAN_RE = /(?:^|[\s/<])(cypress\/[^`\n]*?\.(?:ts|js))\s*>?\s*$/;
 
 /** The spec paths a reply names, de-duplicated in the order given. A path with a `..` segment is not one. */
 export function specPathsIn(text: string): string[] {
-  const found = [...String(text ?? '').matchAll(SPEC_PATH_RE)].map((m) => m[0]);
-  return [...new Set(found)].filter((f) => !f.split('/').includes('..'));
+  const body = String(text ?? '');
+  const spans = [...body.matchAll(CODE_SPAN_RE)].map((m) => IN_SPAN_RE.exec(m[1]!)?.[1]).filter((f): f is string => !!f);
+  const bare = [...body.replace(CODE_SPAN_RE, ' ').matchAll(SPEC_PATH_RE)].map((m) => m[0]);
+  return [...new Set([...spans, ...bare])].filter((f) => !f.split('/').includes('..'));
 }
 
 /**
@@ -73,8 +84,13 @@ export function classifyLocalTestsReply(body: string): LocalTestsReply | null {
   const prefix = PREFIX_RE.exec(text);
   if (!prefix) {
     // `added cypress/e2e/…`, with nothing asking for more than that.
+    if (!OPENS_ADDED_RE.test(text)) return null;
     const files = specPathsIn(text);
-    return OPENS_ADDED_RE.test(text) && files.length && !ASKS_RE.test(text) ? { kind: 'added', files } : null;
+    if (files.length && !ASKS_RE.test(text)) return { kind: 'added', files };
+    // An `added` reply about a test file this cannot read as one path (a name
+    // with a space, not in backticks) is still an answer to the list: the scope
+    // session reads it whole and finds the file, rather than it being ignored.
+    return /cypress\/|\.(?:ts|js)\b/.test(text) ? { kind: 'feedback', text: text.trim() } : null;
   }
   const rest = text.slice(prefix[0].length).trim();
   if (!rest) return null;

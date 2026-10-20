@@ -210,14 +210,27 @@ function specTags(src) {
   return uniq([...m[1].matchAll(/['"`]([^'"`]+)['"`]/g)].map((x) => x[1].trim()).filter(Boolean));
 }
 
-/** The case number a spec's file name carries (`LV_04.1_…` 4.1, `trainings_01_…` 1); Infinity without one. */
+/** The case number a spec's file name carries, part by part (`LV_04.1_…` [4, 1], `trainings_01_…` [1]); null without one. */
 function caseNumber(file) {
-  const m = path.basename(file).match(/(\d+(?:\.\d+)?)/);
-  return m ? Number(m[1]) : Infinity;
+  const m = path.basename(file).match(/(\d+(?:\.\d+)*)/);
+  return m ? m[1].split('.').map(Number) : null;
 }
 
-/** Lowest case number first, then by name: `LV_06` before `LV_06.1` before `LV_13`, and `PRL_02` before `PRL_10`. */
-const byCase = (a, b) => (caseNumber(a) - caseNumber(b)) || a.localeCompare(b);
+/**
+ * Lowest case number first, compared part by part, then by name: `LV_06` before
+ * `LV_06.1` before `LV_13`, `PRL_02` before `PRL_10`, and `TR_74.2` before
+ * `TR_74.13` (sub-cases are counted, not decimals). A file with no number goes last.
+ */
+function byCase(a, b) {
+  const x = caseNumber(a);
+  const y = caseNumber(b);
+  if (!x || !y) return (x ? -1 : y ? 1 : 0) || a.localeCompare(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
+    const d = (x[i] ?? -1) - (y[i] ?? -1);
+    if (d) return d;
+  }
+  return a.localeCompare(b);
+}
 
 /**
  * The main-functionality specs of each module in `modules`: its `smoke`-tagged specs,
@@ -750,7 +763,7 @@ module.exports = {
   analyze, checkMap, estimate, costOf, ImpactError,
   /** Internals, exported for src/lib/local-tests-impact.test.ts. */
   stripComments, countIts, isDestructive, parseTestIds, selectorTestids, referencesIn, resolverFor, areaOf, loadMap,
-  specTags, caseNumber, mainSpecsOf, GENERIC_FOLDERS, MAIN_SPECS_PER_MODULE,
+  specTags, caseNumber, byCase, mainSpecsOf, GENERIC_FOLDERS, MAIN_SPECS_PER_MODULE,
 };
 
 function main() {

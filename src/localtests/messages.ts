@@ -410,7 +410,7 @@ function askToRun(qa: string[]): string {
     + '- `disapproved:` with what to change, for example:\n\n'
     + '  ```\n  disapproved:\n  - also run LV_23\n  - remove LV_21\n  ```\n'
     + `- \`added <test file>\` — a test file on workstream-automation ${automationRefName()} to run as well, for `
-    + 'example `added cypress/e2e/leaves/LV_99_my_case.ts`.\n\n'
+    + 'example `added cypress/e2e/leaves/LV_99_my_case.ts` (a file name with a space goes in backticks).\n\n'
     + FIRST_REPLY;
 }
 
@@ -418,7 +418,7 @@ function askWhenNone(qa: string[]): string {
   return `${who(qa)}reply with one of:\n`
     + `- \`approved\` — go on without local tests; the ticket is marked **${labels().done}**.\n`
     + `- \`added <test file>\` — Oneshot runs that exact file from workstream-automation ${automationRefName()}, for `
-    + 'example `added cypress/e2e/reports/reports_25_x.ts`.\n'
+    + 'example `added cypress/e2e/reports/reports_25_x.ts` (a file name with a space goes in backticks).\n'
     + '- `disapproved:` with what to change — for example a module whose main-functionality tests should run.\n\n'
     + FIRST_REPLY;
 }
@@ -477,12 +477,16 @@ export function localTestsFoundNote(scope: ScopeLike, info: LocalTestsNoteInfo):
  * was checked, so "nothing" is a fact about one commit of the suite rather
  * than a guess, and lists the three answers QA can give. Specs that reach the
  * change but cannot run on a desk are named, so "nothing" is never read as
- * "nothing covers it". No test is suggested: QA add one to the suite
- * themselves and reply `added <file>`.
+ * "nothing covers it", and so are the specs the scope left out with a
+ * `remove` proposal, so an emptied list is never a silent trim. No test is
+ * suggested: QA add one to the suite themselves and reply `added <file>`.
  */
 export function localTestsNotFoundNote(scope: ScopeLike, info: LocalTestsNoteInfo): LocalTestsNote {
   const s = scopeOf(scope);
   const notRunnable = notRunnableItems(s.notRunnable);
+  // What the scope took out on purpose: an empty list QA can approve must
+  // still say what it left out, or the trim is silent.
+  const proposals = proposalLines(s);
   const why = clause(s.reason);
   const parts = [
     '**Oneshot found no automation test to run locally for this ticket.**',
@@ -493,6 +497,7 @@ export function localTestsNotFoundNote(scope: ScopeLike, info: LocalTestsNoteInf
     ...(notRunnable.length
       ? [`**Tests that reach it but can't run on a local machine (not run):** ${notRunnable.join('; ')}.`]
       : []),
+    ...(proposals ? [`**Left out on purpose — reply \`disapproved:\` to keep any of them:**\n${proposals}`] : []),
     askWhenNone(info.qa),
     localTestsMarker('not-found'),
   ];

@@ -147,7 +147,7 @@ test('QA are mentioned for real, never in a code span, with the three answers', 
     + '- `disapproved:` with what to change, for example:\n\n'
     + '  ```\n  disapproved:\n  - also run LV_23\n  - remove LV_21\n  ```\n'
     + `- \`added <test file>\` — a test file on workstream-automation ${REF} to run as well, for example `
-    + '`added cypress/e2e/leaves/LV_99_my_case.ts`.'));
+    + '`added cypress/e2e/leaves/LV_99_my_case.ts` (a file name with a space goes in backticks).'));
   assert.doesNotMatch(body, /`@/, 'a mention in a code span notifies nobody');
   assert.doesNotMatch(body, /check again|temporary test/, 'the retired answers are not offered');
 });
@@ -316,11 +316,25 @@ test('the nothing-to-run note says why, names the commit it checked and the thre
   assert.ok(body.includes('@anosha.saeed @arsal.tariq — reply with one of:\n'
     + '- `approved` — go on without local tests; the ticket is marked **Automation Testing Done**.\n'
     + `- \`added <test file>\` — Oneshot runs that exact file from workstream-automation ${REF}, for example `
-    + '`added cypress/e2e/reports/reports_25_x.ts`.\n'
+    + '`added cypress/e2e/reports/reports_25_x.ts` (a file name with a space goes in backticks).\n'
     + '- `disapproved:` with what to change — for example a module whose main-functionality tests should run.'));
   assert.doesNotMatch(body, /Suggested|evidence banner|temporary test|check again/);
   assert.ok(body.endsWith(localTestsMarker('not-found')));
   assert.deepEqual(attachments, []);
+});
+
+test('an emptied list names what the scope left out, so approving it is never a silent trim', () => {
+  const { body } = localTestsNotFoundNote(scope({
+    specs: [],
+    proposals: [
+      { action: 'remove', title: 'The leave smoke test cannot see this change', file: 'cypress/e2e/leaves/LV_13_submit.ts', why: 'it never opens the drawer' },
+      { action: 'add', title: 'Verify that', why: 'an older scope' },
+    ],
+  }), info());
+  assert.ok(body.includes('**Left out on purpose — reply `disapproved:` to keep any of them:**\n'
+    + '- REMOVE: `cypress/e2e/leaves/LV_13_submit.ts` — The leave smoke test cannot see this change. *Why: it never opens the drawer*'));
+  assert.doesNotMatch(body, /Verify that/, 'an add is never shown');
+  assert.doesNotMatch(localTestsNotFoundNote(scope({ specs: [] }), info()).body, /Left out on purpose/);
 });
 
 test('specs that reach the change but cannot run locally are named, so nothing-to-run is not read as uncovered', () => {

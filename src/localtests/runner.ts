@@ -525,10 +525,11 @@ export function otherDeskRun(notes: IssueNote[], runId: string, now: number): st
 }
 
 /**
- * Pure. The specs the deterministic re-check counts as found: those the
+ * Pure. The specs an earlier merged MR's change reaches, which join the list: those the
  * analysis reached through something the change itself touched — a page object
  * selecting a changed testid, a changed screen — never through their folder
- * alone (`module …`), which is a health check, not a test of the change.
+ * alone (`module …`): a module's main functionality is picked apart from
+ * these (mainSpecsOf), by a fixed rule.
  */
 export function foundSpecs(analysis: Record<string, unknown> | null | undefined): ImpactSpec[] {
   const specs = Array.isArray(analysis?.specs) ? analysis.specs as unknown[] : [];
@@ -581,6 +582,42 @@ export function mainSpecWhy(m: Pick<MainSpec, 'module' | 'basis'>): string {
     : `one of ${m.module}'s smoke tests`}`;
 }
 
+/**
+ * Why Cypress cannot be handed this spec by name, or null: `--spec` takes a
+ * comma-separated list, so scripts/localtests.cjs refuses a name with a comma
+ * (TR_87's `team_name,sub_team_name`), and would fail the whole run on it.
+ */
+export function unrunnableName(file: string): string | null {
+  return file.includes(',') ? 'its file name has a comma, which Cypress cannot take in --spec' : null;
+}
+
+/**
+ * Pure. A scope's list as it can run: a spec whose name Cypress cannot take
+ * moves to `notRunnable` with why, so one name never fails the whole run, and
+ * a file QA added (`addedBy` on the previous list) keeps that mark when a
+ * feedback round lists it again — the session's output has no field for it.
+ */
+export function readyToList(
+  scope: Record<string, unknown>, prev: Record<string, unknown> | null,
+): Record<string, unknown> {
+  const specs = Array.isArray(scope.specs) ? scope.specs as Array<Record<string, unknown>> : [];
+  const addedBy = new Map((Array.isArray(prev?.specs) ? prev.specs as Array<Record<string, unknown>> : [])
+    .filter((x) => x && typeof x.file === 'string' && typeof x.addedBy === 'string' && x.addedBy)
+    .map((x) => [x.file as string, x.addedBy as string]));
+  const notRunnable = notRunnableOf(scope);
+  const keep: Array<Record<string, unknown>> = [];
+  for (const x of specs) {
+    const file = x && typeof x.file === 'string' ? x.file : '';
+    const why = file ? unrunnableName(file) : null;
+    if (why) {
+      if (!notRunnable.some((n) => n.spec === file)) notRunnable.push({ spec: file, why });
+      continue;
+    }
+    keep.push(file && addedBy.has(file) && !x.addedBy ? { ...x, addedBy: addedBy.get(file) } : x);
+  }
+  return { ...scope, specs: keep, notRunnable };
+}
+
 /** Pure. The spec files a scope drops on purpose, each with a `remove` proposal naming it. */
 export function proposedRemovals(scope: Record<string, unknown> | null | undefined): string[] {
   const list = Array.isArray(scope?.proposals) ? scope.proposals as Array<Record<string, unknown>> : [];
@@ -588,9 +625,16 @@ export function proposedRemovals(scope: Record<string, unknown> | null | undefin
     .map((p) => String(p.file).trim());
 }
 
-/** A spec path QA may name: under cypress/, a .ts or .js file, no `..`. */
+/**
+ * A spec path QA may name, or the analysis may pick: under cypress/, a .ts or
+ * .js file, no `..` segment, no control character or backslash. Any other
+ * character is allowed, because the suite's own file names use them — 49 of
+ * its 837 specs have a space, `&`, `(`, `%`, `$`, `,`, `<` or `>` (LV_19's
+ * `Causal&Sick`, costing_15's `non billable`). Every consumer passes the path
+ * as an argument or as JSON, never through a shell.
+ */
 export function isSpecPath(p: string): boolean {
-  return /^cypress\/[\w.\-/]+\.(?:ts|js)$/.test(p) && !p.split('/').includes('..');
+  return /^cypress\/[^\x00-\x1f\x7f\\]+\.(?:ts|js)$/.test(p) && !p.split('/').includes('..');
 }
 
 /**
@@ -803,7 +847,7 @@ async function ensureCommits(ctx: Ctx): Promise<{ ok: true; m: MergedRef & { bas
 interface Range { mrIid: number; base: string; head: string }
 
 /**
- * The changes a scope or a re-check looks at. `own` is the tested MR's
+ * The changes a scope looks at. `own` is the tested MR's
  * (ensureCommits proved it). `earlier` is each other MR of the ticket's own
  * that readiness found merged, oldest first — a follow-up MR's merge is the
  * tested commit, but the change QA asked to test is the ticket's, all of it.
@@ -1102,7 +1146,7 @@ function promptJournal(ctx: Ctx): RunJournal {
   };
 }
 
-/** Release whatever the scope or re-check checked out, and clear it from the journal. */
+/** Release whatever the scope checked out, and clear it from the journal. */
 async function releaseHolding(ctx: Ctx): Promise<void> {
   const j = ctx.j!;
   if (j.holding?.erp) await ctx.deps.erp.remove(j.holding.erp).catch((err: unknown) => {
@@ -1288,7 +1332,7 @@ async function stepScope(ctx: Ctx, request: 'first' | 'feedback'): Promise<StepR
       : (out.error ?? 'the session failed without saying why').slice(0, 300));
   }
   if (after.refusal) return charge(ctx, after.refusal);
-  const scope = after.data ?? listed.data ?? out.data;
+  const scope = readyToList(after.data ?? listed.data ?? out.data, prevScope);
   const blocked = typeof scope.blocked === 'string' ? scope.blocked.trim() : '';
   if (blocked) return charge(ctx, `the session was blocked: ${blocked}`);
   const scopedMrs = !multi ? undefined
@@ -1374,12 +1418,15 @@ async function stepAdd(ctx: Ctx): Promise<StepResult> {
       + `${sha7(automationSha)} instead of ${sha7(carry.automationSha)}`);
   }
   const kept = prev?.kind === 'found' ? prev.specs : [];
-  const specs = [...new Set([...kept, ...existing])];
+  const all = [...new Set([...kept, ...existing])];
+  // A file whose name Cypress cannot take would fail the whole run: it is named, not run.
+  const specs = all.filter((f) => !unrunnableName(f));
+  const cannot = all.filter((f) => unrunnableName(f)).map((spec) => ({ spec, why: unrunnableName(spec)! }));
   const rec: Omit<ListRecord, 'round' | 'noteId' | 'postedAt'> = {
     source: 'added',
     kind: specs.length ? 'found' : 'not-found',
     specs,
-    notRunnable: prev?.kind === 'found' ? prev.notRunnable : [],
+    notRunnable: [...(prev?.kind === 'found' ? prev.notRunnable : []), ...cannot],
     automationSha,
     patchFile: carry ? carry.patchFile : null,
     patchSha: carry ? carry.patchSha : null,
@@ -1446,9 +1493,15 @@ async function stepPost(ctx: Ctx, round: number): Promise<StepResult> {
     const elsewhere = await otherDesk(ctx, current);
     if (elsewhere) return stop(elsewhere);
   }
-  const scope = readList(iid, round);
+  // The list as it was saved — or, when that file is gone or unreadable, the
+  // record's own specs: QA must never read "nothing to run" about a list that
+  // runs when they approve it.
+  const saved = readList(iid, round);
+  const savedSpecs = Array.isArray(saved?.specs) ? saved.specs as unknown[] : [];
+  const scope = rec.specs.length && !savedSpecs.length
+    ? { ...(saved ?? {}), specs: rec.specs.map((file) => ({ file, module: file.split('/')[2] ?? '', cases: 0, why: '' })) }
+    : saved;
   const info = noteInfo(ctx, rec, scope);
-  // The found note falls back to "nothing to run" itself when the list has no rows.
   const note = rec.specs.length ? localTestsFoundNote(scope, info) : localTestsNotFoundNote(scope, info);
   const post = await postOnce(ctx, `list-r${round}`, annotate(note, rec, j.merged), current);
   if (!post.ok) {

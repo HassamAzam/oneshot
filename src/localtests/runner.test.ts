@@ -49,7 +49,7 @@ import type { LocalTestsRun } from '../phases/types.js';
 import {
   OTHER_DESK_STALE_MS, advanceTicket, foreignRequestBetween, foundSpecs, isSpecPath, localTestsGc, localTestsTick,
   mainSpecWhy, mainSpecsOf, nextStep, otherDeskRun, outcomeLine, postMarker, proposedRemovals, qaDecision,
-  runLocalTestsOnce, sessionCharge, type ModeDeps, type StepOpts,
+  readyToList, runLocalTestsOnce, sessionCharge, unrunnableName, type ModeDeps, type StepOpts,
 } from './runner.js';
 import {
   acquireLtLock, erpCheckoutDir, localTestsDir, localTestsHome, newLtJournal, readLtJournal, readRunRecord, saveList,
@@ -282,6 +282,13 @@ test('mainSpecsOf: the analysis\'s main-functionality picks, well formed and nam
   ]);
   assert.deepEqual(mainSpecsOf(null), []);
   assert.deepEqual(mainSpecsOf({ specs: [] }), [], 'an analysis from before the picks gives none');
+  // The suite's own names: an `&`, a space. Dropping them dropped real smoke tests (LV_19, costing_15).
+  const real = [
+    'cypress/e2e/leaves/LV_19_user_can_submit_half_day_leave_Causal&Sick_only.ts',
+    'cypress/e2e/costing/costing_15_verify_total_non billable_cost_on_detail_page.ts',
+  ];
+  assert.deepEqual(mainSpecsOf({ mainSpecs: real.map((file) => ({ file, module: file.split('/')[2], basis: 'smoke' })) })
+    .map((m) => m.file), real);
   assert.equal(mainSpecWhy(picks[0]!), 'Main functionality: one of leaves\'s smoke tests');
   assert.equal(mainSpecWhy(picks[1]!), 'Main functionality: one of the first tests of payroll, which tags none as smoke');
 });
@@ -297,9 +304,33 @@ test('proposedRemovals: only a remove that names its file', () => {
   assert.deepEqual(proposedRemovals(null), []);
 });
 
+test('readyToList: a name Cypress cannot take is named, not run; a file QA added keeps its mark', () => {
+  const comma = 'cypress/e2e/teamReviewA/TR_87_Verify_that_the_team_name,sub_team_name.ts';
+  assert.equal(unrunnableName(comma), 'its file name has a comma, which Cypress cannot take in --spec');
+  assert.equal(unrunnableName('cypress/e2e/leaves/LV_19_Causal&Sick_only.ts'), null);
+  const ready = readyToList(
+    { specs: [{ file: comma, why: 'x' }, { file: 'cypress/e2e/a.ts', why: 'QA asked' }, { file: 'cypress/e2e/b.ts', why: 'y' }],
+      notRunnable: [{ spec: 'cypress/e2e/m.ts', why: 'needs a mailbox' }] },
+    { specs: [{ file: 'cypress/e2e/a.ts', why: 'Added by @x', addedBy: 'arsal.tariq' }] },
+  );
+  assert.deepEqual(ready.specs, [
+    { file: 'cypress/e2e/a.ts', why: 'QA asked', addedBy: 'arsal.tariq' },
+    { file: 'cypress/e2e/b.ts', why: 'y' },
+  ]);
+  assert.deepEqual(ready.notRunnable, [
+    { spec: 'cypress/e2e/m.ts', why: 'needs a mailbox' },
+    { spec: comma, why: 'its file name has a comma, which Cypress cannot take in --spec' },
+  ]);
+});
+
 test('the small judgements: spec paths, session charges, the outcome line, the post marker', () => {
   assert.equal(isSpecPath('cypress/e2e/leaves/LV_LOCAL_total.ts'), true);
+  assert.equal(isSpecPath('cypress/e2e/leaves/LV_19_user_can_submit_half_day_leave_Causal&Sick_only.ts'), true);
+  assert.equal(isSpecPath('cypress/e2e/costing/costing_15_verify_total_non billable_cost.ts'), true);
+  assert.equal(isSpecPath('cypress/e2e/home/HOME_12_(s)_widgets.ts'), true);
   assert.equal(isSpecPath('cypress/../secrets.ts'), false);
+  assert.equal(isSpecPath('cypress/e2e/a\nb.ts'), false, 'no control character');
+  assert.equal(isSpecPath('cypress/e2e/a\\b.ts'), false, 'no backslash');
   assert.equal(isSpecPath('src/app.ts'), false);
   const out = (over: Partial<PhaseOutput>): PhaseOutput => ({
     ok: false, data: null, blocked: null, summary: '', turns: 0, weighted: 0, sessionId: '', rateLimited: false, ...over,
@@ -1316,6 +1347,50 @@ test('ranges: every merged MR of the ticket is analysed, and the main tests of e
   assert.deepEqual(r1.scopedMrs, [310, 321]);
   assert.match(notes(f)[0]!, /^\*\*Impacted module: Trainings — /);
   assert.match(notes(f)[0]!, /together with this ticket's earlier merged MR !310/);
+});
+
+test('real: a file QA added whose name has a comma is named as not runnable, never handed to Cypress', async () => {
+  const f = fake();
+  await pass(f);
+  const comma = 'cypress/e2e/teamReviewA/TR_87_Verify_that_the_team_name,sub_team_name.ts';
+  f.onMaster.add(comma);
+  f.onMaster.add('cypress/e2e/leaves/LV_19_user_can_submit_half_day_leave_Causal&Sick_only.ts');
+  qaSays(f, 'arsal.tariq', `added \`${comma}\` and cypress/e2e/leaves/LV_19_user_can_submit_half_day_leave_Causal&Sick_only.ts`);
+  await pass(f);
+  const r2 = readLtJournal(f.iid)!.lists[1]!;
+  assert.deepEqual(r2.specs, [...SPECS.map((x) => x.file), 'cypress/e2e/leaves/LV_19_user_can_submit_half_day_leave_Causal&Sick_only.ts']);
+  assert.deepEqual(r2.notRunnable, [{ spec: comma, why: 'its file name has a comma, which Cypress cannot take in --spec' }]);
+  assert.match(notes(f)[1]!, /Can't run on a local machine \(not run\):\*\* `cypress\/e2e\/teamReviewA\/TR_87_/);
+  assert.deepEqual(r2.unknown, undefined, 'both were found on master, the & one included');
+});
+
+test('real: a list whose saved file is gone is still posted as the tests it runs, never as nothing to run', async () => {
+  const f = fake();
+  const j = { ...newLtJournal(f.iid, f.issue.title), state: 'awaiting-qa' as const,
+    merged: { mrIid: 321, title: 'Fix the leave total', mergeSha: MERGE, base: BASE, baseChecked: true, sourceBranch: 'oneshot/x',
+      targetBranch: 'dev', author: 'hira.ijaz', url: '' },
+    lists: [list({ round: 1, specs: ['cypress/e2e/leaves/a.cy.ts'], noteId: null, postedAt: null })] };
+  writeLtJournal(j);
+  const o = await pass(f);
+  assert.equal(o.state, 'awaiting-qa', o.did);
+  const n = notes(f)[0]!;
+  assert.match(n, /^\*\*Impacted module: Leaves — Oneshot will run 1 automation test locally once QA approves\.\*\*/);
+  assert.doesNotMatch(n, /no automation test to run/);
+});
+
+test('real: a file QA added keeps its ➕ mark when a feedback round lists it again', async () => {
+  const f = fake();
+  await pass(f);
+  f.onMaster.add('cypress/e2e/leaves/LV_23_total.cy.ts');
+  qaSays(f, 'anosha.saeed', 'added cypress/e2e/leaves/LV_23_total.cy.ts');
+  await pass(f);
+  assert.match(notes(f)[1]!, /\| Leaves \| ➕ \| `cypress\/e2e\/leaves\/LV_23_total\.cy\.ts`/);
+  // The session's output cannot carry the mark; it lists the file as an ordinary spec.
+  f.sessionOut = () => ({ ok: true, blocked: null, summary: '', turns: 9, weighted: 500, sessionId: 's2', rateLimited: false,
+    data: scope({ specs: [SPECS[0], { file: 'cypress/e2e/leaves/LV_23_total.cy.ts', module: 'leaves', cases: 1, why: 'QA added it' }] }) });
+  qaSays(f, 'anosha.saeed', 'disapproved:\n- remove the half day test');
+  await pass(f);
+  assert.match(notes(f)[2]!, /\| Leaves \| ➕ \| `cypress\/e2e\/leaves\/LV_23_total\.cy\.ts` \| QA added it \|/);
 });
 
 test('the tick: the scan\'s tickets, the journals that owe writes, never one the Loop is running', async () => {

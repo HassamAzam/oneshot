@@ -51,3 +51,17 @@ export function localTestsFlags(
   }
   return { given, iid, assumeLabel, error };
 }
+
+/**
+ * A flag Oneshot no longer has, with what to do instead, or null.
+ *
+ * `--automation <iid>` ran the Ready For Automation mode, which is gone. Read
+ * as no flag at all it would boot a full watching conductor that claims Loop
+ * tickets and spends sessions — the slip iidFlag exists to stop — so an old
+ * command or runbook that still says it is refused instead.
+ */
+export function retiredFlagError(argv: readonly string[]): string | null {
+  if (!iidFlag(argv, '--automation').given) return null;
+  return '--automation was removed with the Ready For Automation mode: Oneshot no longer writes test cases into the '
+    + 'sheet (that lives in workstream-automation now). For a merged ticket\'s local Cypress run use --local-tests <iid>.';
+}

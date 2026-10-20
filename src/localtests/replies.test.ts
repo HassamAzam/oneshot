@@ -47,11 +47,35 @@ test('added <file>, without disapproved:, adds exactly those files', () => {
   assert.deepEqual(classifyLocalTestsReply('pushed cypress/e2e/a.ts to master'), { kind: 'added', files: ['cypress/e2e/a.ts'] });
 });
 
-test('without disapproved:, only a reply that OPENS with added decides; anything that asks for more waits', () => {
+test('without disapproved:, only a reply that OPENS with added decides; one asking for more goes to the session whole', () => {
   assert.equal(classifyLocalTestsReply('I think cypress/e2e/a.ts was added last week'), null, 'mentions, not the reply form');
-  assert.equal(classifyLocalTestsReply('added cypress/e2e/a.ts, and remove LV_21'), null,
-    'a change to the list needs disapproved:, so a half-read reply never edits it');
-  assert.equal(classifyLocalTestsReply('added reports_25_x.ts'), null, 'no spec path, nothing to look up');
+  assert.deepEqual(classifyLocalTestsReply('added cypress/e2e/a.ts, and remove LV_21'),
+    { kind: 'feedback', text: 'added cypress/e2e/a.ts, and remove LV_21' },
+    'the lookup can only add files, so the session reads it whole — never ignored, never half-done');
+  assert.deepEqual(classifyLocalTestsReply('added reports_25_x.ts'), { kind: 'feedback', text: 'added reports_25_x.ts' },
+    'a bare file name: the session finds it in the suite');
+  assert.deepEqual(classifyLocalTestsReply('added cypress/e2e/costing/costing_15_verify_total_non billable_cost.ts'),
+    { kind: 'feedback', text: 'added cypress/e2e/costing/costing_15_verify_total_non billable_cost.ts' },
+    'a name with a space, not in backticks, cannot be read as one path: the session finds it');
+});
+
+test('the suite\'s real file names are read whole: & ( ) % $ < > in a bare path, a space or a comma in backticks', () => {
+  for (const file of [
+    'cypress/e2e/leaves/LV_19_user_can_submit_half_day_leave_Causal&Sick_only.ts',
+    'cypress/e2e/teamManagement/TM_22_&_23_Verify_that_system_display_the_records_according_to_filter_and_verify_no_resignation_msg.ts',
+    'cypress/e2e/competency/competency_47_erify_that_an_audit_pop-up_should_be_displayed_when_first_time_entering_SC_or_high_score_progression_grater_than_20%.ts',
+    'cypress/e2e/podA/PD_73_Verify_that_current_salary_must_be_shown_in_$_dollar.ts',
+    'cypress/e2e/teamReviewB/TR_94_Verify_that_team_lead_should_be_able_to_move_next_month_by_clicking_on_>_sign_on_the_calendar.ts',
+    'cypress/e2e/home/HOME_12_(s)_widgets.ts',
+  ]) {
+    assert.deepEqual(classifyLocalTestsReply(`added ${file}`), { kind: 'added', files: [file] }, file);
+  }
+  const spaced = 'cypress/e2e/costing/costing_15_verify_total_non billable_cost_on_detail_page.ts';
+  const comma = 'cypress/e2e/teamReviewA/TR_87_Verify_that_the_team_name,sub_team_name_and_their_presentation_date.ts';
+  assert.deepEqual(classifyLocalTestsReply(`added \`${spaced}\` and \`${comma}\``), { kind: 'added', files: [spaced, comma] });
+  assert.deepEqual(classifyLocalTestsReply(`disapproved: added \`./${spaced}\``), { kind: 'added', files: [spaced] });
+  assert.deepEqual(specPathsIn('added cypress/e2e/a.ts,cypress/e2e/b.ts and (cypress/e2e/c.ts)'),
+    ['cypress/e2e/a.ts', 'cypress/e2e/b.ts', 'cypress/e2e/c.ts'], 'a comma or a closing bracket ends a bare path');
 });
 
 test('disapproved: added files are listed exactly, in the order given', () => {

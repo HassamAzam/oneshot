@@ -129,6 +129,9 @@ test('mergeTriggerLabel is the team\'s switch: the trigger while localTests is e
   assert.equal(mergeTriggerLabel({ localTests: { ...block, enabled: false }, labels: lab }, true), null);
   assert.equal(mergeTriggerLabel({ localTests: undefined, labels: lab }, true), null);
   assert.equal(mergeTriggerLabel({ localTests: block, labels: labels({ ...LT_LABELS, localTestsTrigger: '  ' }) }, true), null);
+  // Either other label empty turns the mode off on every desk: a trigger then would be picked up by nothing.
+  assert.equal(mergeTriggerLabel({ localTests: block, labels: labels({ ...LT_LABELS, localTestsRunning: '' }) }, true), null);
+  assert.equal(mergeTriggerLabel({ localTests: block, labels: labels({ ...LT_LABELS, localTestsDone: undefined }) }, true), null);
   // The shipped config: the team has the mode on, so every desk's merge adds it.
   assert.equal(mergeTriggerLabel(projectConfig(), true), projectConfig().labels.localTestsTrigger);
 });

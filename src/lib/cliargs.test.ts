@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { iidFlag, localTestsFlags } from './cliargs.js';
+import { iidFlag, localTestsFlags, retiredFlagError } from './cliargs.js';
 
 const argv = (...rest: string[]): string[] => ['/usr/bin/node', 'src/index.ts', ...rest];
 
@@ -58,4 +58,14 @@ test('a malformed --local-tests value is refused, never read as no flag', () => 
     assert.equal(r.iid, null, rest.join(' '));
     assert.match(r.error ?? '', /needs a positive ticket iid/, rest.join(' '));
   }
+});
+
+test('the retired --automation flag is refused, never read as no flag', () => {
+  // Read as no flag, `npm start -- --automation 8420` from an old runbook would
+  // boot a full watching conductor that claims Loop tickets.
+  for (const rest of [['--automation', '8420'], ['--automation'], ['--automation=8420'], ['--solo', '--automation', '1']]) {
+    assert.match(retiredFlagError(argv(...rest)) ?? '', /--automation was removed/, rest.join(' '));
+  }
+  assert.equal(retiredFlagError(argv('--local-tests', '8420')), null);
+  assert.equal(retiredFlagError(argv()), null);
 });
