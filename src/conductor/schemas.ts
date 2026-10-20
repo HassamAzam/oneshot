@@ -12,6 +12,8 @@
  * the next phase reads a field that will not be there next time.
  */
 import { ADDRESSED_FEEDBACK_PROP, MR_FEEDBACK_PROPS } from '../mrfeedback/schema.js';
+import { FILE_ACTIONS, FILE_AREAS } from '../lib/planfiles.js';
+import { FLOW_CHANGES, FLOW_KINDS } from '../lib/planflow.js';
 import { BLOCKERS } from './reproduction.js';
 
 export type JsonSchema = Record<string, unknown>;
@@ -211,7 +213,7 @@ export const RESEARCH_SCHEMA = phaseSchema({
       steps: strArr('The steps you actually executed, in order, each with what you did.'),
       expected: str('What the ticket says SHOULD happen.'),
       observed: str('What actually happened when you ran the steps — concrete values, not impressions.'),
-      evidence: strArr('Bare filenames of screenshots written to the run artifacts dir, plus any measurement. For reproduced and not-reproduced the screenshots are attached to the ticket comment.'),
+      evidence: strArr('One item per piece of evidence. An item that names a screenshot file written to the run artifacts dir is attached to the ticket comment, and whatever else that item says becomes the image caption — so put the note on the same item: repro-1-people.png - 566 people, column visible. An item naming no file is reported as a measurement. Write the filename, not a path.'),
       reason: str('Why this verdict. For inconclusive or not-applicable, what stopped you.'),
       blocker: {
         type: 'string',
@@ -232,6 +234,29 @@ export const RESEARCH_SCHEMA = phaseSchema({
   },
 }, ['understanding', 'acceptanceCriteria', 'codePath', 'blastRadius', 'uiPath', 'unknowns', 'module', 'reproduction']);
 
+/**
+ * What each `flow` node kind means. The kind is the one fact the planner
+ * states about a node's nature, and it decides both the node's layer box and
+ * its shape in the diagram (src/lib/planflow.ts).
+ *
+ * The lengths in `flow` and `fileChanges` are written as guidance, not as
+ * `maxLength`/`maxItems`: the SDK enforces a schema by retrying the phase, and
+ * a label one character over would buy a whole re-plan for a cosmetic field.
+ * The renderers cut to length instead.
+ */
+const FLOW_KIND_DOC =
+  'component: a React component or page the user sees. ' +
+  'frontend-logic: frontend code with no markup — redux action/reducer/selector, hook, util, API ' +
+  'helper, constant. ' +
+  'endpoint: a URL route and the view/viewset method behind it. ' +
+  'backend-logic: a backend function or class the request reaches — util, serializer, manager, ' +
+  'permission, signal receiver, model method, setting. ' +
+  'task: work outside the request — Celery task, management command, beat schedule. ' +
+  'template: a server-rendered template — PDF, email, HTML page. ' +
+  'model: a database table (Django model). ' +
+  'migration: a migration file, schema or data. ' +
+  'external: outside this codebase — third-party API, websocket channel, mail/SMS provider, S3.';
+
 export const PLAN_SCHEMA = phaseSchema({
   approach: str('The chosen approach and, in one line, why over the alternative.'),
   reuse: strArr(
@@ -239,8 +264,8 @@ export const PLAN_SCHEMA = phaseSchema({
     'a fragment with no name. One of four verdicts per entry: reuse it, extend it, ' +
     'collapse a duplicate onto it, or rejected — and a rejection stays here with its ' +
     'reason on the same line, because a candidate silently dropped is indistinguishable ' +
-    'from one nobody found. Read by implement; the approval comment does NOT render it, ' +
-    "so a choice somebody must be able to decline goes in approach, openQuestions, " +
+    'from one nobody found. Read by implement; the plan note shows it as verdicts, not as a ' +
+    "question, so a choice somebody must be able to decline goes in approach, openQuestions, " +
     "outOfScope or a step's what instead.",
   ),
   steps: {
@@ -307,7 +332,102 @@ export const PLAN_SCHEMA = phaseSchema({
       required: ['point', 'response', 'where', 'note'],
     },
   },
-}, ['approach', 'reuse', 'steps', 'migrations', 'risks', 'openQuestions', 'outOfScope', 'acceptanceCoverage', 'feedbackResponse']);
+  fileChanges: {
+    type: 'array',
+    description:
+      'Every file in steps[].files, exactly once. Code draws these as the Frontend / Backend / ' +
+      'Config tables the approver reads instead of the steps.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        path: str('Repo-relative path, spelled exactly as in steps[].files.'),
+        action: {
+          type: 'string',
+          enum: [...FILE_ACTIONS],
+          description: 'create: the file does not exist yet. modify: it exists and this plan edits it. ' +
+            'delete: this plan removes it.',
+        },
+        area: {
+          type: 'string',
+          enum: [...FILE_AREAS],
+          description: 'frontend: UI code with its tests and styles. backend: server code, migrations and ' +
+            'their tests. config: settings, environment variables, feature flags, dependency manifests, ' +
+            'CI or deploy files — what someone has to set, not what the app does.',
+        },
+        what: str(
+          'What changes in this file, at most ~12 words, naming the symbol: "Add ' +
+          'get_thing_summary()", "New ThingBadge component". No why, no line numbers — ' +
+          'the steps carry both.',
+        ),
+      },
+      required: ['path', 'action', 'area', 'what'],
+    },
+  },
+  flow: {
+    type: 'object',
+    additionalProperties: false,
+    description:
+      'The runtime path this plan touches. Code draws it as the diagram at the top of the plan ' +
+      'comment, which the approver reads BEFORE the steps. Never write Mermaid. nodes: [] only when ' +
+      'nothing runs (docs, CI config).',
+    properties: {
+      nodes: {
+        type: 'array',
+        description:
+          'The code units in the order a request reaches them, entry point first. Most plans need ' +
+          '4-14; 18 at most — the renderer drops the rest, context first.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: str('Short unique slug that edges refer to, e.g. "detail_view". Never shown.'),
+            label: str(
+              'The exact identifier a developer would grep: "ThingDetailView", "get_thing_summary()", ' +
+              '"ThingLimit", "0021_add_thing_flag". No path, no sentence, no +/~ ' +
+              'prefix. <= 40 chars.',
+            ),
+            kind: { type: 'string', enum: [...FLOW_KINDS], description: FLOW_KIND_DOC },
+            change: {
+              type: 'string',
+              enum: [...FLOW_CHANGES],
+              description: 'new: does not exist yet. modified: exists and this plan changes its code (a ' +
+                'model: its fields, constraints or Meta). removed: this plan deletes it. unchanged: shown ' +
+                'only as context.',
+            },
+            detail: strArr(
+              'What changes here, 0-2 lines of <= 45 chars; [] for unchanged context. Models: one line ' +
+              'per field, up to 4: "+ starts_on: DateField", "- legacy_flag", "~ limit: 10 -> 20". A ' +
+              'data migration names its rows: "+ row: STANDARD, limit 20".',
+            ),
+          },
+          required: ['id', 'label', 'kind', 'change', 'detail'],
+        },
+      },
+      edges: {
+        type: 'array',
+        description:
+          'Caller -> callee, reader -> what it reads or writes, listener -> what it listens to. ' +
+          'Never back along a response.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            from: str('Node id of the caller / reader / listener.'),
+            to: str('Node id of the callee / what is read or written / what is listened to.'),
+            label: str(
+              '"" for a plain call or render. Otherwise what the arrow cannot say, <= 32 chars: ' +
+              '"GET things/<id>/", "if is_active", "reads limit", "seeds row", "enqueues".',
+            ),
+          },
+          required: ['from', 'to', 'label'],
+        },
+      },
+    },
+    required: ['nodes', 'edges'],
+  },
+}, ['approach', 'reuse', 'steps', 'migrations', 'risks', 'openQuestions', 'outOfScope', 'acceptanceCoverage',
+  'feedbackResponse', 'fileChanges', 'flow']);
 
 export const TESTCASES_SCHEMA = phaseSchema({
   module: str('Module name for suite tagging'),
@@ -457,7 +577,7 @@ export const DESIGN_SCHEMA = phaseSchema({
       'True when the change spans more than one screen, or adds a step to an existing journey. ' +
       'True means you also build the clickable prototype and record the walkthrough, and report both in `prototype`.',
   },
-  tokensFile: str('Artifact-relative path of the tokens.css distilled from the real frontend.'),
+  tokensFile: str('Artifact-relative path of the tokens.css the mockups import: design/tokens.css, generated before the session.'),
   screens: {
     type: 'array',
     description: 'One entry per screen designed. Empty when applicable is false.',
@@ -575,6 +695,106 @@ export const UI_EVIDENCE_SCHEMA = phaseSchema({
     },
   },
 }, ['screenshots', 'observations']);
+
+/**
+ * The local automation tests plan (skill: local-tests-impact), made for a
+ * merged ticket by the post-merge mode (src/localtests/runner.ts). Read by
+ * code, not by a later session: the ticket note is rendered from it, QA
+ * approves that list before every run, and the run executes `specs` as listed.
+ * So a spec missing from `specs` is a spec that does not run.
+ *
+ * An empty `specs` is posted as "Oneshot found no automation test for this
+ * ticket", with the `add` proposals as the suggested tests, and the mode waits
+ * for QA's reply. The descriptions below say so, so the session's picture of
+ * what happens next matches the mode's.
+ */
+export const LOCAL_TESTS_SCOPE_SCHEMA = phaseSchema({
+  applicable: {
+    type: 'boolean',
+    description:
+      'False when nothing a workstream-automation spec could observe changed (a backend path no screen ' +
+      'reaches, say). Say why in `reason` and send empty lists. True when the change is observable, even ' +
+      'if no existing spec reaches it: then `specs` is empty, `proposals` names the suggested test, and ' +
+      'the ticket is told "Oneshot found no automation test" and QA decides what happens next.',
+  },
+  reason: str('Why applicable is what it is, in one sentence a non-developer can read.'),
+  modules: strArr('The automation modules the chosen specs belong to, e.g. "Leaves", "Payroll".'),
+  specs: {
+    type: 'array',
+    description:
+      'Every spec file to run, repo-relative to workstream-automation (cypress/e2e/…). Only these ' +
+      'run. Empty when applicable is false.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        file: str('Spec path, e.g. cypress/e2e/leaves/apply_leave.cy.ts'),
+        module: str('Its module, one of `modules`'),
+        cases: { type: 'number', description: 'How many test cases (it blocks) the file holds.' },
+        ciSeconds: { type: 'number', description: 'Its last CI duration in seconds, when spec-timings.json records one.' },
+        why: str('What in the diff this spec exercises, in one plain line. Start a health-check spec with "Health check:"'),
+      },
+      required: ['file', 'module', 'cases', 'why'],
+    },
+  },
+  edits: {
+    type: 'array',
+    description:
+      'Every temporary change you made to a spec, page object or fixture in the throwaway worktree so ' +
+      'the suite matches what the ticket changed on purpose. Never committed. Empty when you changed nothing.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        file: str('Repo-relative path in workstream-automation'),
+        kind: { type: 'string', enum: ['update', 'add'], description: 'update: an existing file. add: a new one.' },
+        why: str('What the change does, in one plain line'),
+        erpEvidence: str('The ERP file:line in this diff that makes the change necessary'),
+      },
+      required: ['file', 'kind', 'why', 'erpEvidence'],
+    },
+  },
+  proposals: {
+    type: 'array',
+    description:
+      'Changes to the team\'s test list worth QA\'s attention: a new test worth adding, or an existing one ' +
+      'this ticket makes obsolete. QA approves every list before it runs, these included. When `specs` is ' +
+      'empty, the `add` entries here are the suggested tests on the "no automation test found" note. ' +
+      'Empty when the existing tests are enough.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['add', 'remove'] },
+        title: str('The test, as a QA would name it: "Verify that …"'),
+        file: str('The spec file it lives in, or would. Omit when not known.'),
+        why: str('Why, in one plain line'),
+      },
+      required: ['action', 'title', 'why'],
+    },
+  },
+  notRunnable: {
+    type: 'array',
+    description:
+      'Specs that reach this change but cannot run on a local machine, because they need something a desk ' +
+      'does not have: Odoo (payroll sync), a real mailbox, a third-party service. Keep each OUT of `specs` ' +
+      'and list it here with why, so the ticket says it was not run instead of the run reporting it as a ' +
+      'failure. Empty when every spec that reaches the change can run locally.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        spec: str('Spec path, e.g. cypress/e2e/payroll/run_payroll.cy.ts'),
+        why: str('What it needs that a local machine does not have, citing the spec line that shows it'),
+      },
+      required: ['spec', 'why'],
+    },
+  },
+  estimatedMinutes: {
+    type: 'number',
+    description: 'Expected wall-clock minutes for the run, from ciSeconds where known.',
+  },
+}, ['applicable', 'reason', 'modules', 'specs', 'edits', 'proposals', 'estimatedMinutes']);
 
 export const MR_SCHEMA = phaseSchema({
   mrIid: { type: 'number' },
@@ -699,6 +919,18 @@ export const AUTOMATION_TESTCASES_SCHEMA = phaseSchema({
   ),
 }, ['module', 'cases', 'changes', 'sources']);
 
+export const DEMO_SCHEMA = phaseSchema({
+  status: {
+    type: 'string',
+    enum: ['ok', 'failed'],
+    description: 'ok when the walkthrough recorded and the webm is on disk; failed when no demo could be produced.',
+  },
+  journey: str('One line naming the user journey the demo walks, for a reader who has not seen the ticket. Empty on failure.'),
+  webm: str('Bare filename of the recorded video under artifacts/demo/, e.g. "demo.webm". Empty on failure — the conductor attaches this to the ticket.'),
+  reason: str('On failure, what broke: which step, what you saw. Empty on success.'),
+  attempts: { type: 'integer', description: 'How many capture attempts were made (the phase retries once).' },
+}, ['status']);
+
 export const SCHEMAS: Record<string, JsonSchema> = {
   recall: RECALL_SCHEMA,
   research: RESEARCH_SCHEMA,
@@ -710,6 +942,8 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   verify: VERIFY_SCHEMA,
   'base-check': BASE_CHECK_SCHEMA,
   'ui-evidence': UI_EVIDENCE_SCHEMA,
+  'demo-recording': DEMO_SCHEMA,
+  'local-tests-scope': LOCAL_TESTS_SCOPE_SCHEMA,
   mr: MR_SCHEMA,
   remediate: REMEDIATE_SCHEMA,
   'mr-feedback': MR_FEEDBACK_SCHEMA,

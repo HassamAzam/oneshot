@@ -361,6 +361,8 @@ export interface VersionView {
   cases: AutomationCase[]; merged: MrRef[]; open: MrRef[]; approvers: string[];
   csvMarkdown: string | null;            // uploadFile().markdown; null → a line saying the CSV could not be attached
   diff?: CaseDiff; notes?: string[]; feedbackAuthors?: string[]; ignoredApproval?: boolean;
+  /** coverage.ts coverageNote: "existing coverage checked …" lines, shown above the table on a WRITE. */
+  coverageNote?: string[];
   /** Approver notes that arrived while this version was being written (id > watermark at post time). */
   during?: { changeAuthors: string[]; staleApprovers: string[] };
   lostHistory?: boolean; hash: string;
@@ -387,6 +389,12 @@ function caseRow(c: AutomationCase): string {
 /** The lines about this round's own history. Separate paragraphs: a line straight after a list joins its last item. */
 function roundLines(view: VersionView): string[] {
   const out: string[] = [];
+  // What the conductor checked before writing: QA reads this before the table,
+  // so a list that leaves existing coverage alone is not mistaken for a gap.
+  for (const line of view.coverageNote ?? []) out.push(`_${mdText(line)}_`);
+  // A request the session could not apply must not be something QA discovers by
+  // rereading; the rest of the change list stays in the journal.
+  for (const n of (view.notes ?? []).filter((x) => /^\s*not applied\b/i.test(x))) out.push(`_${mdText(n)}_`);
   if (view.ignoredApproval) {
     out.push('_An `approved` in the same round was not applied, because change requests came with it. '
       + 'Approve this version when it looks right._');

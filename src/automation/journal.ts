@@ -55,6 +55,8 @@ export interface VersionRecord {
    */
   moduleTab?: string;
   moduleTabIsNew?: boolean;
+  /** coverage.ts coverageNote: the short "existing coverage checked" lines for QA, saved so the note renders the same after a crash. WRITE only. */
+  coverageNote?: string[];
   feedbackAuthors?: string[];
   ignoredApproval?: boolean;
   /** Written fresh because the journal was lost while GitLab still had earlier versions. */

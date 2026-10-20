@@ -3,9 +3,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { labelledLayers, mrOpenNote, promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
 import { gateSubjectDigest } from '../lib/artifacts.js';
-import { ROOT, phaseByName, runDir, type PhaseConfig } from '../lib/config.js';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  ROOT, localTestsConfig, localTestsPatchFile, localTestsWorktree, phaseByName, phases, runDir, type PhaseConfig,
+} from '../lib/config.js';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { writeDesignTokens } from '../lib/designtokens.js';
 import type { Ticket } from './types.js';
 import { PRIOR_ART_KINDS, RESEARCH_SCHEMA } from '../conductor/schemas.js';
 
@@ -135,6 +139,15 @@ test('the scheduling skill plan declares actually ships in the snapshot', () => 
   assert.ok(existsSync(join(ROOT, 'context', 'skills', 'django-scheduled-jobs', 'SKILL.md')));
 });
 
+test('plan declares ponytail, so "does this need to exist" is asked before the approach is settled', () => {
+  // At implement ponytail sits behind the lazy SKILL_LINE and was invoked in three
+  // of ten first sessions; plan never offered it. Its first rungs are approach
+  // decisions, and plan's eager line is the one that runs them on every ticket.
+  const got = names(systemPromptFor(cfg('plan'), ctx(ticket())));
+  assert.ok(got.includes('ponytail'), 'plan must declare ponytail');
+  assert.ok(existsSync(join(ROOT, 'skills', 'ponytail', 'SKILL.md')));
+});
+
 // --------------------------------------------- implement's gating is unchanged
 
 test('implement keeps a plan-gated skill when there is no plan to gate on', () => {
@@ -149,6 +162,37 @@ test('implement drops a plan-gated skill the plan rules out', () => {
   })));
   assert.ok(!got.includes('django-migration-standards'));
   assert.ok(!got.includes('script-writing-standards'));
+});
+
+/**
+ * The plan names files in `steps[].files` and again in `fileChanges`. The
+ * forecast read only the steps, so a migration listed only in the table, under
+ * `migrations: false`, sent implement out without the migration skill — while
+ * the guarded-path gate, reading both, already counted that same file.
+ */
+const tableOnlyPlan = {
+  migrations: false,
+  steps: [{ files: ['common/models.py'], layer: 'backend' }],
+  fileChanges: [
+    { path: 'common/models.py', action: 'modify', area: 'backend', what: 'x' },
+    { path: 'common/migrations/0020_x.py', action: 'create', area: 'backend', what: 'x' },
+    { path: 'frontend/src/A.js', action: 'modify', area: 'frontend', what: 'x' },
+  ],
+};
+
+test('implement keeps the migration skill for a migration named only in the file table', () => {
+  const got = names(systemPromptFor(cfg('implement'), ctx(ticket(), { plan: tableOnlyPlan })));
+  assert.ok(got.includes('django-migration-standards'));
+});
+
+test('implement is pointed at frontend-agent for a frontend file named only in the file table', () => {
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: tableOnlyPlan }));
+  assert.match(p, /Delegate implementation work to `backend-agent` and `frontend-agent`/);
+  const stepsOnly = promptFor(cfg('implement'), ctx(ticket(), {
+    plan: { ...tableOnlyPlan, fileChanges: tableOnlyPlan.fileChanges.slice(0, 1) },
+  }));
+  assert.match(stepsOnly, /Delegate implementation work to `backend-agent` for/,
+    'without the table row the forecast is backend only, so the case above is the row\'s doing');
 });
 
 // ------------------------------------------- ui-evidence only claims a real approval
@@ -191,6 +235,32 @@ test('an approval predating digests still pairs, so upgrades do not regress', ()
   assert.match(uiEvidencePrompt(gate, DESIGN), /is this what I approved/);
 });
 
+// ------------------------------------------- demo-recording records, the conductor posts
+
+test('demo-recording records the webm under artifacts/demo and names it in demo.json', () => {
+  // The conductor reads `webm` from demo.json and attaches that file from
+  // artifacts/demo/, so the prompt must point the recording at the same place.
+  const p = promptFor(cfg('demo-recording'), ctx(ticket()));
+  assert.match(p, /artifacts\/demo\//);
+  assert.match(p, /Write `demo.json`/);
+  assert.match(p, /"webm"/);
+});
+
+test('demo-recording does not tell its session to post to GitLab', () => {
+  // The blocker this phase shipped with: session phases are off every GitLab
+  // write tool, so a prompt that ordered upload_markdown / create_issue_note
+  // produced a video nobody could post. The conductor publishes it instead.
+  const p = promptFor(cfg('demo-recording'), ctx(ticket()));
+  assert.ok(!/mcp__gitlab__upload_markdown/.test(p), 'must not order an upload the session cannot run');
+  assert.ok(!/mcp__gitlab__create_issue_note/.test(p), 'must not order a note the session cannot post');
+  assert.match(p, /conductor/, 'must say the conductor posts the webm');
+});
+
+test('demo-recording quotes its own configured budget, not a typed-in number', () => {
+  const p = promptFor(cfg('demo-recording'), ctx(ticket()));
+  assert.match(p, new RegExp(`~${cfg('demo-recording').timeoutMin} min`));
+});
+
 test('plan does not tell itself a stale design was approved', () => {
   const gate = {
     requestTs: 'x', approved: true, feedback: [],
@@ -213,21 +283,36 @@ test('plan does not tell itself a stale design was approved', () => {
   assert.match(fresh, /A human approved these screens/);
 });
 
-// ------------------------------------------- plan does not order frontend unit tests
+// ------------------------------------------- plan may order frontend unit tests
 
-test('plan is told not to put a Jest or other frontend unit test in a step', () => {
-  // testcases and verify both already refuse Jest -- the toolchain has rotted and
-  // CI never runs it. plan did not, so it could still order one, and implement
-  // would then write code that nothing downstream will ever execute.
+test('plan may put a Jest or other frontend unit test in a step', () => {
+  // Frontend unit coverage is sanctioned again; plan is where a step that needs
+  // it gets ordered, so implement knows to write one.
   const prompt = promptFor(cfg('plan'), ctx(ticket()));
-  assert.match(prompt, /No step writes a Jest test, or any other frontend unit test/);
+  assert.match(prompt, /may order a Jest or other frontend unit test/);
 });
 
-test('plan says where frontend behaviour is covered instead', () => {
-  // A prohibition with no alternative reads as "skip frontend coverage". It is
-  // Playwright, written by testcases against the real app.
+test('plan keeps whole-flow frontend coverage on Playwright', () => {
+  // A unit test isolates logic; rendered and whole-flow behaviour still belongs
+  // to the Playwright cases testcases writes against the real app.
   const prompt = promptFor(cfg('plan'), ctx(ticket()));
   assert.match(prompt, /Playwright cases/);
+});
+
+test('testcases whitelists Jest as a runner a case may assert through', () => {
+  // The Good bullet's list is the only thing sanctioning a Jest case now that
+  // plan can order one. Drop Jest from it and testcases silently refuses the
+  // coverage plan asked for, restoring the old contradiction.
+  const p = promptFor(cfg('testcases'), ctx(ticket()));
+  assert.match(p, /Jest for a frontend unit/);
+});
+
+test('verify runs a shipped frontend unit test through Jest, non-interactively', () => {
+  // Without a named command a verify session runs bare `npm test` and watch-mode
+  // wedges the phase; and nothing else makes Jest a runner the pipeline uses,
+  // which is what keeps the testcases whitelist above honest.
+  const p = promptFor(cfg('verify'), ctx(ticket()));
+  assert.match(p, /CI=true npx jest --watchAll=false/);
 });
 
 // ------------------------------------------- research's reproduction is gated
@@ -536,6 +621,19 @@ test('both skills these phases declare actually ship in this repo', () => {
   assert.ok(existsSync(join(ROOT, 'skills', 'change-scoping', 'SKILL.md')));
 });
 
+test('plan declares the superpowers planning skill alongside change-scoping', () => {
+  // change-scoping decides WHAT is in scope and WHERE it goes; the superpowers
+  // planning discipline decides HOW each step is written so implement executes
+  // it without re-deriving. They complement, so both are declared.
+  const got = names(systemPromptFor(cfg('plan'), ctx(ticket())));
+  assert.ok(got.includes('superpowers-planning'));
+  assert.ok(got.includes('change-scoping'));
+});
+
+test('the superpowers planning skill ships in this repo', () => {
+  assert.ok(existsSync(join(ROOT, 'skills', 'superpowers-planning', 'SKILL.md')));
+});
+
 test('the research prompt still stands alone if the skill does not resolve', () => {
   // Skills are an upgrade, never a dependency (see SKILL_LINE). The parts that
   // must survive are the three the measurement showed were load-bearing.
@@ -715,6 +813,10 @@ test('the prior-art kinds are one set, in every place that names them', () => {
   }
 });
 
+/** The one prompt bullet containing `needle`, so a rule's two halves must sit together. */
+const bulletWith = (prompt: string, needle: string): string =>
+  prompt.split(/\n(?=- )/).find((b) => b.includes(needle)) ?? '';
+
 const PLAN_WITH_A_REJECTION = {
   approach: 'Count maternity days with the existing helper.',
   reuse: [
@@ -732,6 +834,97 @@ test('implement is told a rejected reuse entry is a candidate not to build on', 
   assert.doesNotMatch(p, /Reuse what the plan named under `reuse`/);
   assert.match(p, /A reuse, extend or collapse\s+entry is binding/);
   assert.match(p, /A rejected entry is a candidate the plan decided NOT to build on/);
+});
+
+test('implement is told the codePath and reuse trace is authoritative, not a search to re-run', () => {
+  // Measured from captured implement transcripts: ~65% of tool calls were
+  // exploration, and the reuse hunt research/plan already did was re-run at
+  // implement (73 reuse greps, 21 Explore dispatches across the laps). The
+  // trace must read as prior art to build on, not a lead to re-investigate.
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
+  assert.match(p, /reuse\s+discovery is their job, not yours/);
+  assert.match(p, /Open the files they name to EDIT them/);
+  // Scoped to the one bullet, so a "do not" from any earlier sentence cannot
+  // satisfy it while the ban itself is gone.
+  const ban = bulletWith(p, 'reuse discovery is their job');
+  assert.match(ban, /Do not re-trace a\s+module/);
+  assert.match(ban, /dispatch an `Explore` \/ `general-purpose` agent/);
+});
+
+test('implement tells the session to hand the trace to the agents it delegates to', () => {
+  // A cold sub-agent re-explores (measured 7.4 reads per edit) because its
+  // definition orders a reuse-first sweep. Forwarding the trace and marking it
+  // authoritative is what removes the reason to re-trace.
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
+  assert.match(p, /hand it the `codePath` entries and `reuse`/);
+  assert.match(p, /authoritative\s+prior art to build on, not a lead to re-investigate/);
+});
+
+test('with no reuse survey behind it, implement is told to search rather than to trust', () => {
+  // codePath has no minItems and research is told to land the plane at ~70%, so
+  // it can arrive empty or as a bare trace with no prior-art entry. Telling
+  // implement "reuse discovery is their job" then forbids the only search left,
+  // and the helper that already sits in common/ gets written a second time.
+  const empty = promptFor(cfg('implement'), ctx(ticket()));
+  const traceOnly = promptFor(cfg('implement'), ctx(ticket(), {
+    research: { codePath: [{ file: 'apps/leaves/views.py', line: 40, role: 'LeaveSummaryView.get reads the rows' }] },
+    plan: { ...PLAN_WITH_A_REJECTION, reuse: [] },
+  }));
+  for (const p of [empty, traceOnly]) {
+    assert.doesNotMatch(p, /reuse\s+discovery is their job, not yours/);
+    assert.match(p, /No reuse survey reached this phase/);
+    assert.match(p, /tell it no reuse survey was done/);
+  }
+});
+
+test('a prior-art entry in codePath counts as a survey even when the plan wrote no reuse verdict', () => {
+  const p = promptFor(cfg('implement'), ctx(ticket(), {
+    research: { codePath: [{ file: 'common/utils.py', line: 12, role: 'callable: leave_days() counts the days' }] },
+    plan: { ...PLAN_WITH_A_REJECTION, reuse: [] },
+  }));
+  assert.match(p, /reuse\s+discovery is their job, not yours/);
+});
+
+test('a fix lap may read past the trace for a finding or a verify failure, not only a step', () => {
+  // On a cycle lap the work is findings and verifyFailures, often in a file
+  // research never traced. An exception keyed on "a step" leaves the session
+  // arguing with the ban instead of reading the file the defect is in.
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
+  assert.match(bulletWith(p, 'reuse discovery is their job'), /a step, a review finding or a verify\s+failure/);
+});
+
+test('the trace outranks the reuse searches the loaded skills order, only for what it names', () => {
+  // ponytail and react-frontend-standards each order their own search before
+  // writing; without a stated precedence the session holds two contradictory
+  // instructions. The search survives for any surface the trace does not name.
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
+  const rule = bulletWith(p, 'takes precedence over');
+  assert.match(rule, /`ponytail`/);
+  assert.match(rule, /`react-frontend-standards`/);
+  assert.match(rule, /A surface no phase surveyed still gets/);
+});
+
+test('both delegate agents put the handed trace ahead of their skills\' searches, only for what it names', () => {
+  // The sub-agents never see the implement prompt; each reads its own definition,
+  // which tells it to read and follow the layer skills throughout.
+  for (const agent of ['backend-agent.md', 'frontend-agent.md']) {
+    const def = readFileSync(join(ROOT, 'context', 'agents', agent), 'utf8');
+    assert.match(def, /takes precedence over the reuse searches in the skills below/, agent);
+    assert.match(def, /a surface the trace does not name still gets that search/, agent);
+  }
+});
+
+test('implement executes the plan\'s steps as written, the way superpowers-planning wrote them', () => {
+  // plan loads superpowers-planning so each step names its symbols, signatures and
+  // files for an executor with no context. That only pays if implement takes the
+  // step as the spec instead of re-deriving it from the code.
+  assert.ok(cfg('plan').skills?.includes('superpowers-planning'), 'plan must still write its steps that way');
+  const p = promptFor(cfg('implement'), ctx(ticket(), { plan: PLAN_WITH_A_REJECTION }));
+  const steps = bulletWith(p, '`superpowers-planning`');
+  assert.match(steps, /execute it as written/);
+  assert.match(steps, /symbols, signatures and\s+files/);
+  // A sub-agent sees the step it is handed, not the plan, so it has to arrive whole.
+  assert.match(p, /the plan steps it is building, verbatim/);
 });
 
 test('review sees the plan\'s reuse verdicts one per line, under a heading that admits rejections', () => {
@@ -768,4 +961,468 @@ test('plan is pointed at the approved prototype when the design has one', () => 
   assert.ok(p.includes(`The full flow is prototyped at \`${join(runDir(424251), 'artifacts', 'flow.html')}\``));
   const flat = promptFor(cfg('plan'), ctx(ticket({ iid: 424251 }), { design: { ...design, prototype: null } }));
   assert.doesNotMatch(flat, /The full flow is prototyped/);
+});
+
+// ---------------------------------------------------------------- design tokens
+
+test('design is told the tokens are generated, where they are, and not to redo them', () => {
+  const prompt = promptFor(cfg('design'), ctx(ticket({ iid: 424242, labels: ['Design'] })));
+  assert.ok(prompt.includes(join(runDir(424242), 'artifacts', 'design', 'tokens.css')));
+  assert.ok(prompt.includes('./tokens.css'));
+  assert.ok(!prompt.includes('../tokens.css'), 'a mockup in design/ importing ../tokens.css misses the file');
+  assert.doesNotMatch(prompt, /Distil them into one/);
+});
+
+test('plan and implement are pointed at the tokens the design added, not told to avoid new ones', () => {
+  const design = {
+    applicable: true,
+    tokensFile: 'design/tokens.css',
+    screens: [{ id: 's1', name: 'Completed list', purpose: 'p', mockupHtml: 'design/s1.html', screenshot: 's1.png' }],
+    newPatterns: ['x'],
+  };
+  for (const phase of ['plan', 'implement']) {
+    const prompt = promptFor(cfg(phase), ctx(ticket({ iid: 424243 }), { design }));
+    assert.ok(prompt.includes(join(runDir(424243), 'artifacts', 'design', 'tokens.css')), phase);
+    assert.ok(prompt.includes(join(runDir(424243), 'artifacts', 'design', 'new-tokens.css')), phase);
+    assert.doesNotMatch(prompt, /rather than new ones/, phase);
+  }
+});
+
+test('the design prompt names the very file writeDesignTokens wrote, and tells a dark screen to set data-theme', (t) => {
+  const iid = 990374;
+  const wt = mkdtempSync(join(tmpdir(), 'oneshot-tokens-prompt-'));
+  t.after(() => {
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(runDir(iid), { recursive: true, force: true });
+  });
+  mkdirSync(join(wt, 'frontend', 'src', 'scss'), { recursive: true });
+  writeFileSync(join(wt, 'frontend', 'src', 'scss', '_variables.scss'), '$brand: #111;\n');
+  const written = writeDesignTokens(iid, wt);
+  assert.ok(written);
+  const prompt = promptFor(cfg('design'), ctx(ticket({ iid, labels: ['Design'] })));
+  assert.ok(prompt.includes(written.path), 'the prompt must point at the file the writer produced');
+  assert.match(prompt, /data-theme="dark"/);
+});
+
+// ------------------------------------------- Beta: a new version beside the old one
+
+const BETA = 'beta-version-toggle';
+
+/** The phases config/phases.json hands the Beta skill to, read from config. */
+const loadsBeta = (): string[] =>
+  phases().filter((p) => Object.values(p.labelSkills ?? {}).includes(BETA)).map((p) => p.name);
+
+const beta = (labels = ['Beta', 'Loop']): PromptCtx => ctx(ticket({ labels }));
+
+/** A prompt with its line wrapping undone, so re-wrapping prose cannot break an assertion. */
+const flat = (phase: string, c: PromptCtx = beta()): string => promptFor(cfg(phase), c).replace(/\s+/g, ' ');
+
+test('the Beta label reaches every phase that plans, builds, checks or shows the change', () => {
+  // verify executes testcases' list and nothing else, so a switch no case was
+  // written for is a switch nobody verified; review is where an edit to v1 is caught;
+  // base-check re-runs a 'pre-existing' case on a base branch that has only v1.
+  for (const phase of ['plan', 'implement', 'testcases', 'review', 'verify', 'base-check', 'ui-evidence', 'mr']) {
+    assert.ok(loadsBeta().includes(phase), `${phase} does not load ${BETA}`);
+  }
+  assert.ok(!loadsBeta().includes('design'), 'design must not load Beta: the contract and the skill both state its mockups carry no switch');
+});
+
+test('each of those phases is offered the skill and told its own part in the beta', () => {
+  for (const phase of loadsBeta()) {
+    assert.ok(names(systemPromptFor(cfg(phase), beta())).includes(BETA), `${phase}: skill not offered`);
+    const p = promptFor(cfg(phase), beta());
+    assert.match(p, /carries \*\*Beta\*\* — v2 beside v1, with a switch back/, `${phase}: no contract`);
+    assert.match(p, new RegExp(`### Your part, as \`${phase}\`\\n\\S`), `${phase}: contract with no job`);
+  }
+});
+
+test('without the label no phase is offered the skill or told to build a v2', () => {
+  for (const phase of loadsBeta()) {
+    const plain = ctx(ticket({ labels: ['Loop'] }));
+    assert.ok(!names(systemPromptFor(cfg(phase), plain)).includes(BETA), phase);
+    assert.doesNotMatch(promptFor(cfg(phase), plain), /carries \*\*Beta\*\*/, phase);
+  }
+});
+
+test('a Beta label typed in lower case still counts', () => {
+  assert.match(promptFor(cfg('plan'), beta(['beta'])), /carries \*\*Beta\*\*/);
+});
+
+test('a phase that does not load the skill is not told about the beta', () => {
+  // research traces the code as it is today; there is no v2 to hold it to yet.
+  assert.doesNotMatch(promptFor(cfg('research'), beta()), /carries \*\*Beta\*\*/);
+});
+
+test('the skill the Beta label loads ships in this repo', () => {
+  assert.ok(existsSync(join(ROOT, 'skills', BETA, 'SKILL.md')));
+});
+
+test('plan is told v1\'s components are not prior art for v2, and a duplicate inside v1 is not its to collapse', () => {
+  // research now hands prior art to plan in `codePath`, and change-scoping tells plan
+  // to CONFIRM it and offers "collapse a duplicate onto" as a verdict; on a Beta ticket
+  // v1's component arrives as callable:/duplicate: and that verdict would fold v2 away.
+  const p = flat('plan');
+  assert.match(p, /Research's `codePath` may hand you v1's COMPONENTS as `callable:` or `duplicate:`/);
+  assert.match(p, /for v2\s+they are `reject`, the reason being the Beta label/);
+  assert.match(p, /not a duplicate to reuse or collapse/);
+  assert.match(p, /Collapsing a duplicate that already sits in v1's directory is out of scope too/);
+  // plan loads ponytail too, and its rung 2 would reuse v1's component for v2.
+  assert.match(p, /"already in this codebase\? reuse it" does not apply to v1's components/);
+  // and the prior-art bullet main injects above the beta block carries the same pointer.
+  assert.match(p, /On this beta ticket a v1 COMPONENT handed as `callable:` or `duplicate:` is `reject`/);
+  const plain = flat('plan', ctx(ticket({ labels: ['Loop'] })));
+  assert.doesNotMatch(plain, /for v2\s+they are `reject`/);
+  assert.doesNotMatch(plain, /On this beta ticket a v1 COMPONENT handed as/);
+});
+
+test('implement is told the v2 copy is the requirement, not duplication to fold away', () => {
+  // ponytail is always loaded and asks whether code needs to exist at all; on a
+  // Beta ticket its honest answer would collapse v2 back into an edit of v1.
+  const p = flat('implement');
+  assert.match(p, /`ponytail` never simplifies away anything explicitly requested, and the label is that request/);
+  assert.match(p, /"does this need to exist" does not fold v2's copy/);
+});
+
+test('review does not raise the v2 copies the label asked for as duplication', () => {
+  // review loads ponytail-review and dispatches util-reuse-agent, and both exist
+  // to flag exactly this shape; without the carve-out a correct beta comes back
+  // as findings and spends a lap undoing the requirement.
+  const p = flat('review');
+  assert.match(p, /v2's own copies of v1's COMPONENTS are what the label asked for/);
+  assert.match(p, /A copied HELPER \(a util, a constant, an API call\) is a finding as usual/);
+});
+
+test('review hands the beta contract to the agent that judges scope', () => {
+  // spec-conformance-agent reads scope off the ticket's own text, and a Beta
+  // ticket's description never mentions the switch — the label does.
+  assert.match(flat('review'), /into `spec-conformance-agent`'s `ticket_context`/);
+});
+
+test('review holds every edited v1 file to a backward-compatible extension', () => {
+  // Project Logs v2 extended seven v1 files (optional parameters, null guards), so
+  // "never touch v1" would fail the precedent the label follows; what it never did
+  // was change what a v1 call site does, or let v1 import v2.
+  const p = flat('review');
+  assert.match(p, /git diff --stat origin\/\S+\.\.\.HEAD/);
+  assert.match(p, /Anything else there — a changed behaviour, a rename, a move — is a `major` finding/);
+  assert.match(p, /v1 importing from `<module>_v2\/`/);
+});
+
+test('every phase is held to the Project Logs v2 layout, and told the switch is the new part', () => {
+  const p = flat('plan');
+  assert.match(p, /a sibling `<module>_v2\/` directory/);
+  assert.match(p, /a route wrapper like `LogsVersionRoute\.js`, on every route of the feature/);
+  assert.match(p, /the switch is what this label adds/);
+});
+
+test('testcases writes a v1 regression case and reaches each version by the switch', () => {
+  const p = flat('testcases');
+  assert.match(p, /the case that proves v1 was left alone/);
+  assert.match(p, /never by writing the stored choice directly/);
+  // The phase's own rule is that only the criteria and the ticket are an oracle;
+  // the switch appears in neither, so without this its cases have no source.
+  assert.match(p, /part of this ticket's oracle, alongside its acceptance criteria/);
+});
+
+test('the never-touched case starts by removing the stored choice, and no case needs a second login', () => {
+  // The harness reloads the storage it saved at login into every later case, so an
+  // earlier case's choice would land this one on v1; and verify has exactly one
+  // login, so a second-account case could only end blocked, which no gate refuses.
+  const p = flat('testcases');
+  assert.match(p, /a user who never touched the switch landing on v2 \(`boundary`\)\. Its first step removes the stored choice/);
+  // verify reads that step to learn which key to remove; nothing else tells it.
+  assert.match(p, /naming its localStorage key exactly as the diff spells it/);
+  assert.match(p, /it is not a case here: `verify` has one login/);
+  assert.doesNotMatch(p, /a second account on the same browser not inheriting/);
+});
+
+test('verify reaches each version through the switch, never by writing the stored choice', () => {
+  const p = flat('verify');
+  assert.match(p, /THROUGH THE SWITCH/);
+  // Clearing storage is the obvious way to "log out" in a script, and it erases
+  // exactly the value the persistence case exists to measure.
+  assert.match(p, /Log out through the app's own logout, never by clearing browser storage/);
+});
+
+test('verify may remove the stored choice only to set up the never-touched case', () => {
+  const p = flat('verify');
+  assert.match(p, /Never set the stored choice directly/);
+  assert.match(p, /The one write you may make is SETUP for the never-touched case/);
+  assert.match(p, /Remove that one key — not the rest of storage, which holds the login/);
+  // A case result is {id, result, evidence, screenshot}: `steps` is testcases'
+  // field, so an order to record the setup there had nowhere to go.
+  assert.match(p, /say so in that case's `evidence`/);
+  assert.doesNotMatch(p, /say so in the case's steps/);
+});
+
+test('review proves in code that the choice is per user, since no browser case can', () => {
+  const p = flat('review');
+  assert.match(p, /Point 5's second account is yours to prove, because no browser case can/);
+  assert.match(p, /A username cached at module scope or once per page load is a `major` finding/);
+});
+
+test('base-check is told the base has only v1 and that a v1-regression is in this ticket scope', () => {
+  const p = flat('base-check');
+  assert.match(p, /The base branch is v1 only/);
+  assert.match(p, /run v1's own flow\s+directly/);
+  assert.match(p, /Every v1-regression, switch or v2 case\s+is THIS ticket's own scope/);
+  assert.match(p, /the `pre-existing` label does not stick/);
+  assert.doesNotMatch(flat('base-check', ctx(ticket({ labels: ['Loop'] }))), /The base branch is v1 only/);
+});
+
+test('ui-evidence takes its before from v1 on its own instance and checks it against the base', () => {
+  const p = flat('ui-evidence');
+  assert.match(p, /v1, reached through the switch on YOUR instance/);
+  assert.match(p, /Any other difference between the two is v1 having changed/);
+});
+
+test('ui-evidence compares v1 with the base branch below the switch, which the base never has', () => {
+  // The switch renders above v1 too, so a whole-page match could never hold and
+  // every beta MR taking a base shot would claim that v1 had changed.
+  const p = flat('ui-evidence');
+  assert.match(p, /compare the page BELOW the switch/);
+  assert.match(p, /its absence from the base-branch shot is expected and is not a difference/);
+});
+
+test('the rule that a before comes from a second instance names the beta exception, on a beta only', () => {
+  assert.match(flat('ui-evidence'), /This ticket is a beta, the one exception: its block below makes v1/);
+  assert.doesNotMatch(flat('ui-evidence', ctx(ticket({ labels: ['Loop'] }))), /This ticket is a beta/);
+});
+
+test('the switch sits outside an approved design, so Design and Beta together ask for one thing', () => {
+  // design is never told about the beta, so its mockups carry no switch; without
+  // this, implement is told both to build exactly to them and to add the switch.
+  for (const phase of ['implement', 'ui-evidence']) {
+    assert.match(flat(phase), /it sits outside any approved design/, phase);
+    assert.match(flat(phase), /it is never a departure from the design/, phase);
+  }
+});
+
+test('on a Design and Beta ticket the design pair is v2 below the switch, said before any row is filled', () => {
+  // The conformance block asks for every departure, small ones too, and comes
+  // before the beta block; read top-down, the switch the mockups never drew is a
+  // departure on every screen unless the block itself says otherwise.
+  const designed = (labels: string[]): string => promptFor(cfg('ui-evidence'), {
+    ...ctx(ticket({ labels })),
+    journal: { designApproval: { requestTs: 'x', approved: true, feedback: [] } },
+    prior: { design: DESIGN },
+  } as unknown as PromptCtx).replace(/\s+/g, ' ');
+  const p = designed(['Beta', 'Loop']);
+  const pointer = p.indexOf('This ticket is a beta: pair each approved screen against v2, reached through the switch');
+  assert.ok(pointer > p.indexOf('## Pair the shipped screens against the approved design'), 'pointer outside the block');
+  assert.ok(pointer < p.indexOf('carries **Beta**'), 'pointer after the beta block');
+  assert.match(p, /so leave it out of `differences`/);
+
+  const plain = designed(['Loop']);
+  assert.match(plain, /is this what I approved/);
+  assert.doesNotMatch(plain, /pair each approved screen against v2/);
+});
+
+test('the design prompt reports renders as design/<file>, not the bare filename the gate cannot find', () => {
+  // design writes its mockups and renders into design/, and the schema + every reader
+  // (approvedDesignBlock, designAttachments, designDeliverableRefusal) resolve those fields
+  // against the run's artifact dir. The shared artifactsBlock told this phase to use a BARE
+  // FILENAME, so a render written to design/ was looked for in the root and the gate refused a
+  // design nobody could see (run r-muzdgwta-9ac10b, ticket #8800). The design phase must carry
+  // the design/ prefix, exactly as tokensFile already does.
+  const prompt = promptFor(cfg('design'), ctx(ticket({ iid: 424244, labels: ['Design'] })));
+  assert.ok(prompt.includes('design/<filename>'), 'design names mockupHtml/screenshot/before as design/<file>');
+  assert.doesNotMatch(prompt, /BARE FILENAME/, 'the generic bare-filename instruction contradicts design/ outputs');
+});
+
+// ------------------------------------------------------ local-tests-scope
+
+/**
+ * Read from config/phases.json itself rather than phaseByName(): phases() drops
+ * both local-tests phases on a desk where the step is off, and this desk's
+ * .env must not decide whether the prompt is tested.
+ */
+const shippedPhase = (name: string): PhaseConfig => {
+  const raw = JSON.parse(readFileSync(join(ROOT, 'config', 'phases.json'), 'utf8')) as { phases: PhaseConfig[] };
+  const p = raw.phases.find((x) => x.name === name);
+  assert.ok(p, `phase ${name} is in config/phases.json`);
+  return p;
+};
+
+const SCOPE_INPUTS = {
+  wsa: '/oneshot/state/runs/990901/wsa', automationSha: 'c0ffee1234567890', base: 'bbbb1111', head: 'aaaa2222',
+  patchFile: '/oneshot/state/runs/990901/artifacts/local-tests/temporary-changes.patch',
+};
+
+const scopePrompt = (over: Partial<PromptCtx> = {}): string => promptFor(shippedPhase('local-tests-scope'), {
+  ...ctx(ticket({ iid: 990901 })), worktree: '/wt/ticket-990901', localTests: SCOPE_INPUTS, ...over,
+});
+
+test('the scope session is handed the conductor\'s facts: worktree, commits, automation worktree, limits', () => {
+  const p = scopePrompt();
+  const lt = localTestsConfig();
+  const index = join(ROOT, 'skills', 'local-tests-impact', 'scripts', 'index.cjs');
+  assert.ok(p.includes(`node ${index} --erp /wt/ticket-990901 `
+    + '--base bbbb1111 --head aaaa2222 --automation /oneshot/state/runs/990901/wsa --json'));
+  assert.ok(p.includes('index.cjs estimate --automation /oneshot/state/runs/990901/wsa'));
+  assert.ok(p.includes('c0ffee1234567890'), 'the automation commit the patch will be cut against');
+  assert.ok(p.includes(runDir(990901)));
+  assert.ok(p.includes(`maxSpecs ${lt.maxSpecs} · maxRunMinutes ${lt.maxRunMinutes}`));
+  for (const path of lt.allowedPaths) assert.ok(p.includes(`\`${path}\``), `allowed path ${path} is named`);
+  assert.ok(p.includes(SCOPE_INPUTS.patchFile), 'told where its edits are saved');
+});
+
+test('the analysis script is named by an absolute path that exists, never through $ONESHOT_HOME', () => {
+  // Under DRY_RUN $ONESHOT_HOME is state-dry, which has no skills/: a path built
+  // from it fails with module-not-found instead of a named JSON code.
+  const p = scopePrompt();
+  const index = join(ROOT, 'skills', 'local-tests-impact', 'scripts', 'index.cjs');
+  assert.ok(existsSync(index));
+  assert.ok(p.includes(`analysis script       ${index}`));
+  assert.doesNotMatch(p, /\$ONESHOT_HOME\/skills/);
+});
+
+test('the limits are a selection budget, each Cypress run has its own deadline', () => {
+  const p = scopePrompt();
+  const lt = localTestsConfig();
+  assert.match(p, /The limits are a selection budget, not a cut/);
+  assert.ok(p.includes(`every Cypress run is stopped at\n${lt.maxRunMinutes} minutes`));
+});
+
+test('a list with nothing to run goes to QA as "no test found", with the add proposal as the suggestion', () => {
+  const p = scopePrompt();
+  assert.match(p, /Whatever you return goes on the ticket for QA, who approve every local run before it starts/);
+  assert.match(p, /posted as\s+"Oneshot found no automation test for this ticket", with your `add` proposals as the suggested tests/);
+  assert.doesNotMatch(p, /"not needed" line/, 'the Loop\'s one-line "not needed" note is gone with the Loop wiring');
+  assert.doesNotMatch(p, /not put to QA/);
+});
+
+test('specs that cannot run on a desk are listed apart, with why, and not run', () => {
+  const p = scopePrompt();
+  assert.match(p, /goes in `notRunnable` with `why`/);
+  assert.match(p, /NOT in `specs`/);
+  assert.match(p, /`notRunnable`, `estimatedMinutes`, `summary`, `blocked`/);
+});
+
+test('without the conductor\'s facts the scope prompt falls back to refs it can name', () => {
+  const p = promptFor(shippedPhase('local-tests-scope'), { ...ctx(ticket({ iid: 990902 })), worktree: '/wt/x' });
+  assert.ok(p.includes('--base origin/dev --head HEAD'));
+  assert.ok(p.includes(localTestsWorktree(990902)));
+  assert.ok(p.includes(localTestsPatchFile(990902)));
+});
+
+test('the scope starts from the precise set and adds at most a few module specs, never padding', () => {
+  const p = scopePrompt();
+  assert.match(p, /The precise set is the floor/);
+  assert.match(p, /limits never\s+remove one/);
+  assert.match(p, /at most 5 module specs, as a health check, not as coverage, and only when the\s+precise set is not empty/);
+  assert.match(p, /NEVER fill the\s+list toward/, 'module specs that cannot see the change are not added to reach the limits');
+  assert.match(p, /a ceiling\s+for the precise set, not a target/);
+  assert.match(p, /If the precise set alone is over either limit, keep all of it/);
+  assert.match(p, /`Trim to fit the limits:`/, 'the over-limit case becomes a QA proposal, not a silent cut');
+  assert.match(p, /There is no silent trim/);
+});
+
+test('with an empty precise set there are no health checks, and health checks are marked for the ticket', () => {
+  const p = scopePrompt();
+  assert.match(p, /With an empty\s+precise set there are no health checks either/);
+  assert.match(p, /Start each one's `why` with `Health check:`/, 'the ticket note marks those rows by this prefix');
+  assert.match(p, /`why` is one short line, starting\s+`Health check:` for a health check/);
+  assert.match(p, /clipped to about 120 characters/);
+});
+
+test('by default an uncovered change gets a suggested test, and nothing is written', () => {
+  const p = scopePrompt();
+  assert.match(p, /Then \*\*do not write one\.\*\* Return `specs: \[\]` \(no health checks either, item 2\)/);
+  assert.match(p, /one `add` proposal per missing test: `title` the way QA would name it/);
+  assert.match(p, /Temporary UPDATES of\s+existing specs \(step 4\) are not this: those stay yours to make, unasked/);
+  assert.match(p, /- Write a new spec QA did not ask for\./);
+  assert.doesNotMatch(p, /\*\*write the missing spec\*\*/);
+  assert.doesNotMatch(p, /## QA asked for a temporary test/);
+});
+
+test('when QA ask for a temporary test, the session writes it and keeps turns for it', () => {
+  const p = scopePrompt({ localTests: { ...SCOPE_INPUTS, request: 'write-temporary' } });
+  assert.match(p, /## QA asked for a temporary test/);
+  assert.match(p, /`disapproved: write a temporary test`/);
+  assert.match(p, /\*\*write the missing spec\*\*/);
+  assert.match(p, /list it in `specs` and `edits`, and propose the\s+`add` for the suite/);
+  assert.match(p, /a test QA added to the suite since the last round is in\s+it, and then you write nothing/);
+  assert.match(p, /Leave it unwritten ONLY when the screen cannot be\s+reached/);
+  assert.match(p, /finish choosing by about turn \d+ of\s+\d+/, 'the session keeps turns for writing the spec');
+  assert.match(p, /`TR_LOCAL_<what>\.ts`/);
+  assert.match(p, /no `force: true`/, 'a new spec follows the no-weakening rules too');
+  assert.doesNotMatch(p, /do not write one/);
+  assert.doesNotMatch(p, /- Write a new spec QA did not ask for/);
+});
+
+test('after the merge, head is the merge commit and base its first parent', () => {
+  const p = scopePrompt({ localTests: { ...SCOPE_INPUTS, base: 'f1rstparent', head: 'mergesha99', mergeSha: 'mergesha99', mrIid: 11042 } });
+  assert.match(p, /base {18}f1rstparent {3}\(first parent of the merge commit: dev just before this change\)/);
+  assert.match(p, /head {18}mergesha99 {3}\(the merge commit of MR !11042: the change as it landed on dev\)/);
+  assert.ok(p.includes('--base f1rstparent --head mergesha99'));
+  assert.match(p, /ERP worktree {10}\/wt\/ticket-990901 {3}\(at the merge commit\)/);
+  // Without base and head the merge sha alone still names both commits.
+  const bare = scopePrompt({ localTests: { ...SCOPE_INPUTS, base: undefined, head: undefined, mergeSha: 'mergesha99' } as unknown as PromptCtx['localTests'] });
+  assert.ok(bare.includes('--base mergesha99^1 --head mergesha99'));
+  assert.match(bare, /the merge commit of the ticket's MR/);
+  assert.doesNotMatch(scopePrompt(), /merge commit of/, 'a ctx without a merge keeps the old wording');
+});
+
+test('the scope never runs Cypress, never commits, never opens the credentials', () => {
+  const p = scopePrompt();
+  assert.match(p, /Run Cypress/);
+  assert.match(p, /`scripts\/localtests\.cjs`/);
+  assert.match(p, /Commit, push, stash, reset, clean or check anything out in the automation worktree/);
+  assert.match(p, /`cypress\.env\.json`/);
+  assert.match(p, /Never weaken a test/);
+});
+
+test('the scope prompt carries the method itself, and declares the skill that has the rest', () => {
+  assert.deepEqual(shippedPhase('local-tests-scope').skills, ['local-tests-impact']);
+  assert.ok(existsSync(join(ROOT, 'skills', 'local-tests-impact', 'SKILL.md')));
+  const sys = systemPromptFor(shippedPhase('local-tests-scope'), ctx(ticket({ iid: 990901 })));
+  assert.ok(names(sys).includes('local-tests-impact'));
+  assert.match(scopePrompt(), /The steps below are enough without it/);
+});
+
+test('the scope session is told it may edit the automation worktree, and only read the ERP one', () => {
+  const sys = systemPromptFor(shippedPhase('local-tests-scope'),
+    { ...ctx(ticket({ iid: 990901 })), worktree: '/wt/ticket-990901', localTests: SCOPE_INPUTS });
+  assert.ok(sys.includes('Your ERP worktree is /wt/ticket-990901: read it, never edit it.'));
+  assert.ok(sys.includes(`throwaway automation worktree ${SCOPE_INPUTS.wsa}`));
+  assert.doesNotMatch(sys, /Everything you touch lives inside it/);
+  // Every other worktree phase keeps the line it had.
+  const other = systemPromptFor(cfg('verify'), { ...ctx(ticket()), worktree: '/wt/x' });
+  assert.match(other, /Your worktree is \/wt\/x\. Everything you touch lives inside it\./);
+});
+
+test('a redo after QA\'s disapproval carries their reply and how to keep the previous edits', () => {
+  const prior = { 'local-tests-scope': {
+    specs: [{ file: 'cypress/e2e/leaves/apply_leave.cy.ts' }],
+    edits: [{ file: 'cypress/Pages/LeavePage.ts' }],
+  } };
+  const p = scopePrompt({
+    localTests: { ...SCOPE_INPUTS, request: 'feedback', feedback: '- remove LV_21\n- also run LV_23' }, prior,
+  });
+  assert.match(p, /## QA asked for changes to an earlier version of this list/);
+  assert.ok(p.includes('- remove LV_21\n- also run LV_23'), 'their reply, verbatim');
+  assert.match(p, /by a case id such as `LV_23`: find the spec file/);
+  assert.match(p, /A spec they ask to remove leaves `specs`, with no `remove` proposal/);
+  assert.match(p, /`summary` opens with what changed from the previous list/);
+  assert.ok(p.includes('`cypress/e2e/leaves/apply_leave.cy.ts`'));
+  assert.ok(p.includes(`git -C ${SCOPE_INPUTS.wsa} apply ${SCOPE_INPUTS.patchFile}`));
+
+  assert.doesNotMatch(scopePrompt(), /QA asked for changes/, 'a first round has no feedback block');
+  assert.doesNotMatch(scopePrompt({ localTests: { ...SCOPE_INPUTS, request: 'feedback', feedback: '  ' } }),
+    /QA asked for changes/, 'a feedback request with no text is no feedback');
+});
+
+test('a redo whose previous list is not in the inputs rebuilds it, and still keeps any saved edits', () => {
+  const p = scopePrompt({ localTests: { ...SCOPE_INPUTS, request: 'feedback', feedback: 'keep the half-day leave test' } });
+  assert.match(p, /The previous list is not in your inputs: build it again from step 1/);
+  assert.ok(p.includes(`If\n${SCOPE_INPUTS.patchFile} exists, it holds the previous round's temporary edits.`));
+  assert.ok(p.includes(`git -C ${SCOPE_INPUTS.wsa} apply ${SCOPE_INPUTS.patchFile}`));
+});
+
+test('the journal\'s old Loop gate state no longer reaches the prompt', () => {
+  // The Loop's localSpecs gate is gone; only the mode's own request carries QA's words.
+  const journal = { localSpecsApproval: { feedback: ['disapproved:\n- stale Loop feedback'] } };
+  const p = scopePrompt({ journal: journal as unknown as PromptCtx['journal'] });
+  assert.doesNotMatch(p, /stale Loop feedback/);
 });
