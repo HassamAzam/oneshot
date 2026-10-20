@@ -364,6 +364,41 @@ test('runTicket refuses a Loop ticket carrying Ready For Automation before it cl
   }
 });
 
+// ------------------------------------------------ a ticket whose work has shipped
+
+test('runTicket refuses a ticket already carrying the exit label before it claims, posts or spends anything', async () => {
+  const iid = 102;
+  const ticket = (over: Partial<Issue>): Issue => ({
+    iid, title: 'Organogram employee details', description: null, labels: ['Loop', 'Merged'], assignees: [],
+    state: 'opened', web_url: `https://gitlab.example.com/acme/erp/-/issues/${iid}`, updated_at: '2026-10-20T04:19:00Z',
+    ...over,
+  });
+  const why = 'already Merged — take that label off to run it again';
+  assert.equal(readJournal(iid), null, 'precondition: no run on disk for the fixture ticket');
+
+  const real = globalThis.fetch;
+  const fetched: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    fetched.push(String(input));
+    throw new Error('offline');
+  }) as typeof fetch;
+  try {
+    // Carrying the entry label as well is the whole case: `npm run unblock`
+    // swaps it back on after burying the run as `aborted`, and the scan would
+    // still have skipped the ticket as `already Merged`.
+    for (const t of [ticket({}), ticket({ labels: ['Merged'] }), ticket({ state: 'closed' })]) {
+      const out = await runTicket(t, { conductor: 'test-conductor' });
+      assert.deepEqual(out, { runId: '', iid, status: 'refused', reason: why, final: true });
+      assert.equal(refusalIsFinal(out), true, '--follow stops instead of re-checking a merged ticket forever');
+    }
+    assert.deepEqual(fetched, [], 'nothing was read from or written to GitLab');
+    assert.equal(readJournal(iid), null, 'no run journal was started');
+    assert.equal(isClaimed(iid), false, 'no claim row was taken');
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
 test('--follow stops on a refusal only a person can clear, and keeps checking one that clears by waiting', () => {
   const refused = (reason: string, final?: true) => ({ runId: '', iid: 101, status: 'refused' as const, reason, ...(final ? { final } : {}) });
   assert.equal(refusalIsFinal(refused('carries "Ready For Automation" — the automation mode owns it', true)), true);

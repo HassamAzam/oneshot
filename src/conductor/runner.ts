@@ -256,8 +256,9 @@ export interface RunOutcome {
   reason?: string;
   /**
    * On a refusal: true when waiting cannot clear it, only a person changing
-   * the ticket can (today: it carries the automation mode's trigger label), so
-   * `--follow` stops instead of re-checking every few minutes forever.
+   * the ticket can (today: it already carries the exit label, or it carries
+   * the automation mode's trigger label), so `--follow` stops instead of
+   * re-checking every few minutes forever.
    */
   final?: true;
 }
@@ -1092,6 +1093,18 @@ export async function runTicket(
   const carried = new Set(issue.labels.map((l) => l.toLowerCase()));
   const list = phases().filter((p) => !p.labelGated || carried.has(p.labelGated.toLowerCase()));
   const owner = opts.conductor;
+
+  // The scan skips a ticket that already carries the exit label
+  // (src/conductor/watcher.ts); `--ticket` never scans, so the same rule is
+  // asked here. The entry label coming back on a merged ticket is routine —
+  // `npm run unblock` swaps it back on, and a person can re-add it — and
+  // decideClaim() judges the journal's status alone, so without this a run
+  // buried as `aborted` resumes and re-runs phases whose work has shipped.
+  if (issue.labels.includes(cfg.labels.exit)) {
+    const why = `already ${cfg.labels.exit} — take that label off to run it again`;
+    log.info(`#${iid} — ${why}`);
+    return { runId: '', iid, status: 'refused', reason: why, final: true };
+  }
 
   // The scan skips a ticket the automation mode owns; `--ticket` never scans,
   // so the same rule is asked here, before anything is claimed, posted or
