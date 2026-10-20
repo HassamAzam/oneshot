@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyBaseCheck, baseCheckOutcome, codePhaseStatus, decideClaim, failedCases, mergePollWait,
-  mergeScopedVerify, nextIndex, refusalIsFinal, remediationFreeze, runTicket, salvagedReview,
+  mergedTicketRefusal, mergeScopedVerify, nextIndex, refusalIsFinal, remediationFreeze, runTicket,
+  salvagedReview,
   sharedDatabaseRefusal, statusForFailure, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
   verifyAfterBaseCheckDeath,
 } from './runner.js';
@@ -362,6 +363,63 @@ test('runTicket refuses a Loop ticket carrying Ready For Automation before it cl
     globalThis.fetch = real;
     if (was !== undefined) process.env.ONESHOT_AUTOMATION = was;
   }
+});
+
+// ------------------------------------------------ a ticket whose work has shipped
+
+test('runTicket refuses a ticket already carrying the exit label before it claims, posts or spends anything', async () => {
+  const iid = 102;
+  const ticket = (over: Partial<Issue>): Issue => ({
+    iid, title: 'Organogram employee details', description: null, labels: ['Loop', 'Merged'], assignees: [],
+    state: 'opened', web_url: `https://gitlab.example.com/acme/erp/-/issues/${iid}`, updated_at: '2026-10-20T04:19:00Z',
+    ...over,
+  });
+  const why = 'already Merged — take that label off to run it again';
+  assert.equal(readJournal(iid), null, 'precondition: no run on disk for the fixture ticket');
+
+  const real = globalThis.fetch;
+  const fetched: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    fetched.push(String(input));
+    throw new Error('offline');
+  }) as typeof fetch;
+  try {
+    // Carrying the entry label as well is the whole case: `npm run unblock`
+    // swaps it back on after burying the run as `aborted`, and the scan would
+    // still have skipped the ticket as `already Merged`.
+    for (const t of [ticket({}), ticket({ labels: ['Merged'] }), ticket({ state: 'closed' })]) {
+      const out = await runTicket(t, { conductor: 'test-conductor' });
+      assert.deepEqual(out, { runId: '', iid, status: 'refused', reason: why, final: true });
+      assert.equal(refusalIsFinal(out), true, '--follow stops instead of re-checking a merged ticket forever');
+    }
+    assert.deepEqual(fetched, [], 'nothing was read from or written to GitLab');
+    assert.equal(readJournal(iid), null, 'no run journal was started');
+    assert.equal(isClaimed(iid), false, 'no claim row was taken');
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
+test('a merged ticket the local-tests mode is waiting on is sent to that mode, not told to drop its label', () => {
+  const exit = 'Merged';
+  const trigger = 'Ready for Automation Testing';
+  // Nobody else wants it: dropping the label is the way to run it again.
+  assert.equal(
+    mergedTicketRefusal([exit, 'Loop'], exit, 8877, trigger),
+    'already Merged — take that label off to run it again',
+  );
+  // The mode is waiting on it, and dropping the exit label would hand a
+  // shipped ticket back to the Loop — the very thing the guard stops.
+  assert.equal(
+    mergedTicketRefusal([exit, 'Loop', trigger], exit, 8877, trigger),
+    'already Merged, and carries "Ready for Automation Testing" — the local automation tests mode owns it: '
+      + 'npm start -- --local-tests 8877',
+  );
+  // The mode off on this desk: no advice about a mode that will never pick it up.
+  assert.equal(
+    mergedTicketRefusal([exit, trigger], exit, 8877, null),
+    'already Merged — take that label off to run it again',
+  );
 });
 
 test('--follow stops on a refusal only a person can clear, and keeps checking one that clears by waiting', () => {

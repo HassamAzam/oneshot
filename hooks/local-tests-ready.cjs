@@ -64,9 +64,18 @@ const path = require('node:path');
 const C = require(path.join(__dirname, '_common.cjs'));
 
 /** One deadline for every GitLab call, under the conductor's 30s kill, so the answer is always structured. */
-const DEADLINE_MS = 20_000;
-/** Per request, so one stuck call cannot use the whole deadline by itself. */
-const REQUEST_MS = 8_000;
+const DEADLINE_MS = 27_000;
+/**
+ * Per request, so one stuck call cannot use the whole deadline by itself.
+ * Sized from what GitLab actually takes, not from what it ought to: on
+ * arbisoft/erp the `closed_by` endpoint for one issue answered in 15.3s, 15.2s
+ * and 0.6s on three consecutive calls. At 8s three readiness checks in five
+ * held with `no answer within 8s`, and since the check has one attempt and no
+ * retry, each hold cost the mode a whole pass. A retry instead of a wider
+ * budget would need the conductor's 30s kill (READY_TIMEOUT_MS in
+ * src/localtests/readiness.ts) raised with it.
+ */
+const REQUEST_MS = 18_000;
 const PER_PAGE = 100;
 
 /**

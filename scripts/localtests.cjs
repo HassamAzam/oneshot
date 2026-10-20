@@ -1497,7 +1497,7 @@ function linkAutomationNodeModules(wt, repo, required) {
   const src = path.join(repo, 'node_modules');
   const dst = path.join(wt, 'node_modules');
   if (!fs.existsSync(src)) {
-    if (required) throw new LtError('E_NO_NODE_MODULES', `${src} does not exist`, `run npm ci in ${repo}`);
+    if (required) throw new LtError('E_NO_NODE_MODULES', `${src} does not exist`, `run npm install in ${repo}`);
     log(`note: ${src} does not exist, so the worktree has no node_modules`);
     return;
   }
@@ -2133,10 +2133,10 @@ async function runBody(ctx) {
   const wsaPkg = readJson(path.join(p.wsaRun, 'package.json'));
   if (wsaPkg) {
     assertNodeModules(wsaPkg, path.join(d.repo, 'node_modules'), `the automation code at ${automationSha.slice(0, 10)}`,
-      `run npm ci in ${d.repo} with ${automationSha.slice(0, 10)} (localTests.automationRef) checked out`);
+      `run npm install in ${d.repo} with ${automationSha.slice(0, 10)} (localTests.automationRef) checked out`);
   }
   if (!fs.existsSync(path.join(p.wsaRun, 'node_modules', '.bin', 'cypress'))) {
-    throw new LtError('E_NO_CYPRESS', `${d.repo}/node_modules has no cypress binary`, `run npm ci in ${d.repo}`);
+    throw new LtError('E_NO_CYPRESS', `${d.repo}/node_modules has no cypress binary`, `run npm install in ${d.repo}`);
   }
   if (patchFile && patchSha) {
     const r = sh('git', ['apply', '--whitespace=nowarn', patchFile], { cwd: p.wsaRun, env: gitEnv() });
