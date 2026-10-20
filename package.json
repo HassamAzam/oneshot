@@ -22,6 +22,7 @@
     "eval:causes": "tsx scripts/eval-causes.ts",
     "eval:edges": "tsx scripts/eval-edges.ts",
     "replay:testcases": "tsx scripts/replay-testcases.ts",
+    "replay:verify": "tsx scripts/replay-verify.ts",
     "memory:backfill": "tsx scripts/backfill-memory.ts",
     "hooks:verify": "bash scripts/verify-hooks.sh",
     "verify": "npm run deps:verify && npm run hooks:verify && npm run doctor",
