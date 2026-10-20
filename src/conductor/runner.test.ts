@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyBaseCheck, baseCheckOutcome, codePhaseStatus, decideClaim, failedCases, mergePollWait,
-  mergeScopedVerify, nextIndex, refusalIsFinal, remediationFreeze, runTicket, salvagedReview,
+  mergedTicketRefusal, mergeScopedVerify, nextIndex, refusalIsFinal, remediationFreeze, runTicket,
+  salvagedReview,
   sharedDatabaseRefusal, statusForFailure, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
   verifyAfterBaseCheckDeath,
 } from './runner.js';
@@ -397,6 +398,28 @@ test('runTicket refuses a ticket already carrying the exit label before it claim
   } finally {
     globalThis.fetch = real;
   }
+});
+
+test('a merged ticket the local-tests mode is waiting on is sent to that mode, not told to drop its label', () => {
+  const exit = 'Merged';
+  const trigger = 'Ready for Automation Testing';
+  // Nobody else wants it: dropping the label is the way to run it again.
+  assert.equal(
+    mergedTicketRefusal([exit, 'Loop'], exit, 8877, trigger),
+    'already Merged — take that label off to run it again',
+  );
+  // The mode is waiting on it, and dropping the exit label would hand a
+  // shipped ticket back to the Loop — the very thing the guard stops.
+  assert.equal(
+    mergedTicketRefusal([exit, 'Loop', trigger], exit, 8877, trigger),
+    'already Merged, and carries "Ready for Automation Testing" — the local automation tests mode owns it: '
+      + 'npm start -- --local-tests 8877',
+  );
+  // The mode off on this desk: no advice about a mode that will never pick it up.
+  assert.equal(
+    mergedTicketRefusal([exit, trigger], exit, 8877, null),
+    'already Merged — take that label off to run it again',
+  );
 });
 
 test('--follow stops on a refusal only a person can clear, and keeps checking one that clears by waiting', () => {

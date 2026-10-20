@@ -47,7 +47,7 @@ import { existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, modelFor,
+  DRY_RUN, gitlabUsername, localTestsConfig, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -1080,6 +1080,41 @@ interface PhaseResult {
  * Run one ticket. Resumable: an existing journal means this is a RESUMPTION,
  * and phases that already succeeded are skipped rather than re-paid for.
  */
+/** The local automation tests mode's trigger label, or null when that mode is off or unusable. Never throws. */
+function localTestsTriggerLabel(): string | null {
+  try {
+    const lt = localTestsConfig();
+    return lt.enabled && lt.labels.trigger ? lt.labels.trigger : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pure. Why a ticket carrying the exit label is refused, in the words that name
+ * its real next step.
+ *
+ * "Take the label off" is right for a ticket nobody else wants, and WRONG for
+ * one the local automation tests mode is waiting on: removing the exit label
+ * there would hand a shipped ticket back to the Loop, which is the behaviour
+ * the guard above exists to stop. So a ticket that also carries that mode's
+ * trigger is sent to the mode instead. The labels are the only input: this
+ * runs before anything is fetched, and the exit label is what says the change
+ * shipped.
+ */
+export function mergedTicketRefusal(
+  labels: readonly string[],
+  exit: string,
+  iid: number,
+  trigger: string | null = localTestsTriggerLabel(),
+): string {
+  if (trigger && labels.includes(trigger)) {
+    return `already ${exit}, and carries "${trigger}" — the local automation tests mode owns it: `
+      + `npm start -- --local-tests ${iid}`;
+  }
+  return `already ${exit} — take that label off to run it again`;
+}
+
 export async function runTicket(
   issue: Issue,
   opts: { conductor: string; signal?: AbortSignal },
@@ -1101,9 +1136,11 @@ export async function runTicket(
   // decideClaim() judges the journal's status alone, so without this a run
   // buried as `aborted` resumes and re-runs phases whose work has shipped.
   if (issue.labels.includes(cfg.labels.exit)) {
-    const why = `already ${cfg.labels.exit} — take that label off to run it again`;
-    log.info(`#${iid} — ${why}`);
-    return { runId: '', iid, status: 'refused', reason: why, final: true };
+    log.info(`#${iid} — ${mergedTicketRefusal(issue.labels, cfg.labels.exit, iid)}`);
+    return {
+      runId: '', iid, status: 'refused', final: true,
+      reason: mergedTicketRefusal(issue.labels, cfg.labels.exit, iid),
+    };
   }
 
   // The scan skips a ticket the automation mode owns; `--ticket` never scans,
