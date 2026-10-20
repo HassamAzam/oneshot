@@ -1,7 +1,7 @@
 # Why a real bug fails to reproduce
 
 **One principle: you ran it under different conditions than the reporter, and the
-difference is the bug.** Below are the five conditions that differ most often,
+difference is the bug.** Below are the six conditions that differ most often,
 from the QA team's own history. Walk them before recording `not-reproduced` —
 that is the verdict that closes a real ticket.
 
@@ -9,22 +9,22 @@ that is the verdict that closes a real ticket.
 
 ### 1. The account
 
-Test accounts are superusers, so anything gated on a role, permission or group
-behaves correctly for you and wrongly for the reporter. **The most common cause
-by a distance.** A permission ticket also has two halves — the right person can
-act, the wrong person is stopped — and reproducing one proves half of it.
+A session running as a superuser sees anything gated on a role, permission or
+group behave correctly for it and wrongly for the reporter. **The most common
+cause by a distance.** A permission ticket also has two halves — the right person
+can act, the wrong person is stopped — and reproducing one proves half of it.
 
-**Do:** confirm the account matches the ticket's role and is not a superuser. No
-non-superuser account available is `inconclusive` / `blocker: access`.
+**Do:** read the account's actual flags and permissions, and record them. Not
+"logged in as the test user" — `is_superuser`, `is_staff`, and the specific
+permission the view requires. An account you cannot confirm is not a tested
+account, and no suitable account at all is `inconclusive` / `blocker: access`.
 
-**Say this plainly, because it is a change of posture, not a tweak:** this
-pipeline has exactly one test account (`ONESHOT_TEST_LOGIN`) and it is a
-superuser. Until a limited one exists — an optional `ONESHOT_TEST_LOGIN_LIMITED`
-would do it — **every permission ticket records `inconclusive` / `access`** and
-none of them reproduce. That is the safe direction: a permission bug confirmed
-from a superuser session is confirmed against the one account that cannot show
-it. But it means the fix here is an account, not a rule, and the `blocker` counts
-are what will say how much that class costs.
+**Read them, do not assume them.** This file once asserted what the configured
+test login was without looking, and was wrong. A guess about the account
+propagates into every verdict that account produces, in the expensive direction:
+it writes off a whole ticket class as unreproducible, and makes a genuine
+permission reproduction look untrustworthy. The flags are one query away; the
+assumption is never worth it.
 
 ### 2. The record
 
@@ -70,12 +70,37 @@ calculates at full precision. One fact, two opposite errors:
 **Do:** compare like with like — screen against screen or raw against raw — and
 say which in `observed`. Use the period the ticket reports, not a shorter one.
 
+### 6. The option — when the input is one of a fixed set
+
+A filter, dropdown, band, status or role takes one of a few values, and the
+ticket names one of them. You selected it, the screen was right, and you wrote
+`not-reproduced`. But the code behind the control is **one** implementation
+shared by every option: a fault in it is not specific to the option the reporter
+happened to use. Only its *visibility* is — the symptom appears solely where a
+record exists that can expose it.
+
+Where a filter compares two computations of the same quantity, the mismatch is
+only visible on an option that some record's two values straddle. An option whose
+records all happen to agree looks correct on a broken build — which is why the
+option named in a report is not evidence about the option, only about the data the
+reporter had.
+
+**Do:** derive the option before you click anything — query for a record whose two
+computations disagree, and take the option its values straddle. Then run that one
+and the one the report names: two, not the whole list. Enumerating a dozen values
+costs a navigate-filter-screenshot round trip each and is how a phase dies at its
+turn cap before it derives anything. A reproduction on a different option is still
+a reproduction of the same defect: say which option showed it, and say plainly if
+the report's own illustration does not occur, or the fix lands on that one option
+and the mechanism stays broken.
+
 ---
 
 ## How these get caught
 
 Ask of any `not-reproduced`: **whose account, which record, what content, which
-order, over what range, rounded or raw?** Each entry is one answer.
+order, over what range, rounded or raw, and which of the options?** Each entry is
+one answer.
 
 ## Adding and retiring
 
@@ -86,3 +111,17 @@ yet; "the link on that payroll ticket was too long" does not.
 Retire one the same way. If no reproduction has cited an entry and no `blocker`
 in the run telemetry matches its cause, it is not firing. An entry nobody has
 used is furniture, not knowledge.
+
+**State the class in the entry and keep the case in Sources.** This file is
+injected into every reproduction session, so a worked example naming the ticket,
+the option and the records is an answer key for the run that is about to derive
+them. Cite the ticket; do not solve it here.
+
+## Sources
+
+Ticket numbers are not unique across projects, so each is cited by full URL.
+
+- Conditions 1–5: the QA team's own history, collected rather than drawn from one
+  ticket.
+- Condition 6, and the correction to condition 1:
+  [erp#8771](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8771).

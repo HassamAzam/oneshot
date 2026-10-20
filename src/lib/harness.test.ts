@@ -10,7 +10,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, utimesSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ROOT } from './config.js';
@@ -23,11 +25,17 @@ const harness = require(
   needsCollectstatic: (wt: string) => boolean;
   disabledIntegrations: (wt: string) => Array<{ name: string; why: string }>;
   waitDjango: (port: number, pid: number, budgetMs: number) => Promise<boolean>;
+  waitWebpack: (
+    wt: string, port: number, pid: number, budgetMs: number, startedAt?: number,
+  ) => Promise<boolean>;
+  bundleState: (wt: string, opts?: { since?: number; log?: string }) => BundleState;
+  assertBundleReachable: (bePort: number) => Promise<string>;
   settle: (session: unknown, selector: string, opts?: Budget) => Promise<Settled>;
   overlap: (session: unknown, a: string, b: string, opts?: Budget) => Promise<Overlap>;
 };
 
 interface Box { x: number; y: number; width: number; height: number }
+interface BundleState { state: 'ready' | 'building' | 'failed'; via: string | null; detail: string | null }
 interface Budget { timeout?: number; quiet?: number }
 interface Settled { box: Box | null; settled: boolean }
 interface Overlap {
@@ -217,6 +225,193 @@ test('nothing listening is still reported as dead, not as 5xx', async () => {
     () => harness.waitDjango(port, process.pid, 3000),
     (e: { code: string }) => e.code === 'E_DJANGO_DEAD',
   );
+});
+
+/* ------------------------------------------------------------- waitWebpack */
+
+const ENTRYPOINTS = 'static/webpack-entrypoints.dev.json';
+const STATS = 'static/webpack-stats.dev.json';
+const FE_PORT = 9030;
+
+/** What react-dev-utils prints on a cold start, up to the line that ends the build. */
+const BOOT = [
+  '> hrdb@1.0.0 start',
+  '> node frontend/scripts/start.js',
+  '',
+  'Starting the development server...',
+  '',
+  `ℹ ｢wds｣: webpack output is served from http://localhost:${FE_PORT}/`,
+].join('\n');
+
+/**
+ * A worktree and a run directory as up() leaves them once webpack has been started:
+ * the log truncated and then written by this webpack alone, and whichever manifests the
+ * checkout's webpack config writes, each dated on purpose relative to `startedAt`.
+ */
+function bundleFixture(log: string, files: Record<string, { body: object; mtimeMs: number }> = {}) {
+  const wt = mkdtempSync(join(tmpdir(), 'harness-webpack-wt-'));
+  const run = mkdtempSync(join(tmpdir(), 'harness-webpack-run-'));
+  mkdirSync(join(wt, 'static'), { recursive: true });
+  mkdirSync(join(run, 'harness'), { recursive: true });
+  writeFileSync(join(run, 'harness/webpack.log'), log);
+  for (const [rel, { body, mtimeMs }] of Object.entries(files)) {
+    writeFileSync(join(wt, rel), JSON.stringify(body));
+    utimesSync(join(wt, rel), mtimeMs / 1000, mtimeMs / 1000);
+  }
+  return { wt, run, log: join(run, 'harness/webpack.log') };
+}
+
+/** waitWebpack reads the log from the run directory, as every harness command does. */
+async function inRun<T>(run: string, fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.ONESHOT_RUN_DIR;
+  process.env.ONESHOT_RUN_DIR = run;
+  try { return await fn(); } finally {
+    if (prev === undefined) delete process.env.ONESHOT_RUN_DIR;
+    else process.env.ONESHOT_RUN_DIR = prev;
+  }
+}
+
+/** The manifest EntrypointFilesPlugin writes: no status field, ever. */
+const MANIFEST = {
+  hash: '3f9c2a',
+  entrypoints: {
+    main: [
+      `http://localhost:${FE_PORT}/static/js/vendors~main.chunk.js`,
+      `http://localhost:${FE_PORT}/static/js/bundle.js`,
+    ],
+  },
+};
+
+const started = Date.now() - 60_000;
+const afterStart = Date.now();
+const beforeStart = started - 3_600_000;
+
+test('a fresh entrypoints manifest plus a finished compile in the log is ready', async () => {
+  // The bug every fresh worktree on current app code hit: the app writes
+  // webpack-entrypoints.dev.json, which has no status, and the harness waited 20
+  // minutes for a "done" that file never carries while webpack had already logged
+  // `Compiled with warnings.`.
+  const f = bundleFixture(`${BOOT}\nCompiled with warnings.\n\nsrc/x.js\n  Line 3:  'y' is defined but never used  no-unused-vars\n`, {
+    [ENTRYPOINTS]: { body: MANIFEST, mtimeMs: afterStart },
+  });
+  assert.equal(await inRun(f.run, () => harness.waitWebpack(f.wt, FE_PORT, process.pid, 5000, started)), true);
+  assert.deepEqual(harness.bundleState(f.wt, { since: started, log: f.log }),
+    { state: 'ready', via: ENTRYPOINTS, detail: null });
+});
+
+test('a coloured "Compiled successfully!" counts as a finished compile too', () => {
+  // FORCE_COLOR in the environment turns chalk on even with stdout on a file.
+  const f = bundleFixture(`${BOOT}\n\u001b[32mCompiled successfully!\u001b[39m\n`, {
+    [ENTRYPOINTS]: { body: MANIFEST, mtimeMs: afterStart },
+  });
+  assert.equal(harness.bundleState(f.wt, { since: started, log: f.log }).state, 'ready');
+});
+
+test('an entrypoints manifest older than this webpack is not ready', async () => {
+  // A worktree reused across refs keeps the previous build's manifest. Taking it as
+  // this build's would point Django at chunk names this compile may not have emitted.
+  const f = bundleFixture(`${BOOT}\nCompiled successfully!\n`, {
+    [ENTRYPOINTS]: { body: MANIFEST, mtimeMs: beforeStart },
+  });
+  const state = harness.bundleState(f.wt, { since: started, log: f.log });
+  assert.equal(state.state, 'building');
+  assert.match(String(state.detail), /neither a fresh static\/webpack-entrypoints\.dev\.json/);
+  await assert.rejects(
+    () => inRun(f.run, () => harness.waitWebpack(f.wt, FE_PORT, process.pid, 300, started)),
+    (e: { code: string; message: string; hint: string }) => {
+      assert.equal(e.code, 'E_WEBPACK_DEAD');
+      // localtests.cjs keys its keep-waiting path on this phrase.
+      assert.match(e.message, /did not reach status/);
+      assert.match(e.hint, /neither a fresh/);
+      return true;
+    },
+  );
+});
+
+test('a caller with no start time dates the manifest against the process start', async () => {
+  // app.cjs joins a bring-up somebody else started and has no start time to pass.
+  // Falling back to "any mtime" would accept a manifest from a day-old build.
+  const f = bundleFixture(`${BOOT}\nCompiled successfully!\n`, {
+    [ENTRYPOINTS]: { body: MANIFEST, mtimeMs: Date.now() - 86_400_000 },
+  });
+  await assert.rejects(
+    () => inRun(f.run, () => harness.waitWebpack(f.wt, FE_PORT, process.pid, 300)),
+    (e: { code: string; message: string }) => e.code === 'E_WEBPACK_DEAD' && /did not reach status/.test(e.message),
+  );
+});
+
+test('a rebuild that started after the last result is still building', () => {
+  // Only the LAST marker counts: an earlier `Compiled` is history once `Compiling...`
+  // follows it, even though the manifest from that earlier compile is fresh.
+  const f = bundleFixture(`${BOOT}\nCompiled successfully!\nCompiling...\n`, {
+    [ENTRYPOINTS]: { body: MANIFEST, mtimeMs: afterStart },
+  });
+  assert.equal(harness.bundleState(f.wt, { since: started, log: f.log }).state, 'building');
+});
+
+test('"Failed to compile" as the latest result is a build error carrying its error lines', async () => {
+  // The plugin writes the manifest from webpack's `done` hook, which fires for a failed
+  // compile too — so a fresh manifest is not success, and the log has to say which.
+  const f = bundleFixture(
+    `${BOOT}\nFailed to compile.\n\n./src/sentryConfig.js\nAttempted import error: 'SENTRY_DSN' is not exported from './constants/config'.\n`,
+    { [ENTRYPOINTS]: { body: MANIFEST, mtimeMs: afterStart } },
+  );
+  await assert.rejects(
+    () => inRun(f.run, () => harness.waitWebpack(f.wt, FE_PORT, process.pid, 5000, started)),
+    (e: { code: string; message: string; hint: string }) => {
+      assert.equal(e.code, 'E_WEBPACK_DEAD');
+      assert.match(e.message, /build error/);
+      assert.match(e.hint, /SENTRY_DSN' is not exported/);
+      return true;
+    },
+  );
+});
+
+test('a checkout that still writes webpack-stats is ready on status "done", as before', async () => {
+  // The old shape must keep working for refs older than the app's chunk split. The log
+  // here has not printed a result yet: the stats file alone is the answer for them.
+  const f = bundleFixture(BOOT, {
+    [STATS]: { body: { status: 'done', chunks: { main: [] } }, mtimeMs: afterStart },
+  });
+  assert.equal(await inRun(f.run, () => harness.waitWebpack(f.wt, FE_PORT, process.pid, 5000, started)), true);
+  assert.equal(harness.bundleState(f.wt, { since: started, log: f.log }).via, STATS);
+});
+
+test('a "done" stats file left by an earlier build does not stand in for this one', () => {
+  // A reused worktree that has moved past the chunk split still holds the old
+  // webpack-stats.dev.json. Its `done` describes a build Django no longer reads.
+  const f = bundleFixture(BOOT, {
+    [STATS]: { body: { status: 'done', chunks: { main: [] } }, mtimeMs: beforeStart },
+  });
+  assert.equal(harness.bundleState(f.wt, { since: started, log: f.log }).state, 'building');
+});
+
+test('the bundle probe prefers the entry bundle over the vendor chunk and gtag', async () => {
+  // render_entrypoint emits the split chunks BEFORE static/js/bundle.js, after Google's
+  // loader at the top of the page. The first .js tag is not the app's own code.
+  const requested: string[] = [];
+  const server: Server = createServer((req, res) => {
+    requested.push(String(req.url));
+    if (req.url === '/login/') {
+      const { port: p } = server.address() as { port: number };
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end([
+        '<script async src="https://www.googletagmanager.com/gtag/js?id=G-1"></script>',
+        '<script>window.dataLayer = [];</script>',
+        `<script src="http://localhost:${p}/static/js/vendors~main.chunk.js" async></script>`,
+        `<script src="http://localhost:${p}/static/js/bundle.js" async></script>`,
+      ].join('\n'));
+      return;
+    }
+    res.writeHead(200); res.end('');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address() as { port: number };
+    const url = await harness.assertBundleReachable(port);
+    assert.equal(url, `http://localhost:${port}/static/js/bundle.js`);
+    assert.ok(requested.includes('/static/js/bundle.js'));
+  } finally { server.close(); }
 });
 
 /* ------------------------------------------------- disabled integrations */
