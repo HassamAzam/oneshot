@@ -437,7 +437,10 @@ placed after every phase the Loop runs, so `ui-evidence` and `mr` still batch ex
   each. As a backstop, a desk skips a ticket another desk has already posted a list for.
 - **`local-tests-scope`** is a session (skill `local-tests-impact`), invoked by name. Its script
   maps the merged change onto the modules it touched and the specs that reach it — a page object
-  selecting a testid it touched — and picks each impacted module's **main-functionality tests**:
+  selecting a testid it touched. Because most fixes change logic rather than testids, it also lists
+  the specs that open a screen the change touched, and the AI takes **at most 3** of them whose steps
+  go through a changed part of that screen (it greps them for the getter of the element a diff hunk
+  changed). Then it picks each impacted module's **main-functionality tests**:
   the module's own `smoke`-tagged specs (at most 5, lowest case number first), or its first 5 cases
   when it tags none. Those always run, even when no spec reaches the change itself; the code adds
   back any the session left out without a reason. It never pads the list with other module specs,
@@ -447,7 +450,8 @@ placed after every phase the Loop runs, so `ui-evidence` and `mr` still batch ex
   worktree of the automation clone (`state/runs/<iid>/wsa`), saved as a patch and never committed.
 - **QA approves every local run.** The comment is the impacted-module report: the modules first
   ("Impacted modules: Leaves, Payroll"), then a table by module of every test that will run — ✔️ a
-  test that checks the change, ⭐ one of the module's main-functionality tests, ➕ a file QA added —
+  test that checks the change (a testid links it, or it goes through the changed screen), ⭐ one of
+  the module's main-functionality tests, ➕ a file QA added —
   the counts and minutes, the patch, and an @mention of `config/reviewers.json` `qa`. A temporary
   change that weakens a test, reaches outside the browser (`cy.exec`, `cy.task`, `cy.writeFile`,
   `Cypress.env`) or touches a file outside `localTests.allowedPaths` is named in a bold line just

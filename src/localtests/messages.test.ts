@@ -99,6 +99,7 @@ test('a main-functionality test is recognised by its prefix, the older health-ch
   assert.equal(mark('Smoke: opens the dashboard'), '⭐');
   assert.equal(mark('smoke-tagged spec that submits the renamed button'), '✔️');
   assert.equal(mark('Checks the main functionality banner'), '✔️');
+  assert.equal(mark('Opens the changed screen: asserts the Current Team(s) cards'), '✔️', 'a changed-screen pick checks the change');
 });
 
 test('a file QA added is its own row, after the tests that check the change, and counted', () => {

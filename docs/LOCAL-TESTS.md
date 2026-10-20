@@ -169,7 +169,7 @@ These are the same for everyone. Change them in a PR, not per desk.
 | `localTests.dbPrefix` | Name prefix of the per-run copies, which cleanup is allowed to drop | `oneshot_lt_` |
 | `localTests.automationRef` | Which automation code the tests come from | `origin/master` |
 | `localTests.allowedPaths` | The folders a temporary test edit may touch. An edit outside them, or one that weakens a test (fewer assertions, `.skip`, `force: true`, a long wait) or reaches outside the browser (`cy.exec`, `cy.task`, `cy.writeFile`, `Cypress.env`), is called out in bold on the list comment, file by file with the reason, just before QA is asked to approve | `cypress/Pages/`, `cypress/fixtures/`, `cypress/e2e/` |
-| `localTests.maxSpecs` / `maxRunMinutes` | A ceiling, not a target. The list is the tests that can see the change plus every impacted module's main-functionality tests (its `smoke`-tagged specs, at most 5, or its first 5 cases when it tags none), and it is never padded with unrelated tests. Oneshot never writes or suggests a test: if no existing test reaches the change, the main-functionality tests are what runs. The list is never cut: if it goes over, the whole list stays and the comment says so. `maxRunMinutes` is also the time limit for each Cypress run (the ticket run, the retry, the run on the base), so a long list may not finish | `40` / `45` |
+| `localTests.maxSpecs` / `maxRunMinutes` | A ceiling, not a target. The list is the tests that can see the change (up to 3 of them chosen because they go through the changed screen) plus every impacted module's main-functionality tests (its `smoke`-tagged specs, at most 5, or its first 5 cases when it tags none), and it is never padded with unrelated tests. Oneshot never writes or suggests a test: if no existing test reaches the change, the main-functionality tests are what runs. The list is never cut: if it goes over, the whole list stays and the comment says so. `maxRunMinutes` is also the time limit for each Cypress run (the ticket run, the retry, the run on the base), so a long list may not finish | `40` / `45` |
 | `localTests.releaseBranchPattern` | Source branches that make an MR a release promotion, not the ticket's change, so the readiness check never tests a release merge | `^Adhoc-\d{4}-\d{2}-\d{2}$` |
 | `localTests.devApproval` / `failuresBlock` | Not used any more: QA approves every run before it starts, and a finished run is marked done whether its tests passed or failed. Kept because the run script reads the block field for field | `any` / `false` |
 | `labels.localTestsTrigger` | Put on the ticket by the Loop when it merges it (beside `Merged`), or by a person; starts the mode once the ticket's MR is merged | `Ready for Automation Testing` |
@@ -238,8 +238,11 @@ automation report ──▶ label "Running TestCases Locally" ──▶ "Automat
    the specs the automation team tagged `smoke`, lowest case number first, at most
    5 — or, for a module with no `smoke` tag, its first 5 cases. On top of those, the
    AI (`local-tests-scope`) adds every existing test that reaches what changed (a
-   page object that selects a testid the change touched). It never adds unrelated
-   tests to fill the time. If the change renamed something on purpose (a testid, a
+   page object that selects a testid the change touched), and **up to 3 tests that
+   go through the screen the change touched** — most fixes change logic, not
+   testids, so the script lists every test that opens a changed screen and the AI
+   keeps the ones whose steps use the changed part (the list a fix filters, the
+   button whose handler it edits). It never adds unrelated tests to fill the time. If the change renamed something on purpose (a testid, a
    label), it updates the existing test to follow it, **for this run only**; those
    edits are attached to the comment as a patch. **It never writes or suggests a
    new test**: only tests that already exist in workstream-automation run.
@@ -247,7 +250,8 @@ automation report ──▶ label "Running TestCases Locally" ──▶ "Automat
    QA approves every local run. It posts one comment, in one of two shapes:
    - **The impacted-module report:** "Impacted modules: Leaves, Payroll — Oneshot
      will run N automation tests locally once QA approves." It says what changed
-     in one line, then a table by module: ✔️ a test that checks the change, ⭐ one
+     in one line, then a table by module: ✔️ a test that checks the change (a
+     testid links it to the change, or it goes through the changed screen), ⭐ one
      of the module's main-functionality tests, ➕ a file QA added. Then the counts
      (tests that check the change, main-functionality tests, about how many
      minutes), the temporary changes with the patch attached, and an @mention of

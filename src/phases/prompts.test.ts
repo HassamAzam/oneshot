@@ -1297,11 +1297,24 @@ test('the scope starts from the precise set, adds every impacted module\'s main-
   assert.match(p, /There is no silent trim/);
 });
 
+test('the scope may add at most 3 specs that go through the changed screen, chosen by the getter a hunk touches', () => {
+  const p = scopePrompt();
+  assert.match(p, /Then at most 3 specs that go through the screen the change touched/);
+  assert.match(p, /analysis's `screenSpecs` are those candidates/);
+  assert.match(p, /opening the screen is not enough: take a spec only when its steps go\s+through what a diff hunk changed/);
+  assert.match(p, /grep the candidates for the getter/);
+  assert.match(p, /Start each\s+one's `why` with `Opens the changed screen:`/);
+  assert.match(p, /Take none when\s+no candidate goes through a changed hunk/);
+  assert.match(p, /never more than 3/);
+  assert.match(p, /Its `screenSpecs` are candidates, not answers/);
+  assert.match(p, /`Opens the changed screen:` for a step-2 pick/);
+});
+
 test('with an empty precise set the main-functionality specs are the list, and they are marked for the ticket', () => {
   const p = scopePrompt();
   assert.match(p, /With an empty precise set, these are the whole\s+list: that is the answer, not a gap to fill/);
   assert.match(p, /Start each one's \`why\` with \`Main functionality:\`/, 'the ticket note marks those rows by this prefix');
-  assert.match(p, /`why` is one short line, starting\s+`Main functionality:` for a main-functionality spec/);
+  assert.match(p, /`why` is one short line, starting\s+`Opens the changed screen:` for a step-2 pick and `Main functionality:` for a\s+main-functionality spec/);
   assert.match(p, /clipped to about 120 characters/);
   assert.doesNotMatch(p, /Health check/);
 });
@@ -1309,8 +1322,8 @@ test('with an empty precise set the main-functionality specs are the list, and t
 test('no round ever writes or suggests a test: an uncovered change is said in summary, and that is all', () => {
   for (const p of [scopePrompt(), scopePrompt({ localTests: { ...SCOPE_INPUTS, request: 'feedback', feedback: 'also run LV_23' } })]) {
     assert.match(p, /never write or propose a new test: only tests that already exist in workstream-automation run/);
-    assert.match(p, /gets no test of its own: the modules' main-functionality specs are what\s+runs/);
-    assert.match(p, /never write a spec for it and\s+never propose one/);
+    assert.match(p, /gets no test of its own: the modules' main-functionality specs are\s+what\s+runs/);
+    assert.match(p, /never write a spec for it\s+and\s+never propose one/);
     assert.match(p, /- Write a new spec, or suggest one\./);
     assert.match(p, /Only existing files: never create a spec or a page object/);
     assert.match(p, /`proposals`: only `remove`/);

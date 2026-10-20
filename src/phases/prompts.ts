@@ -475,6 +475,14 @@ tests run: ${i.testsRun || '(none)'}`;
 const REPRODUCTION_SKILL = 'bug-reproduction';
 
 /**
+ * How many of the analysis's `screenSpecs` local-tests-scope may add: specs that go through the
+ * screen the change touched. A judgement, because a popup's page object is imported by many specs
+ * (in one rehearsal fourteen specs opened the changed popup, and two went through what the fix
+ * changed), so it is capped low; QA approve every list and can add more.
+ */
+const SCREEN_PICKS = 3;
+
+/**
  * The label that asks for a reproduction, per config/phases.json.
  *
  * Read back out of the config rather than written here, so the sentence the
@@ -2538,8 +2546,9 @@ broke>", "attempts": <n> }\`. The conductor reads \`webm\` and attaches that fil
 ${localTestsRequestBlock(ctx, wsa, patchFile)}
 ## What this phase decides
 Which workstream-automation (Cypress) specs run for this ticket's change, now merged into
-${baseBranch()}: the modules the change touched, and in each one the tests that see the change plus
-the module's main-functionality tests. Your list goes on the ticket as the impacted-module report, a QA
+${baseBranch()}: the modules the change touched, and in each one the tests that see the change — the
+ones a testid links to it, and up to ${SCREEN_PICKS} that go through the screen it changed — plus the
+module's main-functionality tests. Your list goes on the ticket as the impacted-module report, a QA
 reviewer approves it before anything runs, and then conductor code (\`local-tests-run\`) runs exactly
 the files you list in \`specs\`, against the merge commit, on a private copy of the automation
 database, and posts the automation report. You choose and prepare. You never run anything, and you
@@ -2567,7 +2576,8 @@ node ${index} --erp ${wt} --base ${base} --head ${head} --automation ${wsa} --js
 \`\`\`
 Read-only on both repos, about a second. Its modules, counts, main-functionality picks and minutes
 are the answer: never recount \`it(\` blocks by grep, never pick a module's main tests yourself and
-never estimate minutes yourself. Price every list you consider, and your final one for
+never estimate minutes yourself. Its \`screenSpecs\` are candidates, not answers: step 3 says how to
+choose among them. Price every list you consider, and your final one for
 \`estimatedMinutes\`, with:
 \`\`\`
 node ${index} estimate --automation ${wsa} <spec> <spec> ...
@@ -2587,13 +2597,26 @@ will run and why. A list with no spec in \`specs\` is posted as "nothing to run"
 and QA decide: go on without local tests, add a test file they have on ${automationRef}, or tell you
 what to change.
 
-## 3. Choose the specs: the precise set, then each module's main functionality, never padding
+## 3. Choose the specs: the precise set, the changed screen, each module's main functionality, never padding
 1. **The precise set is the floor.** Every candidate the analysis reached through something the diff
    changed rather than through its folder alone — a \`reasons\` entry other than \`module …\` (a page
    object selecting a testid the diff changed or touched, a changed screen or API) — plus every spec
    under \`removedTestidStillUsed\`. These are the specs that can see this change, so the limits never
    remove one. Start each one's \`why\` with what it checks in this change.
-2. **Then the main-functionality specs of every impacted module: the analysis's \`mainSpecs\`, all of
+2. **Then at most ${SCREEN_PICKS} specs that go through the screen the change touched.** Most fixes change logic, not
+   testids, so the precise set is often empty while a spec does open the changed screen. The
+   analysis's \`screenSpecs\` are those candidates: specs whose page objects (\`via\`) select a testid a
+   changed component (\`screens\`) renders, sorted with the impacted modules first. A popup's page object
+   is imported by many specs, and opening the screen is not enough: take a spec only when its steps go
+   through what a diff hunk changed. Work hunk by hunk: find the control or section the hunk renders or
+   handles (the list it filters, the button whose handler it edits), find that element's getter in the
+   \`via\` page object, and grep the candidates for the getter — a spec that calls it exercises the
+   change. Prefer the one that asserts on that element over one that only passes through. Start each
+   one's \`why\` with \`Opens the changed screen:\` and say what it checks there, citing the spec line
+   ("Opens the changed screen: asserts the Current Team(s) cards, organogram_39_…ts:195"). Take none when
+   no candidate goes through a changed hunk, and say so in \`summary\` in one line; never take one only
+   because it opens the screen, and never more than ${SCREEN_PICKS}.
+3. **Then the main-functionality specs of every impacted module: the analysis's \`mainSpecs\`, all of
    them, whether or not the precise set is empty.** They are each module's own \`smoke\`-tagged specs
    (or, for a module that tags none, its first cases), picked by the script so a module always gives
    the same tests. Start each one's \`why\` with \`Main functionality:\` ("Main functionality: submits a
@@ -2606,14 +2629,15 @@ what to change.
    exception is a diff that changes code EVERY screen of a module runs through (its routing, a layout
    or container all its pages share, a module-wide API): then more of the module may go in, within the
    limits, and \`summary\` names the shared file that justifies it.
-3. **If the list is over either limit, keep all of it.** Add ONE \`remove\` proposal with \`file\` omitted
+4. **If the list is over either limit, keep all of it.** Add ONE \`remove\` proposal with \`file\` omitted
    and a \`title\` starting \`Trim to fit the limits:\` that names the specs you would take out first,
    least likely to catch this change first, and the minutes that saves; \`why\` gives the list's size
    against both limits. Which tests to cut is QA's call: say in \`summary\` that the list runs in full
    unless QA trims it, and that Cypress is stopped at ${lt.maxRunMinutes} minutes, so specs past that
    may not finish.
 - Dropping a spec FROM the precise set or from \`mainSpecs\` needs a \`remove\` proposal naming why it
-  cannot run usefully here. There is no silent trim: a proposal is what asks QA.
+  cannot run usefully here. There is no silent trim: a proposal is what asks QA. A \`screenSpecs\`
+  candidate you leave out needs no proposal: it was never on the list.
 - A spec that reaches the change but cannot run on a local machine — it needs something a desk does not
   have: Odoo (payroll sync), a real mailbox, a third-party service — goes in \`notRunnable\` with \`why\`
   (citing the spec line that shows it), NOT in \`specs\`, and out of \`estimate\`. That is not a drop and
@@ -2621,9 +2645,9 @@ what to change.
   main-functionality spec can be one of these too.
 - Every \`why\` is one short line. The ticket shows it clipped to about 120 characters.
 - A change no existing spec reaches (an \`addedTestidUnused\` value, an \`uncovered\` area, a changed
-  screen no candidate opens) gets no test of its own: the modules' main-functionality specs are what
-  runs. Say in \`summary\`, in one line, what no spec reaches, so QA know; never write a spec for it and
-  never propose one.
+  screen no candidate goes through) gets no test of its own: the modules' main-functionality specs are
+  what runs. Say in \`summary\`, in one line, what no spec reaches, so QA know; never write a spec for it
+  and never propose one.
 
 ## 4. Temporary edits: follow an intended change, never excuse a broken one
 A spec failing because the ticket MEANT to rename a testid or relabel a control is out of date:
@@ -2660,13 +2684,14 @@ The \`LocalTestsScope\` object: \`applicable\`, \`reason\`, \`modules\`, \`specs
 - \`modules\`: the impacted cypress/e2e module folders your \`specs\` come from, e.g. \`leaves\`.
 - \`specs[].file\` is the path from the automation root (\`cypress/e2e/…\`); \`module\` its module folder;
   \`cases\` is the analysis's \`its\`, \`ciSeconds\` its timing; \`why\` is one short line, starting
-  \`Main functionality:\` for a main-functionality spec.
+  \`Opens the changed screen:\` for a step-2 pick and \`Main functionality:\` for a main-functionality spec.
 - \`proposals\`: only \`remove\` — a spec you drop, or a trim (step 3). Usually empty.
 - \`notRunnable\`: \`{ spec, why }\` per spec kept out for needing what a local machine lacks. Empty
   when there is none.
-- \`summary\` is for QA and the developer, numbers first: specs, cases and minutes per module; what you
-  left out and why; what no spec reaches; the specs \`removedTestidStillUsed\` says will fail and
-  whether you updated them; every \`warning\` the analysis printed.
+- \`summary\` is for QA and the developer, numbers first: specs, cases and minutes per module; which
+  changed-screen candidates you took and the getter that decided it, or that none goes through a
+  changed hunk; what you left out and why; what no spec reaches; the specs \`removedTestidStillUsed\` says
+  will fail and whether you updated them; every \`warning\` the analysis printed.
 - \`blocked\` only for a named failure from step 1, or an automation worktree that is not there.
 
 Your budget is ${mins} minutes. The analysis is seconds; spend the rest reading the diff where a

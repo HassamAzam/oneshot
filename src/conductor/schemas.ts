@@ -719,7 +719,7 @@ export const LOCAL_TESTS_SCOPE_SCHEMA = phaseSchema({
         module: str('Its module, one of `modules`'),
         cases: { type: 'number', description: 'How many test cases (it blocks) the file holds.' },
         ciSeconds: { type: 'number', description: 'Its last CI duration in seconds, when spec-timings.json records one.' },
-        why: str('What this spec checks in this change, in one plain line. Start a main-functionality spec with "Main functionality:"'),
+        why: str('What this spec checks in this change, in one plain line. Start a changed-screen pick with "Opens the changed screen:" and a main-functionality spec with "Main functionality:"'),
       },
       required: ['file', 'module', 'cases', 'why'],
     },

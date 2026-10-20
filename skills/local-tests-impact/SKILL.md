@@ -1,6 +1,6 @@
 ---
 name: local-tests-impact
-description: Pick the workstream-automation (Cypress) specs to run for a merged ticket - the ones its change reaches plus the main-functionality (smoke) specs of every module it touched - count their test cases and what running them costs, and make the smallest temporary edits to existing specs an intended UI change needs, in a throwaway automation worktree. Use when asked "which Cypress tests does this change hit", "which modules does this ticket impact", "how long will the automation suite take on this ticket", "scope the local test run", or when Oneshot's local automation tests mode runs its local-tests-scope session. Never commits, never runs Cypress, never weakens a test, never writes or suggests a new test.
+description: Pick the workstream-automation (Cypress) specs to run for a merged ticket - the ones its change reaches, up to 3 that go through the screen it changed, and the main-functionality (smoke) specs of every module it touched - count their test cases and what running them costs, and make the smallest temporary edits to existing specs an intended UI change needs, in a throwaway automation worktree. Use when asked "which Cypress tests does this change hit", "which modules does this ticket impact", "how long will the automation suite take on this ticket", "scope the local test run", or when Oneshot's local automation tests mode runs its local-tests-scope session. Never commits, never runs Cypress, never weakens a test, never writes or suggests a new test.
 ---
 
 # Local Tests Impact
@@ -51,6 +51,11 @@ What it gives you, and what each part is for:
   `smoke`-tagged specs, lowest case number first, at most 5; a module that tags none gives its
   first 5 cases (`basis: 'first'`). These run for every impacted module (step 3). Picked by the
   script so one module always gives the same tests: never pick them yourself.
+- `screenSpecs` - candidates that open a screen the change touched: specs whose direct page
+  objects (`via`) select a testid that a changed component (`screens`) renders anywhere in the
+  file, not only on its changed lines. `matched` counts those testids; impacted modules come
+  first; at most 25 are listed (`screenSpecsTotal` says how many there were). They are
+  candidates, not answers: step 3 item 2 says how to choose.
 - `testids` - what the diff did to `data-testid` values: `added`, `removed`, `changed` (a key
   whose value moved), `referenced` (values on changed component lines), `unresolved` and
   `generic` (values too common to name one screen; they only match inside the area's own
@@ -86,11 +91,12 @@ exact file), or reply `disapproved:` with what to change (a later round, step 6)
 
 ## 3. Choose the specs
 
-**The precise set, then every impacted module's main-functionality specs. Never pad the list.**
+**The precise set, up to 3 specs that go through the changed screen, then every impacted
+module's main-functionality specs. Never pad the list.**
 The prompt carries `maxSpecs` and `maxRunMinutes` from `config/project.json` (`localTests`);
 price every list you consider with `estimate` (below), never by hand. They are a ceiling, not a
 target: nothing trims your list after you return it. A list over them
-runs in full unless QA trims it (item 3), and every Cypress run is stopped at `maxRunMinutes`.
+runs in full unless QA trims it (item 4), and every Cypress run is stopped at `maxRunMinutes`.
 
 1. **The precise set is the floor.** It is every candidate `index.cjs` reached through
    something the diff changed rather than through its folder alone: each spec with a `reasons`
@@ -98,7 +104,18 @@ runs in full unless QA trims it (item 3), and every Cypress run is stopped at `m
    testid the diff changed or touched; a reason `index.cjs` gives for a changed screen or API
    counts the same), plus every spec listed under `removedTestidStillUsed`. Those are the specs
    that can see this change, so the budget never removes one.
-2. **Then every impacted module's main-functionality specs: `mainSpecs`, all of them, whether or
+2. **Then at most 3 specs that go through the screen the change touched, from `screenSpecs`.**
+   Most fixes change logic, not testids, so the precise set is often empty while a spec does open
+   the changed screen. But a popup's page object is imported by many specs (on one ticket fourteen
+   opened the changed popup and two went through what the fix changed), so opening the screen is
+   not enough. Work hunk by hunk: find the control or section the hunk renders or handles (the
+   list it filters, the button whose handler it edits), find that element's getter in the `via`
+   page object, and grep the candidates for it - a spec that calls the getter goes through the
+   change; prefer one that asserts on that element. Start each one's `why` with `Opens the
+   changed screen:` and cite the spec line. Take none when no candidate goes through a changed
+   hunk, and say so in `summary`. A candidate you leave out needs no proposal: it was never on the
+   list.
+3. **Then every impacted module's main-functionality specs: `mainSpecs`, all of them, whether or
    not the precise set is empty.** Start each one's `why` with `Main functionality:` ("Main
    functionality: submits a leave request"): the ticket marks those rows by it. A spec already in
    the precise set is listed once, as a precise spec. With an empty precise set they are the whole
@@ -111,7 +128,7 @@ runs in full unless QA trims it (item 3), and every Cypress run is stopped at `m
    code every screen of a module runs through (its routing, a layout or container all its pages
    share, a module-wide API): then more of the module may go in, within the limits, and `summary`
    names the shared file that justifies it.
-3. **If the list is over either limit, keep all of it and propose a trim.** Leave the whole list
+4. **If the list is over either limit, keep all of it and propose a trim.** Leave the whole list
    in `specs`, and add ONE `remove` proposal with `file` omitted and a `title` that starts
    `Trim to fit the limits:` and names the specs you would take out first, lowest likelihood of
    catching this change first, with the minutes that saves. `why` gives the list's size against
@@ -174,8 +191,8 @@ step 1: it reads the throwaway as it now is, so a value you followed should be g
 
 ## 5. When no spec reaches the change, run the module's main functionality - never write a test
 
-`addedTestidUnused`, an `uncovered` area, or a changed screen no candidate opens is a coverage
-gap: no existing spec tests this exact change. **Do not write a spec for it, and do not propose
+`addedTestidUnused`, an `uncovered` area, or a changed screen no `screenSpecs` candidate goes
+through is a coverage gap: no existing spec tests this exact change. **Do not write a spec for it, and do not propose
 one.** The impacted modules' main-functionality specs (step 3) are what runs. Say in `summary`, in
 one line, what no spec reaches, so QA know; if they have a test for it, they add it to
 workstream-automation themselves and reply `added <file>`, and Oneshot runs that file too.
@@ -215,7 +232,8 @@ Your structured output is the `LocalTestsScope` object, written as `local-tests-
 - `modules`: the impacted cypress/e2e folders your final `specs` come from.
 - `specs`: `{ file, module, cases, ciSeconds, why }` per spec to run. `file` is the path from
   the automation root (`cypress/e2e/...`), `cases` is `index.cjs`'s `its`, `ciSeconds` its
-  timing, `why` one short line (`Main functionality: …` for a main-functionality spec).
+  timing, `why` one short line (`Opens the changed screen: …` for an item-2 pick, `Main
+  functionality: …` for a main-functionality spec).
 - `edits`: `{ file, kind: 'update', why, erpEvidence }` per existing file you changed.
 - `proposals`: `{ action: 'remove', title, file?, why }` for a spec you dropped or a trim.
   Usually empty. Never an `add`.
@@ -223,8 +241,10 @@ Your structured output is the `LocalTestsScope` object, written as `local-tests-
   machine does not have (step 3). Empty when there is none.
 - `estimatedMinutes`: from `estimate` over your final `specs`.
 - `summary`: for QA and the dev, in this order: how many specs and cases run per module and the
-  minutes; what you dropped and why, and what cannot run locally; what no spec reaches; the
-  specs `removedTestidStillUsed` says will fail and whether you updated them; every `warning`.
+  minutes; which changed-screen candidates you took and the getter that decided it, or that none
+  goes through a changed hunk; what you dropped and why, and what cannot run locally; what no
+  spec reaches; the specs `removedTestidStillUsed` says will fail and whether you updated them;
+  every `warning`.
 - `blocked`: only for a named failure from step 1, or a missing `<runDir>/wsa`.
 
 ## Do not

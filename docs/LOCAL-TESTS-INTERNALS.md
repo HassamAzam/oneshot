@@ -66,7 +66,9 @@ One ticket at a time, in this order. The mode keeps its own journal at
    `node skills/local-tests-impact/scripts/index.cjs --erp <erp clone> --base <first parent>
    --head <merge sha> --automation <wsa> --json` over each of the ticket's own merged MRs (the
    impacted modules' `mainSpecs`, and an earlier MR's specs that reach its change), the
-   `local-tests-scope` session (`runPhase`, the phase is `onDemand`), and `capture`. Any of those
+   `local-tests-scope` session (`runPhase`, the phase is `onDemand`; it takes at most 3 of the
+   analysis's `screenSpecs`, the specs that open a screen a changed component renders, choosing
+   the ones whose steps go through a changed hunk), and `capture`. Any of those
    specs the session left out — and did not keep out in `notRunnable` or with a `remove` proposal
    naming it — is added to its list, priced with `index.cjs estimate`; not in a feedback round,
    whose list is QA's. A capture that finds a new spec file (`addedSpecs`) refuses the list: only
