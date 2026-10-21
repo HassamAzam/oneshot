@@ -38,6 +38,18 @@ test('a fail whose evidence says "not pre-existing" is not blamed elsewhere', ()
   assert.deepEqual(blame.failBlamedElsewhere, []);
 });
 
+test('a fail whose evidence calls only a data row pre-existing is not blamed elsewhere', () => {
+  const blame = blameOf(verify(
+    ['TC-1', 'fail', 'Root cause: a migration\'s get_or_create no-oped against a pre-existing MailTemplate row, so the new text never persisted.'],
+  ), null);
+  assert.deepEqual(blame.failBlamedElsewhere, []);
+});
+
+test('a fail whose evidence claims the failure is pre-existing is blamed elsewhere', () => {
+  const claims = ['ROOT CAUSE (pre-existing): filters billable first', 'untouched path, likely pre-existing.', 'confirmed pre-existing, not ours', 'a pre-existing bug in the serializer'];
+  for (const evidence of claims) assert.deepEqual(blameOf(verify(['TC-1', 'fail', evidence]), null).failBlamedElsewhere, ['TC-1'], evidence);
+});
+
 test('pre-existing on a happy-path case is flagged as the ticket\'s own case dismissed', () => {
   const blame = blameOf(
     verify(['TC-1', 'pre-existing', 'base'], ['TC-2', 'pre-existing', 'base']),

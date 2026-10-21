@@ -15,9 +15,12 @@ import type { FailureItem } from './failuremodes.js';
 
 /**
  * A 'fail' whose own evidence says the cause is not this change. "not
- * pre-existing" is the opposite claim and must not match.
+ * pre-existing" is the opposite claim and must not match. "pre-existing"
+ * counts only as a claim about the failure — ending a clause or naming a
+ * defect — never as an adjective on data ("a pre-existing MailTemplate row"),
+ * which describes the state this change ran against, not who caused the fail.
  */
-const NOT_THIS_CHANGE = /(?<!not )pre-?existing|untouched by (this|the) (diff|change)|not (introduced|caused) by (this|the) (diff|change)|does not address it/i;
+const NOT_THIS_CHANGE = /(?<!not )pre-?existing(?=\s*(?:[.,;:)]|$|and\b|on\b|in\b|(?:bug|defect|issue|failure|problem|error|crash|behaviou?r|noise)\b))|untouched by (this|the) (diff|change)|not (introduced|caused) by (this|the) (diff|change)|does not address it/i;
 
 export interface CaseVerdict { id?: string; result?: string; evidence?: string }
 export interface VerifyArtifact { results?: CaseVerdict[]; regressions?: string[] }
