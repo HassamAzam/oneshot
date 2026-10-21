@@ -278,7 +278,7 @@ automation report ──▶ label "Running TestCases Locally" ──▶ "Automat
    |---|---|
    | `approved` (list has tests) | The label moves from `Ready for Automation Testing` to `Running TestCases Locally`, and **exactly** that list runs |
    | `approved` (nothing to run) | Nothing runs. The label moves to `Automation Testing Done`, and Oneshot records "no automation test exists for this change; approved by @… without local tests" |
-   | `added cypress/e2e/…/my_test.ts` | Run that exact file as well. Oneshot fetches workstream-automation `master`, checks each path exists there, adds the ones that do to the list, names the ones it could not find, and posts the list again. `disapproved: added …` works the same |
+   | `added cypress/e2e/…/my_test.ts` | Run that exact file as well. Oneshot fetches workstream-automation `master`, checks each path exists there, adds the ones that do to the list, names the ones it could not find, and posts the list again. `disapproved: added …` and a sentence such as "I have added cypress/e2e/…/my_test.ts" work the same |
    | `disapproved:` with what to change, e.g. `- also run LV_23` or `- remove LV_21` | The AI redoes the list with QA's bullets, on a fresh checkout of `master`, and posts it again. "Check again" is just such a change: the new list is chosen from `master` as it is now |
 
 5. **The run.** Once approved, Oneshot posts "Local automation run started — N

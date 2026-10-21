@@ -59,6 +59,20 @@ test('without disapproved:, only a reply that OPENS with added decides; one aski
     'a name with a space, not in backticks, cannot be read as one path: the session finds it');
 });
 
+test('a sentence saying its author added a test is an added reply, so the one who answered is never passed over', () => {
+  for (const reply of [
+    'I have added cypress/e2e/leaves/LV_99.ts',
+    "I've pushed cypress/e2e/leaves/LV_99.ts to master",
+    'Hi, we just added cypress/e2e/leaves/LV_99.ts for this',
+  ]) {
+    assert.deepEqual(classifyLocalTestsReply(reply), { kind: 'added', files: ['cypress/e2e/leaves/LV_99.ts'] }, reply);
+  }
+  assert.deepEqual(classifyLocalTestsReply('I have added cypress/e2e/a.ts, please remove LV_21'),
+    { kind: 'feedback', text: 'I have added cypress/e2e/a.ts, please remove LV_21' }, 'asking for more goes to the session whole');
+  assert.equal(classifyLocalTestsReply('I have added a comment on the MR'), null, 'no test named: chatter');
+  assert.equal(classifyLocalTestsReply('Usman merged cypress/e2e/a.ts yesterday'), null, 'someone else\'s file is a mention');
+});
+
 test('the suite\'s real file names are read whole: & ( ) % $ < > in a bare path, a space or a comma in backticks', () => {
   for (const file of [
     'cypress/e2e/leaves/LV_19_user_can_submit_half_day_leave_Causal&Sick_only.ts',

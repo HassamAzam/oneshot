@@ -19,7 +19,10 @@
  * itself (remove, drop, also run), or that names files without saying they were
  * added, is feedback: the scope session reads the whole text and can do all of
  * it, where the `added` path can only add files. Without `disapproved:`, only
- * a reply that opens with "added" and names a spec file decides anything.
+ * a reply that says its author added a test decides anything: one that opens
+ * with "added", or says so in a sentence ("I have added cypress/e2e/…").
+ * Passed over, that sentence left the person who answered waiting on a list
+ * that never moved. A mention ("… was added last week") still decides nothing.
  *
  * Nothing here asks Oneshot to write a test: the list is always the existing
  * tests of the modules the change touched.
@@ -48,6 +51,13 @@ const ADDED_RE = /\b(?:added|pushed|merged|committed|created)\b/i;
 
 /** A reply with no `disapproved:` that still decides: it OPENS with "added" (or a word for it). */
 const OPENS_ADDED_RE = /^[\s*_`]*(?:added|pushed|merged|committed|created)\b/i;
+
+/**
+ * The same, said in a sentence by the one who did it: "I have added", "I've
+ * pushed", "we just added". First person only, so a mention of someone else's
+ * file ("cypress/e2e/a.ts was added last week") is not read as an answer.
+ */
+const SAYS_ADDED_RE = /\b(?:i|we)(?:['’]ve|\s+have)?\s+(?:just\s+|now\s+|also\s+|already\s+)?(?:added|pushed|merged|committed|created)\b/i;
 
 /**
  * A spec path under `cypress/`, bare in the reply: behind `./` or
@@ -83,8 +93,8 @@ export function classifyLocalTestsReply(body: string): LocalTestsReply | null {
   if (isApprovedReply(text)) return { kind: 'approved' };
   const prefix = PREFIX_RE.exec(text);
   if (!prefix) {
-    // `added cypress/e2e/…`, with nothing asking for more than that.
-    if (!OPENS_ADDED_RE.test(text)) return null;
+    // `added cypress/e2e/…` or "I have added cypress/e2e/…", with nothing asking for more than that.
+    if (!OPENS_ADDED_RE.test(text) && !SAYS_ADDED_RE.test(text)) return null;
     const files = specPathsIn(text);
     if (files.length && !ASKS_RE.test(text)) return { kind: 'added', files };
     // An `added` reply about a test file this cannot read as one path (a name
