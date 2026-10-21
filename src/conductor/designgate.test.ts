@@ -140,6 +140,38 @@ test('attachments read before-then-after per screen, and keep colliding names ap
   }
 });
 
+test('the clickable mockup HTML is attached as a block after the screenshots', () => {
+  // The pictures render inline and are read before→after per screen; the
+  // mockup HTML is the thing a reviewer opens when a picture left a question,
+  // so it comes last and as its own block rather than interleaved.
+  const dir = artifactDir(TMP_IID);
+  const write = (rel: string): void => {
+    const full = join(dir, rel);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, 'x');
+  };
+  try {
+    const two = {
+      ...design,
+      screens: [
+        { ...screen, before: 'design/one--before.png', screenshot: 'design/one.png', mockupHtml: 'design/one.html' },
+        { ...screen, id: 'second', before: '', screenshot: 'design/two.png', mockupHtml: 'design/two.html' },
+      ],
+    };
+    ['design/one--before.png', 'design/one.png', 'design/two.png', 'design/one.html', 'design/two.html'].forEach(write);
+
+    const got = designAttachments(TMP_IID, two);
+    assert.deepEqual(got.map((a) => a.name), [
+      'one--before.png', 'one.png', 'two.png', 'one.html', 'two.html',
+    ]);
+    assert.deepEqual(got.map((a) => a.mime), [
+      'image/png', 'image/png', 'image/png', 'text/html', 'text/html',
+    ]);
+  } finally {
+    rmSync(join(dir, '..'), { recursive: true, force: true });
+  }
+});
+
 test('a screen with no "before" contributes only its proposal', () => {
   const dir = artifactDir(TMP_IID);
   try {

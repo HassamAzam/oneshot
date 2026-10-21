@@ -1679,9 +1679,10 @@ function designOf(design: Record<string, unknown> | null): DesignArtifact {
  * Order is the argument, exactly as it is in the ui-evidence pack: for each
  * screen the current state first and the proposal second, so a reviewer
  * scrolling the comment reads before→after per screen rather than a block of
- * one followed by a block of the other. Ordering follows the screens,
- * and the clickable file last — it is the thing you open if the pictures left
- * you with a question.
+ * one followed by a block of the other. The screenshots come first in that
+ * order; the clickable mockup files follow as a block at the end, in screen
+ * order — they are the thing you open if the pictures left you with a question,
+ * so they sit after the gallery rather than interrupting it.
  *
  * A file the artifact names but disk does not have is skipped silently here
  * and named in the body by the renderer, which reads the same list: a gate
@@ -1717,6 +1718,9 @@ export function designAttachments(iid: number, design: Record<string, unknown> |
   for (const s of d.screens) {
     push(s.before);
     push(s.screenshot);
+  }
+  for (const s of d.screens) {
+    push(s.mockupHtml);
   }
   return out;
 }
