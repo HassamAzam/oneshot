@@ -90,6 +90,8 @@ import {
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
+import { recordLiveTestcases, recordLiveVerify } from '../lib/liveevals.js';
+import type { TestcasesArtifact, VerifyArtifact } from '../lib/verifyblame.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
@@ -2110,6 +2112,12 @@ export async function runTicket(
           ?? caseFail ?? deliverableFail ?? evidenceFail ?? undefined,
       });
       j = readJournal(iid) ?? j;
+      if (r.out.ok && r.cfg.name === 'verify') {
+        recordLiveVerify(iid, r.lap, readArtifact<VerifyArtifact>(iid, 'verify.json'), readArtifact<TestcasesArtifact>(iid, 'testcases.json'));
+      }
+      if (r.out.ok && r.cfg.name === 'testcases') {
+        recordLiveTestcases(iid, r.lap, ticket, readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases ?? []);
+      }
 
       // Ahead of the rate-limit park below, and ahead of the infra re-attempt
       // in afterFailure: a park is recoverable by waiting and an account gate
