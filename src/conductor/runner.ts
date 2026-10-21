@@ -102,6 +102,7 @@ import {
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
+  gateAsked, type GateTrigger,
 } from './reviewgate.js';
 import { automationOwns } from './watcher.js';
 import {
@@ -1079,6 +1080,9 @@ interface PhaseResult {
  * Run one ticket. Resumable: an existing journal means this is a RESUMPTION,
  * and phases that already succeeded are skipped rather than re-paid for.
  */
+/** A gate the green zone can lift; RunJournal.liftedGates records which it did. */
+type LiftedGate = NonNullable<RunJournal['liftedGates']>[number];
+
 export async function runTicket(
   issue: Issue,
   opts: { conductor: string; signal?: AbortSignal },
@@ -1474,6 +1478,14 @@ export async function runTicket(
         `${list.filter((p) => isImplemented(p.name) || CODE_PHASES[p.name]).map((p) => p.name).join(' → ')}`);
     }
 
+    // Whether every file this run declares and commits sits in a green area,
+    // judged on this pass by the zone check below. The plan and test-case
+    // gates read it through gatesApply: a green ticket is not asked for
+    // approval under the every-run posture. False wherever the guard is off
+    // or no check is due, so nothing is lifted on a ticket the guard never
+    // judged.
+    let greenZone = false;
+
     // The delivery-zone guard (src/conductor/zoneguard.ts), ahead of every code
     // phase and every gate. At implement, over what the plan declares, before
     // the plan gate asks anyone to approve it. On every pass after implement has
@@ -1494,9 +1506,12 @@ export async function runTicket(
         } catch (err) {
           // A throw here used to escape runTicket with no finish(): the ticket kept
           // Loop, got no note, and threw again on every scan. A stop says why.
-          zone = { applies: true, violations: [], unreadable: `the zone guard failed (${(err as Error).message})` };
+          zone = {
+            applies: true, violations: [], unreadable: `the zone guard failed (${(err as Error).message})`, green: false,
+          };
         }
         if (zone.unreadable || zone.violations.length) return stopForZone(zone);
+        greenZone = zone.green;
       }
     }
 
@@ -1581,9 +1596,11 @@ export async function runTicket(
     // skips straight past this. One quick GitLab read, never a loop — see
     // src/conductor/reviewgate.ts's file header for why, and for why the
     // ticket rather than Slack is what this polls.
-    const planGate = gatesApply(ticket.labels, declaredFiles(prior.plan ?? null, null));
-    if (phase.name === 'implement' && phaseSucceeded(iid, 'plan')
-      && planGate.on && !j.planApproval?.approved) {
+    const planGate = gatesApply(ticket.labels, declaredFiles(prior.plan ?? null, null),
+      greenZone && !gateAsked(j.planApproval));
+    const planGateDue = phase.name === 'implement' && phaseSucceeded(iid, 'plan') && !j.planApproval?.approved;
+    if (planGateDue) announceLift('plan', planGate);
+    if (planGateDue && planGate.on) {
       if (planGate.hits.length && !j.reviewMode) {
         j = updateJournal(iid, { reviewMode: true }) ?? j;
         log.warn('review gates armed by guarded paths, not by the label', { iid, hits: planGate.hits });
@@ -1662,8 +1679,13 @@ export async function runTicket(
     // run that follows. Taken after `qa`, the same reply would land on merged
     // code and could only become a follow-up ticket.
     const caseGate = gatesApply(ticket.labels,
-      declaredFiles(prior.plan ?? null, prior.implement ?? null));
+      declaredFiles(prior.plan ?? null, prior.implement ?? null), greenZone && !gateAsked(j.testcasesApproval));
     const caseGatePending = caseGate.on && !j.testcasesApproval?.approved;
+    // Said where the decision bites: at testcases, whose group folds review in
+    // when nothing is pending, and at review when the loop lands on it alone.
+    if ((phase.name === 'testcases' || phase.name === 'review') && !j.testcasesApproval?.approved) {
+      announceLift('testcases', caseGate);
+    }
     if (phase.name === 'review' && phaseSucceeded(iid, 'testcases') && caseGatePending) {
       const cases = (prior.testcases as { cases?: TestCase[] } | null)?.cases ?? [];
       if (caseGate.hits.length && !j.reviewMode) {
@@ -2313,6 +2335,23 @@ export async function runTicket(
       zones: [...new Set(zone.violations.map((v) => v.zone))],
     }, { runId: j.runId });
     return finish(j, 'blocked', zoneBlockReason(zone));
+  }
+
+  /**
+   * Say, once per run, that a gate the every-run posture would have asked a
+   * person to clear is not asked on this ticket. A gate that does not fire is
+   * silent, and a plan note followed by no approval ask reads like a gate
+   * that forgot to post; the event is what a report can count. Latched on the
+   * journal the way `published` is, not in a Set: a parked run re-enters
+   * runTicket every tick, and a lift said once per pass wrote one event per
+   * tick for as long as the park lasted.
+   */
+  function announceLift(gate: LiftedGate, trigger: GateTrigger): void {
+    const said = j.liftedGates ?? [];
+    if (!trigger.lifted || said.includes(gate)) return;
+    j = updateJournal(iid, { liftedGates: [...said, gate] }) ?? j;
+    log.info(`${gate} gate lifted on #${iid}: every file this run declares and commits is in a green area`);
+    logEvent('zone_gate_lifted', { iid, gate }, { runId: j.runId });
   }
 
   /**

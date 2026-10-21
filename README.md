@@ -235,6 +235,20 @@ ever asked for, and the request says which path armed it rather than claiming a 
 there. To disarm a module's trigger, remove its `paths` in `config/risk-modules.json` — emptying
 `highScrutinyPaths` in config/project.json does nothing, the module paths are merged in at load.
 
+**The green zone lifts the every-run posture.** With the delivery-zone guard on (`zones` in
+`config/project.json`; `src/conductor/zoneguard.ts`), a ticket the guard holds to a zone, that
+grooming did not classify yellow, and whose every declared and committed file sits in a green
+area is not asked to clear R1 or R2. The plan is still posted to the ticket and the case list is
+still written; the run simply goes on, opens its MR and waits there — labelled `In Review` — for
+a person to merge it. R3 is untouched: the map calls green the tight loop, and the merge is still
+the one step reserved for a human. The verdict is taken where the guard takes it, from the plan
+at `implement` and from the branch's real diff on every pass after; a lap that reaches outside
+green is stopped by the guard, as it always was. A gate that has already asked a person is never
+lifted — the question is theirs to answer now. It lifts `reviewAllRuns` and nothing else: the
+`Review` label is a person's word about this ticket, and a guarded path inside a green area is
+two maps disagreeing — both still pause. The `Design` gate, the Not a Bug gate and the
+verify-case gate are not review gates and do not change.
+
 **Comment `approved`** (that exact word, case-insensitive, trimmed — not a substring of a longer
 reply) **on the ticket** to release a pause. It only counts from an account in that gate's own
 group: an `approved` from outside the list is logged and ignored, and so is any other comment, so

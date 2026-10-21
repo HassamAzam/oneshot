@@ -16,6 +16,12 @@
  * the Plane pipeline sent here by zone. A ticket a person labelled `Loop` by
  * hand keeps today's behaviour: the review gates, not a stop.
  *
+ * A ticket that keeps to green is not asked for plan or test-case approval
+ * under the every-run posture (`reviewAllRuns`): the map calls green the
+ * tight loop, and a sign-off on every lap of it is the opposite. The merge
+ * is never lifted. `green` on the verdict is what "keeps to green" means;
+ * gateTrigger in reviewgate.ts is what it lifts and what it leaves.
+ *
  * The map is read from the work repo's origin/<base>, never from the ticket's
  * worktree, so a branch cannot widen its own zone by editing the map.
  */
@@ -42,6 +48,11 @@ export interface ZoneVerdict {
   violations: ZoneHit[];
   /** Why the guard could not judge the files at all, or null when it could. Non-null stops the run. */
   unreadable: string | null;
+  /**
+   * Every file judged is in a green area, at least one was judged, and the
+   * ticket carries no yellow label; false whenever the guard did not judge.
+   */
+  green: boolean;
 }
 /** What reading the map gave: the map, or why there is none, in words a person can act on. */
 export type ZoneMapRead = { map: ZoneMap } | { error: string };
@@ -278,23 +289,36 @@ export function zoneCheckDue(
  * is never allowed. Without the guard label nothing applies.
  * `files` null means branchFiles() could not read the diff, and a guard that
  * cannot see the files stops the run, the same as one that cannot read the map.
+ *
+ * `green` is the stricter reading the review gates lift on: every file in a
+ * green area, at least one file judged, and no yellow label. The stop is
+ * decided on files alone because the guard checks what a run touches rather
+ * than what the ticket says; a lift is a permission, though, and grooming's
+ * yellow classification is a person's word against it, so there the label
+ * counts. An empty list is not green either: nothing judged is nothing passed.
  */
 export function zoneVerdict(
   labels: string[], files: string[] | null, read: ZoneMapRead, zones: ZonesConfig | null = liveZones(),
 ): ZoneVerdict {
   const applies = zoneGuardApplies(labels, zones);
-  if (!applies) return { applies, violations: [], unreadable: null };
-  if ('error' in read) return { applies, violations: [], unreadable: read.error };
-  if (!files) return { applies, violations: [], unreadable: "the branch's diff cannot be read — add Loop back to retry" };
+  if (!applies) return { applies, violations: [], unreadable: null, green: false };
+  if ('error' in read) return { applies, violations: [], unreadable: read.error, green: false };
+  if (!files) {
+    return {
+      applies, violations: [], unreadable: "the branch's diff cannot be read — add Loop back to retry", green: false,
+    };
+  }
   const { map } = read;
   const yellow = zones?.yellowLabel;
-  const allowed = new Set(['green', ...(yellow && labels.includes(yellow) ? ['yellow'] : [])]);
+  const classifiedYellow = Boolean(yellow && labels.includes(yellow));
+  const allowed = new Set(['green', ...(classifiedYellow ? ['yellow'] : [])]);
   const seen = new Set<string>();
-  const violations = files
+  const hits = files
     .filter((f) => (seen.has(f) ? false : (seen.add(f), true)))
-    .map((f) => zoneOf(map, f))
-    .filter((hit) => !allowed.has(hit.zone));
-  return { applies, violations, unreadable: null };
+    .map((f) => zoneOf(map, f));
+  const violations = hits.filter((hit) => !allowed.has(hit.zone));
+  const green = hits.length > 0 && !classifiedYellow && hits.every((hit) => hit.zone === 'green');
+  return { applies, violations, unreadable: null, green };
 }
 
 /**

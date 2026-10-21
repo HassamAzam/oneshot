@@ -164,6 +164,24 @@ export interface GateTrigger {
   on: boolean;
   /** Non-empty when the guarded paths, rather than the label, armed the gates. */
   hits: string[];
+  /** True when the every-run posture alone would have armed the gates and the green zone lifted it. */
+  lifted: boolean;
+}
+
+/**
+ * The gate decision with its inputs in hand, so a test can set the posture
+ * instead of reading whatever config/project.json ships with.
+ *
+ * `green` lifts only `every`. A green area is a person's decision that the
+ * code there changes without a sign-off, and the every-run posture is the
+ * same question answered for every ticket at once, so the finer answer wins.
+ * It lifts neither the Review label, which a person put on THIS ticket, nor
+ * a guarded path: a green area that overlaps one is two maps disagreeing,
+ * and a pause is how a person finds that out.
+ */
+export function gateTrigger(o: { every: boolean; labelled: boolean; hits: string[]; green: boolean }): GateTrigger {
+  const asked = o.labelled || o.hits.length > 0;
+  return { on: asked || (o.every && !o.green), hits: o.hits, lifted: o.every && o.green && !asked };
 }
 
 /**
@@ -174,10 +192,26 @@ export interface GateTrigger {
  * exist, and by the test-case gate `implement` has reported what it really
  * touched. A plan that swore off payroll and a diff that edited it anyway is
  * exactly the case worth catching, and only the later evaluation sees it.
+ *
+ * `green` is the zone guard's verdict on these same files
+ * (src/conductor/zoneguard.ts); gateTrigger says what it lifts.
  */
-export function gatesApply(labels: string[], files: string[]): GateTrigger {
-  const hits = highScrutinyHits(files);
-  return { on: reviewAllRuns() || reviewLabelPresent(labels) || hits.length > 0, hits };
+export function gatesApply(labels: string[], files: string[], green = false): GateTrigger {
+  return gateTrigger({
+    every: reviewAllRuns(), labelled: reviewLabelPresent(labels), hits: highScrutinyHits(files), green,
+  });
+}
+
+/**
+ * Whether this gate has put its question to a person and not had it answered:
+ * a request standing on the ticket, or a feedback round that re-asks on the
+ * next check. The green zone never lifts such a gate (runner.ts): the question
+ * is a person's to answer now, and a gate that stops being checked leaves its
+ * ask open on the ticket and its board label on for good.
+ */
+export function gateAsked(state: ReviewGateState | undefined): boolean {
+  if (!state || state.approved) return false;
+  return state.requestNoteId != null || state.feedback.length > 0;
 }
 
 /** The one line a gate request needs about why it is asking. */
