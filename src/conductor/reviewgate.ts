@@ -192,8 +192,8 @@ export function triggerLine(trigger: GateTrigger): string {
 }
 
 /**
- * Exported so the Ready For Automation mode's approval tally
- * (src/automation/runner.ts) applies the same word rule instead of a copy of it.
+ * Exported so the local automation tests mode's reply reader
+ * (src/localtests/replies.ts) applies the same word rule instead of a copy of it.
  */
 export function isApprovedReply(text: string): boolean {
   // Exact match, case-insensitive, trimmed — deliberately NOT a substring
@@ -305,16 +305,16 @@ async function setBoardLabel(iid: number, gate: Gate, on: boolean): Promise<void
  * monotonic per project, so "strictly after the request" is an integer
  * comparison rather than a string one.
  *
- * `at` is the note's `created_at`. The gates here never read it; the Ready For
- * Automation mode files an approval under the year it was GIVEN, not the year
- * the conductor happened to notice it.
+ * `at` is the note's `created_at`. The gates here never read it; the local
+ * automation tests mode records when QA's approval was GIVEN, not when the
+ * conductor happened to notice it.
  */
 export interface GateReply { id: number; text: string; user: string | null; at: string | null }
 type NoteReply = GateReply;
 
 /**
  * Human replies strictly after `since`: not system, not machine notes. Pure.
- * Input order is kept. Shared with the Ready For Automation mode, so both
+ * Input order is kept. Shared with the local automation tests mode, so both
  * read "a person answered" the same way.
  */
 export function repliesAfter(notes: IssueNote[], since: number): GateReply[] {

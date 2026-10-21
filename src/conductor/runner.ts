@@ -31,9 +31,13 @@
  * `verify` and `review` concluded from their artifacts rather than from their
  * exit status.
  *
- * The pipeline ENDS AT THE MERGE. There is no deploy, no QA against a running
- * build and no demo: 'done' means the change is in the base branch, the ticket
- * carries the exit label, and a person takes it from there.
+ * The Loop ENDS AT THE MERGE. There is no deploy, no QA against a running
+ * build and no demo: 'done' means the change is in the base branch and the
+ * ticket carries the exit label — and, while the team has the local automation
+ * tests on, their trigger label as well (doneLabelSwap). The post-merge mode
+ * (src/localtests) takes it from there: it picks the Cypress specs of the
+ * modules the change touched, asks QA, runs them and posts the automation
+ * report, which is the last thing Oneshot does on a ticket.
  *
  * One thing is attempted rather than surrendered. Most blocks this pipeline
  * hits are not defects in the ticket's code — they are a missing credential, an
@@ -47,7 +51,7 @@ import { existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, modelFor,
+  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -103,7 +107,6 @@ import {
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
 } from './reviewgate.js';
-import { automationOwns } from './watcher.js';
 import {
   branchFiles, loadZoneMap, refusedTicket, zoneBlockReason, zoneCheckDue, zoneGuardApplies, zoneVerdict,
   type ZoneVerdict,
@@ -254,22 +257,16 @@ export interface RunOutcome {
    */
   status: 'done' | 'blocked' | 'aborted' | 'refused' | 'parked';
   reason?: string;
-  /**
-   * On a refusal: true when waiting cannot clear it, only a person changing
-   * the ticket can (today: it carries the automation mode's trigger label), so
-   * `--follow` stops instead of re-checking every few minutes forever.
-   */
-  final?: true;
 }
 
 /**
  * Whether `--follow` should stop on this outcome's refusal rather than check
- * again next tick: a refusal marked `final`, or one naming an assignee who is
- * not this desk. A lost claim race or a block's cooldown clears by waiting.
+ * again next tick: one naming an assignee who is not this desk, which only a
+ * person changing the ticket can clear. A lost claim race or a block's
+ * cooldown clears by waiting.
  */
 export function refusalIsFinal(o: RunOutcome): boolean {
   if (o.status !== 'refused') return false;
-  if (o.final) return true;
   return Boolean(o.reason?.includes('assigned to') || o.reason?.includes('GITLAB_USERNAME'));
 }
 
@@ -483,6 +480,25 @@ type Control =
  */
 function withInReview(cfg: ReturnType<typeof projectConfig>, labels: string[]): string[] {
   return cfg.labels.inReview ? [...labels, cfg.labels.inReview] : labels;
+}
+
+/**
+ * The one label edit a finished — merged — run makes. Off: the entry label,
+ * the blocked label (a run that was blocked and later resumed still carries
+ * it) and the in-review marker. On: the exit label and, while the team has the
+ * local automation tests on, their trigger (mergeTriggerLabel). That second
+ * label is what starts the post-merge phases — local-tests-scope, QA's
+ * approval, local-tests-run and its results — so a merged ticket goes on to its
+ * Cypress run without anybody adding a label by hand. One swap, so the board
+ * never shows the ticket merged without the request that follows from it.
+ */
+export function doneLabelSwap(
+  cfg: ReturnType<typeof projectConfig>, atMerge: string | null = mergeTriggerLabel(cfg),
+): { remove: string[]; add: string[] } {
+  return {
+    remove: withInReview(cfg, [cfg.labels.entry, cfg.labels.blocked]),
+    add: atMerge ? [cfg.labels.exit, atMerge] : [cfg.labels.exit],
+  };
 }
 
 export function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] {
@@ -1092,15 +1108,6 @@ export async function runTicket(
   const carried = new Set(issue.labels.map((l) => l.toLowerCase()));
   const list = phases().filter((p) => !p.labelGated || carried.has(p.labelGated.toLowerCase()));
   const owner = opts.conductor;
-
-  // The scan skips a ticket the automation mode owns; `--ticket` never scans,
-  // so the same rule is asked here, before anything is claimed, posted or
-  // paid for.
-  const owned = automationOwns(issue.labels);
-  if (owned) {
-    log.info(`#${iid} — ${owned}`);
-    return { runId: '', iid, status: 'refused', reason: owned, final: true };
-  }
 
   if (issue.assignees.length > 0) {
     const me = gitlabUsername();
@@ -3419,8 +3426,13 @@ export async function runTicket(
       // past the cooldown, through --ticket, or after a person answered it —
       // still carries it, and finishing with both "Needs Human" and "merged" on
       // the ticket tells the board a person is wanted on work that is done.
+      // The local automation tests' trigger goes on in the same edit
+      // (doneLabelSwap): the merge is what they wait for.
       if (!DRY_RUN) {
-        await swapLabel(journal.iid, withInReview(cfg, [cfg.labels.entry, cfg.labels.blocked]), [cfg.labels.exit]);
+        const swap = doneLabelSwap(cfg);
+        const res = await swapLabel(journal.iid, swap.remove, swap.add);
+        if (!res.ok) log.warn(`#${journal.iid} — could not set ${swap.add.map((l) => `"${l}"`).join(' and ')}: ${res.error ?? res.kind}`);
+        else if (swap.add.length > 1) log.ok(`#${journal.iid} — marked ${swap.add.map((l) => `"${l}"`).join(' and ')}; the local automation tests take it from here`);
       }
       // The claim note has done its job — with the exit label on, nothing
       // scans this ticket again — and a claim that outlives its run is exactly

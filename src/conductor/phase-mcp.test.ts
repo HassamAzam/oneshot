@@ -1,9 +1,8 @@
 /**
  * Which MCP servers a session starts with. Every Loop phase keeps the GitLab
- * server exactly as before; a caller that opts out (the automation phase, whose
- * ticket and diff the conductor reads and hands over in the prompt) starts with
- * none, so a server that comes up without its tools cannot leave it with
- * nothing to read.
+ * server exactly as before; a caller that opts out (the local-tests scope
+ * session, whose ticket the conductor reads and hands over in the prompt)
+ * starts with none, so it holds no GitLab write a prompt could talk it into.
  */
 import '../lib/test-project-env.js';
 import { test } from 'node:test';

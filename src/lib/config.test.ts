@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { ROOT, localTestsConfig, projectConfig, requiredLabels } from './config.js';
+import { ROOT, localTestsConfig, localTestsTargetBranches, mergeTriggerLabel, projectConfig, requiredLabels } from './config.js';
 
 const risk = JSON.parse(readFileSync(join(ROOT, 'config', 'risk-modules.json'), 'utf8')) as {
   modules: Array<{ name: string; paths?: string[] }>;
@@ -105,11 +105,56 @@ test('the three local-tests labels are required only where the mode is on', () =
   // The mode reads and writes them on a desk running local tests; on any other
   // desk nothing touches them, and a missing label there is nobody's problem.
   const l = labels(LT_LABELS);
-  const on = names(requiredLabels(l, [], false, true));
+  const on = names(requiredLabels(l, [], false, true, null));
   for (const name of Object.values(LT_LABELS)) assert.ok(on.includes(name), `${name} is required`);
-  const off = names(requiredLabels(l, [], false, false));
+  const off = names(requiredLabels(l, [], false, false, null));
   for (const name of Object.values(LT_LABELS)) assert.ok(!off.includes(name), `${name} is not required`);
-  assert.ok(!names(requiredLabels(labels(), [], false, true)).includes(''), 'an unset label is not required');
+  assert.ok(!names(requiredLabels(labels(), [], false, true, null)).includes(''), 'an unset label is not required');
+});
+
+test('the trigger is required on a desk with the mode off when its merges put it on', () => {
+  // The Loop writes it beside the exit label at merge on every desk while the
+  // team has the mode on; a label missing there is a merge that silently
+  // starts nothing.
+  const l = labels(LT_LABELS);
+  const got = requiredLabels(l, [], false, false, LT_LABELS.localTestsTrigger);
+  assert.deepEqual(names(got).filter((n) => Object.values(LT_LABELS).includes(n)), [LT_LABELS.localTestsTrigger]);
+  assert.match(got.find((x) => x.name === LT_LABELS.localTestsTrigger)?.why ?? '', /at merge/);
+});
+
+test('localTestsTargetBranches: the config\'s branches, else the base alone; anything but branch names is null', () => {
+  type Cfg = Parameters<typeof localTestsTargetBranches>[0];
+  const withTargets = (targetBranches: unknown): Cfg => ({ branches: { base: 'dev' }, localTests: { targetBranches } } as unknown as Cfg);
+  assert.deepEqual(localTestsTargetBranches(withTargets(['dev', 'stage'])), ['dev', 'stage']);
+  assert.deepEqual(localTestsTargetBranches(withTargets([' stage ', 'stage'])), ['stage'], 'trimmed, each once');
+  assert.deepEqual(localTestsTargetBranches({ branches: { base: 'develop' }, localTests: {} } as unknown as Cfg), ['develop'],
+    'absent: the base branch alone');
+  for (const bad of [[], ['-x'], ['a..b'], ['dev stage'], 'dev', [1]]) {
+    assert.equal(localTestsTargetBranches(withTargets(bad)), null, JSON.stringify(bad));
+  }
+  assert.deepEqual(localTestsTargetBranches(), ['dev', 'stage'], 'the team config: a merge into dev or stage starts the tests');
+});
+
+test('mergeTriggerLabel is the team\'s switch: the trigger while localTests is enabled, null otherwise', () => {
+  const lab = labels(LT_LABELS);
+  const block = projectConfig().localTests!;
+  assert.equal(mergeTriggerLabel({ localTests: block, labels: lab }, true), 'Ready for Automation Testing');
+  assert.equal(mergeTriggerLabel({ localTests: { ...block, enabled: false }, labels: lab }, true), null);
+  assert.equal(mergeTriggerLabel({ localTests: undefined, labels: lab }, true), null);
+  assert.equal(mergeTriggerLabel({ localTests: block, labels: labels({ ...LT_LABELS, localTestsTrigger: '  ' }) }, true), null);
+  // Either other label empty turns the mode off on every desk: a trigger then would be picked up by nothing.
+  assert.equal(mergeTriggerLabel({ localTests: block, labels: labels({ ...LT_LABELS, localTestsRunning: '' }) }, true), null);
+  assert.equal(mergeTriggerLabel({ localTests: block, labels: labels({ ...LT_LABELS, localTestsDone: undefined }) }, true), null);
+  // The shipped config: the team has the mode on, so every desk's merge adds it.
+  assert.equal(mergeTriggerLabel(projectConfig(), true), projectConfig().labels.localTestsTrigger);
+});
+
+test('a project with no local-tests phase in its target adds no trigger at merge: it has no automation suite', () => {
+  const lab = labels(LT_LABELS);
+  assert.equal(mergeTriggerLabel({ localTests: projectConfig().localTests!, labels: lab }, false), null);
+  // The shipped phases scope local-tests-scope to the erp target.
+  const raw = JSON.parse(readFileSync(join(ROOT, 'config', 'phases.json'), 'utf8')) as { phases: Array<{ name: string; targets?: string[] }> };
+  assert.deepEqual(raw.phases.find((p) => p.name === 'local-tests-scope')?.targets, ['erp']);
 });
 
 test('the retired TestCase Run Locally marker is not configured any more', () => {

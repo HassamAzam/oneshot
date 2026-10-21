@@ -40,8 +40,8 @@ import { currentProjectKey } from '../lib/journalproject.js';
  *
  *   new          first sight, nothing checked
  *   waiting      labelled, no merged MR yet — checked again later, quietly
- *   scoping      a scope session is owed (first, or QA asked for a temporary test or for changes)
- *   rechecking   QA asked to check workstream-automation master again (no session)
+ *   scoping      a scope session is owed (first, or QA asked for changes)
+ *   rechecking   retired (QA's old "check again"): read as a fresh scope, which checks master again
  *   adding       QA named spec files to add
  *   awaiting-qa  a list is on the ticket (or about to be), waiting for a QA reply
  *   approved     QA approved; the labels (and, for no tests, the record) are owed
@@ -58,8 +58,10 @@ export type LocalTestsState =
 /**
  * One of the ticket's own merged MRs: `base..head` is its change. `base` null:
  * the readiness check could not say, and it is `head^1`, learned from git.
+ * `otherBranch`: the branch it went into, when that is not the tested MR's
+ * (stage, with a dev merge tested), so the list can say so.
  */
-export interface MergedRange { mrIid: number; base: string | null; head: string }
+export interface MergedRange { mrIid: number; base: string | null; head: string; otherBranch?: string }
 
 /**
  * The change under test, as readiness proved it. `base` is the commit before
@@ -79,24 +81,25 @@ export interface MergedRef {
   author: string | null;
   url: string;
   /**
-   * Every MR that is the ticket's own and merged into the base branch, oldest
-   * first, the tested one last. Set only when there is more than one: the scope
+   * Every MR that is the ticket's own and merged into a target branch (dev or
+   * stage), oldest first, the tested one last. Set only when there is more than one: the scope
    * and the re-check then look at each one's change, not only the last.
    */
   ranges?: MergedRange[];
 }
 
 /**
- * `found`: tests to run, put to QA for approval. `not-found`: the scope found
- * none, with a suggested test. `recheck-not-found`: a re-check or QA's named
- * files found none either.
+ * `found`: tests to run, put to QA for approval. `not-found`: nothing to run —
+ * no automation module reaches the change, or QA's named files are not on the
+ * automation ref either. `recheck-not-found` is the same answer as an older
+ * journal recorded it, from the retired re-check.
  */
 export type ListKind = 'found' | 'not-found' | 'recheck-not-found';
 
 /** One list put to QA. The scope object it was rendered from is list-r<round>.json beside the journal. */
 export interface ListRecord {
   round: number;
-  /** What made it: the scope session, the deterministic re-check, or QA's `added` files. */
+  /** What made it: the scope session or QA's `added` files (`recheck`: the retired re-check, in an older journal). */
   source: 'scope' | 'recheck' | 'added';
   kind: ListKind;
   /** The spec files a run executes, in order. Empty for the two not-found kinds. */
@@ -129,9 +132,13 @@ export interface LocalTestsJournal {
   merged?: MergedRef;
   /** The last not-ready check, so a waiting ticket is re-checked on change or cadence, not every tick. */
   readiness?: { at: number; issueUpdatedAt: string | null; reason: string };
-  /** What QA asked of the next scope session. */
+  /**
+   * What QA asked of the next scope session: their `disapproved:` text.
+   * `write-temporary` is the retired "write a temporary test", in an older
+   * journal; it is read as a fresh scope.
+   */
   request?: { kind: 'write-temporary' | 'feedback'; feedback?: string; noteId: number; by: string };
-  /** The files QA's `disapproved: added …` named, not yet checked. */
+  /** The files QA's `added …` reply named, not yet checked. */
   addFiles?: { files: string[]; noteId: number; by: string };
   lists: ListRecord[];
   /** The highest note id a decision has CONSUMED. Replies count only above it and above the latest list's note. */
@@ -250,9 +257,9 @@ export function writeLtJournal(j: LocalTestsJournal): void {
 
 /**
  * A fresh record in state `new`. The run id is `l-…`, so its events, quota
- * rows and Cypress lease can never be mistaken for a Loop run's `r-…` or the
- * automation mode's `a-…`, and every post marker carries it, so a new request
- * never adopts an earlier request's notes.
+ * rows and Cypress lease can never be mistaken for a Loop run's `r-…`, and
+ * every post marker carries it, so a new request never adopts an earlier
+ * request's notes.
  */
 export function newLtJournal(iid: number, title: string): LocalTestsJournal {
   const now = Date.now();
@@ -411,8 +418,7 @@ function lockStale(held: LockBody | null): boolean {
  * It serialises the tick against `--local-tests` and against a second
  * conductor on the SAME desk, and it is what gc reads to know which tickets'
  * worktrees are in use. It does not reach other machines — which is why the
- * mode, like the Ready For Automation mode, is run by one desk: the one whose
- * .env sets ONESHOT_LOCAL_TESTS_REPO.
+ * mode is run by one desk: the one whose .env sets ONESHOT_LOCAL_TESTS_REPO.
  */
 export function acquireLtLock(iid: number, owner: string): (() => void) | null {
   const dir = localTestsDir(iid);

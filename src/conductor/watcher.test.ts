@@ -1,8 +1,7 @@
 import '../lib/test-project-env.js';
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { automationOwns, orderCandidates, triage } from './watcher.js';
-import { automationTriggerLabel, projectConfig } from '../lib/config.js';
+import { orderCandidates, triage } from './watcher.js';
 import { db } from '../lib/db.js';
 import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
 
@@ -57,60 +56,6 @@ test('resumable in-progress work counts as ready, not stalled', () => {
   assert.deepEqual(iids(orderCandidates(candidates, status)), [51, 50]);
 });
 
-// ------------------------------------------------ Loop vs the automation mode
-
-const TRIGGER = 'Ready For Automation';
-
-test('the Loop skips a ticket carrying Ready For Automation beside Loop, and says the automation mode owns it', () => {
-  // The default reads the trigger from config/project.json: the rule the scan applies.
-  assert.equal(automationTriggerLabel(), TRIGGER);
-  assert.equal(automationOwns(['Loop', TRIGGER]), `carries "${TRIGGER}" — the automation mode owns it`);
-  assert.equal(automationOwns(['Loop', 'Bug', TRIGGER, 'Ready For Deployment']),
-    `carries "${TRIGGER}" — the automation mode owns it`);
-});
-
-test('the trigger without Loop keeps the pipeline off, and the reason names both ways out instead of an owner', () => {
-  assert.equal(automationOwns([TRIGGER]),
-    `carries "${TRIGGER}", which keeps the pipeline off it — add "Loop" for automation test cases, `
-    + `or remove "${TRIGGER}" to run the pipeline`);
-  assert.equal(automationOwns(['Bug', TRIGGER, 'Ready For Deployment'])?.includes('the automation mode owns it'), false);
-});
-
-test('a plain Loop ticket is still the Loop\'s, whatever else it carries', () => {
-  assert.equal(automationOwns(['Loop']), null);
-  assert.equal(automationOwns(['Loop', 'Bug', 'Ready For Deployment', 'Automation Done']), null);
-  // Exact, case-sensitive names, like every other label check.
-  assert.equal(automationOwns(['Loop', 'Ready for Automation']), null);
-});
-
-test('the rule holds with the automation mode switched off on this desk', () => {
-  const was = process.env.ONESHOT_AUTOMATION;
-  delete process.env.ONESHOT_AUTOMATION;
-  try {
-    assert.notEqual(automationOwns(['Loop', TRIGGER]), null);
-  } finally {
-    if (was !== undefined) process.env.ONESHOT_AUTOMATION = was;
-  }
-});
-
-test('with no usable automation block there is no trigger to route on, and the Loop is unchanged', () => {
-  type Cfg = Parameters<typeof automationTriggerLabel>[0];
-  const real = projectConfig().automation!;
-  for (const cfg of [{}, { automation: undefined }, { automation: 'nope' }, { automation: { labels: {} } },
-    { automation: { labels: { trigger: '  ' } } }, { automation: { labels: { trigger: 7 } } },
-    // Names its trigger, but the mode could never run with it: nobody would work the ticket.
-    { automation: { labels: { trigger: TRIGGER } } },
-    { automation: { ...real, sheet: { ...real.sheet, spreadsheetId: '' } } },
-    { automation: { ...real, recheckMinutes: 0 } }]) {
-    const trigger = automationTriggerLabel(cfg as Cfg);
-    assert.equal(trigger, null, JSON.stringify(cfg));
-    assert.equal(automationOwns(['Loop', TRIGGER], trigger), null, JSON.stringify(cfg));
-  }
-  // A usable block routes on its trigger, and the real config reads without throwing.
-  assert.equal(automationTriggerLabel({ automation: { ...real } }), TRIGGER);
-  assert.doesNotThrow(() => automationTriggerLabel());
-});
-
 // ------------------------------------------------ the scan, over a stubbed GitLab
 
 const API = 'https://gitlab.example.com/api/v4/projects/acme%2Ferp';
@@ -133,35 +78,29 @@ function stubFetch(answer: (url: string) => unknown): { urls: string[]; restore:
   return { urls, restore: () => { globalThis.fetch = real; } };
 }
 
-test('the Loop\'s scan asks GitLab to leave Ready For Automation tickets off its one page', async () => {
+test('the Loop\'s scan reads the entry label alone: no label is left to another mode', async () => {
   const f = stubFetch(() => []);
   try {
     assert.equal((await issuesWithEntryLabel()).ok, true);
-    assert.deepEqual(f.urls, [
-      `GET ${API}/issues?state=opened&labels=Loop&not%5Blabels%5D=Ready%20For%20Automation`
-        + '&per_page=50&order_by=updated_at&sort=asc',
-    ]);
+    assert.deepEqual(f.urls, [`GET ${API}/issues?state=opened&labels=Loop&per_page=50&order_by=updated_at&sort=asc`]);
   } finally {
     f.restore();
   }
 });
 
-test('the scan skips a Loop + Ready For Automation ticket that reaches it anyway, before any claim is read', async () => {
+test('a Loop ticket that also carries the retired Ready For Automation label is the Loop\'s like any other', async () => {
+  // The Ready For Automation mode (test cases into the sheet) is gone, so its
+  // label no longer keeps the pipeline off a ticket.
   const unassigned = (iid: number, labels: string[]): Issue => ({ ...issue(iid), labels, assignees: [] });
   const f = stubFetch((url) => (url.includes('/notes') ? [] : undefined));
   try {
     const r = await triage([
-      unassigned(990401, ['Loop', TRIGGER]),
+      unassigned(990401, ['Loop', 'Ready For Automation']),
       unassigned(990402, ['Loop']),
-      unassigned(990403, ['Loop', 'Bug', TRIGGER, 'Ready For Deployment']),
+      unassigned(990403, ['Loop', 'Merged']),
     ]);
-    assert.deepEqual(iids(r.candidates), [990402]);
-    assert.deepEqual(r.skipped, [
-      { iid: 990401, why: `carries "${TRIGGER}" — the automation mode owns it` },
-      { iid: 990403, why: `carries "${TRIGGER}" — the automation mode owns it` },
-    ]);
-    // Only the Loop's own ticket had its claim notes read.
-    assert.ok(f.urls.length > 0 && f.urls.every((u) => u.includes('/issues/990402/notes')), f.urls.join('\n'));
+    assert.deepEqual(iids(r.candidates), [990401, 990402]);
+    assert.deepEqual(r.skipped, [{ iid: 990403, why: 'already Merged' }]);
   } finally {
     f.restore();
   }

@@ -7,9 +7,9 @@
  * A `<flag> <iid>` argument: whether the flag was given at all, and the iid
  * after it when that is a positive integer.
  *
- * `given` with a null `iid` is an operator's slip — `--automation '#8420'`, a
- * bare `--automation` (unquoted, bash reads `#8420` as a comment), or
- * `--automation=8420` — and the caller must refuse it. Read as "no flag", it
+ * `given` with a null `iid` is an operator's slip — `--local-tests '#8420'`, a
+ * bare `--local-tests` (unquoted, bash reads `#8420` as a comment), or
+ * `--local-tests=8420` — and the caller must refuse it. Read as "no flag", it
  * booted a full watching conductor that scans and claims Loop tickets and
  * spends sessions, when the operator asked for one pass on one ticket.
  */
@@ -27,9 +27,9 @@ export function iidFlag(argv: readonly string[], flag: string): { given: boolean
  * treat `Ready for Automation Testing` as present.
  *
  * `error` is the refusal the boot prints, or null. `--assume-label` is refused
- * outside a dry run: on a real desk that label is the request, put on by a
- * person, and a flag standing in for it would post on a ticket nobody asked
- * about. In a dry run nothing reaches GitLab, so it lets a rehearsal be run on
+ * outside a dry run: on a real desk that label is the request — the Loop puts
+ * it on when it merges the ticket, or a person does — and a flag standing in
+ * for it would post on a ticket nobody asked about. In a dry run nothing reaches GitLab, so it lets a rehearsal be run on
  * any merged ticket. It means nothing without `--local-tests`, and is refused
  * there too rather than ignored. The merged check applies either way.
  */
@@ -45,9 +45,23 @@ export function localTestsFlags(
     error = '--assume-label only goes with --local-tests <iid>';
   } else if (assumeLabel && !dryRun) {
     error = '--assume-label is only allowed with DRY_RUN=1 — on a real run the "Ready for Automation Testing" '
-      + 'label is the request, and only a person puts it on the ticket';
+      + 'label is the request: the Loop puts it on when it merges the ticket, or a person does';
   } else if (argv.some((a) => a.startsWith('--assume-label='))) {
     error = '--assume-label takes no value';
   }
   return { given, iid, assumeLabel, error };
+}
+
+/**
+ * A flag Oneshot no longer has, with what to do instead, or null.
+ *
+ * `--automation <iid>` ran the Ready For Automation mode, which is gone. Read
+ * as no flag at all it would boot a full watching conductor that claims Loop
+ * tickets and spends sessions — the slip iidFlag exists to stop — so an old
+ * command or runbook that still says it is refused instead.
+ */
+export function retiredFlagError(argv: readonly string[]): string | null {
+  if (!iidFlag(argv, '--automation').given) return null;
+  return '--automation was removed with the Ready For Automation mode: Oneshot no longer writes test cases into the '
+    + 'sheet (that lives in workstream-automation now). For a merged ticket\'s local Cypress run use --local-tests <iid>.';
 }

@@ -25,7 +25,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, extname, isAbsolute, join } from 'node:path';
-import { artifactDir, localTestsPatchFile, reviewersConfig, WORK_REPO } from './config.js';
+import { artifactDir, localTestsPatchFile, projectConfig, reviewersConfig, WORK_REPO } from './config.js';
 import { readArtifact, readJournal, updateJournal, type RunJournal } from './artifacts.js';
 import {
   addIssueNote, addMergeRequestNote, mergeRequestUrl, projectUrl, uploadFile, type Upload,
@@ -536,9 +536,10 @@ export function localTestsPlanNote(data: Record<string, unknown>, ctx: PublishCt
 }
 
 /**
- * Whether a failed local test fails on dev too, in the words the reader of the
- * results needs: is this the ticket's change? Exported so every note that
- * names a failure words one answer the same way.
+ * Whether a failed local test fails on the tested branch too (dev, or stage for
+ * a fix merged there), in the words the reader of the results needs: is this
+ * the ticket's change? Exported so every note that names a failure words one
+ * answer the same way.
  */
 export function failingOnDevText(v: boolean | null | undefined): string {
   if (v === true) return 'yes — not caused by this ticket';
@@ -587,21 +588,26 @@ export function runNotes(run: { notes?: unknown } | null | undefined): string[] 
  * One row per test that needs a look — failed, then passed only on a retry,
  * then skipped — and one row per spec for what passed cleanly, so forty green
  * tests do not bury the red one. Each failure says whether it also fails on
- * dev, because that is the question whoever reads the results is actually
- * answering: is this the ticket's change? A test that passed only on its retry is
- * its own row, not a green count: it is a flaky test, or a change that made
- * one flaky, and either way somebody should know.
+ * the tested branch without the change (`opts.branch`: dev, or stage for a fix
+ * merged there; else the base branch), because that is the question whoever
+ * reads the results is actually answering: is this the ticket's change? A test
+ * that passed only on its retry is its own row, not a green count: it is a
+ * flaky test, or a change that made one flaky, and either way somebody should
+ * know.
  *
  * Whatever cut the run short (`reason`, e.g. Cypress stopped at its deadline)
  * is in the header line, and the script's notes close the note — the one
- * place that says why "failing on dev too?" reads unknown.
+ * place that says why "failing on <branch> too?" reads unknown.
  *
  * The videos of failed specs are attached under the note (they render as
  * players on GitLab), which puts them after the closing lines rather than
  * beside their rows; any too large to upload is named instead.
  */
-export function localTestsReportNote(data: Record<string, unknown>, ctx: PublishCtx): Publication | null {
+export function localTestsReportNote(
+  data: Record<string, unknown>, ctx: PublishCtx, opts: { branch?: string } = {},
+): Publication | null {
   const run = data as Partial<LocalTestsRun>;
+  const branch = opts.branch?.trim() || projectConfig().branches.base || 'dev';
   if (run.status === 'skipped') {
     const notRunnable = notRunnableItems(run.notRunnable);
     return {
@@ -651,7 +657,7 @@ export function localTestsReportNote(data: Record<string, unknown>, ctx: Publish
       plural(totals.tests, 'test')}, ${runMinutes(run, results)} min)${cutShort ? `. ${cutShort}.` : ''}`,
   ];
   if (rows.length) {
-    parts.push(['| Spec | Result | Failing on dev too? | Reason |', '|---|---|---|---|',
+    parts.push([`| Spec | Result | Failing on ${tableCell(branch)} too? | Reason |`, '|---|---|---|---|',
       ...rows.slice(0, MAX_RESULT_ROWS)].join('\n')
       + (rows.length > MAX_RESULT_ROWS ? `\n\n_…and ${rows.length - MAX_RESULT_ROWS} more rows not shown._` : ''));
   }

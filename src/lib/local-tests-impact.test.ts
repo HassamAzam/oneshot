@@ -24,9 +24,18 @@ const impact = require(SCRIPT) as {
   isDestructive: (src: string) => boolean;
   parseTestIds: (src: string) => Record<string, Record<string, string>>;
   selectorTestids: (src: string) => Set<string>;
+  specTags: (src: string) => string[];
+  caseNumber: (file: string) => number[] | null;
+  byCase: (a: string, b: string) => number;
+  mainSpecsOf: (modules: string[], specFiles: string[], tagsOf: Map<string, string[]>) =>
+    Array<{ file: string; module: string; basis: 'smoke' | 'first' }>;
+  MAIN_SPECS_PER_MODULE: number;
 };
 
-interface Spec { file: string; module: string; its: number; ciSeconds: number | null; destructive: boolean; reasons: string[] }
+interface Spec {
+  file: string; module: string; its: number; ciSeconds: number | null; destructive: boolean; smoke: boolean; main: boolean; reasons: string[];
+}
+interface MainSpec { file: string; module: string; basis: 'smoke' | 'first'; its: number; ciSeconds: number | null; destructive: boolean }
 interface Dropped { value: string; source: string; renamedTo: string | null; pageObjects: string[]; specs: string[] }
 interface Impact {
   changedFiles: { frontend: string[]; backend: string[]; migrations: string[] };
@@ -40,6 +49,10 @@ interface Impact {
     generic: string[];
   };
   specs: Spec[];
+  mainSpecs: MainSpec[];
+  mainTotals: { specs: number; its: number; estimatedMinutes: number };
+  screenSpecs: Array<{ file: string; module: string; screens: string[]; via: string[]; matched: number; its: number }>;
+  screenSpecsTotal: number;
   removedTestidStillUsed: Dropped[];
   addedTestidUnused: Array<{ value: string; usedBy: string[] }>;
   totals: { specs: number; its: number; ciSeconds: number; untimed: number; estimatedMinutes: number };
@@ -359,4 +372,152 @@ test('a per-row testid function and a template selector meet on the same prefix'
 test('reading a spec is not running it: a raw delete request is destructive, a GET is not', () => {
   assert.equal(impact.isDestructive("cy.request({ method: 'DELETE', url: '/api/x' });"), true);
   assert.equal(impact.isDestructive("cy.request({ method: 'GET', url: '/api/x' });"), false);
+});
+
+/* ------------------------------------------------------------------ main functionality */
+
+test('every impacted module gives its main-functionality specs; a module with no smoke tag gives its first cases', () => {
+  // The fixture tags every spec `regression` only, so each mapped module falls back to its first cases.
+  assert.deepEqual(result.mainSpecs.map((m) => [m.module, m.file.split('/').pop(), m.basis]), [
+    ['expenses', 'EXP_01.ts', 'first'],
+    ['home', 'HOME_01.ts', 'first'],
+    ['teamReviewA', 'TR_01.ts', 'first'],
+    ['teamReviewB', 'TR_50.ts', 'first'],
+  ]);
+  assert.equal(result.mainSpecs.find((m) => m.file.endsWith('TR_50.ts'))?.its, 2, 'priced like every candidate');
+  assert.equal(result.mainTotals.specs, 4);
+  // A testid match outside the mapped modules is a candidate, never a module's main test.
+  const org = result.specs.find((x) => x.file.endsWith('ORG_01.ts'))!;
+  assert.equal(org.main, false);
+  assert.ok(result.specs.filter((x) => x.main).every((x) => result.mainSpecs.some((m) => m.file === x.file)));
+  assert.ok(result.specs.every((x) => x.smoke === false));
+});
+
+test('a spec\'s tags are the TestFilters list, and a commented-out wrapper tags nothing', () => {
+  assert.deepEqual(impact.specTags("TestFilters(['regression', 'smoke'], () => {"), ['regression', 'smoke']);
+  assert.deepEqual(impact.specTags('TestFilters( [ "smoke" ,\n "LV_480" ], () => {'), ['LV_480', 'smoke']);
+  assert.deepEqual(impact.specTags("// TestFilters(['smoke'], () => {\nTestFilters(['regression'], () => {"), ['regression']);
+  assert.deepEqual(impact.specTags("describe('no filter', () => {});"), []);
+});
+
+test('case numbers order a module\'s specs the way QA number them: sub-cases are counted, not decimals', () => {
+  assert.deepEqual(impact.caseNumber('cypress/e2e/leaves/LV_04.1_team_on_leave.ts'), [4, 1]);
+  assert.deepEqual(impact.caseNumber('cypress/e2e/trainings/trainings_01_dashboard.ts'), [1]);
+  assert.equal(impact.caseNumber('cypress/e2e/leaves/no_number.ts'), null);
+  const files = ['x/TR_74.13_b.ts', 'x/no_number.ts', 'x/TR_74.2_a.ts', 'x/TR_74_c.ts', 'x/TR_10_d.ts', 'x/TR_9_e.ts'];
+  assert.deepEqual([...files].sort(impact.byCase),
+    ['x/TR_9_e.ts', 'x/TR_10_d.ts', 'x/TR_74_c.ts', 'x/TR_74.2_a.ts', 'x/TR_74.13_b.ts', 'x/no_number.ts']);
+});
+
+test('main picks: smoke-tagged first in case order, capped per module, else the first cases', () => {
+  const files = [
+    'cypress/e2e/leaves/LV_29_calendar.ts', 'cypress/e2e/leaves/LV_13_submit.ts', 'cypress/e2e/leaves/LV_01_nav.ts',
+    'cypress/e2e/leaves/LV_06.1_modal.ts', 'cypress/e2e/leaves/LV_06_modal.ts', 'cypress/e2e/leaves/LV_14_dashboard.ts',
+    'cypress/e2e/leaves/LV_17.1_cancel.ts', 'cypress/e2e/leaves/LV_19_half_day.ts', 'cypress/e2e/leaves/LV_40_x.ts',
+    'cypress/e2e/payroll/PRL_10_report.ts', 'cypress/e2e/payroll/PRL_02_dashboard.ts', 'cypress/e2e/payroll/PRL_01_nav.ts',
+    'cypress/e2e/home/HOME_01.ts',
+  ];
+  const smoke = ['LV_13_submit', 'LV_14_dashboard', 'LV_17.1_cancel', 'LV_19_half_day', 'LV_29_calendar', 'LV_40_x'];
+  const tags = new Map(files.map((f) => [f, smoke.some((x) => f.includes(x)) ? ['regression', 'smoke'] : ['regression']]));
+  const picks = impact.mainSpecsOf(['leaves', 'payroll'], files, tags);
+  assert.equal(impact.MAIN_SPECS_PER_MODULE, 5);
+  assert.deepEqual(picks.map((m) => [m.module, m.file.split('/').pop(), m.basis]), [
+    ['leaves', 'LV_13_submit.ts', 'smoke'],
+    ['leaves', 'LV_14_dashboard.ts', 'smoke'],
+    ['leaves', 'LV_17.1_cancel.ts', 'smoke'],
+    ['leaves', 'LV_19_half_day.ts', 'smoke'],
+    ['leaves', 'LV_29_calendar.ts', 'smoke'],
+    ['payroll', 'PRL_01_nav.ts', 'first'],
+    ['payroll', 'PRL_02_dashboard.ts', 'first'],
+    ['payroll', 'PRL_10_report.ts', 'first'],
+  ], 'leaves: its smoke tests, the sixth left out; payroll tags none, so its first cases; home is not impacted');
+  assert.deepEqual(impact.mainSpecsOf([], files, tags), []);
+});
+
+/* ------------------------------------------------------------------ the changed screen */
+
+/**
+ * A fix that changes logic inside a popup and touches no testid line: the testid match reaches
+ * nothing, while specs that open the popup exist. `screenSpecs` lists those — through the page
+ * object that selects what the popup renders — and leaves out the main specs and the specs that
+ * only use another page of the module.
+ */
+function screenCase(): Impact {
+  const erp = mkdtempSync(join(tmpdir(), 'lti-screen-erp-'));
+  const wsa = mkdtempSync(join(tmpdir(), 'lti-screen-wsa-'));
+  try {
+    git(erp, 'init', '-q', '-b', 'dev');
+    git(erp, 'config', 'user.email', 'test@example.com');
+    git(erp, 'config', 'user.name', 'Test');
+    const detail = (list: string) => [
+      "import { organogramTestIds } from '../testIds';",
+      'export const PersonDetail = ({ person }) => (',
+      '  <div data-testid={organogramTestIds.personDetailModal}>',
+      '    <ul data-testid={organogramTestIds.personTeams}>',
+      `      {${list}.map((t) => <li key={t.id}>{t.name}</li>)}`,
+      '    </ul>',
+      '    <button data-testid={organogramTestIds.nextButton} />',
+      '  </div>',
+      ');',
+    ].join('\n');
+    write(erp, {
+      'frontend/src/components/organogram/testIds.js': [
+        'export const organogramTestIds = {',
+        "    personDetailModal: 'person-detail-modal',",
+        "    personTeams: 'person-teams-container',",
+        "    nextButton: 'person-next-button',",
+        '};',
+      ].join('\n'),
+      'frontend/src/components/organogram/components/PersonDetail.js': detail('person.teams'),
+    });
+    git(erp, 'add', '.');
+    git(erp, 'commit', '-qm', 'base');
+    git(erp, 'checkout', '-qb', 'ticket');
+    write(erp, { 'frontend/src/components/organogram/components/PersonDetail.js': detail('dedupe(person.teams)') });
+    git(erp, 'add', '.');
+    git(erp, 'commit', '-qm', 'ticket');
+
+    const it = (name: string) => `        it('${name}', () => {});`;
+    write(wsa, {
+      'cypress/support/filter_tests.ts': 'export default (tags, fn) => fn();\n',
+      'cypress/Pages/organogram/profile_card.ts': pageObject('person-detail-modal', 'person-teams-container', 'person-next-button'),
+      'cypress/Pages/organogram/teams.ts': pageObject('team-tree'),
+      'cypress/e2e/organogram/ORG_01_nav.ts': spec(['../../Pages/organogram/teams'], it('opens the tree'))
+        .replace("TestFilters(['regression']", "TestFilters(['regression', 'smoke']"),
+      'cypress/e2e/organogram/ORG_02_tree.ts': spec(['../../Pages/organogram/teams'], it('walks the tree')),
+      'cypress/e2e/organogram/ORG_05_card.ts': spec(['../../Pages/organogram/profile_card'], it('moves with the arrows')),
+      'cypress/e2e/organogram/ORG_39_teams.ts': spec(['../../Pages/organogram/profile_card'], it('lists the current teams')),
+      'cypress/e2e/teamReviewB/TR_126_person.ts': spec(['../../Pages/organogram/profile_card'], it('opens a person')),
+    });
+    const r = run('--erp', erp, '--base', 'dev', '--head', 'ticket', '--automation', wsa, '--json');
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    return JSON.parse(r.stdout) as Impact;
+  } finally {
+    rmSync(erp, { recursive: true, force: true });
+    rmSync(wsa, { recursive: true, force: true });
+  }
+}
+
+test('a logic-only change to a popup: no testid match, but the specs that open the popup are screen candidates', () => {
+  const r = screenCase();
+  assert.deepEqual(r.modules, ['organogram']);
+  assert.deepEqual(r.specs.filter((x) => x.reasons.some((why) => !why.startsWith('module '))), [], 'no testid line changed');
+  assert.deepEqual(r.mainSpecs.map((m) => m.file.split('/').pop()), ['ORG_01_nav.ts'], 'the module\'s smoke test');
+  assert.deepEqual(r.screenSpecs.map((x) => [x.file.split('/').pop(), x.matched]), [
+    ['ORG_05_card.ts', 3],
+    ['ORG_39_teams.ts', 3],
+    ['TR_126_person.ts', 3],
+  ], 'the impacted module first; never the main spec, never a spec that only uses another page');
+  const first = r.screenSpecs[0]!;
+  assert.deepEqual(first.screens, ['frontend/src/components/organogram/components/PersonDetail.js']);
+  assert.deepEqual(first.via, ['cypress/Pages/organogram/profile_card.ts']);
+  assert.equal(first.its, 1);
+  assert.equal(r.screenSpecsTotal, 3);
+});
+
+test('the shared fixture\'s changed screens list no spec twice and none already on the list', () => {
+  const taken = new Set([...result.specs.filter((x) => x.reasons.some((why) => !why.startsWith('module '))).map((x) => x.file),
+    ...result.mainSpecs.map((m) => m.file)]);
+  for (const x of result.screenSpecs) assert.ok(!taken.has(x.file), x.file);
+  assert.equal(new Set(result.screenSpecs.map((x) => x.file)).size, result.screenSpecs.length);
 });

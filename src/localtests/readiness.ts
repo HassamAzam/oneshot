@@ -3,8 +3,7 @@
  * and the one call that asks for it.
  *
  * The verdict itself is made by hooks/local-tests-ready.cjs — dependency-free
- * CJS this module starts as its own process, the way the Ready For Automation
- * mode starts hooks/automation-ready.cjs. One implementation of "is this
+ * CJS this module starts as its own process. One implementation of "is this
  * ticket's change merged, and is it the real change" is the point: a second
  * copy here would drift. This module declares the shape that file prints under
  * `localTestsReadiness`, reads it back out of whatever the process printed, and
@@ -37,6 +36,12 @@ export interface MergedRange {
   base: string | null;
   /** The merge commit, else the squash commit, else the MR's head (a fast-forward). */
   head: string;
+  /**
+   * The target branch, when this MR went into another one than the tested MR
+   * did (stage, with dev's merge tested): the tested code may not hold its
+   * change, and the list says so. Absent for the tested branch's own merges.
+   */
+  otherBranch?: string;
 }
 
 /** The merge request the hook proved merged: the change the tests run against. */
@@ -59,7 +64,7 @@ export interface MergedMr {
   mergedAt: string | null;
   url: string;
   /**
-   * Every one of the ticket's own MRs merged into the base, oldest first, the
+   * Every one of the ticket's own MRs merged into a target branch, oldest first, the
    * last being this one; just this one when nothing linked closes the ticket
    * or names it in its source branch. Use mergedRanges(); optional for the same reason as `base`.
    */
@@ -109,7 +114,8 @@ function isSha(v: unknown): v is string {
 }
 
 function isRange(v: unknown): v is MergedRange {
-  return isRecord(v) && typeof v.mrIid === 'number' && isSha(v.head) && (v.base === null || isSha(v.base));
+  return isRecord(v) && typeof v.mrIid === 'number' && isSha(v.head) && (v.base === null || isSha(v.base))
+    && (v.otherBranch === undefined || typeof v.otherBranch === 'string');
 }
 
 /**
@@ -177,7 +183,8 @@ export function readinessFromOutput(out: unknown, iid: number): LocalTestsReadin
 /** What the conductor already knows, handed to the script so it does not decide policy twice. */
 export interface ReadyInputs {
   trigger: string;
-  base: string;
+  /** The branches a merge may go into (localTestsTargetBranches()); empty is a config problem the script names. */
+  targets: string[];
   /** A dry run told to treat the trigger as present (`--assume-label`). */
   assumeLabel?: boolean;
 }
@@ -192,7 +199,7 @@ export function localTestsReadyEnv(iid: number, o: ReadyInputs): Record<string, 
   const cfg = projectConfig();
   let token = '';
   try { token = readToken(); } catch { token = ''; }
-  const release = cfg.automation?.releaseBranchPattern ?? '';
+  const release = cfg.localTests?.releaseBranchPattern ?? '';
   return {
     ONESHOT_HOME,
     ONESHOT_TICKET: String(iid),
@@ -200,7 +207,7 @@ export function localTestsReadyEnv(iid: number, o: ReadyInputs): Record<string, 
     ONESHOT_LOCAL_TESTS_PROJECT: cfg.gitlab.project,
     ONESHOT_LOCAL_TESTS_TOKEN: token,
     ONESHOT_LOCAL_TESTS_TRIGGER: o.trigger,
-    ONESHOT_LOCAL_TESTS_BASE: o.base,
+    ONESHOT_LOCAL_TESTS_TARGETS: JSON.stringify(o.targets),
     ONESHOT_LOCAL_TESTS_PROTECTED: JSON.stringify(cfg.branches.protected ?? []),
     ONESHOT_LOCAL_TESTS_RELEASE: typeof release === 'string' ? release : '',
     ONESHOT_LOCAL_TESTS_ASSUME_LABEL: o.assumeLabel ? '1' : '',

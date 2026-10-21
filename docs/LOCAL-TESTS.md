@@ -1,23 +1,28 @@
 # Local automation tests — setup guide
 
-When a ticket's change has been **merged** and QA puts the label
-**`Ready for Automation Testing`** on it, Oneshot can find the
-**workstream-automation (Cypress) tests that reach that change**, ask QA on the
-ticket, and once QA replies `approved`, run exactly those tests on your machine
-against the merged code and post the results. The ticket then moves to
-**`Automation Testing Done`**.
+When Oneshot **merges** a ticket, it puts **`Ready for Automation Testing`** on it
+together with `Merged`. From there Oneshot finds the **modules the change
+touched** and the **workstream-automation (Cypress) tests to run** for them — the
+tests that reach the change plus each module's main-functionality tests — posts
+that list on the ticket for QA, and once QA replies `approved`, runs exactly those
+tests on your machine against the merged code and posts the **automation report**.
+The ticket then moves to **`Automation Testing Done`**. That report is the last
+thing Oneshot does on a ticket.
 
-This runs **after the merge**, as its own mode in the same conductor. The Loop
-pipeline (research → … → mr → merge) does not run these tests and does not wait
-for them.
+This runs **after the merge**, as its own mode in the same conductor, and it needs
+no command: the conductor you already run (`npm start`) picks every labelled
+ticket up on its own. The Loop pipeline (research → … → mr → merge) does not run
+these tests and does not wait for them. A person can also put the label on any
+other merged ticket to ask for a run.
 
 This guide is for a desk that already runs Oneshot with **only the ERP repo and the
 ERP database**. It adds two things: the automation repo and a copy of the
 automation database. Your ERP repo and your ERP database (`hrdb`) are never changed
 by this mode.
 
-> The mode is **off** on a desk until `ONESHOT_LOCAL_TESTS_REPO` is set in `.env`.
-> A desk without it behaves exactly as before.
+> The mode **runs** only on a desk that sets `ONESHOT_LOCAL_TESTS_REPO` in `.env`.
+> Every other desk only puts the label on when it merges a ticket, and the desk
+> that runs the mode picks the ticket up.
 >
 > **Switch it on for one desk per team.** The lock that stops a ticket being
 > picked up twice is a file on the desk, so it does not reach other machines. Two
@@ -158,15 +163,16 @@ These are the same for everyone. Change them in a PR, not per desk.
 
 | Setting | Meaning | Default |
 |---|---|---|
-| `localTests.enabled` | Team-wide off switch | `true` |
+| `localTests.enabled` | Team-wide switch: `true` makes every desk's merge put the trigger label on, and lets the mode run on the desk that has the clone; `false` turns both off | `true` |
 | `localTests.baselineDb` | The database every run copies | `hrdb_automation_baseline_20261002` |
 | `localTests.pgHost` / `pgPort` / `pgUser` | Where that Postgres listens (a desk can override in `.env`) | `127.0.0.1` / `5432` / your OS user |
 | `localTests.dbPrefix` | Name prefix of the per-run copies, which cleanup is allowed to drop | `oneshot_lt_` |
 | `localTests.automationRef` | Which automation code the tests come from | `origin/master` |
 | `localTests.allowedPaths` | The folders a temporary test edit may touch. An edit outside them, or one that weakens a test (fewer assertions, `.skip`, `force: true`, a long wait) or reaches outside the browser (`cy.exec`, `cy.task`, `cy.writeFile`, `Cypress.env`), is called out in bold on the list comment, file by file with the reason, just before QA is asked to approve | `cypress/Pages/`, `cypress/fixtures/`, `cypress/e2e/` |
-| `localTests.maxSpecs` / `maxRunMinutes` | A ceiling, not a target. The AI picks the tests that can see the change plus at most 5 smoke tests from the module (the health check), and never pads the list with unrelated tests. If no existing test reaches the change, it writes none on its own: the list is empty and a test is suggested (see the reply options below). Tests that can see the change are never cut: if they alone go over, the whole list stays and the comment says so. `maxRunMinutes` is also the time limit for each Cypress run (the ticket run, the retry, the run on the base), so a long list may not finish | `40` / `45` |
+| `localTests.maxSpecs` / `maxRunMinutes` | A ceiling, not a target. The list is the tests that can see the change (up to 3 of them chosen because they go through the changed screen) plus every impacted module's main-functionality tests (its `smoke`-tagged specs, at most 5, or its first 5 cases when it tags none), and it is never padded with unrelated tests. Oneshot never writes or suggests a test: if no existing test reaches the change, the main-functionality tests are what runs. The list is never cut: if it goes over, the whole list stays and the comment says so. `maxRunMinutes` is also the time limit for each Cypress run (the ticket run, the retry, the run on the base), so a long list may not finish | `40` / `45` |
+| `localTests.releaseBranchPattern` | Source branches that make an MR a release promotion, not the ticket's change, so the readiness check never tests a release merge | `^Adhoc-\d{4}-\d{2}-\d{2}$` |
 | `localTests.devApproval` / `failuresBlock` | Not used any more: QA approves every run before it starts, and a finished run is marked done whether its tests passed or failed. Kept because the run script reads the block field for field | `any` / `false` |
-| `labels.localTestsTrigger` | Put on the ticket by QA; starts the mode once the ticket's MR is merged | `Ready for Automation Testing` |
+| `labels.localTestsTrigger` | Put on the ticket by the Loop when it merges it (beside `Merged`), or by a person; starts the mode once the ticket's MR is merged | `Ready for Automation Testing` |
 | `labels.localTestsRunning` | Replaces the trigger while QA's approved list runs | `Running TestCases Locally` (renamed from `TestCase Run Locally`) |
 | `labels.localTestsDone` | Replaces either when the run is over, passed or failed, or when QA approves going on with no local test | `Automation Testing Done` |
 
@@ -175,38 +181,52 @@ These are the same for everyone. Change them in a PR, not per desk.
 ## What happens on a ticket
 
 ```
-QA adds "Ready for Automation Testing"  +  the ticket's MR is merged into dev
+Oneshot merges the ticket ──▶ "Merged" + "Ready for Automation Testing"  (one label edit)
+   │     (or a person puts the label on any other merged ticket)
+   ▼     the desk that runs this mode, on its next tick
+"Ready for Automation Testing"  +  the ticket's MR is merged into dev or stage
    │     (labelled, not merged yet: Oneshot waits quietly and checks again later)
    ▼
 throwaway ERP checkout at the MR's merge commit
    ▼
-local-tests-scope   the AI picks the existing tests that reach the change
+local-tests-scope   finds the impacted modules and picks the tests to run:
+                    the ones that check the change + each module's main-functionality tests
    ▼
-ONE comment on the ticket: the list (or "no test found"), @QA, how to reply
+ONE comment on the ticket: the impacted-module report (or "nothing to run"), @QA, how to reply
    │
-   ├─ disapproved: …  ──▶ check again / add that file / write a temporary test /
-   │                      redo the list ──▶ a new comment, and it waits again
+   ├─ added <test file>  ──▶ that file joins the list   ─┐
+   ├─ disapproved: …     ──▶ the AI redoes the list      ┴─▶ a new comment, and it waits again
    ▼ approved
 label "Ready for Automation Testing" ──▶ "Running TestCases Locally"
    ▼
 local-tests-run     plain code: copy the DB, build the merge commit, run Cypress,
                     retry failures, re-run them on the base, clean up
    ▼
-results comment ──▶ label "Running TestCases Locally" ──▶ "Automation Testing Done"
-                    (passed or failed)
+automation report ──▶ label "Running TestCases Locally" ──▶ "Automation Testing Done"
+                      (passed or failed) — the last thing Oneshot does on the ticket
 ```
 
-1. **When it starts.** Both must hold:
+1. **How it starts.** When Oneshot merges a ticket, the same label edit that puts
+   `Merged` on puts **`Ready for Automation Testing`** on too, as long as
+   `localTests.enabled` is `true`. Every desk does this, so the one desk that runs
+   this mode sees every merged ticket. A person can put the label on any other
+   merged ticket. Then both must hold:
    - the ticket carries **`Ready for Automation Testing`**, and
-   - the ticket's own merge request is **merged into `dev`** (`branches.base`).
+   - the ticket's own merge request is **merged into `dev` or `stage`**
+     (`localTests.targetBranches`). The tests run on the branch it went into: a
+     hotfix merged into `stage` is tested on stage's merge commit, and a failure
+     is re-run on stage just before it.
      Its own MR is one that closes the ticket, or has the ticket number in its
      branch name; a `#N` in another MR's title only mentions it. A promotion or backmerge (from `stage`, `master`,
-     `main` or `dev`, or titled like `stage -> dev` or `Backmerge`) never counts.
+     `main` or `dev`, a release branch like `Adhoc-2026-10-19`, or titled like `stage -> dev` or `Backmerge`) never counts,
+     so a fix merged into stage and backmerged into dev later is tested once. A ticket with its own MRs
+     merged into both has the latest one tested, and the tests chosen for all of them; the list names
+     an MR that went into the other branch.
 
    If the ticket has its own MR but it is not merged yet, Oneshot posts nothing
    and checks again on later passes — even when some other MR that only
    mentions the ticket is merged. Only when no linked MR closes the ticket or
-   names it in its branch does any linked MR merged into `dev` count.
+   names it in its branch does any linked MR merged into `dev` or `stage` count.
 
    Any assignee, on the one desk that runs this mode (see the note at the top;
    a desk also skips a ticket another desk has already posted a list for).
@@ -218,39 +238,48 @@ results comment ──▶ label "Running TestCases Locally" ──▶ "Automatio
    several merged MRs of its own, the tests are chosen for the changes of all of
    them, and the comment names each one.
 2. **Choosing the tests.** Oneshot checks out the merge commit in a throwaway
-   folder and the AI (`local-tests-scope`) picks the existing automation tests
-   that reach what changed, plus at most 5 smoke tests from the module as a
-   health check. If the change renamed something on purpose (a testid, a label),
-   it updates the existing test to follow it, **for this run only**; those edits
-   are attached to the comment as a patch. If **no existing test reaches the
-   change, it does not write one on its own**: it says so and suggests one.
+   folder and works out which automation **modules** the change touched (from
+   the folders it changed, `skills/local-tests-impact/scripts/modules-map.json`).
+   For each impacted module it takes the module's **main-functionality tests**:
+   the specs the automation team tagged `smoke`, lowest case number first, at most
+   5 — or, for a module with no `smoke` tag, its first 5 cases. On top of those, the
+   AI (`local-tests-scope`) adds every existing test that reaches what changed (a
+   page object that selects a testid the change touched), and **up to 3 tests that
+   go through the screen the change touched** — most fixes change logic, not
+   testids, so the script lists every test that opens a changed screen and the AI
+   keeps the ones whose steps use the changed part (the list a fix filters, the
+   button whose handler it edits). It never adds unrelated tests to fill the time. If the change renamed something on purpose (a testid, a
+   label), it updates the existing test to follow it, **for this run only**; those
+   edits are attached to the comment as a patch. **It never writes or suggests a
+   new test**: only tests that already exist in workstream-automation run.
 3. **The comment, and the wait.** Oneshot always asks before it runs anything —
    QA approves every local run. It posts one comment, in one of two shapes:
-   - **Tests found:** "Oneshot found N automation tests for this ticket — waiting
-     for QA approval to run them locally." It says what changed in one line, then
-     a table: 🆕 a temporary test written for this run, ✔️ an existing test that
-     checks the change, and the health-check rows. Then the counts (existing
-     tests found, tests added for this run, health checks, about how many
-     minutes), the temporary changes with the patch attached, and an @mention
-     of the QA reviewers (`config/reviewers.json` `qa`: Anosha, Arsal). If a
+   - **The impacted-module report:** "Impacted modules: Leaves, Payroll — Oneshot
+     will run N automation tests (M test cases) locally once QA approves." It says what changed
+     in one line, then a table by module: ✔️ a test that checks the change (a
+     testid links it to the change, or it goes through the changed screen), ⭐ one
+     of the module's main-functionality tests, ➕ a file QA added. Then the counts
+     (tests that check the change, main-functionality tests, about how many
+     minutes), the temporary changes with the patch attached, and an @mention of
+     the QA reviewers (`config/reviewers.json` `qa`: Anosha, Arsal). If a
      temporary change weakens a test, reaches outside the browser or touches a
      file outside `localTests.allowedPaths`, a bold line just before the
      @mention names each such file and why: read the patch before approving.
-   - **No test found:** "Oneshot found no automation test for this ticket." It
-     says what changed, which workstream-automation commit it checked
-     (`master`, by its short sha), the suggested test, and the same @mention.
+   - **Nothing to run:** "Oneshot found no automation test to run locally for this
+     ticket." This only happens when the change reaches no automation module (a
+     backend-only change no screen with a module reaches, say). It says what
+     changed, why, which workstream-automation commit it checked (`master`, by its
+     short sha), and the same @mention.
 4. **QA replies.** Only the first reply from a QA reviewer after the comment
    counts; anyone else's comments are ignored. With no reply, Oneshot keeps
-   waiting (a cheap check on each pass).
+   waiting (a cheap check on each pass). There are three answers:
 
    | Reply | What happens |
    |---|---|
    | `approved` (list has tests) | The label moves from `Ready for Automation Testing` to `Running TestCases Locally`, and **exactly** that list runs |
-   | `approved` (no test found) | Nothing runs. The label moves to `Automation Testing Done`, and Oneshot records "no automation test exists for this change; approved by @… without local tests" |
-   | `disapproved: please check again` | For when a test has since been added to workstream-automation `master`. A quick re-check, no AI and nothing else repeated: Oneshot fetches the latest `master` and checks again. Found → a new list comment, and it waits for `approved` again. Still nothing → "Checked workstream-automation master again (commit …): still no automation test reaches this change." with the same reply options |
-   | `disapproved: added cypress/e2e/…/my_test.cy.ts` | Run that exact file. Oneshot checks each path exists on `master`, adds the ones that do to the list, names the ones it could not find, and posts the list again |
-   | `disapproved: write a temporary test` | The AI writes one test for this run only (never committed). It shows as 🆕 in the new list comment |
-   | `disapproved:` with any other change, e.g. `- also run LV_23` or `- remove LV_21` | The AI redoes the list with QA's bullets and posts it again |
+   | `approved` (nothing to run) | Nothing runs. The label moves to `Automation Testing Done`, and Oneshot records "no automation test exists for this change; approved by @… without local tests" |
+   | `added cypress/e2e/…/my_test.ts` | Run that exact file as well. Oneshot fetches workstream-automation `master`, checks each path exists there, adds the ones that do to the list, names the ones it could not find, and posts the list again. `disapproved: added …` and a sentence such as "I have added cypress/e2e/…/my_test.ts" work the same |
+   | `disapproved:` with what to change, e.g. `- also run LV_23` or `- remove LV_21` | The AI redoes the list with QA's bullets, on a fresh checkout of `master`, and posts it again. "Check again" is just such a change: the new list is chosen from `master` as it is now |
 
 5. **The run.** Once approved, Oneshot posts "Local automation run started — N
    tests, about X min…" and:
@@ -270,15 +299,16 @@ results comment ──▶ label "Running TestCases Locally" ──▶ "Automatio
    the ports in use by another local-tests run, or something connected to the
    baseline), Oneshot doesn't record an error: it waits and tries again on a
    later pass.
-6. **Results.** **"Local automation results"** shows pass/fail counts (and says so
-   in the first line if Cypress was stopped at the time limit), a table with a
-   reason for each failure and whether it fails on dev too, the tests that passed
-   only on a retry, videos of failed tests, tests that can't run locally,
-   temporary/new tests used, and any notes from the run. It ends with "Marked
-   **Automation Testing Done**." and the label moves from
-   `Running TestCases Locally` to `Automation Testing Done` — **whether the tests
-   passed or failed**. A failure that does *not* also fail on dev @mentions the
-   MR's author, for their information.
+6. **The automation report.** **"Local automation results"** shows pass/fail
+   counts (and says so in the first line if Cypress was stopped at the time
+   limit), a table with a reason for each failure and whether it fails on the
+   tested branch too (dev, or stage for a fix merged there),
+   the tests that passed only on a retry, videos of failed tests, tests that can't
+   run locally, and any notes from the run. It ends with "Marked **Automation
+   Testing Done**." and the label moves from `Running TestCases Locally` to
+   `Automation Testing Done` — **whether the tests passed or failed**. A failure
+   that does *not* also fail on that branch @mentions the MR's author, for their
+   information. This is the last thing Oneshot does on the ticket.
 7. **If the run could not happen** (a setup error: no baseline, a patch that no
    longer applies, the app would not build), Oneshot posts the error, takes
    `Running TestCases Locally` off and puts `Ready for Automation Testing` back.
@@ -292,7 +322,8 @@ results comment ──▶ label "Running TestCases Locally" ──▶ "Automatio
 9. **Asking for a run again.** Put `Ready for Automation Testing` back on a
    ticket that is done. That is a new request: the tests are chosen again, QA
    approves again, and Cypress runs again — even when nothing has changed.
-   Earlier results are never posted again as if they were new.
+   Earlier results are never posted again as if they were new. A follow-up fix
+   that Oneshot merges puts the label back by itself.
 
 ## Trying it on a ticket without changing the ticket (dry run)
 
@@ -339,8 +370,10 @@ older branches.
 
 ## Turning it off
 
-- **One desk:** remove `ONESHOT_LOCAL_TESTS_REPO` from `.env`.
-- **Everyone:** set `localTests.enabled` to `false` in `config/project.json`.
+- **One desk:** remove `ONESHOT_LOCAL_TESTS_REPO` from `.env`. That desk's merges
+  still put the label on, for the desk that runs the mode.
+- **Everyone:** set `localTests.enabled` to `false` in `config/project.json`. No
+  merge puts the label on, and no desk runs the mode.
 - **One ticket:** take `Ready for Automation Testing` off it before Oneshot
   picks it up.
 
@@ -389,8 +422,8 @@ failures.
   in throwaway worktrees under `state/runs/<ticket>/`.
 - It never commits or pushes to workstream-automation. Temporary test edits are
   attached to the comment as a patch, for the automation team to adopt if they want.
-- It never writes a new test unless QA asks for one (`disapproved: write a
-  temporary test`), and never runs anything QA has not approved.
+- It never writes or suggests a new test: only tests that exist in
+  workstream-automation run, and nothing runs that QA has not approved.
 - It never runs inside the Loop pipeline, and never holds up an MR: it starts only
   after the change is merged.
 - It never shows the Cypress logins to the AI, and never posts them anywhere.

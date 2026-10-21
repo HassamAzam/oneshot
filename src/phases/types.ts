@@ -170,25 +170,32 @@ export interface Screenshot {
  */
 export interface LocalTestsScope {
   /**
-   * False when nothing in the automation suite covers what the diff touches.
-   * The run then carries on to `mr`, says so in one line on the ticket, and
-   * nobody is asked anything — the same as a design that turns out to have no UI.
+   * False only when no automation module is impacted and no spec reaches the
+   * change. The ticket is then told there is nothing to run, with `reason`,
+   * and QA decide what happens next.
    */
   applicable: boolean;
   reason: string;
+  /** The impacted cypress/e2e module folders the specs come from. */
   modules: string[];
-  /** Spec files to run, repo-relative to workstream-automation. */
-  specs: Array<{ file: string; module: string; cases: number; ciSeconds?: number; why: string }>;
   /**
-   * Temporary changes made in the throwaway worktree, never committed. `update`
-   * edits an existing spec, page object or fixture; `add` creates one.
-   * `erpEvidence` is the ERP file:line that makes the change necessary.
+   * Spec files to run, repo-relative to workstream-automation: the ones that
+   * see the change, then each impacted module's main-functionality specs (a
+   * `why` starting `Main functionality:`). `addedBy` marks a file a QA
+   * reviewer added with an `added <file>` reply.
+   */
+  specs: Array<{ file: string; module: string; cases: number; ciSeconds?: number; why: string; addedBy?: string }>;
+  /**
+   * Temporary changes made in the throwaway worktree, never committed: each
+   * edits an EXISTING spec, page object or fixture (`add` only in a list from
+   * before new files were refused). `erpEvidence` is the ERP file:line that
+   * makes the change necessary.
    */
   edits: Array<{ file: string; kind: 'update' | 'add'; why: string; erpEvidence: string }>;
   /**
-   * Changes to the team's test list. QA approves every list before it runs,
-   * these included; when `specs` is empty, the `add` entries are the suggested
-   * tests on the "Oneshot found no automation test" note.
+   * Specs proposed for removal from this list — a drop, or a trim to fit the
+   * limits — for QA to decide. QA approves every list before it runs. (`add`
+   * only in a list from before Oneshot stopped proposing new tests; never shown.)
    */
   proposals: Array<{ action: 'add' | 'remove'; title: string; file?: string; why: string }>;
   /**

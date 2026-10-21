@@ -45,30 +45,43 @@ One ticket at a time, in this order. The mode keeps its own journal at
 `localTestsPatchFile()` in `src/lib/config.ts` name. Under `DRY_RUN` both live under
 `state-dry/state/`.
 
+0. **The label.** The Loop's merge puts `labels.localTestsTrigger` on beside `labels.exit`, in one
+   label edit (`doneLabelSwap` in `src/conductor/runner.ts`), while `localTests.enabled` is true
+   (`mergeTriggerLabel`). That is what hands every merged ticket to this mode; a person can add it
+   to any other merged ticket.
 1. **Ready?** `hooks/local-tests-ready.cjs`, run by the conductor (docs/HOOKS.md, "Not a hook:
    `local-tests-ready`"): the trigger label, and the ticket's own merge request (one that closes it,
-   or names its iid in the source branch; a title only mentions it) merged into `branches.base`, never
-   a promotion or a backmerge. Own MRs that are all still open mean not ready, quietly; only a ticket
-   with no linked MR that closes it or names it in its source branch falls back to any linked MR merged into the base. The latest own
-   merged MR is the one tested: its merge (or squash) commit is `--ref`, and `mergedMr.base` is
-   `--base` — `diff_refs.base_sha` for an MR merged with no merge commit, else the merge commit's
-   first parent (`<mergeSha>^1` when the hook could not say). `mergedMr.ranges` lists every own MR
-   merged into the base, oldest first, as `{mrIid, base, head}`; the scope covers all of them and
-   the list comment names each.
+   or names its iid in the source branch; a title only mentions it) merged into one of
+   `localTests.targetBranches` (`dev` or `stage`; absent, `branches.base`), never a promotion or a
+   backmerge — so a hotfix merged into stage and backmerged into dev is tested once, on stage. Own
+   MRs that are all still open mean not ready, quietly; only a ticket with no linked MR that closes
+   it or names it in its source branch falls back to any linked MR merged into a target branch. The
+   latest own merged MR, on whichever target branch, is the one tested: its merge (or squash) commit
+   is `--ref`, and `mergedMr.base` is `--base` — `diff_refs.base_sha` for an MR merged with no merge
+   commit, else the merge commit's first parent (`<mergeSha>^1` when the hook could not say), so a
+   failure is re-run on the same branch just before the merge. A merge commit the ERP clone has not
+   seen is fetched from every target branch. `mergedMr.ranges` lists every own MR merged into a
+   target branch, oldest first, as `{mrIid, base, head}` (plus `otherBranch` for one merged into
+   another branch than the tested MR); the scope covers all of them and the list comment names
+   each, with the branch of any merged elsewhere.
    Only one desk per team runs the mode: the per-ticket `lock` is an O_EXCL file under
    `state/localtests/<iid>/` and does not reach other machines, and a desk skips a ticket whose
    notes already carry another desk's list.
-2. **Scope.** A throwaway ERP worktree at the merge commit, `prepare-scope`, the
-   `local-tests-scope` session (`runPhase`, the phase is `onDemand`), `capture`. When no existing
-   spec reaches the change the session returns no specs and an `add` proposal; it writes a temporary
-   spec only when QA asked for one (`request: 'write-temporary'` in its prompt context).
-3. **Ask QA**, and wait for the first reply from `config/reviewers.json` `qa`. The quick re-check
-   behind `disapproved: please check again` runs no session: `git fetch` in the clone, a fresh
-   throwaway worktree at `origin/<automationRef>`, then
-   `node skills/local-tests-impact/scripts/index.cjs --erp <erp worktree> --base <first parent>
-   --head <merge sha> --automation <worktree> --json`; a spec reached for any reason but `module`
-   counts as found. `disapproved: added <path>` is checked with
-   `git cat-file -e origin/<automationRef>:<path>` in the clone.
+2. **Scope.** A throwaway ERP worktree at the merge commit, `prepare-scope`, then
+   `node skills/local-tests-impact/scripts/index.cjs --erp <erp clone> --base <first parent>
+   --head <merge sha> --automation <wsa> --json` over each of the ticket's own merged MRs (the
+   impacted modules' `mainSpecs`, and an earlier MR's specs that reach its change), the
+   `local-tests-scope` session (`runPhase`, the phase is `onDemand`; it takes at most 3 of the
+   analysis's `screenSpecs`, the specs that open a screen a changed component renders, choosing
+   the ones whose steps go through a changed hunk), and `capture`. Any of those
+   specs the session left out — and did not keep out in `notRunnable` or with a `remove` proposal
+   naming it — is added to its list, priced with `index.cjs estimate`; not in a feedback round,
+   whose list is QA's. A capture that finds a new spec file (`addedSpecs`) refuses the list: only
+   tests that exist in workstream-automation run, and nothing is ever written or suggested.
+3. **Ask QA** with the impacted-module report, and wait for the first reply from
+   `config/reviewers.json` `qa`: `approved`, `added <path>` (checked with
+   `git cat-file -e origin/<automationRef>:<path>` in the clone after a fetch), or `disapproved:`
+   with what to change (a new scope round with QA's text in its prompt).
 4. **Run** the approved list: `run --iid N --worktree <erp worktree> --ref <merge sha>
    --specs-file F --patch P --patch-sha S --base <base> --until <deadline>`, under the
    desk-wide Cypress lease (`src/lib/cypresslease.ts`). A dry run stops before this step unless

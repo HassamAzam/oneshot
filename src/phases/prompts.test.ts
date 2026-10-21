@@ -1242,6 +1242,15 @@ test('the scope session is handed the conductor\'s facts: worktree, commits, aut
   assert.ok(p.includes(SCOPE_INPUTS.patchFile), 'told where its edits are saved');
 });
 
+test('the scope prompt names the branch the MR went into: stage for a fix merged there, else the base', () => {
+  const merged = { ...SCOPE_INPUTS, mergeSha: 'aaaa2222', mrIid: 11200 };
+  const stage = scopePrompt({ localTests: { ...merged, branch: 'stage' } });
+  assert.match(stage, /now merged into\nstage: the modules/);
+  assert.match(stage, /first parent of the merge commit: stage just before this change/);
+  assert.match(stage, /the merge commit of MR !11200: the change as it landed on stage/);
+  assert.match(scopePrompt({ localTests: merged }), /now merged into\ndev: the modules/, 'no branch named: the base branch');
+});
+
 test('the analysis script is named by an absolute path that exists, never through $ONESHOT_HOME', () => {
   // Under DRY_RUN $ONESHOT_HOME is state-dry, which has no skills/: a path built
   // from it fails with module-not-found instead of a named JSON code.
@@ -1259,10 +1268,13 @@ test('the limits are a selection budget, each Cypress run has its own deadline',
   assert.ok(p.includes(`every Cypress run is stopped at\n${lt.maxRunMinutes} minutes`));
 });
 
-test('a list with nothing to run goes to QA as "no test found", with the add proposal as the suggestion', () => {
+test('the list goes to QA as the impacted-module report; nothing to run is said with the reason, never a suggestion', () => {
   const p = scopePrompt();
   assert.match(p, /Whatever you return goes on the ticket for QA, who approve every local run before it starts/);
-  assert.match(p, /posted as\s+"Oneshot found no automation test for this ticket", with your `add` proposals as the suggested tests/);
+  assert.match(p, /posted as the impacted-module report: each module, and under it the tests that\s+will run and why/);
+  assert.match(p, /A list with no spec in `specs` is posted as "nothing to run", with your `reason`/);
+  assert.match(p, /add a test file they have on master/);
+  assert.doesNotMatch(p, /suggested test/, 'no test is ever suggested');
   assert.doesNotMatch(p, /"not needed" line/, 'the Loop\'s one-line "not needed" note is gone with the Loop wiring');
   assert.doesNotMatch(p, /not put to QA/);
 });
@@ -1281,49 +1293,52 @@ test('without the conductor\'s facts the scope prompt falls back to refs it can 
   assert.ok(p.includes(localTestsPatchFile(990902)));
 });
 
-test('the scope starts from the precise set and adds at most a few module specs, never padding', () => {
+test('the scope starts from the precise set, adds every impacted module\'s main-functionality specs, never pads', () => {
   const p = scopePrompt();
   assert.match(p, /The precise set is the floor/);
   assert.match(p, /limits never\s+remove one/);
-  assert.match(p, /at most 5 module specs, as a health check, not as coverage, and only when the\s+precise set is not empty/);
-  assert.match(p, /NEVER fill the\s+list toward/, 'module specs that cannot see the change are not added to reach the limits');
-  assert.match(p, /a ceiling\s+for the precise set, not a target/);
-  assert.match(p, /If the precise set alone is over either limit, keep all of it/);
+  assert.match(p, /Then the main-functionality specs of every impacted module: the analysis's `mainSpecs`, all of\s+them, whether or not the precise set is empty/);
+  assert.match(p, /`smoke`-tagged specs\s+\(or, for a module that tags none, its first cases\), picked by the script/);
+  assert.match(p, /never pick a module's main tests yourself/);
+  assert.match(p, /NEVER add other module specs to fill the list toward/, 'other module specs are not added to reach the limits');
+  assert.match(p, /If the list is over either limit, keep all of it/);
   assert.match(p, /`Trim to fit the limits:`/, 'the over-limit case becomes a QA proposal, not a silent cut');
   assert.match(p, /There is no silent trim/);
 });
 
-test('with an empty precise set there are no health checks, and health checks are marked for the ticket', () => {
+test('the scope may add at most 3 specs that go through the changed screen, chosen by the getter a hunk touches', () => {
   const p = scopePrompt();
-  assert.match(p, /With an empty\s+precise set there are no health checks either/);
-  assert.match(p, /Start each one's `why` with `Health check:`/, 'the ticket note marks those rows by this prefix');
-  assert.match(p, /`why` is one short line, starting\s+`Health check:` for a health check/);
+  assert.match(p, /Then at most 3 specs that go through the screen the change touched/);
+  assert.match(p, /analysis's `screenSpecs` are those candidates/);
+  assert.match(p, /opening the screen is not enough: take a spec only when its steps go\s+through what a diff hunk changed/);
+  assert.match(p, /grep the candidates for the getter/);
+  assert.match(p, /Start each\s+one's `why` with `Opens the changed screen:`/);
+  assert.match(p, /Take none when\s+no candidate goes through a changed hunk/);
+  assert.match(p, /never more than 3/);
+  assert.match(p, /Its `screenSpecs` are candidates, not answers/);
+  assert.match(p, /`Opens the changed screen:` for a step-2 pick/);
+});
+
+test('with an empty precise set the main-functionality specs are the list, and they are marked for the ticket', () => {
+  const p = scopePrompt();
+  assert.match(p, /With an empty precise set, these are the whole\s+list: that is the answer, not a gap to fill/);
+  assert.match(p, /Start each one's \`why\` with \`Main functionality:\`/, 'the ticket note marks those rows by this prefix');
+  assert.match(p, /`why` is one short line, starting\s+`Opens the changed screen:` for a step-2 pick and `Main functionality:` for a\s+main-functionality spec/);
   assert.match(p, /clipped to about 120 characters/);
+  assert.doesNotMatch(p, /Health check/);
 });
 
-test('by default an uncovered change gets a suggested test, and nothing is written', () => {
-  const p = scopePrompt();
-  assert.match(p, /Then \*\*do not write one\.\*\* Return `specs: \[\]` \(no health checks either, item 2\)/);
-  assert.match(p, /one `add` proposal per missing test: `title` the way QA would name it/);
-  assert.match(p, /Temporary UPDATES of\s+existing specs \(step 4\) are not this: those stay yours to make, unasked/);
-  assert.match(p, /- Write a new spec QA did not ask for\./);
-  assert.doesNotMatch(p, /\*\*write the missing spec\*\*/);
-  assert.doesNotMatch(p, /## QA asked for a temporary test/);
-});
-
-test('when QA ask for a temporary test, the session writes it and keeps turns for it', () => {
-  const p = scopePrompt({ localTests: { ...SCOPE_INPUTS, request: 'write-temporary' } });
-  assert.match(p, /## QA asked for a temporary test/);
-  assert.match(p, /`disapproved: write a temporary test`/);
-  assert.match(p, /\*\*write the missing spec\*\*/);
-  assert.match(p, /list it in `specs` and `edits`, and propose the\s+`add` for the suite/);
-  assert.match(p, /a test QA added to the suite since the last round is in\s+it, and then you write nothing/);
-  assert.match(p, /Leave it unwritten ONLY when the screen cannot be\s+reached/);
-  assert.match(p, /finish choosing by about turn \d+ of\s+\d+/, 'the session keeps turns for writing the spec');
-  assert.match(p, /`TR_LOCAL_<what>\.ts`/);
-  assert.match(p, /no `force: true`/, 'a new spec follows the no-weakening rules too');
-  assert.doesNotMatch(p, /do not write one/);
-  assert.doesNotMatch(p, /- Write a new spec QA did not ask for/);
+test('no round ever writes or suggests a test: an uncovered change is said in summary, and that is all', () => {
+  for (const p of [scopePrompt(), scopePrompt({ localTests: { ...SCOPE_INPUTS, request: 'feedback', feedback: 'also run LV_23' } })]) {
+    assert.match(p, /never write or propose a new test: only tests that already exist in workstream-automation run/);
+    assert.match(p, /gets no test of its own: the modules' main-functionality specs are\s+what\s+runs/);
+    assert.match(p, /never write a spec for it\s+and\s+never propose one/);
+    assert.match(p, /- Write a new spec, or suggest one\./);
+    assert.match(p, /Only existing files: never create a spec or a page object/);
+    assert.match(p, /`proposals`: only `remove`/);
+    assert.doesNotMatch(p, /## QA asked for a temporary test/);
+    assert.doesNotMatch(p, /write a temporary test|TR_LOCAL_|`add` proposal/);
+  }
 });
 
 test('after the merge, head is the merge commit and base its first parent', () => {
@@ -1377,7 +1392,9 @@ test('a redo after QA\'s disapproval carries their reply and how to keep the pre
   });
   assert.match(p, /## QA asked for changes to an earlier version of this list/);
   assert.ok(p.includes('- remove LV_21\n- also run LV_23'), 'their reply, verbatim');
-  assert.match(p, /by a case id such as `LV_23`: find the spec file/);
+  assert.match(p, /by a case id such as `LV_23`, or by a module whose\s+main-functionality tests they want: find the spec file/);
+  assert.match(p, /A test that does not exist yet is not yours to write: say in `summary` that QA can add it to\s+workstream-automation and reply `added <file>`/);
+  assert.match(p, /"Check again" means look at workstream-automation master as it is now/);
   assert.match(p, /A spec they ask to remove leaves `specs`, with no `remove` proposal/);
   assert.match(p, /`summary` opens with what changed from the previous list/);
   assert.ok(p.includes('`cypress/e2e/leaves/apply_leave.cy.ts`'));

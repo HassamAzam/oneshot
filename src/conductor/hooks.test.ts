@@ -1,20 +1,16 @@
 /**
- * The readiness script the conductor runs, and the guards the automation
- * session does NOT get.
+ * The guards the conductor hands a session, and the GitLab helpers the local
+ * automation tests mode writes labels with.
  *
- * hooks/automation-ready.cjs is the Ready For Automation mode's readiness
- * check, run by the conductor through runGuard (runAutomationReadyGuard) and
- * registered as no session's hook: the automation session holds no tool a
- * hook could stand in front of. Pinned here: that session gets the same guards
- * as any Loop phase and nothing on UserPromptSubmit, the script answers before
- * runGuard would kill it, and every way the check can fail — GitLab down, no
- * token, a script that says nothing — reads as `unknown`, which the runner
- * holds on, without a FAIL_CLOSED entry.
+ * Pinned here: a Glob that hunts for the Cypress credentials reaches
+ * secret-guard, the guards read the local-tests paths the way the config does,
+ * the guards that need longer than the default get it, and the label helpers
+ * send exactly one request as this desk.
  *
  * No test reads a real credential or calls a real host. The project is the
  * example one (test-project-env), the read token is set to a test value
- * BEFORE anything asks for it, and the tests that spawn the real script point
- * it at a closed local port and a throwaway ONESHOT_HOME.
+ * BEFORE anything asks for it, and the tests that spawn a real guard point it
+ * at a throwaway ONESHOT_HOME.
  */
 import '../lib/test-project-env.js';
 import { test } from 'node:test';
@@ -23,14 +19,12 @@ import { createRequire } from 'node:module';
 import { DRY_RUN, localTestsConfig } from '../lib/config.js';
 import { editIssueLabels, issuesWithLabel, readToken } from '../lib/gitlab.js';
 import { scratchHome } from '../lib/test-scratch-home.js';
-import { AUTOMATION_PHASE, readinessFromHookOutput } from '../automation/readiness.js';
-import { guardTimeoutMs, hooksFor, runAutomationReadyGuard } from './hooks.js';
+import { guardTimeoutMs, hooksFor } from './hooks.js';
 
 // Set rather than inherited, so this machine's .env and desk token cannot change the answer.
 process.env.GITLAB_READ_TOKEN = 'test-read-token';
 process.env.ONESHOT_GITLAB_TOKEN = 'test-write-token';
 
-const hook = createRequire(import.meta.url)('../../hooks/automation-ready.cjs') as { DEADLINE_MS: number };
 const common = createRequire(import.meta.url)('../../hooks/_common.cjs') as {
   localTests: (env?: Record<string, string | undefined>) => { repo: string; creds: string };
 };
@@ -42,24 +36,6 @@ function denial(out: Record<string, unknown>): string | null {
   const h = out.hookSpecificOutput as { permissionDecision?: string; permissionDecisionReason?: string } | undefined;
   return h?.permissionDecision === 'deny' ? h.permissionDecisionReason ?? '' : null;
 }
-
-/** What the SDK is handed, minus the callbacks: event → [matcher, timeout] per entry. */
-function shape(env: Record<string, string>): Record<string, Array<[string | undefined, number]>> {
-  const out: Record<string, Array<[string | undefined, number]>> = {};
-  for (const [event, entries] of Object.entries(hooksFor(env))) {
-    out[event] = entries.map((raw) => {
-      const e = raw as { matcher?: string; timeout: number };
-      return [e.matcher, e.timeout];
-    });
-  }
-  return out;
-}
-
-test('the automation session gets exactly the guards a Loop phase gets, and none on UserPromptSubmit', () => {
-  const automation = shape({ ONESHOT_PHASE: AUTOMATION_PHASE });
-  assert.deepEqual(automation, shape({ ONESHOT_PHASE: 'implement' }));
-  assert.equal('UserPromptSubmit' in automation, false);
-});
 
 test('a Glob reaches secret-guard: one hunting for cypress.env.json is denied, one for specs is not', async () => {
   // Routed the way the SDK routes it: every PreToolUse entry whose matcher takes
@@ -100,65 +76,13 @@ test('the guards read the local-tests paths as localTestsConfig() does: spelling
   }
 });
 
-test('the readiness script gives its own answer before runGuard kills it', () => {
-  const kill = guardTimeoutMs('automation-ready.cjs');
-  assert.ok(hook.DEADLINE_MS < kill, `script ${hook.DEADLINE_MS} < kill ${kill}`);
+test('the guards that need longer than the default get it, and every other keeps the default', () => {
   // Guards without an entry keep the default.
   assert.equal(guardTimeoutMs('pause-check.cjs'), 15_000);
   assert.equal(guardTimeoutMs('py-lint.cjs'), 60_000);
   // eslint-guard spawns eslint with its own 55s bound, so the kill must land
   // after that or the hook dies with nothing said about which file was slow.
   assert.equal(guardTimeoutMs('eslint-guard.cjs'), 60_000);
-});
-
-test('runAutomationReadyGuard with GitLab unreachable reads as unknown, with the reason', async () => {
-  const { home, cleanup } = scratchHome();
-  try {
-    const out = await runAutomationReadyGuard(101, {
-      ONESHOT_AUTOMATION_API: 'http://127.0.0.1:9/api/v4',
-      ONESHOT_HOME: home,
-    });
-    assert.equal(out.decision, 'block');
-    const r = readinessFromHookOutput(out, 101);
-    assert.equal(r.verdict, 'unknown');
-    assert.equal(r.errorKind, 'network');
-    assert.match(r.error ?? '', /GitLab could not be reached/);
-    assert.equal(JSON.stringify(out).includes('test-read-token'), false);
-  } finally {
-    cleanup();
-  }
-});
-
-test('runAutomationReadyGuard with no token reads as unknown, a config problem, before any call', async () => {
-  const { home, cleanup } = scratchHome();
-  try {
-    const out = await runAutomationReadyGuard(101, {
-      ONESHOT_AUTOMATION_API: 'http://127.0.0.1:9/api/v4',
-      ONESHOT_AUTOMATION_TOKEN: '',
-      ONESHOT_HOME: home,
-    });
-    const r = readinessFromHookOutput(out, 101);
-    assert.equal(r.verdict, 'unknown');
-    assert.equal(r.errorKind, 'config');
-    assert.match(r.error ?? '', /ONESHOT_AUTOMATION_TOKEN\) is missing/);
-  } finally {
-    cleanup();
-  }
-});
-
-test('a readiness script that answers nothing reads as unknown, not ready, with no FAIL_CLOSED entry', async () => {
-  // Outside its phase the script allows the way every guard does: exit 0,
-  // empty stdout. runGuard fails that open to `{}`; the verdict must not.
-  const { home, cleanup } = scratchHome();
-  try {
-    const out = await runAutomationReadyGuard(101, { ONESHOT_PHASE: 'implement', ONESHOT_HOME: home });
-    assert.deepEqual(out, {});
-    const r = readinessFromHookOutput(out, 101);
-    assert.equal(r.verdict, 'unknown');
-    assert.equal(r.error, 'the readiness hook gave no verdict');
-  } finally {
-    cleanup();
-  }
 });
 
 // ------------------------------------------------ GitLab helpers the mode uses
@@ -189,17 +113,17 @@ test('issuesWithLabel asks for one label in every state, minus the done label, n
   const restore = stubFetch();
   try {
     calls.length = 0;
-    await issuesWithLabel('Ready For Automation', { notLabel: 'Automation Done' });
+    await issuesWithLabel('Ready for Automation Testing', { notLabel: 'Automation Testing Done' });
     assert.deepEqual(calls.map((c) => [c.method, c.url, c.token]), [[
       'GET',
-      `${API}/projects/acme%2Ferp/issues?labels=Ready%20For%20Automation&state=all` +
-        '&not%5Blabels%5D=Automation%20Done&per_page=100&order_by=updated_at&sort=desc',
+      `${API}/projects/acme%2Ferp/issues?labels=Ready%20for%20Automation%20Testing&state=all` +
+        '&not%5Blabels%5D=Automation%20Testing%20Done&per_page=100&order_by=updated_at&sort=desc',
       'test-read-token',
     ]]);
     calls.length = 0;
-    await issuesWithLabel('Ready For Automation', { state: 'opened' });
+    await issuesWithLabel('Ready for Automation Testing', { state: 'opened' });
     assert.equal(calls[0]?.url,
-      `${API}/projects/acme%2Ferp/issues?labels=Ready%20For%20Automation&state=opened&per_page=100&order_by=updated_at&sort=desc`);
+      `${API}/projects/acme%2Ferp/issues?labels=Ready%20for%20Automation%20Testing&state=opened&per_page=100&order_by=updated_at&sort=desc`);
   } finally {
     restore();
   }
@@ -209,7 +133,7 @@ test('editIssueLabels adds and removes in one PUT as this desk, and an empty cha
   const restore = stubFetch();
   try {
     calls.length = 0;
-    const res = await editIssueLabels(101, { add: ['Automation Done'], remove: ['Automation Test Case Review'] });
+    const res = await editIssueLabels(101, { add: ['Running TestCases Locally'], remove: ['Ready for Automation Testing'] });
     assert.equal(res.ok, true);
     if (DRY_RUN) {
       assert.deepEqual(calls, []);                  // a dry run never writes
@@ -219,7 +143,7 @@ test('editIssueLabels adds and removes in one PUT as this desk, and an empty cha
       url: `${API}/projects/acme%2Ferp/issues/101`,
       method: 'PUT',
       token: 'test-write-token',
-      body: { add_labels: 'Automation Done', remove_labels: 'Automation Test Case Review' },
+      body: { add_labels: 'Running TestCases Locally', remove_labels: 'Ready for Automation Testing' },
     }]);
     calls.length = 0;
     assert.equal((await editIssueLabels(101, { add: [], remove: [] })).ok, true);

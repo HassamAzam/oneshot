@@ -475,13 +475,12 @@ tests run: ${i.testsRun || '(none)'}`;
 const REPRODUCTION_SKILL = 'bug-reproduction';
 
 /**
- * How many module specs local-tests-scope adds beyond the precise set, as a health check of
- * the module. A dry run showed why it is a cap and not the limits: with no spec reaching the
- * change, filling toward maxSpecs picked 40 unrelated specs (~37 min) that could not see the
- * banner the change added. For the same reason an empty precise set gets none:
- * a list of health checks alone would run without testing the ticket at all.
+ * How many of the analysis's `screenSpecs` local-tests-scope may add: specs that go through the
+ * screen the change touched. A judgement, because a popup's page object is imported by many specs
+ * (in one rehearsal fourteen specs opened the changed popup, and two went through what the fix
+ * changed), so it is capped low; QA approve every list and can add more.
  */
-const SMOKE_SPECS = 5;
+const SCREEN_PICKS = 3;
 
 /**
  * The label that asks for a reproduction, per config/phases.json.
@@ -932,26 +931,16 @@ ${BETA_DUTIES[phase]?.() ?? ''}
 
 /**
  * What QA's last reply asks of this round of the local test list, when it is
- * something only the scope session can do. The other answers (`approved`,
- * check again, added files) the local automation tests mode handles in code.
+ * something only the scope session can do: a `disapproved:` with what to
+ * change. The other answers (`approved`, `added <file>`) the local automation
+ * tests mode handles in code.
  *
- * `write-temporary` lifts the default that a change no test reaches gets a
- * suggested test and nothing written. `feedback` carries QA's text, what the
- * previous round listed (the mode passes it as the prior artifact) and how to
- * keep its edits: the worktree this round is handed is fresh, and the previous
- * edits survive only as the patch.
+ * It carries QA's text, what the previous round listed (the mode passes it as
+ * the prior artifact) and how to keep its edits: the worktree this round is
+ * handed is fresh, and the previous edits survive only as the patch.
  */
 function localTestsRequestBlock(ctx: PromptCtx, wsa: string, patchFile: string): string {
   const inputs = ctx.localTests;
-  if (inputs?.request === 'write-temporary') {
-    return `
-## QA asked for a temporary test
-The previous round found no automation test that reaches this change, and a QA reviewer replied
-\`disapproved: write a temporary test\`. So this round, if still no spec reaches the change, write one
-for this run only (step 3, last bullet). It is never committed, and QA approves the list with it in
-before anything runs.
-`;
-  }
   const text = inputs?.request === 'feedback' ? inputs.feedback?.trim() : '';
   if (!text) return '';
   const earlier = ctx.prior['local-tests-scope']
@@ -977,16 +966,24 @@ ${text}
 
 Apply all of it, then return the WHOLE list again: it goes back to them for approval.
 - A spec they ask to add goes in \`specs\` even when the analysis did not reach it, and its \`why\` says
-  QA asked for it. They may name it by file, or by a case id such as \`LV_23\`: find the spec file in
-  the automation worktree whose name or \`it\` titles carry it. One you cannot find is named in
-  \`summary\`, never guessed.
+  QA asked for it. They may name it by file, by a case id such as \`LV_23\`, or by a module whose
+  main-functionality tests they want: find the spec file in the automation worktree whose name or
+  \`it\` titles carry it. One you cannot find is named in \`summary\`, never guessed.
 - A spec they ask to remove leaves \`specs\`, with no \`remove\` proposal: the decision is already theirs.
-- A new test they ask for is written for this run only, following step 3's rules for a new spec, and
-  goes in \`specs\` and \`edits\` with an \`add\` proposal for the suite.
+  That holds for a main-functionality spec too.
+- A test that does not exist yet is not yours to write: say in \`summary\` that QA can add it to
+  workstream-automation and reply \`added <file>\`.
+- "Check again" means look at workstream-automation ${automationRefName()} as it is now: your
+  automation worktree is a fresh checkout of it, so run step 1 again and take what it finds.
 - \`summary\` opens with what changed from the previous list, in one line ("Added …; removed …").
 
 ${previous}
 `;
+}
+
+/** The automation ref as people say it: `origin/master` is "master". */
+function automationRefName(): string {
+  return localTestsConfig().automationRef.replace(/^origin\//, '') || 'master';
 }
 
 /** How a phase names a screenshot the schema will only carry as a bare filename. */
@@ -2532,49 +2529,32 @@ broke>", "attempts": <n> }\`. The conductor reads \`webm\` and attaches that fil
     const base = inputs?.base ?? (merge ? `${merge}^1` : `origin/${baseBranch()}`);
     const head = inputs?.head ?? (merge || 'HEAD');
     const mr = inputs?.mrIid ? `MR !${inputs.mrIid}` : 'the ticket\'s MR';
+    // The branch the MR went into: dev, or stage for a fix merged there.
+    const branch = inputs?.branch?.trim() || baseBranch();
     const patchFile = inputs?.patchFile ?? localTestsPatchFile(iid);
-    const writeTemporary = inputs?.request === 'write-temporary';
-    const automationRef = lt.automationRef.replace(/^origin\//, '') || 'master';
+    const automationRef = automationRefName();
     // Absolute, from this checkout: under DRY_RUN $ONESHOT_HOME is state-dry,
     // which has no skills/ to resolve against.
     const index = join(ROOT, 'skills', 'local-tests-impact', 'scripts', 'index.cjs');
     const allowed = lt.allowedPaths.map((p) => `\`${p}\``).join(', ') || '(none configured — make no edits)';
     const mins = budgetMin('local-tests-scope', 30);
-    const turnsFor = budgetTurns('local-tests-scope');
     const commits = merge
-      ? `    base                  ${base}   (first parent of the merge commit: ${baseBranch()} just before this change)
-    head                  ${head}   (the merge commit of ${mr}: the change as it landed on ${baseBranch()})`
+      ? `    base                  ${base}   (first parent of the merge commit: ${branch} just before this change)
+    head                  ${head}   (the merge commit of ${mr}: the change as it landed on ${branch})`
       : `    base                  ${base}   (merge-base of HEAD with origin/${baseBranch()})
     head                  ${head}`;
-    // The default is a suggestion, not a spec: QA decide whether a test this
-    // change lacks is written, and ask for a temporary one when they want it.
-    const uncovered = writeTemporary
-      ? `- No spec reaches the change (an \`addedTestidUnused\` value, an \`uncovered\` area, a changed screen no
-  candidate opens)? QA asked for a temporary test this round, so **write the missing spec** in the
-  automation worktree — a temporary \`add\` (step 4) — list it in \`specs\` and \`edits\`, and propose the
-  \`add\` for the suite, titled the way QA would name it ("Verify that …"). It is then the precise set,
-  so health checks may follow it (item 2). The automation worktree is a fresh checkout, so make sure
-  first that no spec reaches the change now: a test QA added to the suite since the last round is in
-  it, and then you write nothing. Plan your turns: finish choosing by about turn ${Math.round(turnsFor * 0.5)} of
-  ${turnsFor}, so writing and re-checking it fits. Leave it unwritten ONLY when the screen cannot be
-  reached with data the module's specs already create; then say exactly why in \`summary\`, and return
-  the \`add\` proposal alone with \`specs\` empty.`
-      : `- No spec reaches the change (an \`addedTestidUnused\` value, an \`uncovered\` area, a changed screen no
-  candidate opens)? Then **do not write one.** Return \`specs: []\` (no health checks either, item 2), no
-  \`add\` edit, and one \`add\` proposal per missing test: \`title\` the way QA would name it ("Verify that
-  …"), \`file\` where it would live (\`cypress/e2e/<module>/…\`), and \`why\` naming the gap (the testid no
-  page object selects, the screen no spec opens). Oneshot posts it as the suggested test and QA decide:
-  add one to the suite, or ask for a temporary one, which a later round writes. Temporary UPDATES of
-  existing specs (step 4) are not this: those stay yours to make, unasked.`;
 
     return `${ticketHead(ctx.ticket)}
 ${localTestsRequestBlock(ctx, wsa, patchFile)}
 ## What this phase decides
-Which workstream-automation (Cypress) specs can see this ticket's change, now merged into
-${baseBranch()}, and the smallest temporary spec edits an INTENDED UI change needs for them to test the
-new screen. Your list goes on the ticket and a QA reviewer approves it before anything runs; then
-conductor code (\`local-tests-run\`) runs exactly the files you list in \`specs\`, against the merge
-commit, on a private copy of the automation database. You choose and prepare. You never run anything.
+Which workstream-automation (Cypress) specs run for this ticket's change, now merged into
+${branch}: the modules the change touched, and in each one the tests that see the change — the
+ones a testid links to it, and up to ${SCREEN_PICKS} that go through the screen it changed — plus the
+module's main-functionality tests. Your list goes on the ticket as the impacted-module report, a QA
+reviewer approves it before anything runs, and then conductor code (\`local-tests-run\`) runs exactly
+the files you list in \`specs\`, against the merge commit, on a private copy of the automation
+database, and posts the automation report. You choose and prepare. You never run anything, and you
+never write or propose a new test: only tests that already exist in workstream-automation run.
 
 ## Your inputs
     ERP worktree          ${wt}${merge ? '   (at the merge commit)' : ''}
@@ -2596,9 +2576,11 @@ path above. The steps below are enough without it.
 \`\`\`
 node ${index} --erp ${wt} --base ${base} --head ${head} --automation ${wsa} --json
 \`\`\`
-Read-only on both repos, about a second. Its counts, modules and minutes are the answer: never
-recount \`it(\` blocks by grep and never estimate minutes yourself. Price every list you consider, and
-your final one for \`estimatedMinutes\`, with:
+Read-only on both repos, about a second. Its modules, counts, main-functionality picks and minutes
+are the answer: never recount \`it(\` blocks by grep, never pick a module's main tests yourself and
+never estimate minutes yourself. Its \`screenSpecs\` are candidates, not answers: step 3 says how to
+choose among them. Price every list you consider, and your final one for
+\`estimatedMinutes\`, with:
 \`\`\`
 node ${index} estimate --automation ${wsa} <spec> <spec> ...
 \`\`\`
@@ -2606,57 +2588,68 @@ A JSON object with a \`code\` instead (\`E_REF_UNRESOLVED\`, \`E_NO_AUTOMATION\`
 named failure: put the code and message in \`blocked\` and stop. Never build a scope by hand.
 
 ## 2. Applicable or not
-\`applicable: false\`, with the reason, when nothing a spec could observe changed: every area is
-\`ignored\` or \`other\`, or the only change is a backend path no screen reaches. \`specs\`, \`edits\` and
-\`proposals\` are then empty. That is a correct answer, not a failure.
+\`applicable: false\`, with the reason, only when no automation module is impacted and no spec reaches
+the change: \`modules\` and \`mainSpecs\` are empty and every candidate is out (every area is
+\`ignored\`, \`other\`, \`uncovered\` or \`shared\` with no testid match, a backend path no screen
+reaches). \`specs\`, \`edits\` and \`proposals\` are then empty. That is a correct answer, not a failure.
 
 Whatever you return goes on the ticket for QA, who approve every local run before it starts. A list
-with specs in it is posted as the tests Oneshot found. A list with no spec in \`specs\` is posted as
-"Oneshot found no automation test for this ticket", with your \`add\` proposals as the suggested tests,
-and QA decide what happens next: check again once a test is on ${automationRef}, name a test file they
-added, ask for a temporary test, or go on without local tests.
+with specs in it is posted as the impacted-module report: each module, and under it the tests that
+will run and why. A list with no spec in \`specs\` is posted as "nothing to run", with your \`reason\`,
+and QA decide: go on without local tests, add a test file they have on ${automationRef}, or tell you
+what to change.
 
-## 3. Choose the specs: the precise set, a few health checks, never padding
+## 3. Choose the specs: the precise set, the changed screen, each module's main functionality, never padding
 1. **The precise set is the floor.** Every candidate the analysis reached through something the diff
    changed rather than through its folder alone — a \`reasons\` entry other than \`module …\` (a page
    object selecting a testid the diff changed or touched, a changed screen or API) — plus every spec
    under \`removedTestidStillUsed\`. These are the specs that can see this change, so the limits never
-   remove one.
-2. **Then at most ${SMOKE_SPECS} module specs, as a health check, not as coverage, and only when the
-   precise set is not empty.** From the candidates whose only reason is \`module …\`, take the affected
-   modules' \`smoke\`-tagged specs first, then ones that open the changed screen's own page or sidebar
-   group, up to ${SMOKE_SPECS} in all. Start each one's \`why\` with \`Health check:\` ("Health check: opens the
-   leave dashboard"), so the ticket shows it apart from the specs that check the change. With an empty
-   precise set there are no health checks either: they cannot see the change, so a list of them alone
-   would run without testing this ticket. NEVER fill the list toward ${lt.maxSpecs} specs or
-   ${lt.maxRunMinutes} minutes with module specs that cannot see the change: a long list of unrelated
-   tests costs the run its time and tells nobody anything about this ticket. The limits are a ceiling
-   for the precise set, not a target. Count the module specs you left out in \`summary\` in one line (how
-   many, which modules).
-   The one exception is a diff that changes code EVERY screen of a module runs through (its routing, a
-   layout or container all its pages share, a module-wide API): then more of the module may go in,
-   within the limits, and \`summary\` names the shared file that justifies it.
-3. **If the precise set alone is over either limit, keep all of it** and add no module specs. Add ONE
-   \`remove\` proposal with \`file\` omitted and a \`title\` starting \`Trim to fit the limits:\` that names
-   the specs you would take out first, least likely to catch this change first, and the minutes that
-   saves; \`why\` gives the set's size against both limits. Which tests to cut is QA's call: say in
-   \`summary\` that the list runs in full unless QA trims it, and that Cypress is stopped at
-   ${lt.maxRunMinutes} minutes, so specs past that may not finish.
-- Dropping a spec FROM the precise set needs a \`remove\` proposal naming why it cannot exercise this
-  change. There is no silent trim: a proposal is what asks QA.
+   remove one. Start each one's \`why\` with what it checks in this change.
+2. **Then at most ${SCREEN_PICKS} specs that go through the screen the change touched.** Most fixes change logic, not
+   testids, so the precise set is often empty while a spec does open the changed screen. The
+   analysis's \`screenSpecs\` are those candidates: specs whose page objects (\`via\`) select a testid a
+   changed component (\`screens\`) renders, sorted with the impacted modules first. A popup's page object
+   is imported by many specs, and opening the screen is not enough: take a spec only when its steps go
+   through what a diff hunk changed. Work hunk by hunk: find the control or section the hunk renders or
+   handles (the list it filters, the button whose handler it edits), find that element's getter in the
+   \`via\` page object, and grep the candidates for the getter — a spec that calls it exercises the
+   change. Prefer the one that asserts on that element over one that only passes through. Start each
+   one's \`why\` with \`Opens the changed screen:\` and say what it checks there, citing the spec line
+   ("Opens the changed screen: asserts the Current Team(s) cards, organogram_39_…ts:195"). Take none when
+   no candidate goes through a changed hunk, and say so in \`summary\` in one line; never take one only
+   because it opens the screen, and never more than ${SCREEN_PICKS}.
+3. **Then the main-functionality specs of every impacted module: the analysis's \`mainSpecs\`, all of
+   them, whether or not the precise set is empty.** They are each module's own \`smoke\`-tagged specs
+   (or, for a module that tags none, its first cases), picked by the script so a module always gives
+   the same tests. Start each one's \`why\` with \`Main functionality:\` ("Main functionality: submits a
+   leave request"), so the ticket shows it apart from the specs that check the change. A spec already
+   in the precise set is listed once, as a precise spec. With an empty precise set, these are the whole
+   list: that is the answer, not a gap to fill.
+   NEVER add other module specs to fill the list toward ${lt.maxSpecs} specs or ${lt.maxRunMinutes} minutes:
+   a long list of unrelated tests costs the run its time and tells nobody anything about this ticket.
+   Count the module specs you left out in \`summary\` in one line (how many, which modules). The one
+   exception is a diff that changes code EVERY screen of a module runs through (its routing, a layout
+   or container all its pages share, a module-wide API): then more of the module may go in, within the
+   limits, and \`summary\` names the shared file that justifies it.
+4. **If the list is over either limit, keep all of it.** Add ONE \`remove\` proposal with \`file\` omitted
+   and a \`title\` starting \`Trim to fit the limits:\` that names the specs you would take out first,
+   least likely to catch this change first, and the minutes that saves; \`why\` gives the list's size
+   against both limits. Which tests to cut is QA's call: say in \`summary\` that the list runs in full
+   unless QA trims it, and that Cypress is stopped at ${lt.maxRunMinutes} minutes, so specs past that
+   may not finish.
+- Dropping a spec FROM the precise set or from \`mainSpecs\` needs a \`remove\` proposal naming why it
+  cannot run usefully here. There is no silent trim: a proposal is what asks QA. A \`screenSpecs\`
+  candidate you leave out needs no proposal: it was never on the list.
 - A spec that reaches the change but cannot run on a local machine — it needs something a desk does not
   have: Odoo (payroll sync), a real mailbox, a third-party service — goes in \`notRunnable\` with \`why\`
   (citing the spec line that shows it), NOT in \`specs\`, and out of \`estimate\`. That is not a drop and
-  needs no proposal: the ticket names it, so a missing result is never read as a pass.
-- Every other spec's \`why\` is one short line on what it checks in this change, built from its
-  \`reasons\`. The ticket shows it clipped to about 120 characters.
-${uncovered}
-- A new spec, written only when QA asked for one, follows its neighbours: a page object extending
-  \`PageElementReadiness\` that selects with a literal \`[data-testid="…"]\`, the spec wrapped in
-  \`TestFilters(['regression'], …)\`, \`loginWith('<KEY>_CREDENTIALS')\` with an account the module's own
-  specs already use for that screen's sidebar group (never invent one), reaching the screen through
-  \`SidePanel\` like they do, and a \`LOCAL\` marker in place of the case number in its name
-  (\`TR_LOCAL_<what>.ts\`). Assert what the ticket asks for, each behaviour in its own \`it\`.
+  needs no proposal: the ticket names it, so a missing result is never read as a pass. A
+  main-functionality spec can be one of these too.
+- Every \`why\` is one short line. The ticket shows it clipped to about 120 characters.
+- A change no existing spec reaches (an \`addedTestidUnused\` value, an \`uncovered\` area, a changed
+  screen no candidate goes through) gets no test of its own: the modules' main-functionality specs are
+  what runs. Say in \`summary\`, in one line, what no spec reaches, so QA know; never write a spec for it
+  and never propose one.
 
 ## 4. Temporary edits: follow an intended change, never excuse a broken one
 A spec failing because the ticket MEANT to rename a testid or relabel a control is out of date:
@@ -2665,16 +2658,15 @@ proves the intent in \`erpEvidence\`. \`removedTestidStillUsed\` with a \`rename
 and the smallest edit is usually one selector string. A spec failing because the change broke
 something is the finding this phase exists for: leave it exactly as it is.
 - Only under ${allowed}. Never \`cypress.config.ts\`, \`package.json\` or \`.gitlab-ci.yml\`.
+- Only existing files: never create a spec or a page object. A new spec file in the worktree is
+  refused when you finish, and the whole scope is run again.
 - Never weaken a test: no removed assertion or \`it\` block, no \`.skip\` or \`.only\`, no \`force: true\`,
   no raised timeout, no added \`cy.wait\`. Oneshot checks the saved diff and puts a weakened test, or a
   file outside the paths above, in front of QA before anything runs.
-- The same holds for every NEW spec and page object you write: no \`force: true\` (a click that only works
-  forced is a covered or hidden control, which is a finding), no \`cy.wait\`, no raised timeout. If a
-  control seems to need one, assert why it is not clickable instead.
 - Leave edits as working-tree changes. Oneshot saves them as ${patchFile} the moment you finish and
   removes the worktree. Revert any experiment you do not want run.
-- One \`edits\` entry per file you changed or created. Then run step 1 again: a value you followed should
-  be gone from \`removedTestidStillUsed\`; if it is not, the edit missed.
+- One \`edits\` entry per file you changed. Then run step 1 again: a value you followed should be gone
+  from \`removedTestidStillUsed\`; if it is not, the edit missed.
 
 ## Never
 - Run Cypress, a test script (\`npm run report\` is Cypress) or \`scripts/localtests.cjs\`, start a
@@ -2685,22 +2677,23 @@ something is the finding this phase exists for: leave it exactly as it is.
 - Open, cat or grep any \`cypress.env.json\`, or the desk's Cypress credentials file. They hold the test
   accounts' passwords; the secret guard refuses them.
 - Edit the ERP worktree. A spec this change breaks is a finding for the developer, not yours to fix.
-${writeTemporary ? '' : `- Write a new spec QA did not ask for. With no spec reaching the change, the \`add\` proposal is your
-  answer (step 3).
-`}
+- Write a new spec, or suggest one. Only tests that exist in workstream-automation run; QA add any
+  other test there themselves and reply \`added <file>\`.
+
 ## What you return
 The \`LocalTestsScope\` object: \`applicable\`, \`reason\`, \`modules\`, \`specs\`, \`edits\`, \`proposals\`,
 \`notRunnable\`, \`estimatedMinutes\`, \`summary\`, \`blocked\`.
-- \`specs[].file\` is the path from the automation root (\`cypress/e2e/…\`); \`cases\` is the analysis's
-  \`its\`, \`ciSeconds\` its timing (omit it for a new spec); \`why\` is one short line, starting
-  \`Health check:\` for a health check.
-- \`proposals\`: an \`add\` per missing test when no spec reaches the change (QA are shown it as the
-  suggested test), a \`remove\` for a spec you drop or a trim (step 3). Otherwise empty.
+- \`modules\`: the impacted cypress/e2e module folders your \`specs\` come from, e.g. \`leaves\`.
+- \`specs[].file\` is the path from the automation root (\`cypress/e2e/…\`); \`module\` its module folder;
+  \`cases\` is the analysis's \`its\`, \`ciSeconds\` its timing; \`why\` is one short line, starting
+  \`Opens the changed screen:\` for a step-2 pick and \`Main functionality:\` for a main-functionality spec.
+- \`proposals\`: only \`remove\` — a spec you drop, or a trim (step 3). Usually empty.
 - \`notRunnable\`: \`{ spec, why }\` per spec kept out for needing what a local machine lacks. Empty
   when there is none.
-- \`summary\` is for QA and the developer, numbers first: specs, cases and minutes; what you left out and
-  why; what you added; the specs \`removedTestidStillUsed\` says will fail and whether you updated them;
-  every \`warning\` the analysis printed.
+- \`summary\` is for QA and the developer, numbers first: specs, cases and minutes per module; which
+  changed-screen candidates you took and the getter that decided it, or that none goes through a
+  changed hunk; what you left out and why; what no spec reaches; the specs \`removedTestidStillUsed\` says
+  will fail and whether you updated them; every \`warning\` the analysis printed.
 - \`blocked\` only for a named failure from step 1, or an automation worktree that is not there.
 
 Your budget is ${mins} minutes. The analysis is seconds; spend the rest reading the diff where a
