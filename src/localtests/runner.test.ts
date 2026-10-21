@@ -625,7 +625,7 @@ test('DRY_RUN: a whole ticket in one pass — the session runs, nothing reaches 
   assert.ok(kept.some((n) => /note-results/.test(n)));
   assert.equal(kept.filter((n) => /labels\.json$/.test(n)).length, 2, 'Running on, then Done on — both only kept');
   const listNote = readFileSync(join(localTestsDir(f.iid), 'dry-run', kept.find((n) => /note-list-r1/.test(n))!), 'utf8');
-  assert.match(listNote, /^\*\*Impacted module: Leaves — Oneshot will run 2 automation tests locally once QA approves\.\*\*/);
+  assert.match(listNote, /^\*\*Impacted module: Leaves — Oneshot will run 2 automation tests \(9 test cases\) locally once QA approves\.\*\*/);
   assert.match(listNote, /@anosha\.saeed/);
 });
 
@@ -710,7 +710,7 @@ test('real: list → QA approved → Running → run on the merge commit → res
   assert.match(first.did, /round 1 waiting on QA/);
   assert.equal(notes(f).length, 1);
   const list1 = notes(f)[0]!;
-  assert.match(list1, /^\*\*Impacted module: Leaves — Oneshot will run 2 automation tests locally once QA approves\.\*\*/);
+  assert.match(list1, /^\*\*Impacted module: Leaves — Oneshot will run 2 automation tests \(9 test cases\) locally once QA approves\.\*\*/);
   assert.match(list1, /\| Leaves \| ✔️ \| `cypress\/e2e\/leaves\/apply_leave\.cy\.ts` \|/);
   assert.match(list1, /\| Leaves \| ⭐ \| `cypress\/e2e\/leaves\/half_day\.cy\.ts` \|/);
   assert.match(list1, /@anosha\.saeed/);
@@ -817,7 +817,7 @@ test('real: every impacted module\'s main-functionality specs are on the list, a
   assert.equal(r1.estimatedMinutes, 4 + 2);
   assert.deepEqual(f.impactCalls.find((a) => a[0] === 'estimate')!.slice(3), MAIN.map((m) => m.file));
   const n = notes(f)[0]!;
-  assert.match(n, /^\*\*Impacted module: Leaves — Oneshot will run 3 automation tests locally once QA approves\.\*\*/);
+  assert.match(n, /^\*\*Impacted module: Leaves — Oneshot will run 3 automation tests \(11 test cases\) locally once QA approves\.\*\*/);
   assert.match(n, /\| Leaves \| ⭐ \| `cypress\/e2e\/leaves\/LV_13_submit\.ts` \| One of leaves's smoke tests \|/);
   assert.match(n, /\*\*Counts:\*\* 1 test that checks the change · 2 main-functionality tests/);
 });
@@ -851,7 +851,7 @@ test('real: nothing reaches the change, so the module\'s main-functionality spec
   assert.equal(r1.patchSha, PATCH, 'joined before the capture, so the session\'s edits are kept with the list');
   assert.deepEqual(readArtifact<{ specs: Array<{ file: string }> }>(f.iid, 'local-tests-scope.json')?.specs.map((x) => x.file),
     MAIN.map((m) => m.file), 'the scope the run reads is the whole list');
-  assert.match(notes(f)[0]!, /Oneshot will run 2 automation tests locally once QA approves/);
+  assert.match(notes(f)[0]!, /Oneshot will run 2 automation tests \(5 test cases\) locally once QA approves/);
   assert.equal(readLtJournal(f.iid)!.lists.length, 1);
 });
 
@@ -876,7 +876,7 @@ test('real: the retired "check again" is feedback — the scope runs again on a 
   assert.match(f.sessions[1]!.prompt, /## QA asked for changes to an earlier version of this list/);
   assert.match(f.sessions[1]!.prompt, /please check again/);
   assert.deepEqual(f.cliCalls.filter((a) => a[0] === 'prepare-scope').length, 2);
-  assert.match(notes(f)[1]!, /Oneshot will run 1 automation test locally once QA approves/);
+  assert.match(notes(f)[1]!, /Oneshot will run 1 automation test \(6 test cases\) locally once QA approves/);
 });
 
 test('real: "added <file>" looks each path up on master; the ones there join the list, the rest are named', async () => {
@@ -897,7 +897,7 @@ test('real: "added <file>" looks each path up on master; the ones there join the
   assert.equal(r2.patchFile, j.lists[0]!.patchFile);
   assert.equal(r2.patchFromRound, 1);
   const n2 = notes(f)[1]!;
-  assert.match(n2, /^\*\*Impacted module: Leaves — Oneshot will run 3 automation tests locally once QA approves\.\*\*/);
+  assert.match(n2, /^\*\*Impacted module: Leaves — Oneshot will run 3 automation tests \(9 test cases\) locally once QA approves\.\*\*/);
   assert.match(n2, /\| Leaves \| ➕ \| `cypress\/e2e\/leaves\/LV_23_total\.cy\.ts` \| Added to workstream-automation by @anosha\.saeed \|/);
   assert.match(n2, /\*\*Not on master:\*\* `cypress\/e2e\/leaves\/typo\.cy\.ts` — check the path and reply again\./);
   assert.match(n2, /\*\*Temporary changes:\*\* 1 file updated, never committed \(kept from round 1, cut against workstream-automation `ccccccc` and applied on top of `eeeeeee`; if it no longer applies there, the run says so\) — the patch is attached\./);
@@ -955,7 +955,7 @@ test('real: a setup error puts the trigger back, says why, and asks QA again; th
   assert.deepEqual(labelEdits(f), [{ remove: [TRIGGER, DONE], add: [RUNNING] }, { remove: [RUNNING], add: [TRIGGER] }]);
   const posted = notes(f);
   assert.match(posted[posted.length - 2]!, /Oneshot could not run the local automation tests:\*\* E_MIGRATE_FAILED: leaves\.0042 failed/);
-  assert.match(posted[posted.length - 1]!, /Oneshot will run 2 automation tests locally once QA approves/, 'the same list, put to QA again');
+  assert.match(posted[posted.length - 1]!, /Oneshot will run 2 automation tests \(9 test cases\) locally once QA approves/, 'the same list, put to QA again');
   assert.ok(!f.issue.labels.includes(DONE), 'not marked done');
 
   qaSays(f, 'arsal.tariq', 'approved');
@@ -1191,7 +1191,7 @@ test('real: a reply after another Oneshot request is not read as approval; the l
   assert.deepEqual(j.lists[1]!.askedAgain?.by, 'arsal.tariq');
   assert.deepEqual(j.lists[1]!.specs, j.lists[0]!.specs, 'the same list');
   const again = notes(f)[1]!;
-  assert.match(again, /^\*\*Impacted module: Leaves — Oneshot will run 2 automation tests locally once QA approves/, 'the headline stays first');
+  assert.match(again, /^\*\*Impacted module: Leaves — Oneshot will run 2 automation tests \(9 test cases\) locally once QA approves/, 'the headline stays first');
   assert.match(again, /\*\*Asked again:\*\* the reply from `@arsal\.tariq` came after another Oneshot request on this ticket/);
 
   qaSays(f, 'arsal.tariq', 'approved');

@@ -255,7 +255,7 @@ automation report ──▶ label "Running TestCases Locally" ──▶ "Automat
 3. **The comment, and the wait.** Oneshot always asks before it runs anything —
    QA approves every local run. It posts one comment, in one of two shapes:
    - **The impacted-module report:** "Impacted modules: Leaves, Payroll — Oneshot
-     will run N automation tests locally once QA approves." It says what changed
+     will run N automation tests (M test cases) locally once QA approves." It says what changed
      in one line, then a table by module: ✔️ a test that checks the change (a
      testid links it to the change, or it goes through the changed screen), ⭐ one
      of the module's main-functionality tests, ➕ a file QA added. Then the counts

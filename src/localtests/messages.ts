@@ -453,8 +453,10 @@ export function localTestsFoundNote(scope: ScopeLike, info: LocalTestsNoteInfo):
   const summary = raw ? `${mdText(raw)}${raw.endsWith('…') ? '' : '.'}` : '';
   const modules = modulesOf(rows);
   const parts = [
+    // The case count beside the test count, so "4 tests" and the counts line's
+    // "11 test cases" read as one list, not as two numbers for the same thing.
     `**Impacted ${modules.length === 1 ? 'module' : 'modules'}: ${mdText(modules.join(', '))} — Oneshot will run `
-      + `${plural(rows.length, 'automation test')} locally once QA approves.**`,
+      + `${plural(rows.length, 'automation test')}${cases > 0 ? ` (${plural(cases, 'test case')})` : ''} locally once QA approves.**`,
     whatChanged(s, info),
     table(rows),
     legend(rows),

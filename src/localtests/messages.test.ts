@@ -70,10 +70,10 @@ const clearRun = (): void => rmSync(dirname(artifactDir(LT_IID)), { recursive: t
 test('the report opens with the impacted modules and what will run, then what changed', () => {
   const { body } = localTestsFoundNote(scope(), info());
   const parts = body.split('\n\n');
-  assert.equal(parts[0], '**Impacted modules: Leaves, Payroll — Oneshot will run 3 automation tests locally once QA approves.**');
+  assert.equal(parts[0], '**Impacted modules: Leaves, Payroll — Oneshot will run 3 automation tests (10 test cases) locally once QA approves.**');
   assert.equal(parts[1], '**What changed:** Leave form: rename the submit button (MR !11042, merged as `abcdef1`).');
   const one = localTestsFoundNote(scope({ specs: scope().specs.slice(0, 1) }), info()).body.split('\n\n')[0];
-  assert.equal(one, '**Impacted module: Leaves — Oneshot will run 1 automation test locally once QA approves.**');
+  assert.equal(one, '**Impacted module: Leaves — Oneshot will run 1 automation test (3 test cases) locally once QA approves.**');
 });
 
 test('what changed names the branch the MR went into: dev, or stage for a fix merged there', () => {
