@@ -2,8 +2,9 @@ import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  declaredFiles, parseCorrectedSteps, parseVerifyDirectives, planApprovalRequestBody, repliesAfter,
-  testcasesApprovalRequestBody, testcasesApprovedRecordBody, verifyCasesRequestBody, verifyOurStepsBody,
+  declaredFiles, gateAsked, gateTrigger, gatesApply, parseCorrectedSteps, parseVerifyDirectives,
+  planApprovalRequestBody, repliesAfter, reviewAllRuns, testcasesApprovalRequestBody, testcasesApprovedRecordBody,
+  verifyCasesRequestBody, verifyOurStepsBody,
 } from './reviewgate.js';
 import { planRenderWarnings, renderPlanMd } from '../lib/publish.js';
 
@@ -282,6 +283,43 @@ test('a file named only in fileChanges still counts toward the guarded-path gate
     steps: [],
     fileChanges: [{ path: 'apps/payroll/views.py', action: 'modify', area: 'Backend', what: 'x' }],
   }, null), ['apps/payroll/views.py']);
+});
+
+test('the green zone lifts the every-run posture, and nothing else', () => {
+  const plain = { every: true, labelled: false, hits: [] as string[] };
+  assert.deepEqual(gateTrigger({ ...plain, green: false }), { on: true, hits: [], lifted: false });
+  assert.deepEqual(gateTrigger({ ...plain, green: true }), { on: false, hits: [], lifted: true });
+  // A person's word about this ticket, and a guarded path inside a green
+  // area (two maps disagreeing), both still pause it.
+  assert.deepEqual(gateTrigger({ ...plain, labelled: true, green: true }), { on: true, hits: [], lifted: false });
+  const guarded = gateTrigger({ ...plain, hits: ['apps/payroll/'], green: true });
+  assert.deepEqual(guarded, { on: true, hits: ['apps/payroll/'], lifted: false });
+  // With the posture off there is nothing to lift, and green changes nothing.
+  const off = { every: false, labelled: false, hits: [] as string[] };
+  assert.deepEqual(gateTrigger({ ...off, green: true }), { on: false, hits: [], lifted: false });
+  assert.equal(gateTrigger({ ...off, hits: ['apps/auth/'], green: true }).on, true);
+  assert.equal(gateTrigger({ ...off, labelled: true, green: true }).on, true);
+});
+
+test('gatesApply reads the shipped posture and passes the zone verdict through', () => {
+  // Independent of reviewAllRuns (the first assertion compares against it);
+  // apps/payroll/ is a guarded path via config/risk-modules.json, so each end
+  // of gateTrigger is reached.
+  assert.equal(gatesApply(['Loop'], ['apps/training/views.py']).on, reviewAllRuns());
+  assert.equal(gatesApply(['Loop'], ['apps/training/views.py'], true).on, false);
+  assert.deepEqual(gatesApply(['Loop'], ['apps/payroll/utils.py'], true),
+    { on: true, hits: ['apps/payroll/'], lifted: false });
+});
+
+test('a gate that has asked a person is theirs to answer, until it is', () => {
+  const state = (over: Partial<Parameters<typeof gateAsked>[0] & object> = {}) =>
+    ({ requestTs: null, requestNoteId: null, approved: false, feedback: [], ...over });
+  assert.equal(gateAsked(undefined), false, 'never checked');
+  assert.equal(gateAsked(state()), false, 'checked, not yet asked');
+  assert.equal(gateAsked(state({ requestNoteId: 42 })), true, 'a request stands on the ticket');
+  // Feedback clears requestNoteId until the next check re-asks; the person is still in the loop.
+  assert.equal(gateAsked(state({ feedback: ['add a case for the empty list'] })), true);
+  assert.equal(gateAsked(state({ requestNoteId: 42, approved: true })), false, 'answered');
 });
 
 const tcase = (over: Record<string, unknown> = {}) => ({

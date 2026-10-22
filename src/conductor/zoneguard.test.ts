@@ -56,9 +56,32 @@ test('a ticket without the AI label is never stopped', () => {
   assert.deepEqual(v.violations, []);
 });
 
-test('a green AI ticket that stays green passes', () => {
+test('a green AI ticket that stays green passes, and is green', () => {
   const v = zoneVerdict(['AI', 'Loop'], ['apps/training/views.py', 'frontend/src/components/training/A.js'], read, ZONES);
   assert.deepEqual(v.violations, []);
+  assert.equal(v.green, true);
+});
+
+test('green needs every file in a green area, and at least one file', () => {
+  // A plan that names no file has given the guard nothing to pass.
+  assert.equal(zoneVerdict(['AI', 'Loop'], [], read, ZONES).green, false);
+  assert.equal(zoneVerdict(['AI', 'Loop'], ['apps/training/views.py', 'README.md'], read, ZONES).green, false);
+});
+
+test('a ticket grooming classified yellow is not green, even when its files are', () => {
+  // The stop is judged on files; a lift is a permission, and the label is a
+  // person's word against it.
+  const v = zoneVerdict(['AI', 'Loop', 'Zone: Yellow'], ['apps/training/views.py'], read, ZONES);
+  assert.deepEqual(v.violations, []);
+  assert.equal(v.green, false);
+  assert.equal(zoneVerdict(['AI', 'Loop', 'Zone: Yellow'], ['apps/teams/views.py'], read, ZONES).green, false);
+});
+
+test('a verdict the guard did not reach is never green', () => {
+  assert.equal(zoneVerdict(['Loop'], ['apps/training/views.py'], read, ZONES).green, false, 'guard not applied');
+  assert.equal(zoneVerdict(['AI'], ['apps/training/views.py'], { error: 'no map' }, ZONES).green, false, 'map unread');
+  assert.equal(zoneVerdict(['AI'], null, read, ZONES).green, false, 'diff unread');
+  assert.equal(zoneVerdict(['AI'], ['apps/training/views.py'], read, null).green, false, 'guard switched off');
 });
 
 test('a green AI ticket reaching into shared code is stopped', () => {

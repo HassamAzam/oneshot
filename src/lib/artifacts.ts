@@ -227,6 +227,14 @@ export interface RunJournal {
    * takes effect on the next claim.
    */
   reviewMode?: boolean;
+  /**
+   * The review gates the green zone lifted on this run
+   * (src/conductor/zoneguard.ts), each announced once. Latched here rather
+   * than in memory because a parked run re-enters runTicket every tick, and
+   * a lift announced per pass wrote one event per tick for as long as the
+   * park lasted.
+   */
+  liftedGates?: Array<'plan' | 'testcases'>;
   /** Plan-approval gate state (Review label, between `plan` and `implement`). */
   /**
    * Design approval gate state (the `Design` label, between `design` and
