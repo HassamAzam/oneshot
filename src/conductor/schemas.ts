@@ -486,6 +486,94 @@ export const TESTCASES_SCHEMA = phaseSchema({
   ),
 }, ['module', 'lv', 'cases', 'passesEmpty']);
 
+const EVAL_REQUIREMENT = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: str('R1, R2, … Stable: a later attempt is judged against these exact ids.'),
+    text: str('What must be true, in one sentence.'),
+    source: {
+      type: 'string',
+      enum: ['ticket', 'bug', 'code'],
+      description: 'ticket: stated in the description or comments. bug: the reported broken behaviour. code: a rule in the changed code.',
+    },
+    evidence: str('A verbatim quote from the ticket, or file:line in the changed code. Empty string if you have neither.'),
+  },
+  required: ['id', 'text', 'source', 'evidence'],
+};
+
+/**
+ * The on-demand `testcases-eval` judgement of one test-case list against its
+ * ticket. The conductor, not this session, decides what a finding costs — see
+ * src/lib/testcaseseval.ts — so every field here is evidence, not a verdict on
+ * the run.
+ */
+export const TESTCASES_EVAL_SCHEMA = phaseSchema({
+  requirements: {
+    type: 'array',
+    description: 'First evaluation only: every requirement the ticket establishes. On a re-evaluation, send [].',
+    items: EVAL_REQUIREMENT,
+  },
+  coverage: {
+    type: 'array',
+    description: 'One entry per requirement id you were given or listed.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        requirement: str('Requirement id.'),
+        coveredBy: str('The ONE case id whose precondition, steps and expected result would fail if the software got this requirement wrong, or "none".'),
+      },
+      required: ['requirement', 'coveredBy'],
+    },
+  },
+  findings: {
+    type: 'array',
+    description: 'Gaps and defects in the list. Empty when there are none — that is a valid answer.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: str('F1, F2, …'),
+        kind: {
+          type: 'string',
+          enum: ['missing', 'incorrect', 'redundant', 'contradictory'],
+          description: 'missing: no case covers it. incorrect: a case expects behaviour the ticket or code contradicts. redundant / contradictory: about the cases named.',
+        },
+        requirement: str('The requirement id it concerns, or empty string.'),
+        cases: strArr('Case ids the finding is about. Empty for a missing scenario — except an edge under a covered requirement that its covering case stops short of: name that case.'),
+        gap: str('What is missing or wrong, in one sentence.'),
+        evidence: str('A verbatim quote from the ticket, or file:line. Empty string if you have none.'),
+        validity: {
+          type: 'string',
+          enum: ['supported', 'unsupported', 'uncertain'],
+          description: 'supported: the evidence establishes it. uncertain: the ticket and code do not establish the expected behaviour.',
+        },
+        relevance: {
+          type: 'string',
+          enum: ['in-scope', 'out-of-scope'],
+          description: 'in-scope: named by the ticket, or on a code path this change touched.',
+        },
+        severity: {
+          type: 'string',
+          enum: ['critical', 'major', 'minor'],
+          description:
+            'critical: an acceptance criterion or the reported bug behaviour has no covering case. ' +
+            'major: an evidenced edge on a changed path (boundary, empty/null, permission, state change) is uncovered, ' +
+            'or a case expects behaviour the ticket contradicts. minor: anything else.',
+        },
+        rationale: str('Why this severity, in one line.'),
+      },
+      required: ['id', 'kind', 'requirement', 'cases', 'gap', 'evidence', 'validity', 'relevance', 'severity', 'rationale'],
+    },
+  },
+  proposedRequirements: {
+    type: 'array',
+    description: 'Re-evaluation only: a requirement the given list lacks that you have evidence for. Recorded, never added. [] otherwise.',
+    items: EVAL_REQUIREMENT,
+  },
+}, ['requirements', 'coverage', 'findings', 'proposedRequirements']);
+
 export const IMPLEMENT_SCHEMA = phaseSchema({
   commits: strArr('Short SHAs committed this lap.'),
   filesChanged: strArr('Repo-relative paths.'),
@@ -914,6 +1002,7 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   design: DESIGN_SCHEMA,
   plan: PLAN_SCHEMA,
   testcases: TESTCASES_SCHEMA,
+  'testcases-eval': TESTCASES_EVAL_SCHEMA,
   implement: IMPLEMENT_SCHEMA,
   review: FINDINGS_SCHEMA,
   verify: VERIFY_SCHEMA,

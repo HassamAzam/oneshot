@@ -4,7 +4,7 @@ import { mkdirSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
   MAX_UPLOAD_BYTES, baseShotsFor, failingOnDevText, localTestsPlanNote, localTestsReportNote, localTestsScopeReady,
-  localTestsStartNote, mimeFor,
+  localTestsStartNote, mimeFor, testcasesNoteBody,
 } from './publish.js';
 import { artifactDir, localTestsPatchFile } from './config.js';
 import { writeArtifact, type RunJournal } from './artifacts.js';
@@ -351,4 +351,11 @@ test('failing on dev reads the same three ways in the report and the gate', () =
   assert.equal(failingOnDevText(false), 'no — likely caused by this ticket');
   assert.equal(failingOnDevText(null), 'unknown');
   assert.equal(failingOnDevText(undefined), 'unknown');
+});
+
+test('the test-case note carries the coverage check\'s open gaps, and is unchanged without them', () => {
+  const tc = { id: 'TC-01', scenario: 's', precondition: '', steps: ['a'], expected: 'e', pass: ['happy'], blast: 'high' as const };
+  assert.match(testcasesNoteBody([tc], ''), /^\*\*Test cases\*\* — 1 case\(s\), 1 high blast radius\./);
+  assert.doesNotMatch(testcasesNoteBody([tc], ''), /coverage check/);
+  assert.match(testcasesNoteBody([tc], '**Automatic coverage check — 1 gap(s) still open**'), /screenshots come from\.\n\n\*\*Automatic coverage check/);
 });

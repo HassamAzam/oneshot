@@ -920,11 +920,14 @@ function renderCasesForTicket(cases: TestCase[]): string {
  * Deliberately carries no verdict: `qa` has not run yet at this point in the
  * pipeline, and inventing a summary for a phase that has not happened would be
  * worse than saying nothing. What is under review here is the LIST — what this
- * run intends to test — not a result.
+ * run intends to test — not a result. `evaluation` is the automatic coverage
+ * check's open gaps (testcaseseval.unresolvedSection), shown so the reviewer
+ * decides with them in view; the reviewer's verdict is never fed back to it.
  */
-export function testcasesApprovalRequestBody(cases: TestCase[], why: string): string {
+export function testcasesApprovalRequestBody(cases: TestCase[], why: string, evaluation = ''): string {
   return `**Oneshot pauses here** — ${why}\n\n` +
-    `**Test cases to be verified** (${cases.length})\n${renderCasesForTicket(cases)}\n\n---\n\n` +
+    `**Test cases to be verified** (${cases.length})\n${renderCasesForTicket(cases)}\n\n` +
+    (evaluation ? `${evaluation}\n\n` : '') + '---\n\n' +
     `${approverLine('testcases')}\n\n` +
     'Comment the single word **`approved`** to continue to `review`.\n\n' +
     'Anything else is a REVISION request, and the list is rewritten to match it — so say what you ' +

@@ -260,6 +260,19 @@ export interface RunJournal {
   /** Test-case approval gate state (Review label, between `testcases` and `review`). */
   testcasesApproval?: ReviewGateState;
   /**
+   * The automatic test-case evaluation's summary (the full record is
+   * testcases-eval.json). Its own field, never `testcasesApproval`: the gate's
+   * feedback is a human's and is carried into every later round, and evaluator
+   * findings mixed into it would reach a reviewer's next revision as if they
+   * were the reviewer's own. `feedback` is set only while a correction re-run
+   * is pending, so a later gate revision is never handed stale findings.
+   */
+  testcasesEval?: {
+    attempts: number;
+    status: 'pass' | 'fail' | 'needs_review' | 'error' | 'running';
+    feedback: string | null;
+  };
+  /**
    * Not a Bug confirmation gate state (between `research` and the phase after
    * it). Armed only when research could not reproduce a reported bug: a QA
    * reviewer's `approved` labels the ticket Not a Bug and stops the run; any
