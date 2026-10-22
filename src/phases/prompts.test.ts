@@ -774,14 +774,15 @@ test('research paces itself against its own configured budget', () => {
   assert.match(p, new RegExp(`about 70% of your ${turns}`));
 });
 
-test('the plan keeps its measured budget rather than growing to fit the method', () => {
-  // Seven replays measured 26-39 turns against a cap of 50, and the 39 was the
-  // run that DISCOVERED the prior art — the cost this change moves to research.
-  // A ceiling raised to cover a method is read as a target.
+test('the plan budget is pinned to its heavy-tier sibling, with the raise recorded', () => {
+  // Held at 50/20 across seven replays (max 39 turns), then raised to 115/40
+  // after #8933 — a greenfield sub-module — hit error_max_turns at 50 and wrote
+  // no plan.json: the confirm-and-residual-plan-hits-the-cap measurement the old
+  // rationale named as the one condition to revisit under. 115/40 matches design.
   const c = cfg('plan');
-  assert.equal(c.maxTurns, 50);
-  assert.equal(c.timeoutMin, 20);
-  assert.ok((c as unknown as { _why_turns?: string })._why_turns, 'the decision not to raise is recorded');
+  assert.equal(c.maxTurns, 115);
+  assert.equal(c.timeoutMin, 40);
+  assert.ok((c as unknown as { _why_turns?: string })._why_turns, 'the decision is recorded');
 });
 
 test('the prior-art kinds are one set, in every place that names them', () => {
