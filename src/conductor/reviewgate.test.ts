@@ -314,6 +314,13 @@ test('a pipe in model-authored prose cannot break the table open', () => {
   assert.ok(md.includes('401 \\| 403'), 'the expected pipe is escaped');
 });
 
+test('the coverage check\'s open gaps sit between the list and the instructions, and only when there are some', () => {
+  const md = testcasesApprovalRequestBody([tcase()], 'why', '**Automatic coverage check — 1 gap(s) still open**');
+  assert.ok(md.indexOf('| **TC-01** |') < md.indexOf('Automatic coverage check'));
+  assert.ok(md.indexOf('Automatic coverage check') < md.indexOf('Comment the single word'));
+  assert.doesNotMatch(testcasesApprovalRequestBody([tcase()], 'why'), /Automatic coverage check/);
+});
+
 test('the reviewer is told a reply revises the list, not that it appends', () => {
   // The old text said replies "are appended to testcases.json", which is what
   // taught reviewers to write append-shaped comments — and is no longer true.

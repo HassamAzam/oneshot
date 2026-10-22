@@ -206,6 +206,21 @@
       "artifact": "findings.json"
     },
     {
+      "name": "testcases-eval",
+      "n": 5.5,
+      "kind": "session",
+      "tier": "standard",
+      "cwd": "worktree",
+      "maxTurns": 30,
+      "timeoutMin": 15,
+      "writes": [],
+      "onFail": "warn",
+      "onDemand": true,
+      "artifact": "testcases-judgement.json",
+      "_why": "ON DEMAND: the conductor invokes it inside the testcases slot, once per evaluation of a freshly written list, and never after the Review gate asks for a revision. It judges the list against the TICKET — requirements frozen on the first attempt, coverage mapped onto them after — and the conductor (src/lib/testcaseseval.ts) decides from its findings whether testcases re-runs: at most twice, and no further once a re-run closes no gap. Read-only (writes: []) because it reads the diff for evidence and changes nothing. Standard tier: it judges a list, it does not write one.",
+      "_why_n": "5.5, not 4.5: phases() sorts by n, and anything between testcases (4) and review (5) would split the check group the runner batches. Being on demand it never runs in its sorted slot; n only decides where it sits in the list."
+    },
+    {
       "name": "verify",
       "n": 6,
       "kind": "session",

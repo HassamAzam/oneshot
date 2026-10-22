@@ -47,8 +47,8 @@
  * continues from the phase remediation says to resume at.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import {
   DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
@@ -94,6 +94,10 @@ import {
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
+import {
+  EVAL_RECORD, EvalInterrupted, evalStart, evidenceHolds, judgementFrom, runEvalLoop, unresolvedSection,
+  type EvalRecord, type JudgementArtifact,
+} from '../lib/testcaseseval.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
@@ -113,7 +117,7 @@ import {
 } from './zoneguard.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import {
-  countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type Ticket, type TestCase,
+  GITLAB_PROJECT_URL, countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type Ticket, type TestCase,
 } from '../phases/types.js';
 import {
   activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
@@ -1091,6 +1095,15 @@ interface PhaseResult {
   hardStop?: string;
 }
 
+/** A file's text, or null when it is missing, a directory, or unreadable. */
+function readText(path: string): string | null {
+  try {
+    return statSync(path).isFile() ? readFileSync(path, 'utf8') : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Run one ticket. Resumable: an existing journal means this is a RESUMPTION,
  * and phases that already succeeded are skipped rather than re-paid for.
@@ -1522,6 +1535,14 @@ export async function runTicket(
     if (shouldSkip(phase)) {
       prior[phase.name] = readArtifact(iid, phase.artifact ?? `${phase.name}.json`);
       log.info(`skip ${phase.name} — already succeeded this run`);
+      // A conductor stopped mid-evaluation left the record open. Finish it
+      // here, but only while the list is still unexecuted: once verify has run
+      // against it, or a reviewer approved it, the list is pinned.
+      if (phase.name === 'testcases' && prior.testcases && lapsOf(iid, 'verify') === 0
+        && !j.testcasesApproval?.approved
+        && evalStart(readArtifact<EvalRecord>(iid, EVAL_RECORD), j.testcasesApproval?.feedback?.length ?? 0) === 'resume') {
+        await evaluateTestcases(false);
+      }
       i += 1;
       continue;
     }
@@ -1682,7 +1703,8 @@ export async function runTicket(
       const gate = await checkApprovalGate({
         iid,
         gate: 'testcases',
-        requestBody: testcasesApprovalRequestBody(cases, triggerLine(caseGate)),
+        requestBody: testcasesApprovalRequestBody(cases, triggerLine(caseGate),
+          unresolvedSection(readArtifact<EvalRecord>(iid, EVAL_RECORD))),
         trigger: caseGate,
         // Appending runs on EVERY round that carried replies, approved or
         // not, and always before onApproved — a reviewer who lists an edge
@@ -1788,6 +1810,7 @@ export async function runTicket(
     if (running.length > 1) log.phase(`running ${running.join(' + ')} concurrently`);
 
     const results = await Promise.all(members.map((k) => runOne(list[k]!, k)));
+    let testcasesSalvaged = false;
 
     // A check phase's own account of itself is not evidence. Overrule it before
     // anything is recorded, so the journal and the card show the verdict the
@@ -2021,6 +2044,7 @@ export async function runTicket(
           r.out.ok = true;
           writeArtifact(iid, r.cfg.artifact ?? 'testcases.json', r.out.data);
           log.warn(`testcases salvaged from partial results — ${cases.length} case(s) recorded`);
+          testcasesSalvaged = true;
         }
       }
 
@@ -2278,6 +2302,12 @@ export async function runTicket(
         }
       }
       if (isMilestone(r.cfg)) await thread(j.slackTs ?? null, milestoneText(r.cfg, r.out.data, iid));
+    }
+
+    // Evaluated before publishPending below, so the ticket only ever sees the
+    // list that survives the evaluation — never each intermediate attempt.
+    if (results.some((r) => r.cfg.name === 'testcases') && prior.testcases) {
+      await evaluateTestcases(testcasesSalvaged);
     }
 
     await updateCard(j.slackTs ?? '', cardState(j));
@@ -2927,6 +2957,114 @@ export async function runTicket(
       log.warn('could not list this branch\'s migrations', { error: (err as Error).message.slice(0, 160) });
       return null;
     }
+  }
+
+  /**
+   * Judge a freshly written test-case list against the ticket and, while a
+   * retry-worthy gap remains, send it back to `testcases` — up to the retry cap.
+   * src/lib/testcaseseval.ts makes every decision; this only runs the sessions.
+   *
+   * Never fails the run. A judge that cannot answer closes the record as an
+   * eval error and the list goes on as written; a stop or pause leaves the
+   * record open for the next conductor (EvalInterrupted). Retried `testcases`
+   * sessions are recorded like any lap, so the ledger and lapsOf() count them.
+   */
+  async function evaluateTestcases(salvaged: boolean): Promise<void> {
+    const cfgE = list.find((q) => q.name === 'testcases-eval');
+    const idxT = list.findIndex((q) => q.name === 'testcases');
+    const cfgT = list[idxT];
+    if (!cfgE || !cfgT || !isImplemented(cfgE.name)) return;
+    const existing = readArtifact<EvalRecord>(iid, EVAL_RECORD);
+    if (evalStart(existing, j.testcasesApproval?.feedback?.length ?? 0) === 'skip') return;
+    const onDisk = readArtifact<Record<string, unknown> & { cases?: TestCase[] }>(iid, 'testcases.json');
+    if (!onDisk?.cases?.length) return;
+
+    const stopping = (): boolean => Boolean(opts.signal?.aborted) || existsSync(PAUSE) || quotaParked();
+    const record: EvalRecord = existing ?? {
+      iid, project: GITLAB_PROJECT_URL(), runId, requirements: [], attempts: [],
+    };
+    const noteEval = (status: NonNullable<RunJournal['testcasesEval']>['status'], feedback: string | null): void => {
+      j = updateJournal(iid, { testcasesEval: { attempts: record.attempts.length, status, feedback } }) ?? j;
+    };
+    const session = async (p: PhaseConfig, index: number): Promise<PhaseResult | string> => {
+      const quota = checkQuota(runId, p.name, lapsOf(iid, p.name));
+      if (!quota.allowed) return `quota: ${quota.reason}`;
+      await updateCard(j.slackTs ?? '', cardState(j, [p.name]));
+      updateRun(runId, { phase: p.name, status: 'running', owner_seen_at: Date.now() });
+      const r = await runOne(p, index);
+      recordPhase(iid, {
+        phase: p.name, lap: r.lap, status: r.out.ok ? 'ok' : statusForFailure(p, r.out.infra),
+        startedAt: r.startedAt, endedAt: r.endedAt, model: modelFor(p),
+        turns: r.out.turns, weighted: r.out.weighted, sessionId: r.out.sessionId,
+        error: r.out.accountAction ?? r.out.error ?? r.out.blocked ?? undefined,
+      });
+      j = readJournal(iid) ?? j;
+      return r;
+    };
+    const interrupted = (): EvalInterrupted => new EvalInterrupted('the run was stopped or paused during the test-case evaluation');
+    const ticketText = [
+      ticket.title, ticket.description ?? '', ...(ticket.notes ?? []),
+      ...(ticket.documents ?? []).map((d) => (d.textPath ? readText(d.textPath) ?? '' : '')),
+    ].join('\n');
+    const lineCounts = new Map<string, number | null>();
+    const linesIn = (path: string): number | null => {
+      if (!worktree) return null;
+      const bare = path.replace(/^[ab]\//, '');
+      const full = isAbsolute(bare) ? bare : resolve(worktree, bare);
+      const inside = relative(worktree, full);
+      if (!inside || inside.startsWith(`..${sep}`) || inside === '..' || isAbsolute(inside)) return null;
+      if (!lineCounts.has(full)) lineCounts.set(full, readText(full)?.split('\n').length ?? null);
+      return lineCounts.get(full)!;
+    };
+
+    let result: Awaited<ReturnType<typeof runEvalLoop>>;
+    try {
+      result = await runEvalLoop({
+        record, cases: onDisk.cases, lap: Math.max(0, lapsOf(iid, 'testcases') - 1), salvaged,
+        persist: (r) => writeArtifact(iid, EVAL_RECORD, r),
+        evidenceHolds: (e) => evidenceHolds(e, { ticketText, lines: linesIn }),
+        evaluate: async (cases) => {
+          prior.testcases = { ...(prior.testcases ?? {}), cases };
+          noteEval('running', null);
+          if (stopping()) throw interrupted();
+          const r = await session(cfgE, list.indexOf(cfgE));
+          if (typeof r === 'string') throw new Error(r);
+          if (stopping()) throw interrupted();
+          if (!r.out.ok || !r.out.data) throw new Error(r.out.error ?? r.out.blocked ?? 'the judge gave no judgement');
+          return {
+            judgement: judgementFrom(r.out.data as JudgementArtifact),
+            cost: { sessionId: r.out.sessionId, turns: r.out.turns, weighted: r.out.weighted },
+          };
+        },
+        regenerate: async (feedback) => {
+          noteEval('running', feedback);
+          if (stopping()) throw interrupted();
+          const r = await session(cfgT, idxT);
+          if (typeof r === 'string' || !r.out.ok || !r.out.data) return null;
+          const cases = (r.out.data as { cases?: TestCase[] }).cases ?? [];
+          if (!cases.length) return null;
+          prior.testcases = r.out.data;
+          return { cases, lap: r.lap, salvaged: false };
+        },
+      });
+    } catch (err) {
+      if (!(err instanceof EvalInterrupted)) throw err;
+      log.warn(`testcases-eval interrupted on #${iid} — the record stays open for the next conductor`);
+      return;
+    }
+
+    if (result.rewrite) {
+      const latest = readArtifact<Record<string, unknown>>(iid, 'testcases.json') ?? onDisk;
+      const kept = { ...latest, cases: result.cases };
+      writeArtifact(iid, 'testcases.json', kept);
+      prior.testcases = kept;
+    }
+    const final = result.record.final!;
+    noteEval(final.status, null);
+    const line = `testcases-eval #${iid}: ${final.status} after ${result.record.attempts.length} evaluation(s) `
+      + `(${final.stopReason}), kept attempt ${final.chosenAttempt ?? '-'}`;
+    if (final.status === 'pass') log.ok(line);
+    else log.warn(`${line}${final.unresolved.length ? ` — ${final.unresolved.length} unresolved` : ''}${final.error ? ` — ${final.error}` : ''}`);
   }
 
   /**
