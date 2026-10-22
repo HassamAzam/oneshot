@@ -3044,7 +3044,10 @@ export async function runTicket(
           const cases = (r.out.data as { cases?: TestCase[] }).cases ?? [];
           if (!cases.length) return null;
           prior.testcases = r.out.data;
-          return { cases, lap: r.lap, salvaged: false };
+          return {
+            cases, lap: r.lap, salvaged: false,
+            cost: { sessionId: r.out.sessionId, turns: r.out.turns, weighted: r.out.weighted },
+          };
         },
       });
     } catch (err) {
@@ -3061,8 +3064,11 @@ export async function runTicket(
     }
     const final = result.record.final!;
     noteEval(final.status, null);
+    const coverage = final.score
+      ? `, coverage ${final.score.firstCovered}/${final.score.requirements} → ${final.score.keptCovered}/${final.score.requirements}`
+      : '';
     const line = `testcases-eval #${iid}: ${final.status} after ${result.record.attempts.length} evaluation(s) `
-      + `(${final.stopReason}), kept attempt ${final.chosenAttempt ?? '-'}`;
+      + `(${final.stopReason}), kept attempt ${final.chosenAttempt ?? '-'}${coverage}`;
     if (final.status === 'pass') log.ok(line);
     else log.warn(`${line}${final.unresolved.length ? ` — ${final.unresolved.length} unresolved` : ''}${final.error ? ` — ${final.error}` : ''}`);
   }

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import type { TestCase } from '../phases/types.js';
 import {
   EvalInterrupted, MAX_EVAL_RETRIES, attemptStatus, evalStart, coverageDrops, evidenceHolds, feedbackFor, freezeRequirements,
-  judgementFrom, pickBest, reconcileFindings, retryWorthy, runEvalLoop, steadyCoverage, unresolvedSection,
+  judgementFrom, pickBest, reconcileFindings, retryWorthy, runEvalLoop, scoreOf, steadyCoverage, unresolvedSection,
   type Attempt, type EvalRecord, type Finding, type Judgement, type Requirement,
 } from './testcaseseval.js';
 
@@ -504,4 +504,43 @@ test('a check that could not finish says the list was not checked', () => {
 test('model-written text cannot inject markup into the ticket comment', () => {
   const md = unresolvedSection(closed({}, [finding({ gap: '<img src=x onerror=alert(1)>' })]));
   assert.doesNotMatch(md, /<img/);
+});
+
+test('a finished loop scores the first and the kept list, the retries and the cost of each session', async () => {
+  const h = harness({
+    judgements: [judgement({ R1: 'TC-01', R2: null }, [finding()]), judgement({ R1: 'TC-01', R2: 'TC-02' })],
+    lists: [[tc('TC-01'), tc('TC-02')]],
+  });
+  const base = h.input([tc('TC-01')]);
+  const out = await runEvalLoop({
+    ...base,
+    evaluate: async (c, frozen) => ({ ...(await base.evaluate(c, frozen)), cost: { turns: 4, weighted: 1.5 } }),
+    regenerate: async (fb) => {
+      const next = await base.regenerate(fb);
+      return next && { ...next, cost: { turns: 20, weighted: 6 } };
+    },
+  });
+  assert.deepEqual(out.record.attempts[1]!.generationCost, { turns: 20, weighted: 6 });
+  assert.equal(out.record.attempts[0]!.generationCost, undefined);
+  assert.deepEqual(out.record.final!.score, {
+    requirements: 2, firstCovered: 1, keptCovered: 2, retries: 1, openCritical: 0, openMajor: 0, uncertain: 0,
+    judgeTurns: 8, judgeWeighted: 3, retryTurns: 20, retryWeighted: 6,
+  });
+});
+
+test('the score counts the gaps and uncertain points still open on the kept list', () => {
+  const record = closed({}, [
+    finding(),
+    finding({ id: 'F2', severity: 'major', requirement: undefined }),
+    finding({ id: 'F3', validity: 'uncertain', requirement: undefined }),
+    finding({ id: 'F4', validity: 'uncertain', severity: 'minor', requirement: undefined }),
+  ]);
+  const score = scoreOf(record)!;
+  assert.equal(score.firstCovered, 1);
+  assert.equal(score.keptCovered, 1);
+  assert.equal(score.retries, 1);
+  assert.equal(score.openCritical, 1);
+  assert.equal(score.openMajor, 1);
+  assert.equal(score.uncertain, 1);
+  assert.equal(scoreOf(blank()), null);
 });

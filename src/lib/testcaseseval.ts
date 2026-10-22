@@ -128,7 +128,29 @@ export interface Attempt {
   carried?: string[];
   status: AttemptStatus;
   feedbackSent: string | null;
+  /** The judge session that produced this attempt's judgement. */
   cost?: AttemptCost;
+  /** The `testcases` re-run that wrote this attempt's list. Absent on the first attempt. */
+  generationCost?: AttemptCost;
+}
+
+/**
+ * The live score of one ticket's evaluation: how much of the ticket the first
+ * list covered, how much the kept list covers, what the retries cost, and what
+ * is still open. Derived from the record alone, so any record can be re-scored.
+ */
+export interface EvalScore {
+  requirements: number;
+  firstCovered: number;
+  keptCovered: number;
+  retries: number;
+  openCritical: number;
+  openMajor: number;
+  uncertain: number;
+  judgeTurns: number;
+  judgeWeighted: number;
+  retryTurns: number;
+  retryWeighted: number;
 }
 
 export interface FinalOutcome {
@@ -138,6 +160,7 @@ export interface FinalOutcome {
   unresolved: Finding[];
   /** What stopped the loop early, when it was not the judge's verdict. */
   error?: string;
+  score?: EvalScore;
 }
 
 export interface EvalRecord {
@@ -443,7 +466,7 @@ export interface EvalLoopInput {
   /** One judge pass. `frozen` is null on the first attempt. Throws on failure. */
   evaluate: (cases: TestCase[], frozen: Requirement[] | null) => Promise<{ judgement: Judgement; cost?: AttemptCost }>;
   /** One `testcases` re-run with the feedback. Null when that session did not produce a list. */
-  regenerate: (feedback: string) => Promise<{ cases: TestCase[]; lap: number; salvaged: boolean } | null>;
+  regenerate: (feedback: string) => Promise<{ cases: TestCase[]; lap: number; salvaged: boolean; cost?: AttemptCost } | null>;
   /** Called after every change to the record, so a restart resumes rather than restarts. */
   persist: (record: EvalRecord) => void;
   /** Checks evidence against the ticket and the worktree. Absent, all non-empty evidence is taken at its word. */
@@ -463,6 +486,31 @@ export interface EvalLoopResult {
   rewrite: boolean;
 }
 
+/** Score a record from its attempts and its chosen one. Null when nothing was evaluated. */
+export function scoreOf(record: EvalRecord): EvalScore | null {
+  const first = record.attempts[0];
+  if (!first) return null;
+  const kept = record.attempts.find((a) => a.n === record.final?.chosenAttempt)
+    ?? pickBest(record.requirements, record.attempts)!;
+  const covered = (a: Attempt): number => coveredIds(record.requirements, a.coverage, a.cases).size;
+  const open = kept.findings.filter(retryWorthy);
+  const sum = (pick: (a: Attempt) => number | undefined): number =>
+    record.attempts.reduce((total, a) => total + (pick(a) ?? 0), 0);
+  return {
+    requirements: record.requirements.length,
+    firstCovered: covered(first),
+    keptCovered: covered(kept),
+    retries: record.attempts.length - 1,
+    openCritical: open.filter((f) => f.severity === 'critical').length,
+    openMajor: open.filter((f) => f.severity === 'major').length,
+    uncertain: kept.findings.filter((f) => f.validity === 'uncertain' && f.severity !== 'minor').length,
+    judgeTurns: sum((a) => a.cost?.turns),
+    judgeWeighted: sum((a) => a.cost?.weighted),
+    retryTurns: sum((a) => a.generationCost?.turns),
+    retryWeighted: sum((a) => a.generationCost?.weighted),
+  };
+}
+
 function close(input: EvalLoopInput, stopReason: StopReason, current: TestCase[], error?: string): EvalLoopResult {
   const { record } = input;
   const best = pickBest(record.requirements, record.attempts);
@@ -473,6 +521,8 @@ function close(input: EvalLoopInput, stopReason: StopReason, current: TestCase[]
     unresolved: best ? best.findings.filter(retryWorthy) : [],
     ...(error ? { error } : {}),
   };
+  const score = scoreOf(record);
+  if (score) record.final.score = score;
   input.persist(record);
   const cases = best ? best.cases : current;
   return { record, cases, rewrite: stopReason === 'testcases-failed' || cases !== current };
@@ -491,6 +541,7 @@ export async function runEvalLoop(input: EvalLoopInput): Promise<EvalLoopResult>
   let cases = input.cases;
   let lap = input.lap;
   let salvaged = input.salvaged;
+  let generationCost: AttemptCost | undefined;
   let retried = false;
 
   for (;;) {
@@ -537,6 +588,7 @@ export async function runEvalLoop(input: EvalLoopInput): Promise<EvalLoopResult>
       status: attemptStatus(findings),
       feedbackSent: null,
       ...(judged.cost ? { cost: judged.cost } : {}),
+      ...(generationCost ? { generationCost } : {}),
     };
     record.attempts.push(attempt);
     input.persist(record);
@@ -550,6 +602,7 @@ export async function runEvalLoop(input: EvalLoopInput): Promise<EvalLoopResult>
     const next = await input.regenerate(attempt.feedbackSent);
     if (!next) return close(input, 'testcases-failed', cases);
     ({ cases, lap, salvaged } = next);
+    generationCost = next.cost;
     retried = true;
   }
 }
