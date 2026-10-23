@@ -1,0 +1,4 @@
+{
+  "_how": "One entry per ticket iid, labelled by a person who has read the ticket and the kept test-case list in state/runs/<iid>/testcases-eval.json. project: the ticket's GitLab project URL. runId: the record's runId — labels are only graded against that run. real: each judge requirement id that IS a requirement, mapped to the case id in the kept list that truly covers it, or null when no case does. notReal: judge requirement ids that are not requirements. missed: one line per real requirement the judge never listed. Run `npm run eval:gold`.",
+  "cases": {}
+}

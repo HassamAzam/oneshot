@@ -1533,6 +1533,25 @@ test('a re-evaluation is held to the frozen ids and never shown its own earlier 
   assert.doesNotMatch(p, /EARLIER-FINDING|EARLIER-FEEDBACK/);
 });
 
+test('the first evaluation numbers research\'s criteria and asks each requirement to name the one it comes from', () => {
+  const p = evalPrompt(990205);
+  assert.match(p, /AC1: Leave balance carries forward at year end/);
+  assert.match(p, /Set `criterion` to the research criterion/);
+  assert.match(p, /at least\s+four words long/);
+  assert.match(p, /`invalidRequirements: \[\]`/);
+});
+
+test('requirements frozen before any attempt was recorded still make it a re-evaluation', () => {
+  const p = evalPrompt(990206, {
+    iid: 990206, project: 'p', runId: 'r', frozen: true, attempts: [],
+    requirements: [{ id: 'R1', text: 'Balance carries forward', source: 'ticket', evidence: '"Carry the leave balance forward"', criterion: 'AC1' }],
+  });
+  assert.match(p, /This is a RE-EVALUATION/);
+  assert.match(p, /R1 \[ticket, AC1\] Balance carries forward/);
+  assert.match(p, /`invalidRequirements`/);
+  assert.match(p, /adopted only when another judgement proposes it too/);
+});
+
 test('the evaluator is told an empty findings list is a valid answer and not to invent rules', () => {
   const p = evalPrompt(990204);
   assert.match(p, /`findings: \[\]` is then the right answer/);

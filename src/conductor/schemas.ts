@@ -497,9 +497,10 @@ const EVAL_REQUIREMENT = {
       enum: ['ticket', 'bug', 'code'],
       description: 'ticket: stated in the description or comments. bug: the reported broken behaviour. code: a rule in the changed code.',
     },
-    evidence: str('A verbatim quote from the ticket, or file:line in the changed code. Empty string if you have neither.'),
+    evidence: str('A verbatim quote of four or more words from the ticket, or file:line on a line the change touched. Empty string if you have neither.'),
+    criterion: str('The research acceptance criterion it comes from, as AC1, AC2, …; empty string if it comes from none.'),
   },
-  required: ['id', 'text', 'source', 'evidence'],
+  required: ['id', 'text', 'source', 'evidence', 'criterion'],
 };
 
 /**
@@ -569,10 +570,24 @@ export const TESTCASES_EVAL_SCHEMA = phaseSchema({
   },
   proposedRequirements: {
     type: 'array',
-    description: 'Re-evaluation only: a requirement the given list lacks that you have evidence for. Recorded, never added. [] otherwise.',
+    description: 'Re-evaluation only: a requirement the given list lacks that you have evidence for. Adopted only when another judgement proposes it too. [] otherwise.',
     items: EVAL_REQUIREMENT,
   },
-}, ['requirements', 'coverage', 'findings', 'proposedRequirements']);
+  invalidRequirements: {
+    type: 'array',
+    description: 'Re-evaluation only: a given requirement the ticket or code shows is NOT one. Retired only when another judgement agrees. [] otherwise.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        requirement: str('The requirement id.'),
+        evidence: str('A verbatim quote of four or more words from the ticket, or file:line, that shows it is not a requirement.'),
+        reason: str('Why it is not a requirement, in one sentence.'),
+      },
+      required: ['requirement', 'evidence', 'reason'],
+    },
+  },
+}, ['requirements', 'coverage', 'findings', 'proposedRequirements', 'invalidRequirements']);
 
 export const IMPLEMENT_SCHEMA = phaseSchema({
   commits: strArr('Short SHAs committed this lap.'),
