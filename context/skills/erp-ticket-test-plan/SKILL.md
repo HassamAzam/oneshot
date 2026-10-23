@@ -30,6 +30,20 @@ Cover every category:
 
 **Derive every "Expected" for the change itself from the ticket's business logic, NOT the code's output.** If the expected value comes from the same code path you are testing, a systematic bug passes silently. This rule decides *whether the change works*. It does not cover the facts around the change — those come from the code, next section.
 
+## Walk the plan's loose ends — every one gets a case
+
+The approved plan closes with three lists, and they are your checklist, not background reading: `risks` (each names the check that would catch it), `openQuestions` (each with the default the plan assumed — usually nobody has answered it) and `acceptanceCoverage` (one row per criterion, `covered`, `partial` or `not-satisfiable`). Go through every risk, every open question and every row not marked `covered`, and give each one a case. Name the entry in the case's scenario — `(plan risk 2)`, `(open question 1)`, `(coverage: response times)` — so QA can see at the gate which entry it answers. Only an entry no step in this run can observe at all goes without a case; name it in `summary` with the reason (`risk 4: the crontab lives on the deployed server`).
+
+- **A risk's check is a case.** "Check: assertNumQueries pinned to a 3-month window" is a case that counts the queries over three months; "a week beginning 29 Dec 2025 belongs to December" is a case with that week in it. Trace the plan's predicted figure before you copy it into `expected`: on erp#8893 the plan said the query count was unchanged, and it rose by one.
+- **A row that is not `covered` is yours.** Cover every endpoint, screen and state its note names — "response times for the leave-choices, leave-summary and team fiscal summary endpoints" is three measurements, not one. A note that hands the check to "the verify phase", "ui-evidence" or "verified visually" hands it to you: those phases only run this list.
+- **A default never overrides a criterion the ticket states.** If the plan's default leaves a stated criterion partly met, write the case the criterion asks for and let it fail; never make the default the pass condition. On erp#8877 the default "collapse the pair into one card" was the pass condition of TC-04 and TC-05 while criterion (c) asked for the two cards to be told apart.
+- **A default on a point the ticket leaves open is the oracle only until someone answers it — so make the gate show it.** Choose inputs where the default and the alternative the question names give different results, put the default's figures in `expected`, and put the alternative's beside them as the named fail signal (principle 8). On erp#8781 "no per-person cap" was tested only with equal entitlements, where every rule gives the same split, and the unequal split reached stage.
+- **An entry that says existing code reacts to something gets a case that triggers the reaction**, not one that seeds the end state — and its Expected comes from the ticket, not from the entry. The entry describes what the code does; if the ticket says that outcome must not happen, the case expects it not to happen and fails when the reaction fires. On erp#8921 "an employment-type change cascades and disapproves future paid leaves" was tested by seeding records, so the receiver that revokes approved paid leave on a Status or Entity edit never ran — and the ticket excludes exactly that revocation.
+
+There is no upper limit on the number of cases, and no case per entry either. A case answers every entry its steps actually reach — name them all in its scenario — and an entry gets a new case only when no existing case reaches it. On the six tickets QA reviewed in October every first list stopped at exactly twenty while the plans carried 9–20 of these entries, and QA's feedback took the lists to 22–27. QA's reviewer already requires "every risk the plan itself lists needs a case or an explicit waiver", so an entry you skip comes back as a gate round.
+
+Sources: [erp#8344](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8344) (query count, straddling week, legacy reminder, dark theme handed to ui-evidence), [erp#8893](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8893) (pushed-event row, query count), [erp#8921](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8921) (receiver cascade, three endpoints), [erp#8877](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8877) (default over criterion c), [erp#8781](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8781) (default as the oracle, escaped to stage).
+
 ## Trace every fact about the product to the line that produces it
 
 Everything else a case states about the product is a fact about code the ticket did not ask to change. The ticket cannot tell you any of it; only the code can. That covers:
@@ -81,7 +95,9 @@ Sources: [erp#8783](https://gitlab.arbisoft.com/arbisoft/erp/-/work_items/8783),
 
 **Read `refs/traps.md` and walk it against your draft before the GATE.** It holds numbered **principles**, each generalising revision requests QA has already had to make on real tickets — cases that failed on a correct build, passed on an unchanged one, or were never written at all. Walk the principles, not the examples: the bullets under each one are illustrations of it, and the principle is what has to fire on a screen they never mention. It is the difference between a list that is approved in one round and one that costs three.
 
-Five checks to run over the finished draft:
+Six checks to run over the finished draft:
+
+- **Does every plan risk, every open question and every coverage row not marked `covered` have a case that names it?** If not, write it, or name the entry in `summary` with why no step in this run can observe it (see "Walk the plan's loose ends"). A case whose pass condition is an open question's default, on a point the ticket states, is the wrong case.
 
 - **Can you point at the line behind every literal the case quotes — and is that line outside the diff?** If you cannot, trace it or loosen it; if the diff wrote it, take it from the ticket or plan instead (see "Trace every fact about the product").
 - **Would this case still pass if the diff were reverted?** If yes it proves nothing about the change. Keep it if it guards a regression, but label it a smoke check and give it a positive control (principle 5).

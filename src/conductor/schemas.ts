@@ -434,7 +434,9 @@ export const TESTCASES_SCHEMA = phaseSchema({
   lv: str("Block header id. Emit 'LV_TBD' — the real number needs the sheet."),
   cases: {
     type: 'array',
-    description: '7-20 cases. This ONE list is executed by verify, ui-evidence and qa.',
+    description: 'At least 7 cases and no upper limit: every acceptance criterion, plan risk, ' +
+      'open question and coverage row not marked covered needs a case (one case may answer ' +
+      'several). This ONE list is executed by verify, ui-evidence and qa.',
     items: {
       type: 'object',
       additionalProperties: false,
