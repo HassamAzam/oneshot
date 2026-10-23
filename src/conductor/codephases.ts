@@ -826,6 +826,43 @@ async function resolveMrIid(ctx: CodePhaseCtx, journal: RunJournal): Promise<num
   return (merged ?? opened ?? res.data[0])?.iid ?? null;
 }
 
+interface ReviewArtifact {
+  verdict?: string;
+  findings?: Array<{ id?: string; severity?: string }>;
+  /** Stamped by the runner, never by the phase — see `reviewRegrade()`. */
+  gradedSha?: string;
+}
+
+/**
+ * The two artifacts every merge decision is derived from, read once.
+ *
+ * Shared by `qualityGate()` and `reviewRegrade()` on purpose: they ask
+ * different questions of the same inputs, and one of them reading `prior`
+ * while the other read disk would be a drift between the refusal and the
+ * decision to re-derive it — the gate refusing over a finding the staleness
+ * check cannot see, or the reverse.
+ */
+function gateInputs(ctx: CodePhaseCtx): {
+  results: Array<{ id?: string; result?: string; evidence?: string }>;
+  review: ReviewArtifact | null;
+} {
+  const iid = ctx.iid;
+  const fromPrior = <T>(phase: string, file: string): T | null =>
+    (ctx.prior[phase] as T | undefined) ?? readArtifact<T>(iid, file);
+  const verify = fromPrior<{
+    results?: Array<{ id?: string; result?: string; evidence?: string }>;
+  }>('verify', 'verify.json');
+  return {
+    results: verify?.results ?? [],
+    review: fromPrior<ReviewArtifact>('review', 'findings.json'),
+  };
+}
+
+/** The findings that stand in front of a merge: blockers and majors. */
+function reviewBlockers(review: ReviewArtifact | null): Array<{ id?: string; severity?: string }> {
+  return (review?.findings ?? []).filter((f) => f.severity === 'blocker' || f.severity === 'major');
+}
+
 /**
  * What the run's own check phases concluded, re-read here rather than trusted
  * from their phase status.
@@ -852,14 +889,7 @@ async function resolveMrIid(ctx: CodePhaseCtx, journal: RunJournal): Promise<num
  * residue is what hooks/artifact-guard.cjs stands in front of.
  */
 export function qualityGate(ctx: CodePhaseCtx): string | null {
-  const iid = ctx.iid;
-  const fromPrior = <T>(phase: string, file: string): T | null =>
-    (ctx.prior[phase] as T | undefined) ?? readArtifact<T>(iid, file);
-
-  const verify = fromPrior<{
-    results?: Array<{ id?: string; result?: string; evidence?: string }>;
-  }>('verify', 'verify.json');
-  const results = verify?.results ?? [];
+  const { results, review } = gateInputs(ctx);
   // 'pre-existing' is deliberately not a refusal: it fails on the base branch
   // too, and the MR note lists it for the reviewer (lib/publish.ts). Memory
   // and disk carry the same base-checked labels: the runner rewrites verify's
@@ -875,11 +905,7 @@ export function qualityGate(ctx: CodePhaseCtx): string | null {
       + 'Refusing to merge a change its own test cases do not pass.';
   }
 
-  const review = fromPrior<{
-    verdict?: string; findings?: Array<{ id?: string; severity?: string }>;
-  }>('review', 'findings.json');
-  const unaddressed = (review?.findings ?? [])
-    .filter((f) => f.severity === 'blocker' || f.severity === 'major');
+  const unaddressed = reviewBlockers(review);
   if (review?.verdict === 'changes-requested' || unaddressed.length) {
     const ids = unaddressed.map((f) => `${f.id ?? '?'} [${f.severity}]`).join(', ') || 'none listed';
     return `review returned verdict '${review?.verdict ?? 'unknown'}' with ${unaddressed.length} `
@@ -887,6 +913,93 @@ export function qualityGate(ctx: CodePhaseCtx): string | null {
   }
 
   return null;
+}
+
+/**
+ * The branch tip as git has it, or null when git cannot say.
+ *
+ * Read-only, by branch name, in the run's worktree — the same source and the
+ * same posture as `branchFiles()`: a sha that cannot be read comes back null,
+ * never as a wrong answer, because every caller here treats "unknown" as
+ * "assume the review still stands" and refuses the merge.
+ */
+export function branchHeadSha(branch: string | null | undefined, repo: string | null | undefined): string | null {
+  if (!branch || !repo) return null;
+  try {
+    return execFileSync('git', ['-C', repo, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], {
+      encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why the recorded review verdict should be re-derived instead of enforced, or
+ * null to enforce it.
+ *
+ * `review` grades the diff that existed when it ran. An `implement` lap after
+ * it — a verify failure sent back to code, a fix lap closing the findings
+ * themselves — moves the branch out from under that verdict, and nothing
+ * re-runs review or invalidates `findings.json`. The gate then refuses forever
+ * over findings the branch no longer carries, and `unblock` cannot clear it
+ * because review SUCCEEDED and a succeeded record is never dropped: erp#8893
+ * sat blocked on three blockers that four commits had already fixed, through a
+ * remediation that correctly reported the environment was fine.
+ *
+ * So the verdict is stamped with the sha it graded (runner.ts, on review's
+ * return) and checked against the branch here. This is the shape
+ * `approvalCovers()` uses for the design gate: an ABSENT stamp counts as
+ * covering, so a run already in flight when this shipped is enforced exactly
+ * as before rather than paying for a re-grade it never needed.
+ *
+ * Three conditions, and all three are load-bearing:
+ *
+ * - the verdict has to be one that refuses, or there is nothing to re-derive;
+ * - verify has to be CLEAN, so a stale review can never excuse a failing case
+ *   — those are separate refusals and only this one is re-derivable;
+ * - the stamp has to MISMATCH. Any difference counts, in either direction: a
+ *   sha that is not the one review read means review read another tree, and
+ *   deciding which way it moved is more trust than a cheap re-grade is worth.
+ *
+ * Direction of failure is deliberate. The worst a wrong answer here can do is
+ * spend one review lap — the re-grade writes a fresh verdict against the
+ * current sha, and a second refusal is then stamped with a sha that matches
+ * and so is enforced. It cannot open a merge. That matters because
+ * `findings.json` is writeable by every phase after review (see the note on
+ * `qualityGate` above): a session that forged its own stamp would buy itself a
+ * re-review by an agent that reads the real diff, not a way past the gate.
+ */
+export function reviewRegrade(ctx: CodePhaseCtx): string | null {
+  const inputs = gateInputs(ctx);
+  const review = inputs.review;
+  const unaddressed = reviewBlockers(review);
+  if (review?.verdict !== 'changes-requested' && !unaddressed.length) return null;
+  if (inputs.results.filter(countsAsFailure).length) return null;
+
+  const graded = typeof review?.gradedSha === 'string' ? review.gradedSha : '';
+  if (!graded) return null;
+
+  // LOCAL to local, on both sides, and that is what makes the comparison mean
+  // "did implement add commits after review graded". The stamp is read off the
+  // local branch when review returns; implement commits locally and `mr-open`
+  // pushes. A rebase, which is the other thing that moves a sha, is performed
+  // by `merge` through the GitLab API and rewrites the REMOTE branch — it does
+  // not touch this ref, so it cannot present itself here as a changed diff and
+  // buy a re-review on every merge re-entry.
+  //
+  // WORK_REPO is the fallback for a worktree already reaped: a worktree shares
+  // its parent clone's object store, so `refs/heads/<branch>` is still readable
+  // there. If neither can answer, `head` is null and the verdict stands.
+  const journal = readJournal(ctx.iid) ?? ctx.journal;
+  const head = branchHeadSha(journal.branch, journal.worktree)
+    ?? branchHeadSha(journal.branch, WORK_REPO);
+  if (!head || head === graded) return null;
+
+  const ids = unaddressed.map((f) => `${f.id ?? '?'} [${f.severity}]`).join(', ') || 'none listed';
+  return `review graded ${graded.slice(0, 10)} and the branch is now at ${head.slice(0, 10)}: `
+    + `its verdict '${review?.verdict ?? 'unknown'}' (${ids}) describes a diff that has since changed. `
+    + 'Re-grading the current diff rather than refusing over a stale review.';
 }
 
 /**
@@ -913,7 +1026,9 @@ async function markInReview(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<void
 
 export async function mergePhase(
   ctx: CodePhaseCtx,
-): Promise<{ ok: boolean; error?: string; park?: boolean; feedback?: MrFeedbackSignal }> {
+): Promise<{
+  ok: boolean; error?: string; park?: boolean; feedback?: MrFeedbackSignal; regrade?: string;
+}> {
   const cfg = projectConfig();
   const base = cfg.branches.base;
   const budgetMs = (phaseByName('merge')?.timeoutMin ?? 10) * 60_000;
@@ -936,6 +1051,17 @@ export async function mergePhase(
   rec.successNotePosted = carried?.successNotePosted === true;
   rec.mrNotePosted = carried?.mrNotePosted === true;
   rec.promotion = carried?.promotion ?? null;
+
+  // Before the refusal, not after it: a verdict that graded another diff is not
+  // a verdict about this one, and the one thing that can legitimately clear it
+  // is a fresh review. Checked here rather than inside qualityGate() so the
+  // gate keeps answering exactly one question — "do the records refuse this
+  // merge" — and so a failing verify case still reaches failMerge() unchanged.
+  const regrade = reviewRegrade(ctx);
+  if (regrade !== null) {
+    log.warn(`merge: ${regrade}`);
+    return { ok: false, error: regrade, regrade };
+  }
 
   const gate = qualityGate(ctx);
   if (gate !== null) return failMerge(ctx, rec, gate);

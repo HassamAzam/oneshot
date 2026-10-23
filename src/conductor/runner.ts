@@ -99,7 +99,7 @@ import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
-import { mergePhase, mrOpenPhase } from './codephases.js';
+import { branchHeadSha, mergePhase, mrOpenPhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
   MAX_CONFIRMATIONS, rearmGate,
@@ -306,6 +306,12 @@ export const CODE_PHASES: Record<
     park?: boolean;
     /** Set only by `merge`: new MR review threads for the runner to triage. */
     feedback?: MrFeedbackSignal;
+    /**
+     * Set only by `merge`: the recorded review verdict graded a different sha
+     * than the branch now carries, so it is re-derived instead of enforced.
+     * Routes a cycle back to `review` alone — see `reviewRegrade()`.
+     */
+    regrade?: string;
   }>) | undefined
 > = {
   'mr-open': mrOpenPhase,
@@ -2074,6 +2080,40 @@ export async function runTicket(
           log.warn(`review salvaged from partial findings — ${salvaged.findings.length} recorded`);
         }
       }
+
+      // What diff this verdict is ABOUT, stamped by the conductor from git
+      // rather than asked of the session.
+      //
+      // LAST in this loop, deliberately: review's salvage above replaces
+      // `r.out.data` wholesale and rewrites findings.json, so a stamp applied
+      // before it would be dropped and a SALVAGED 'changes-requested' — the
+      // one verdict no session authored — would be the unstampable case that
+      // walks straight back into the trap this closes.
+      //
+      // `findings.json` outlives the lap that wrote it, and an `implement` lap
+      // after review moves the branch out from under the verdict while the
+      // artifact keeps saying 'changes-requested'. The merge gate then refuses
+      // over findings the branch no longer carries, and no unblock can clear
+      // it, because review succeeded and `unblock` never drops a succeeded
+      // record (erp#8893). The sha is what lets the gate tell "review said no
+      // to THIS diff" from "review said no to an older one".
+      //
+      // Stamped here, after the SDK validated the session's output, for the
+      // same reason applyBaseCheck() rewrites verify's: a fact the gate relies
+      // on must not be one the phase it distrusts can author. FINDINGS_SCHEMA
+      // is additionalProperties:false, so the session cannot submit this field
+      // at all; it is added to the copy on its way to disk.
+      if (r.cfg.name === 'review' && r.out.ok) {
+        const gradedSha = branchHeadSha(branch, worktree);
+        if (gradedSha) {
+          r.out.data = { ...r.out.data, gradedSha };
+          writeArtifact(iid, r.cfg.artifact ?? 'findings.json', r.out.data);
+        } else {
+          // No stamp is the pre-upgrade case, which the gate reads as
+          // "covering" — the verdict is enforced as it was before this existed.
+          log.warn('review: could not read the branch tip — verdict left unstamped');
+        }
+      }
     }
 
     // Reconciled strictly in phase order, whatever order they finished in:
@@ -2541,6 +2581,25 @@ export async function runTicket(
     if (done.ok) {
       if (isMilestone(p)) await thread(j.slackTs ?? null, milestoneText(p, prior[p.name] ?? null, iid));
       return { kind: 'advance' };
+    }
+    if (done.regrade) {
+      // Cycle to `review` ALONE, not to implement and not through the phases
+      // between: no code changed, so the test cases, the evidence pack and the
+      // MR all still describe this branch. Only the verdict is out of date.
+      // Those phases read as succeeded and skip, so the loop comes straight
+      // back here with a findings.json stamped against the current sha — and a
+      // verdict that still refuses is then enforced, which is what stops this
+      // from cycling twice on the same diff.
+      releasePromotion(runId);
+      const rIdx = list.findIndex((q) => q.name === 'review');
+      if (rIdx === -1) {
+        return {
+          kind: 'stop', status: 'blocked', noRemediation: true,
+          reason: `merge: ${done.regrade} — but review is not in the phase list, so it cannot be re-run`,
+        };
+      }
+      prior.review = null;
+      return { kind: 'cycle', jumpTo: rIdx, windowEnd: rIdx };
     }
     if (done.feedback) {
       // Nothing of this run has landed on the base branch — the MR is still
