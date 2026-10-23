@@ -81,7 +81,7 @@ import { planFilePaths } from '../lib/planfiles.js';
 import type { DesignArtifact, TestCase } from '../phases/types.js';
 import { parseEdgeCases } from './edgecases.js';
 import { MAX_UPLOAD_BYTES, mimeFor } from '../lib/publish.js';
-import { artifactDir } from '../lib/config.js';
+import { artifactDir, designFlowOwedFile } from '../lib/config.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
@@ -1700,6 +1700,9 @@ function designOf(design: Record<string, unknown> | null): DesignArtifact {
     flowChange: d.flowChange === true,
     tokensFile: typeof d.tokensFile === 'string' ? d.tokensFile : '',
     screens: Array.isArray(d.screens) ? d.screens : [],
+    prototype: d.prototype && typeof d.prototype === 'object'
+      ? { entry: String(d.prototype.entry ?? ''), video: String(d.prototype.video ?? '') }
+      : null,
     decisions: Array.isArray(d.decisions) ? d.decisions.map(String) : [],
     newPatterns: Array.isArray(d.newPatterns) ? d.newPatterns.map(String) : [],
     openQuestions: Array.isArray(d.openQuestions) ? d.openQuestions : [],
@@ -1713,7 +1716,7 @@ function designOf(design: Record<string, unknown> | null): DesignArtifact {
  * Order is the argument, exactly as it is in the ui-evidence pack: for each
  * screen the current state first and the proposal second, so a reviewer
  * scrolling the comment reads before→after per screen rather than a block of
- * one followed by a block of the other. Ordering follows the screens,
+ * one followed by a block of the other. The walkthrough follows the screens,
  * and the clickable file last — it is the thing you open if the pictures left
  * you with a question.
  *
@@ -1752,6 +1755,10 @@ export function designAttachments(iid: number, design: Record<string, unknown> |
     push(s.before);
     push(s.screenshot);
   }
+  if (d.prototype) {
+    push(d.prototype.video);
+    push(d.prototype.entry);
+  }
   return out;
 }
 
@@ -1766,15 +1773,28 @@ export function designAttachments(iid: number, design: Record<string, unknown> |
  * phase reports its own success and nothing checks the artifact against disk.
  *
  * So the per-file tolerance stays where it is and the check moves up a level.
- * A design claiming screens must have rendered them. Returns null when there is
+ * A design claiming screens must have rendered them, and a design claiming a
+ * flow change must have built and recorded it. Returns null when there is
  * nothing to refuse: `applicable: false`, or no screens, is a complete answer.
  */
 export function designDeliverableRefusal(
   iid: number, design: Record<string, unknown> | null,
 ): string | null {
   const d = designOf(design);
-  if (!d.applicable || d.screens.length === 0) return null;
+  if (!d.applicable) return null;
   const dir = artifactDir(iid);
+  // Both, not the first of the two. `screens: []` is a complete answer for a
+  // design that changes nothing, but it is also schema-valid for a flow change
+  // — no `minItems` — so hanging the flow check off the screen check let
+  // `{flowChange: true, screens: [], prototype: null}` through.
+  const refusals = [screenDeliverableRefusal(d, dir), flowDeliverableRefusal(iid, d, dir)]
+    .filter((r): r is string => r !== null);
+  return refusals.length === 0 ? null : refusals.join(' ');
+}
+
+/** The renders the design says it made, checked against disk. */
+function screenDeliverableRefusal(d: DesignArtifact, dir: string): string | null {
+  if (d.screens.length === 0) return null;
   const missing = d.screens
     .filter((sc) => !sc.screenshot || !existsSync(join(dir, sc.screenshot)))
     .map((sc) => sc.id || sc.name || '(unnamed)');
@@ -1783,6 +1803,31 @@ export function designDeliverableRefusal(
   return `design reported ${d.screens.length} screen(s) and ${all ? 'none' : `${missing.length}`}`
     + ` of their renders are on disk: ${missing.join(', ')}.`
     + ' A design gate armed on screens nobody can see asks a reviewer to approve nothing.';
+}
+
+/**
+ * A flow is approved by clicking through it and watching it, not by reading
+ * stills in order. hooks/design-flow-guard.cjs refuses the session's answer
+ * until the prototype and the walkthrough are good; this is what still holds
+ * when that guard released at its refusal cap, or failed open.
+ *
+ * `d.flowChange` is NOT the only trigger, because the session writes it: an
+ * answer refused for a missing prototype could come back with the flag cleared
+ * and the same stills, and a check keyed on the flag alone would wave it
+ * through. The guard records the obligation against the ticket as it refuses,
+ * outside any phase's write scope, and that recording counts here too.
+ */
+function flowDeliverableRefusal(iid: number, d: DesignArtifact, dir: string): string | null {
+  if (!d.flowChange && !existsSync(designFlowOwedFile(iid))) return null;
+  const missing = ([['clickable prototype', d.prototype?.entry], ['walkthrough video', d.prototype?.video]] as const)
+    .filter(([, rel]) => !rel || !existsSync(join(dir, rel)))
+    .map(([what]) => what);
+  if (missing.length === 0) return null;
+  const claimed = d.flowChange
+    ? 'design reported a flow change'
+    : 'design was refused for a flow change and then stopped reporting one';
+  return `${claimed}, and its ${missing.join(' and ')} ${missing.length > 1 ? 'are' : 'is'}`
+    + ' not on disk. A gate armed on stills alone asks a reviewer to approve a journey they cannot walk.';
 }
 
 /**
@@ -1798,8 +1843,10 @@ export function designDeliverableRefusal(
  * scrolls to them naturally; repeating them as a list would be a caption
  * track for something already on screen.
  */
-function renderDesignForTicket(design: Record<string, unknown> | null): string {
+function renderDesignForTicket(iid: number, design: Record<string, unknown> | null): string {
   const d = designOf(design);
+  const onDisk = (rel: string | undefined): boolean =>
+    !!rel && existsSync(join(artifactDir(iid), rel));
   const bullets = (xs: string[]): string => xs.map((x) => `- ${mdText(x)}`).join('\n');
   const screens = d.screens
     .map((s) => `- **${mdText(s.name)}** — ${mdText(s.purpose)}`
@@ -1817,17 +1864,46 @@ function renderDesignForTicket(design: Record<string, unknown> | null): string {
       ? `**New — needs approval**\nNot in the design system today. Approving the design approves these too.\n${bullets(d.newPatterns)}\n\n`
       : ''}`
     + `${questions ? `**Open questions** — answer in a comment, or the recommendation is used\n${questions}\n\n` : ''}`
-    + (d.flowChange
-      ? 'The flow spans more than one screen, so the mockups below are its states in order. '
-        + 'A clickable prototype and a recorded walkthrough follow in a later change.\n'
-      : 'Single screen, no flow change.\n');
+    + flowLine(d, onDisk);
+}
+
+/**
+ * What the reviewer is told to look for below the comment, read off disk
+ * rather than off `flowChange`.
+ *
+ * `designAttachments` drops a file disk does not have, silently and on
+ * purpose. A sentence rendered from the flag alone therefore promised a video
+ * and a prototype that were never uploaded — and it still does on any re-arm
+ * of a gate whose `design.json` predates the guard, because
+ * `designDeliverableRefusal` only runs on a fresh phase result. The flat case
+ * is phrased from the same facts: the old wording said "single screen" over
+ * designs that reported several.
+ */
+function flowLine(d: DesignArtifact, onDisk: (rel: string | undefined) => boolean): string {
+  const video = onDisk(d.prototype?.video);
+  const entry = onDisk(d.prototype?.entry);
+  if (video && entry) {
+    return 'The flow changes, so a silent walkthrough is attached below the screens, and the clickable '
+      + 'prototype with it — download it and open it in a browser to click through the whole '
+      + 'journey yourself.\n';
+  }
+  if (entry) {
+    return 'The flow changes, and the clickable prototype is attached below the screens — download it '
+      + 'and open it in a browser to click through the whole journey yourself. There is no '
+      + 'walkthrough recording with it.\n';
+  }
+  if (video) {
+    return 'The flow changes, so a silent walkthrough of it is attached below the screens. There is no '
+      + 'clickable prototype with it.\n';
+  }
+  return 'There is no prototype or walkthrough attached, so the screens above are the whole design.\n';
 }
 
 /** Posted as a ticket comment when the design gate first arms, or re-arms after feedback. */
-export function designApprovalRequestBody(design: Record<string, unknown> | null): string {
+export function designApprovalRequestBody(iid: number, design: Record<string, unknown> | null): string {
   return '**Oneshot pauses here** — this ticket carries **Design**, so the UI is agreed before '
     + 'it is built.\n\n'
-    + `${renderDesignForTicket(design)}\n---\n\n`
+    + `${renderDesignForTicket(iid, design)}\n---\n\n`
     + `${approverLine('design')}\n\n`
     + 'Comment the single word **`approved`** to continue to `plan` and `implement` — what is '
     + 'approved here becomes the specification they build to, and the shipped screens are posted '

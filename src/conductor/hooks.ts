@@ -165,6 +165,11 @@ const MR_TOOLS = '^mcp__gitlab__(create|update)_merge_request$';
  * credentials file it was never told the path of (docs/HOOKS.md, local tests).
  */
 const READ_OR_BASH = '^(Read|NotebookRead|Grep|Glob|Bash)$';
+/**
+ * A phase's final answer: the SDK delivers `outputFormat: json_schema` as this
+ * tool call, so a deny sends the session back to finish before it may end.
+ */
+const STRUCTURED_OUTPUT = '^StructuredOutput$';
 
 /**
  * Build the hook set for one phase.
@@ -186,6 +191,9 @@ export function hooksFor(env: Record<string, string>): Record<string, unknown[]>
       { matcher: BASH, hooks: [guard('install-guard.cjs')], timeout: 15 },
       { matcher: MR_TOOLS, hooks: [guard('mr-gate.cjs')], timeout: 15 },
       { matcher: READ_OR_BASH, hooks: [guard('secret-guard.cjs')], timeout: 15 },
+      // Self-gates to `design`: a flow change may not end without its
+      // prototype and walkthrough on disk.
+      { matcher: STRUCTURED_OUTPUT, hooks: [guard('design-flow-guard.cjs')], timeout: 15 },
       // log-event stays last so a denied call is still recorded.
       { hooks: [guard('log-event.cjs')], timeout: 10 },
     ],
