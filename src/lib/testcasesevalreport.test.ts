@@ -4,8 +4,10 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { EvalScore } from './testcaseseval.js';
-import { formatReport, reportRow, summarise, type ReportRow } from './testcasesevalreport.js';
+import type { EvalRecord, EvalScore } from './testcaseseval.js';
+import {
+  formatGold, formatReport, gradeAgainstGold, reportRow, summarise, type GoldLabel, type ReportRow,
+} from './testcasesevalreport.js';
 
 const score = (over: Partial<EvalScore> = {}): EvalScore => ({
   requirements: 4, firstCovered: 4, keptCovered: 4, retries: 0, openCritical: 0, openMajor: 0, uncertain: 0,
@@ -53,3 +55,52 @@ test('the printed report has a row per ticket and the pooled coverage', () => {
   assert.ok(lines.some((l) => l.includes('first list 75% → kept list 100%')));
   assert.deepEqual(formatReport([]), ['No ticket has a test-case evaluation yet.']);
 });
+
+test('judge agreement and reviewer additions are summed across tickets', () => {
+  const t = summarise([
+    row(1, { score: score({ coverageCalls: 8, disputed: 1 }), review: { added: ['a', 'b'], removed: [], revisions: 1 } }),
+    row(2, { score: score({ coverageCalls: 2, disputed: 0 }), review: { added: [], removed: ['c'], revisions: 0 } }),
+    row(3),
+  ]);
+  assert.equal(t.coverageCalls, 10);
+  assert.equal(t.disputed, 1);
+  assert.equal(t.reviewed, 2);
+  assert.equal(t.reviewerAddedOn, 1);
+  assert.equal(t.reviewerAdded, 2);
+  const lines = formatReport([row(1, { score: score({ coverageCalls: 8, disputed: 1 }) })]);
+  assert.ok(lines.some((l) => l.includes('judge agreement: 88% of 8 coverage call(s) (1 split between passes)')));
+});
+
+const tc = (id: string) => ({ id, scenario: id, precondition: '', steps: [], expected: '', pass: ['happy' as const], blast: 'low' as const });
+const graded = (): EvalRecord => ({
+  iid: 5, project: 'p', runId: 'run-1',
+  requirements: ['R1', 'R2', 'R3', 'R4'].map((id) => ({ id, text: id, source: 'ticket' as const, evidence: '' })),
+  attempts: [{
+    n: 0, at: '', lap: 0, salvaged: false, cases: [tc('TC-01'), tc('TC-02')],
+    coverage: { R1: 'TC-01', R2: 'TC-02', R3: null, R4: 'TC-09' }, findings: [], proposedRequirements: [], dropped: [],
+    status: 'pass', feedbackSent: null,
+  }],
+  final: { status: 'pass', chosenAttempt: 0, stopReason: 'passed', unresolved: [] },
+});
+
+test('a record is graded against labels for its run: real, missed and coverage calls', () => {
+  const gold: GoldLabel = {
+    project: 'p', runId: 'run-1', real: { R1: 'TC-01', R2: null, R3: 'TC-02' }, notReal: ['R4'], missed: ['Sorted by date'],
+  };
+  const g = gradeAgainstGold(graded(), gold);
+  assert.notEqual(typeof g, 'string');
+  assert.deepEqual(g, {
+    iid: 5, real: 3, notReal: 1, missed: 1, unlabelled: [],
+    coverageLabelled: 3, coverageAgree: 1, falseCovered: 1, falseGap: 1,
+  });
+  const lines = formatGold([g as Exclude<typeof g, string>]);
+  assert.ok(lines.some((l) => l.includes('75% of those listed are real, 75% of the real ones were listed')));
+  assert.ok(lines.some((l) => l.includes('33% of 3 labelled call(s) agree — 1 falsely covered, 1 falsely missing')));
+});
+
+test('labels written for another run are refused, and unlabelled ids are named', () => {
+  assert.match(String(gradeAgainstGold(graded(), { project: 'p', runId: 'run-0', real: {}, notReal: [], missed: [] })), /run-0/);
+  const g = gradeAgainstGold(graded(), { project: 'p', runId: 'run-1', real: { R1: 'TC-01' }, notReal: [], missed: [] });
+  assert.deepEqual((g as { unlabelled: string[] }).unlabelled, ['R2', 'R3', 'R4']);
+});
+

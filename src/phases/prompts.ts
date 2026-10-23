@@ -32,7 +32,7 @@ import { DESIGN_DIR, NEW_TOKENS_FILE, TOKENS_FILE } from '../lib/designtokens.js
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import { PRIOR_ART_KINDS } from '../conductor/schemas.js';
-import { COVERAGE_RULE, type EvalRecord } from '../lib/testcaseseval.js';
+import { COVERAGE_RULE, isFrozen, type EvalRecord } from '../lib/testcaseseval.js';
 import {
   GITLAB_PROJECT_URL, countsAsFailure, ticketScopeIds,
   type CaseResult, type DesignArtifact, type Finding, type Screenshot, type TestCase,
@@ -1603,33 +1603,44 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
 
   'testcases-eval': (ctx) => {
     const record = readArtifact<EvalRecord>(ctx.ticket.iid, 'testcases-eval.json');
-    const frozen = record?.attempts?.length ? record.requirements : null;
+    const frozen = record && isFrozen({ ...record, attempts: record.attempts ?? [] }) ? record.requirements : null;
+    const acceptance = artifact<{ acceptanceCriteria: string[] }>(ctx, 'research').acceptanceCriteria ?? [];
     const requirementsBlock = frozen
       ? `## The requirements — frozen on the first evaluation, judge against these ids only
-${frozen.map((r) => `  - ${r.id} [${r.source}] ${r.text}\n      evidence: ${r.evidence}`).join('\n') || '  (none were frozen)'}
+${frozen.map((r) => `  - ${r.id} [${r.source}${r.criterion ? `, ${r.criterion}` : ''}] ${r.text}\n      evidence: ${r.evidence}`).join('\n') || '  (none were frozen)'}
 
-This is a RE-EVALUATION. Send \`requirements: []\`. Map every id above in \`coverage\`. A requirement
-you have evidence for that is not above goes in \`proposedRequirements\` — it is recorded, never
-held against this list.`
+This is a RE-EVALUATION. Send \`requirements: []\`. Map every id above in \`coverage\`.
+- A requirement you have evidence for that is not above goes in \`proposedRequirements\`. It is
+  adopted only when another judgement proposes it too, so propose only what you can evidence.
+- A requirement above that the ticket or the code shows is NOT one goes in \`invalidRequirements\`
+  with evidence that shows it. It is retired only when another judgement agrees. Do not use this
+  for a requirement that is merely hard to test.`
       : `## First evaluation — list the requirements
 
 Before judging any case, list in \`requirements\` what this ticket establishes must be true when it is
 done: each acceptance criterion, the reported broken behaviour that must now work (a bug), and any
 rule in the changed code a user can reach. Give each an id R1, R2, … and its evidence — a verbatim
 quote from the ticket above, or \`file:line\` in the diff. A requirement you cannot quote or point at
-is a guess: give it an empty \`evidence\` and it is held as uncertain, not against the list. Send
-\`proposedRequirements: []\`.`;
+is a guess: give it an empty \`evidence\` and it is held as uncertain, not against the list.
+
+Set \`criterion\` to the research criterion (AC1, AC2, …) a requirement comes from. Every criterion
+below should come out as at least one requirement unless the ticket contradicts it: one no
+requirement carries is shown to a person as a disagreement between the two readings. Send
+\`proposedRequirements: []\` and \`invalidRequirements: []\`.`;
 
     return `${ticketBlock(ctx.ticket)}
 
 ## Acceptance criteria as research read them (phase 1)
-${criteria(ctx)}
+${acceptance.map((a, i) => `  - AC${i + 1}: ${a}`).join('\n') || '  (none recorded)'}
 
 These are another phase's reading of the ticket, a pointer to where to look. Evidence is a quote
 from the ticket itself, or \`file:line\` in the change — never this list. Evidence is checked
-mechanically: put a quote in double quotes, copied exactly from the ticket (\`…\` may elide words),
-and give a path relative to the repo root with a line that exists. Evidence that does not check out
-is held as uncertain, whatever you rate it.
+mechanically:
+- A quote goes in double quotes, copied exactly from the ticket (\`…\` may elide words), at least
+  four words long, and shares a word with what it is offered for.
+- A \`file:line\` is a path relative to the repo root, on or within a few lines of a line the
+  change touched.
+Evidence that does not check out is held as uncertain, whatever you rate it.
 
 ## The test-case list to evaluate
 ${caseList(testCases(ctx), { steps: true })}

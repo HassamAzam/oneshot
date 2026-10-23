@@ -8,9 +8,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { TestCase } from '../phases/types.js';
 import {
-  EvalInterrupted, MAX_EVAL_RETRIES, attemptStatus, evalStart, coverageDrops, evidenceHolds, feedbackFor, freezeRequirements,
-  judgementFrom, pickBest, reconcileFindings, retryWorthy, runEvalLoop, scoreOf, steadyCoverage, unresolvedSection,
-  type Attempt, type EvalRecord, type Finding, type Judgement, type Requirement,
+  EvalInterrupted, MAX_EVAL_RETRIES, adoptProposals, attemptStatus, changedRanges, criterionTag, evalStart, coverageDrops,
+  evidenceHolds, feedbackFor, freezeRequirements, judgementFrom, mergeJudgements, pickBest, reconcileFindings,
+  retireRequirements, retryWorthy, reviewOutcome, runEvalLoop, scoreOf, steadyCoverage, unmatchedCriteria,
+  unresolvedSection, type Attempt, type EvalRecord, type Finding, type Judgement, type Requirement,
 } from './testcaseseval.js';
 
 const tc = (id: string): TestCase => ({
@@ -334,7 +335,7 @@ test('a file:line holds only for a file in the worktree and a line it has', () =
 });
 
 test('one checking source is enough: a bad file:line beside a real quote holds', () => {
-  assert.equal(evidenceHolds('"the employee code" — apps/payroll/nope.py:3', sources), true);
+  assert.equal(evidenceHolds('"must include the employee code" — apps/payroll/nope.py:3', sources), true);
 });
 
 test('a supported finding whose evidence does not check out is held as uncertain and earns no retry', () => {
@@ -343,13 +344,13 @@ test('a supported finding whose evidence does not check out is held as uncertain
   assert.equal(f!.validity, 'uncertain');
   assert.match(f!.rationale, /evidence found neither in the ticket nor in the worktree/);
   assert.equal(retryWorthy(f!), false);
-  const [ok] = reconcileFindings([finding({ evidence: '"the employee code"' })], [req('R2')], {}, [tc('TC-01')], holds);
+  const [ok] = reconcileFindings([finding({ evidence: '"must include the employee code"' })], [req('R2')], {}, [tc('TC-01')], holds);
   assert.equal(ok!.validity, 'supported');
 });
 
 test('a requirement whose evidence does not check out is not frozen and comes back as uncertain', () => {
   const { frozen, rejected } = freezeRequirements(
-    [req('R1', '"the employee code"'), req('R2', '"exports are sorted by date"')], (e) => evidenceHolds(e, sources),
+    [req('R1', '"must include the employee code"'), req('R2', '"exports are sorted by date"')], (e) => evidenceHolds(e, sources),
   );
   assert.deepEqual(frozen.map((r) => r.id), ['R1']);
   assert.equal(rejected[0]!.validity, 'uncertain');
@@ -359,7 +360,7 @@ test('a requirement whose evidence does not check out is not frozen and comes ba
 test('a judge that invents evidence for a gap does not spend a retry', async () => {
   const h = harness({
     judgements: [judgement({ R1: 'TC-01', R2: 'TC-02' }, [finding({ requirement: undefined, evidence: '"sorted by date"' })],
-      [req('R1', '"the employee code"'), req('R2', '"cannot see salaries"')])],
+      [req('R1', '"must include the employee code"'), req('R2', '"cannot see salaries of other teams"')])],
   });
   const out = await runEvalLoop({ ...h.input([tc('TC-01'), tc('TC-02')]), evidenceHolds: (e) => evidenceHolds(e, sources) });
   assert.equal(h.feedback.length, 0);
@@ -436,13 +437,13 @@ test('retries spent before an interruption count against the cap on the same tic
   assert.equal(out.record.iid, 7);
 });
 
-test('the record is persisted after every attempt and before every re-run', async () => {
+test('the record is persisted on freezing, after every attempt and before every re-run', async () => {
   const h = harness({
     judgements: [judgement({ R1: 'TC-01', R2: null }, [finding()]), judgement({ R1: 'TC-01', R2: 'TC-02' })],
     lists: [[tc('TC-01'), tc('TC-02')]],
   });
   await runEvalLoop(h.input([tc('TC-01')]));
-  assert.equal(h.persisted(), 4);
+  assert.equal(h.persisted(), 5);
 });
 
 test('only a first generation is evaluated: a finished record or a Review-gate revision skips it', () => {
@@ -524,7 +525,7 @@ test('a finished loop scores the first and the kept list, the retries and the co
   assert.equal(out.record.attempts[0]!.generationCost, undefined);
   assert.deepEqual(out.record.final!.score, {
     requirements: 2, firstCovered: 1, keptCovered: 2, retries: 1, openCritical: 0, openMajor: 0, uncertain: 0,
-    judgeTurns: 8, judgeWeighted: 3, retryTurns: 20, retryWeighted: 6,
+    judgeTurns: 8, judgeWeighted: 3, retryTurns: 20, retryWeighted: 6, coverageCalls: 4, disputed: 0, judgeSamples: 2,
   });
 });
 
@@ -544,3 +545,240 @@ test('the score counts the gaps and uncertain points still open on the kept list
   assert.equal(score.uncertain, 1);
   assert.equal(scoreOf(blank()), null);
 });
+
+// ------------------------------------------------- stricter evidence checks
+
+test('a quote of fewer than four words, or with a one-word fragment, does not hold', () => {
+  assert.equal(evidenceHolds('"the employee code"', sources), false);
+  assert.equal(evidenceHolds('"export … employee code"', sources), false);
+  assert.equal(evidenceHolds('"must include the employee code"', sources), true);
+});
+
+test('a real quote that shares no meaningful word with what it is offered for does not hold', () => {
+  const quote = '"must include the employee code"';
+  assert.equal(evidenceHolds(quote, sources, 'The export lists each employee code'), true);
+  assert.equal(evidenceHolds(quote, sources, 'Managers are blocked from other teams\' salaries'), false);
+});
+
+test('an unquoted paraphrase holds when one ticket sentence carries most of its words', () => {
+  assert.equal(evidenceHolds('employee code must be included in the CSV export', sources), true);
+  assert.equal(evidenceHolds('the export includes salaries and department names', sources), false);
+});
+
+test('the diff parser reads the new-side ranges of every changed file', () => {
+  const diff = [
+    'diff --git a/apps/payroll/views.py b/apps/payroll/views.py',
+    '--- a/apps/payroll/views.py',
+    '+++ b/apps/payroll/views.py',
+    '@@ -40,2 +40,3 @@ def export():',
+    '@@ -90 +91 @@',
+    '@@ -100,4 +102,0 @@',
+    'diff --git a/old.py b/old.py',
+    '--- a/old.py',
+    '+++ /dev/null',
+    '@@ -1,3 +0,0 @@',
+  ].join('\n');
+  const ranges = changedRanges(diff);
+  assert.deepEqual(ranges.get('apps/payroll/views.py'), [[40, 42], [91, 91], [102, 102]]);
+  assert.equal(ranges.has('old.py'), false);
+});
+
+test('with the diff known, a file:line holds only near a changed hunk', () => {
+  const scoped = { ...sources, changed: (path: string) => (path === 'apps/payroll/views.py' ? [[40, 42]] as Array<[number, number]> : null) };
+  assert.equal(evidenceHolds('apps/payroll/views.py:41', scoped), true);
+  assert.equal(evidenceHolds('apps/payroll/views.py:50', scoped), true);
+  assert.equal(evidenceHolds('apps/payroll/views.py:100', scoped), false);
+  assert.equal(evidenceHolds('b/apps/payroll/views.py:41', { ...scoped, lines: () => 120 }), true);
+});
+
+// ---------------------------------------------------- several judge passes
+
+test('coverage counts only the case a majority of passes name; a split is held uncovered and reported', () => {
+  const merged = mergeJudgements([
+    judgement({ R1: 'TC-01', R2: 'TC-02' }),
+    judgement({ R1: 'TC-01', R2: null }),
+  ]);
+  assert.deepEqual(merged.judgement.coverage, { R1: 'TC-01', R2: null });
+  assert.deepEqual(merged.disputed, ['R2']);
+  assert.equal(merged.tiebreak, true);
+});
+
+test('a gap only one of two passes raises is held as uncertain and asks for a deciding pass', () => {
+  const merged = mergeJudgements([judgement({ R1: 'TC-01' }, [finding()]), judgement({ R1: 'TC-01' })]);
+  assert.equal(merged.judgement.findings.length, 1);
+  assert.equal(merged.judgement.findings[0]!.validity, 'uncertain');
+  assert.match(merged.judgement.findings[0]!.rationale, /raised by 1 of 2 judge passes/);
+  assert.equal(merged.judgement.findings[0]!.severity, 'major');
+  assert.equal(merged.tiebreak, true);
+});
+
+test('a gap both passes raise stays retry-worthy, merged into one finding', () => {
+  const merged = mergeJudgements([
+    judgement({ R1: 'TC-01' }, [finding({ id: 'F1' })]),
+    judgement({ R1: 'TC-01' }, [finding({ id: 'F3', gap: 'no case covers R2 at all' })]),
+  ]);
+  assert.equal(merged.judgement.findings.length, 1);
+  assert.equal(retryWorthy(merged.judgement.findings[0]!), true);
+  assert.equal(merged.tiebreak, false);
+});
+
+test('two passes that agree run no third; a split runs exactly one deciding pass', async () => {
+  const agree = harness({ judgements: [judgement({ R1: 'TC-01', R2: 'TC-02' }), judgement({ R1: 'TC-01', R2: 'TC-02' })] });
+  const a = await runEvalLoop({ ...agree.input([tc('TC-01'), tc('TC-02')]), samples: 2 });
+  assert.equal(agree.evaluated.length, 2);
+  assert.equal(a.record.attempts[0]!.samples, 2);
+
+  const split = harness({
+    judgements: [
+      judgement({ R1: 'TC-01', R2: 'TC-02' }, [finding({ requirement: undefined, gap: 'no case for a zero balance' })]),
+      judgement({ R1: 'TC-01', R2: 'TC-02' }),
+      judgement({ R1: 'TC-01', R2: 'TC-02' }),
+    ],
+  });
+  const b = await runEvalLoop({ ...split.input([tc('TC-01'), tc('TC-02')]), samples: 2 });
+  assert.equal(split.evaluated.length, 3);
+  assert.equal(b.record.final!.status, 'pass');
+  assert.equal(split.feedback.length, 0);
+});
+
+test('the first pass freezes the requirements and every later pass is held to them', async () => {
+  const h = harness({ judgements: [judgement({ R1: 'TC-01', R2: 'TC-02' }), judgement({ R1: 'TC-01', R2: 'TC-02' }, [], [])] });
+  await runEvalLoop({ ...h.input([tc('TC-01'), tc('TC-02')]), samples: 2 });
+  assert.deepEqual(h.evaluated.map((e) => e.frozen), [null, ['R1', 'R2']]);
+});
+
+test('a later pass that fails falls back to the passes that answered', async () => {
+  const h = harness({ judgements: [judgement({ R1: 'TC-01', R2: 'TC-02' })] });
+  const out = await runEvalLoop({ ...h.input([tc('TC-01'), tc('TC-02')]), samples: 2 });
+  assert.equal(out.record.final!.status, 'pass');
+  assert.equal(out.record.attempts[0]!.samples, undefined);
+});
+
+test('a resumed loop whose requirements froze before any attempt does not list them again', async () => {
+  const record = { ...blank(), requirements: [req('R1')], frozen: true };
+  const h = harness({ judgements: [judgement({ R1: 'TC-01' }, [], [])] }, record);
+  await runEvalLoop(h.input([tc('TC-01')]));
+  assert.deepEqual(h.evaluated[0]!.frozen, ['R1']);
+});
+
+test('the score reports how many coverage calls the passes disagreed on', async () => {
+  const h = harness({
+    judgements: [judgement({ R1: 'TC-01', R2: 'TC-02' }), judgement({ R1: 'TC-01', R2: null }), judgement({ R1: 'TC-01', R2: 'TC-02' })],
+  });
+  const out = await runEvalLoop({ ...h.input([tc('TC-01'), tc('TC-02')]), samples: 2 });
+  assert.equal(out.record.attempts[0]!.coverage.R2, 'TC-02');
+  assert.equal(out.record.final!.score!.judgeSamples, 3);
+  assert.equal(out.record.final!.score!.disputed, 0);
+});
+
+// ------------------------------------------- the frozen list can be amended
+
+const proposal = (text: string, evidence = '"must include the employee code"'): Requirement => ({
+  id: 'P1', text, source: 'ticket', evidence,
+});
+
+test('a proposal two passes make, with evidence that holds, is adopted with a fresh id', () => {
+  const record = { ...blank(), requirements: [req('R1'), req('R2')], frozen: true };
+  const p = proposal('The CSV export carries the employee code');
+  const { adopted, findings } = adoptProposals(record, [[p], [{ ...p, id: 'P7' }]], (e) => evidenceHolds(e, sources));
+  assert.deepEqual(adopted.map((r) => r.id), ['R3']);
+  assert.equal(record.requirements.length, 3);
+  assert.equal(findings[0]!.id, 'NEW-R3');
+  assert.equal(findings[0]!.validity, 'uncertain');
+  assert.equal(retryWorthy(findings[0]!), false);
+});
+
+test('a proposal seen once, or without evidence that holds, or already said, is not adopted', () => {
+  const holds = (e: string) => evidenceHolds(e, sources);
+  const record = { ...blank(), requirements: [{ ...req('R1'), text: 'The CSV export carries the employee code' }], frozen: true };
+  assert.equal(adoptProposals(record, [[proposal('Sorted by joining date', '"sorted by joining date"')], [proposal('Sorted by joining date', '"sorted by joining date"')]], holds).adopted.length, 0);
+  assert.equal(adoptProposals(record, [[proposal('A new rule about employee code exports')]], holds).adopted.length, 0);
+  assert.equal(adoptProposals(record, [[proposal('The CSV export carries the employee code')], [proposal('The CSV export carries the employee code')]], holds).adopted.length, 0);
+});
+
+test('a proposal seen on an earlier attempt and again now is adopted', () => {
+  const p = proposal('The CSV export carries the employee code');
+  const record = { ...blank(), requirements: [req('R1')], frozen: true };
+  record.attempts.push({ ...closed({}).attempts[0]!, proposedRequirements: [p] });
+  assert.equal(adoptProposals(record, [[p]]).adopted.length, 1);
+});
+
+test('a requirement most passes show is invalid, with evidence that holds, is retired and kept for a person', () => {
+  const record = { ...blank(), requirements: [req('R1'), { ...req('R2'), text: 'Managers may see every team salary' }], frozen: true };
+  const retired = retireRequirements(record, [
+    { requirement: 'R2', evidence: '"Managers cannot see salaries of other teams"', reason: 'the ticket says managers cannot see other salaries' },
+    { requirement: 'R1', evidence: '', reason: 'no reason' },
+  ], (e, claim) => evidenceHolds(e, sources, claim));
+  assert.deepEqual(retired, ['R2']);
+  assert.deepEqual(record.requirements.map((r) => r.id), ['R1']);
+  assert.equal(record.standing![0]!.id, 'RET-R2');
+  assert.equal(record.standing![0]!.validity, 'uncertain');
+});
+
+test('an invalid-requirement claim only one of two passes makes is dropped', () => {
+  const claim = { requirement: 'R2', evidence: '"x y z w"', reason: 'r' };
+  const merged = mergeJudgements([
+    { ...judgement({ R1: 'TC-01' }), invalidRequirements: [claim] },
+    judgement({ R1: 'TC-01' }),
+  ]);
+  assert.deepEqual(merged.judgement.invalidRequirements, []);
+});
+
+test('a proposal never adopted is shown for a person to decide', () => {
+  const record = closed({});
+  record.attempts[0]!.proposedRequirements = [proposal('Sorted by joining date', '"sorted by joining date"')];
+  assert.match(unresolvedSection(record), /Proposed as requirements but seen only once[\s\S]*Sorted by joining date/);
+});
+
+// ------------------------------------------ cross-check with research's reading
+
+test('a criterion tag is read loosely and anything else is absent', () => {
+  assert.equal(criterionTag('AC2'), 'AC2');
+  assert.equal(criterionTag(' ac 3 '), 'AC3');
+  assert.equal(criterionTag('2'), 'AC2');
+  assert.equal(criterionTag(''), undefined);
+  assert.equal(criterionTag('the second one'), undefined);
+  const j = judgementFrom({ requirements: [{ ...req('R1'), criterion: '1' }, { ...req('R2'), criterion: '' }] });
+  assert.equal(j.requirements[0]!.criterion, 'AC1');
+  assert.equal('criterion' in j.requirements[1]!, false);
+});
+
+test('a research criterion no requirement comes from is an uncertain critical finding', () => {
+  const reqs = [{ ...req('R1'), criterion: 'AC1' }, { ...req('R2'), text: 'Managers cannot see salaries of other teams' }];
+  const out = unmatchedCriteria(['Export includes code', 'Managers cannot see other teams salaries', 'Export is sorted by joining date'], reqs);
+  assert.deepEqual(out.map((f) => f.id), ['CRIT-AC3']);
+  assert.equal(out[0]!.validity, 'uncertain');
+  assert.equal(out[0]!.severity, 'critical');
+});
+
+test('a criterion the evaluator missed makes the list need review, on every attempt, without a retry', async () => {
+  const h = harness({ judgements: [judgement({ R1: 'TC-01', R2: 'TC-02' })] });
+  const out = await runEvalLoop({ ...h.input([tc('TC-01'), tc('TC-02')]), criteria: ['Export is sorted by joining date'] });
+  assert.equal(out.record.final!.status, 'needs_review');
+  assert.deepEqual(out.record.criteria, ['Export is sorted by joining date']);
+  assert.equal(h.feedback.length, 0);
+  assert.match(unresolvedSection(out.record), /CRIT-AC3|acceptance criterion AC1/);
+});
+
+test('a rejected requirement stays on every attempt, so a later kept list still shows it', async () => {
+  const h = harness({
+    judgements: [
+      judgement({ R1: 'TC-01', R2: null }, [finding({ requirement: 'R1', cases: ['TC-01'], gap: 'TC-01 stops short of the edge' })], [req('R1'), req('R2'), req('R3', '')]),
+      judgement({ R1: 'TC-01', R2: 'TC-02' }, []),
+    ],
+    lists: [[tc('TC-01'), tc('TC-02')]],
+  });
+  const out = await runEvalLoop(h.input([tc('TC-01')]));
+  assert.equal(out.record.final!.chosenAttempt, 1);
+  assert.ok(out.record.attempts[1]!.findings.some((f) => f.id === 'U-R3'));
+});
+
+// ---------------------------------------------- what the reviewer changed
+
+test('the reviewer outcome lists cases added and removed against the kept list, by scenario', () => {
+  const record = closed({});
+  record.attempts[1]!.cases = [tc('TC-01'), tc('TC-02')];
+  const approved = [{ ...tc('TC-09'), scenario: 'scenario TC-01' }, tc('TC-03')];
+  assert.deepEqual(reviewOutcome(record, approved, 1), { added: ['scenario TC-03'], removed: ['scenario TC-02'], revisions: 1 });
+});
+

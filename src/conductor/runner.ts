@@ -95,8 +95,8 @@ import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
 import {
-  EVAL_RECORD, EvalInterrupted, evalStart, evidenceHolds, judgementFrom, runEvalLoop, unresolvedSection,
-  type EvalRecord, type JudgementArtifact,
+  EVAL_RECORD, EvalInterrupted, JUDGE_SAMPLES, changedRanges, evalStart, evidenceHolds, judgementFrom, reviewOutcome,
+  runEvalLoop, unresolvedSection, type EvalRecord, type JudgementArtifact, type LineRange,
 } from '../lib/testcaseseval.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
@@ -1724,6 +1724,11 @@ export async function runTicket(
             if (updated) prior.testcases = { ...(prior.testcases ?? {}), cases: updated };
           }
           const finalCases = (readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases) ?? cases;
+          const evalRecord = readArtifact<EvalRecord>(iid, EVAL_RECORD);
+          if (evalRecord?.final) {
+            const revisions = readJournal(iid)?.testcasesApproval?.feedback?.length ?? 0;
+            writeArtifact(iid, EVAL_RECORD, { ...evalRecord, review: reviewOutcome(evalRecord, finalCases, revisions) });
+          }
           await addIssueNote(iid, testcasesApprovedRecordBody(finalCases));
         },
       });
@@ -3016,13 +3021,20 @@ export async function runTicket(
       if (!lineCounts.has(full)) lineCounts.set(full, readText(full)?.split('\n').length ?? null);
       return lineCounts.get(full)!;
     };
+    const ranges = await changedLines();
+    const criteria = (prior.research ?? readArtifact<{ acceptanceCriteria?: string[] }>(iid, 'research.json'))
+      ?.acceptanceCriteria as string[] | undefined;
 
     let result: Awaited<ReturnType<typeof runEvalLoop>>;
     try {
       result = await runEvalLoop({
         record, cases: onDisk.cases, lap: Math.max(0, lapsOf(iid, 'testcases') - 1), salvaged,
         persist: (r) => writeArtifact(iid, EVAL_RECORD, r),
-        evidenceHolds: (e) => evidenceHolds(e, { ticketText, lines: linesIn }),
+        evidenceHolds: (e, claim) => evidenceHolds(e, {
+          ticketText, lines: linesIn, ...(ranges ? { changed: (p: string) => ranges.get(p) ?? null } : {}),
+        }, claim),
+        criteria: criteria ?? [],
+        samples: JUDGE_SAMPLES,
         evaluate: async (cases) => {
           prior.testcases = { ...(prior.testcases ?? {}), cases };
           noteEval('running', null);
@@ -3064,6 +3076,9 @@ export async function runTicket(
     }
     const final = result.record.final!;
     noteEval(final.status, null);
+    if (result.record.attempts.some((a) => a.disputed?.length)) {
+      log.info(`testcases-eval #${iid}: judge passes split on ${result.record.attempts.reduce((n, a) => n + (a.disputed?.length ?? 0), 0)} coverage call(s)`);
+    }
     const coverage = final.score
       ? `, coverage ${final.score.firstCovered}/${final.score.requirements} → ${final.score.keptCovered}/${final.score.requirements}`
       : '';
@@ -3071,6 +3086,23 @@ export async function runTicket(
       + `(${final.stopReason}), kept attempt ${final.chosenAttempt ?? '-'}${coverage}`;
     if (final.status === 'pass') log.ok(line);
     else log.warn(`${line}${final.unresolved.length ? ` — ${final.unresolved.length} unresolved` : ''}${final.error ? ` — ${final.error}` : ''}`);
+  }
+
+  /**
+   * The changed line ranges of the worktree against the merge base with the
+   * project's base branch, or null when git cannot say — then evidence falls
+   * back to any line the file has, rather than failing every file:line.
+   */
+  async function changedLines(): Promise<Map<string, LineRange[]> | null> {
+    if (!worktree) return null;
+    try {
+      const { stdout } = await exec('git', ['diff', '-U0', '--no-color', '--merge-base', `origin/${projectConfig().branches.base}`],
+        { cwd: worktree, maxBuffer: 64 * 1024 * 1024 });
+      return changedRanges(stdout);
+    } catch (err) {
+      log.warn(`testcases-eval #${iid}: could not read the diff for evidence — ${(err as Error).message}`);
+      return null;
+    }
   }
 
   /**
