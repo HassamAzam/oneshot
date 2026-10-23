@@ -1464,7 +1464,9 @@ alternative's beside it as the fail signal. Never a line that excuses the case.
 The plan's \`risks\`, \`openQuestions\` and \`acceptanceCoverage\` are your checklist, not
 background: every risk's check, every open question and every row not marked \`covered\` needs a
 case that names the entry in its scenario. One case answers every entry its steps reach, so add
-a case only for an entry no existing case reaches. A row that hands its check to \`verify\` or
+a case only for an entry no existing case reaches, and start it from a seed the list already
+traced: a seed runs real code without the test suite's mocks, so one wrong seed copied into many
+cases fails them all on a correct build. A row that hands its check to \`verify\` or
 \`ui-evidence\` hands it to you — they only run this list. Only an entry no step in this run can
 observe goes without one, named in \`summary\` with the reason. There is no upper limit on the
 number of cases: stop when every criterion and every one of those entries is covered, not at 20.
@@ -1529,7 +1531,8 @@ any runner.
   runs it (below), so it is a runner this pipeline uses.
 - **Good:** assert through a runner \`testsRun\` shows working, or one this
   pipeline itself uses — Jest for a frontend unit, Playwright for the browser,
-  pytest and flake8 for the backend — and name it in \`steps\`.
+  \`python manage.py test\` with the project's test settings and flake8 for the
+  backend (pytest is not installed) — and name it in \`steps\`.
 
 ### 3. One case, one subject
 
