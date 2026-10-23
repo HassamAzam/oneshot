@@ -178,6 +178,42 @@ test('a flow change attaches the walkthrough after the screens, then the clickab
   }
 });
 
+test('each screen\'s mockup HTML is attached after the media, and the prototype last', () => {
+  // The pictures and the walkthrough render inline and are read first; the
+  // mockup HTML is the thing a reviewer opens when a picture left a question,
+  // so it comes after them as its own block rather than interleaved, with the
+  // whole journey's prototype after the single screens.
+  const dir = artifactDir(TMP_IID);
+  const write = (rel: string): void => {
+    const full = join(dir, rel);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, 'x');
+  };
+  try {
+    const two = {
+      ...design,
+      screens: [
+        { ...screen, before: 'design/one--before.png', screenshot: 'design/one.png', mockupHtml: 'design/one.html' },
+        { ...screen, id: 'second', before: '', screenshot: 'design/two.png', mockupHtml: 'design/two.html' },
+      ],
+    };
+    [
+      'design/one--before.png', 'design/one.png', 'design/two.png', 'design/one.html', 'design/two.html',
+      design.prototype.video, design.prototype.entry,
+    ].forEach(write);
+
+    const got = designAttachments(TMP_IID, two);
+    assert.deepEqual(got.map((a) => a.name), [
+      'one--before.png', 'one.png', 'two.png', 'flow.webm', 'one.html', 'two.html', 'flow.html',
+    ]);
+    assert.deepEqual(got.map((a) => a.mime), [
+      'image/png', 'image/png', 'image/png', 'video/webm', 'text/html', 'text/html', 'text/html',
+    ]);
+  } finally {
+    rmSync(join(dir, '..'), { recursive: true, force: true });
+  }
+});
+
 test('a screen with no "before" contributes only its proposal', () => {
   const dir = artifactDir(TMP_IID);
   try {

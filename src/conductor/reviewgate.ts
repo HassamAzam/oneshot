@@ -1717,8 +1717,9 @@ function designOf(design: Record<string, unknown> | null): DesignArtifact {
  * screen the current state first and the proposal second, so a reviewer
  * scrolling the comment reads before→after per screen rather than a block of
  * one followed by a block of the other. The walkthrough follows the screens,
- * and the clickable file last — it is the thing you open if the pictures left
- * you with a question.
+ * and the clickable files come last: each screen's mockup in screen order, then
+ * the flow's prototype. They are the thing you open if the pictures left you
+ * with a question, so they sit after the gallery rather than interrupting it.
  *
  * A file the artifact names but disk does not have is skipped silently here
  * and named in the body by the renderer, which reads the same list: a gate
@@ -1755,10 +1756,11 @@ export function designAttachments(iid: number, design: Record<string, unknown> |
     push(s.before);
     push(s.screenshot);
   }
-  if (d.prototype) {
-    push(d.prototype.video);
-    push(d.prototype.entry);
+  push(d.prototype?.video ?? '');
+  for (const s of d.screens) {
+    push(s.mockupHtml);
   }
+  push(d.prototype?.entry ?? '');
   return out;
 }
 
