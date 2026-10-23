@@ -81,7 +81,7 @@ import { planFilePaths } from '../lib/planfiles.js';
 import type { DesignArtifact, TestCase } from '../phases/types.js';
 import { parseEdgeCases } from './edgecases.js';
 import { MAX_UPLOAD_BYTES, mimeFor } from '../lib/publish.js';
-import { artifactDir } from '../lib/config.js';
+import { artifactDir, designFlowOwedFile } from '../lib/config.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
@@ -164,6 +164,24 @@ export interface GateTrigger {
   on: boolean;
   /** Non-empty when the guarded paths, rather than the label, armed the gates. */
   hits: string[];
+  /** True when the every-run posture alone would have armed the gates and the green zone lifted it. */
+  lifted: boolean;
+}
+
+/**
+ * The gate decision with its inputs in hand, so a test can set the posture
+ * instead of reading whatever config/project.json ships with.
+ *
+ * `green` lifts only `every`. A green area is a person's decision that the
+ * code there changes without a sign-off, and the every-run posture is the
+ * same question answered for every ticket at once, so the finer answer wins.
+ * It lifts neither the Review label, which a person put on THIS ticket, nor
+ * a guarded path: a green area that overlaps one is two maps disagreeing,
+ * and a pause is how a person finds that out.
+ */
+export function gateTrigger(o: { every: boolean; labelled: boolean; hits: string[]; green: boolean }): GateTrigger {
+  const asked = o.labelled || o.hits.length > 0;
+  return { on: asked || (o.every && !o.green), hits: o.hits, lifted: o.every && o.green && !asked };
 }
 
 /**
@@ -174,10 +192,26 @@ export interface GateTrigger {
  * exist, and by the test-case gate `implement` has reported what it really
  * touched. A plan that swore off payroll and a diff that edited it anyway is
  * exactly the case worth catching, and only the later evaluation sees it.
+ *
+ * `green` is the zone guard's verdict on these same files
+ * (src/conductor/zoneguard.ts); gateTrigger says what it lifts.
  */
-export function gatesApply(labels: string[], files: string[]): GateTrigger {
-  const hits = highScrutinyHits(files);
-  return { on: reviewAllRuns() || reviewLabelPresent(labels) || hits.length > 0, hits };
+export function gatesApply(labels: string[], files: string[], green = false): GateTrigger {
+  return gateTrigger({
+    every: reviewAllRuns(), labelled: reviewLabelPresent(labels), hits: highScrutinyHits(files), green,
+  });
+}
+
+/**
+ * Whether this gate has put its question to a person and not had it answered:
+ * a request standing on the ticket, or a feedback round that re-asks on the
+ * next check. The green zone never lifts such a gate (runner.ts): the question
+ * is a person's to answer now, and a gate that stops being checked leaves its
+ * ask open on the ticket and its board label on for good.
+ */
+export function gateAsked(state: ReviewGateState | undefined): boolean {
+  if (!state || state.approved) return false;
+  return state.requestNoteId != null || state.feedback.length > 0;
 }
 
 /** The one line a gate request needs about why it is asking. */
@@ -1666,6 +1700,9 @@ function designOf(design: Record<string, unknown> | null): DesignArtifact {
     flowChange: d.flowChange === true,
     tokensFile: typeof d.tokensFile === 'string' ? d.tokensFile : '',
     screens: Array.isArray(d.screens) ? d.screens : [],
+    prototype: d.prototype && typeof d.prototype === 'object'
+      ? { entry: String(d.prototype.entry ?? ''), video: String(d.prototype.video ?? '') }
+      : null,
     decisions: Array.isArray(d.decisions) ? d.decisions.map(String) : [],
     newPatterns: Array.isArray(d.newPatterns) ? d.newPatterns.map(String) : [],
     openQuestions: Array.isArray(d.openQuestions) ? d.openQuestions : [],
@@ -1679,10 +1716,10 @@ function designOf(design: Record<string, unknown> | null): DesignArtifact {
  * Order is the argument, exactly as it is in the ui-evidence pack: for each
  * screen the current state first and the proposal second, so a reviewer
  * scrolling the comment reads before→after per screen rather than a block of
- * one followed by a block of the other. The screenshots come first in that
- * order; the clickable mockup files follow as a block at the end, in screen
- * order — they are the thing you open if the pictures left you with a question,
- * so they sit after the gallery rather than interrupting it.
+ * one followed by a block of the other. The walkthrough follows the screens,
+ * and the clickable files come last: each screen's mockup in screen order, then
+ * the flow's prototype. They are the thing you open if the pictures left you
+ * with a question, so they sit after the gallery rather than interrupting it.
  *
  * A file the artifact names but disk does not have is skipped silently here
  * and named in the body by the renderer, which reads the same list: a gate
@@ -1719,9 +1756,11 @@ export function designAttachments(iid: number, design: Record<string, unknown> |
     push(s.before);
     push(s.screenshot);
   }
+  push(d.prototype?.video ?? '');
   for (const s of d.screens) {
     push(s.mockupHtml);
   }
+  push(d.prototype?.entry ?? '');
   return out;
 }
 
@@ -1736,15 +1775,28 @@ export function designAttachments(iid: number, design: Record<string, unknown> |
  * phase reports its own success and nothing checks the artifact against disk.
  *
  * So the per-file tolerance stays where it is and the check moves up a level.
- * A design claiming screens must have rendered them. Returns null when there is
+ * A design claiming screens must have rendered them, and a design claiming a
+ * flow change must have built and recorded it. Returns null when there is
  * nothing to refuse: `applicable: false`, or no screens, is a complete answer.
  */
 export function designDeliverableRefusal(
   iid: number, design: Record<string, unknown> | null,
 ): string | null {
   const d = designOf(design);
-  if (!d.applicable || d.screens.length === 0) return null;
+  if (!d.applicable) return null;
   const dir = artifactDir(iid);
+  // Both, not the first of the two. `screens: []` is a complete answer for a
+  // design that changes nothing, but it is also schema-valid for a flow change
+  // — no `minItems` — so hanging the flow check off the screen check let
+  // `{flowChange: true, screens: [], prototype: null}` through.
+  const refusals = [screenDeliverableRefusal(d, dir), flowDeliverableRefusal(iid, d, dir)]
+    .filter((r): r is string => r !== null);
+  return refusals.length === 0 ? null : refusals.join(' ');
+}
+
+/** The renders the design says it made, checked against disk. */
+function screenDeliverableRefusal(d: DesignArtifact, dir: string): string | null {
+  if (d.screens.length === 0) return null;
   const missing = d.screens
     .filter((sc) => !sc.screenshot || !existsSync(join(dir, sc.screenshot)))
     .map((sc) => sc.id || sc.name || '(unnamed)');
@@ -1753,6 +1805,31 @@ export function designDeliverableRefusal(
   return `design reported ${d.screens.length} screen(s) and ${all ? 'none' : `${missing.length}`}`
     + ` of their renders are on disk: ${missing.join(', ')}.`
     + ' A design gate armed on screens nobody can see asks a reviewer to approve nothing.';
+}
+
+/**
+ * A flow is approved by clicking through it and watching it, not by reading
+ * stills in order. hooks/design-flow-guard.cjs refuses the session's answer
+ * until the prototype and the walkthrough are good; this is what still holds
+ * when that guard released at its refusal cap, or failed open.
+ *
+ * `d.flowChange` is NOT the only trigger, because the session writes it: an
+ * answer refused for a missing prototype could come back with the flag cleared
+ * and the same stills, and a check keyed on the flag alone would wave it
+ * through. The guard records the obligation against the ticket as it refuses,
+ * outside any phase's write scope, and that recording counts here too.
+ */
+function flowDeliverableRefusal(iid: number, d: DesignArtifact, dir: string): string | null {
+  if (!d.flowChange && !existsSync(designFlowOwedFile(iid))) return null;
+  const missing = ([['clickable prototype', d.prototype?.entry], ['walkthrough video', d.prototype?.video]] as const)
+    .filter(([, rel]) => !rel || !existsSync(join(dir, rel)))
+    .map(([what]) => what);
+  if (missing.length === 0) return null;
+  const claimed = d.flowChange
+    ? 'design reported a flow change'
+    : 'design was refused for a flow change and then stopped reporting one';
+  return `${claimed}, and its ${missing.join(' and ')} ${missing.length > 1 ? 'are' : 'is'}`
+    + ' not on disk. A gate armed on stills alone asks a reviewer to approve a journey they cannot walk.';
 }
 
 /**
@@ -1768,8 +1845,10 @@ export function designDeliverableRefusal(
  * scrolls to them naturally; repeating them as a list would be a caption
  * track for something already on screen.
  */
-function renderDesignForTicket(design: Record<string, unknown> | null): string {
+function renderDesignForTicket(iid: number, design: Record<string, unknown> | null): string {
   const d = designOf(design);
+  const onDisk = (rel: string | undefined): boolean =>
+    !!rel && existsSync(join(artifactDir(iid), rel));
   const bullets = (xs: string[]): string => xs.map((x) => `- ${mdText(x)}`).join('\n');
   const screens = d.screens
     .map((s) => `- **${mdText(s.name)}** — ${mdText(s.purpose)}`
@@ -1787,17 +1866,46 @@ function renderDesignForTicket(design: Record<string, unknown> | null): string {
       ? `**New — needs approval**\nNot in the design system today. Approving the design approves these too.\n${bullets(d.newPatterns)}\n\n`
       : ''}`
     + `${questions ? `**Open questions** — answer in a comment, or the recommendation is used\n${questions}\n\n` : ''}`
-    + (d.flowChange
-      ? 'The flow spans more than one screen, so the mockups below are its states in order. '
-        + 'A clickable prototype and a recorded walkthrough follow in a later change.\n'
-      : 'Single screen, no flow change.\n');
+    + flowLine(d, onDisk);
+}
+
+/**
+ * What the reviewer is told to look for below the comment, read off disk
+ * rather than off `flowChange`.
+ *
+ * `designAttachments` drops a file disk does not have, silently and on
+ * purpose. A sentence rendered from the flag alone therefore promised a video
+ * and a prototype that were never uploaded — and it still does on any re-arm
+ * of a gate whose `design.json` predates the guard, because
+ * `designDeliverableRefusal` only runs on a fresh phase result. The flat case
+ * is phrased from the same facts: the old wording said "single screen" over
+ * designs that reported several.
+ */
+function flowLine(d: DesignArtifact, onDisk: (rel: string | undefined) => boolean): string {
+  const video = onDisk(d.prototype?.video);
+  const entry = onDisk(d.prototype?.entry);
+  if (video && entry) {
+    return 'The flow changes, so a silent walkthrough is attached below the screens, and the clickable '
+      + 'prototype with it — download it and open it in a browser to click through the whole '
+      + 'journey yourself.\n';
+  }
+  if (entry) {
+    return 'The flow changes, and the clickable prototype is attached below the screens — download it '
+      + 'and open it in a browser to click through the whole journey yourself. There is no '
+      + 'walkthrough recording with it.\n';
+  }
+  if (video) {
+    return 'The flow changes, so a silent walkthrough of it is attached below the screens. There is no '
+      + 'clickable prototype with it.\n';
+  }
+  return 'There is no prototype or walkthrough attached, so the screens above are the whole design.\n';
 }
 
 /** Posted as a ticket comment when the design gate first arms, or re-arms after feedback. */
-export function designApprovalRequestBody(design: Record<string, unknown> | null): string {
+export function designApprovalRequestBody(iid: number, design: Record<string, unknown> | null): string {
   return '**Oneshot pauses here** — this ticket carries **Design**, so the UI is agreed before '
     + 'it is built.\n\n'
-    + `${renderDesignForTicket(design)}\n---\n\n`
+    + `${renderDesignForTicket(iid, design)}\n---\n\n`
     + `${approverLine('design')}\n\n`
     + 'Comment the single word **`approved`** to continue to `plan` and `implement` — what is '
     + 'approved here becomes the specification they build to, and the shipped screens are posted '

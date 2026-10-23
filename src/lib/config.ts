@@ -1070,6 +1070,20 @@ export function runDir(iid: number): string { return join(RUNS, String(iid)); }
 export function artifactDir(iid: number): string { return join(runDir(iid), 'artifacts'); }
 
 /**
+ * Where `hooks/design-flow-guard.cjs` records that a ticket's design owes a
+ * clickable prototype and a walkthrough, so `designDeliverableRefusal` can
+ * refuse an answer that withdrew the claim after being refused for it.
+ *
+ * Deliberately NOT under `runDir(iid)`: `design` holds `writes: ['run',
+ * 'artifacts']`, so a marker there would be inside the write scope of the
+ * session it judges. `hooks/design-flow-guard.cjs` writes this exact path and
+ * `hooks.test.ts` pins the two together.
+ */
+export function designFlowOwedFile(iid: number): string {
+  return join(STATE, 'hook-state', 'design-flow-guard', `${iid}.owed`);
+}
+
+/**
  * The throwaway workstream-automation worktree a local-tests run checks out.
  * Never committed to, and removed when the run cleans up.
  */

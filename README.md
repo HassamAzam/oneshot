@@ -66,7 +66,7 @@ Three things fall out of that:
  issue labelled `Loop`
    0  recall          Haiku     prior art from past runs
    1  research        Opus 5    trace the code path, state blast radius
- 1.5  design      ⟨D⟩ Opus 5    mockups, before/after screens
+ 1.5  design      ⟨D⟩ Opus 5    mockups, before/after, prototype + silent walkthrough
                                 ── parks until a dev approves on the ticket ──
    2  plan            Opus 5    phased plan
    3  implement       Opus 5    commits on oneshot/ticket-<iid>-<slug>
@@ -235,6 +235,20 @@ ever asked for, and the request says which path armed it rather than claiming a 
 there. To disarm a module's trigger, remove its `paths` in `config/risk-modules.json` — emptying
 `highScrutinyPaths` in config/project.json does nothing, the module paths are merged in at load.
 
+**The green zone lifts the every-run posture.** With the delivery-zone guard on (`zones` in
+`config/project.json`; `src/conductor/zoneguard.ts`), a ticket the guard holds to a zone, that
+grooming did not classify yellow, and whose every declared and committed file sits in a green
+area is not asked to clear R1 or R2. The plan is still posted to the ticket and the case list is
+still written; the run simply goes on, opens its MR and waits there — labelled `In Review` — for
+a person to merge it. R3 is untouched: the map calls green the tight loop, and the merge is still
+the one step reserved for a human. The verdict is taken where the guard takes it, from the plan
+at `implement` and from the branch's real diff on every pass after; a lap that reaches outside
+green is stopped by the guard, as it always was. A gate that has already asked a person is never
+lifted — the question is theirs to answer now. It lifts `reviewAllRuns` and nothing else: the
+`Review` label is a person's word about this ticket, and a guarded path inside a green area is
+two maps disagreeing — both still pause. The `Design` gate, the Not a Bug gate and the
+verify-case gate are not review gates and do not change.
+
 **Comment `approved`** (that exact word, case-insensitive, trimmed — not a substring of a longer
 reply) **on the ticket** to release a pause. It only counts from an account in that gate's own
 group: an `approved` from outside the list is logged and ignored, and so is any other comment, so
@@ -301,10 +315,13 @@ rather than adding a guard around one.
 
 Put `Design` on a ticket alongside `Loop` and a `design` phase runs between `research` and
 `plan`. It reads the tokens out of the real frontend, captures the screens this ticket touches
-as they are **today**, draws each one as a self-contained mockup against those tokens, and — when
-the change spans more than one screen or adds a step — draws each state of the flow as its own
-screen. The conductor posts all of that to the ticket as one
-comment, and the run **parks**.
+as they are **today**, and draws each one as a self-contained mockup against those tokens. When
+the change spans more than one screen or adds a step, every state of that journey is drawn as its
+own screen **and** built into a clickable prototype with a **silent, annotated** walkthrough
+recorded of it — the prototype is what the stills cannot be walked through, not a replacement for
+them. `hooks/design-flow-guard.cjs` refuses the phase's answer until both are on disk, so a flow
+change cannot reach the ticket as stills alone. The conductor
+posts all of that to the ticket as one comment, and the run **parks**.
 
 ```
  … research ──▶ design ──▶[ D  a dev approves the design ]──▶ plan ──▶ implement …

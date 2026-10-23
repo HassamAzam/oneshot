@@ -774,14 +774,15 @@ test('research paces itself against its own configured budget', () => {
   assert.match(p, new RegExp(`about 70% of your ${turns}`));
 });
 
-test('the plan keeps its measured budget rather than growing to fit the method', () => {
-  // Seven replays measured 26-39 turns against a cap of 50, and the 39 was the
-  // run that DISCOVERED the prior art — the cost this change moves to research.
-  // A ceiling raised to cover a method is read as a target.
+test('the plan budget is pinned to its heavy-tier sibling, with the raise recorded', () => {
+  // Held at 50/20 across seven replays (max 39 turns), then raised to 115/40
+  // after #8933 — a greenfield sub-module — hit error_max_turns at 50 and wrote
+  // no plan.json: the confirm-and-residual-plan-hits-the-cap measurement the old
+  // rationale named as the one condition to revisit under. 115/40 matches design.
   const c = cfg('plan');
-  assert.equal(c.maxTurns, 50);
-  assert.equal(c.timeoutMin, 20);
-  assert.ok((c as unknown as { _why_turns?: string })._why_turns, 'the decision not to raise is recorded');
+  assert.equal(c.maxTurns, 115);
+  assert.equal(c.timeoutMin, 40);
+  assert.ok((c as unknown as { _why_turns?: string })._why_turns, 'the decision is recorded');
 });
 
 test('the prior-art kinds are one set, in every place that names them', () => {
@@ -936,6 +937,35 @@ test('review sees the plan\'s reuse verdicts one per line, under a heading that 
     '  - reuse: leave_days() in apps/leaves/utils.py, called as it stands\n' +
     '  - rejected: carry_forward() — it has 12 callers, and a flag would split them\n',
   ));
+});
+
+// ------------------------------------------------------- design flow deliverables
+
+test('design is told a flow change owes a self-contained prototype and a walkthrough, and is refused without them', () => {
+  const p = promptFor(cfg('design'), ctx(ticket({ iid: 424250, labels: ['Design'] })));
+  assert.doesNotMatch(p, /Do not\s+build a clickable prototype/);
+  assert.match(p, /make it clickable and record it/);
+  assert.match(p, /paste `tokens\.css` into a `<style>`/);
+  assert.match(p, /`recordVideo`/);
+  assert.match(p, /Your answer is REFUSED until both are on\s+disk/);
+  // The guard's trigger is a field this session writes, so the prompt says
+  // plainly that a second answer cannot revise the obligation away.
+  assert.match(p, /first refusal RECORDS the obligation/);
+  assert.match(p, /not dropping a field/);
+});
+
+test('plan is pointed at the approved prototype when the design has one', () => {
+  const design = {
+    applicable: true,
+    flowChange: true,
+    tokensFile: 'tokens.css',
+    screens: [{ id: 's1', name: 'Compose', purpose: 'p', mockupHtml: 's1.html', screenshot: 's1.png' }],
+    prototype: { entry: 'flow.html', video: 'flow.webm' },
+  };
+  const p = promptFor(cfg('plan'), ctx(ticket({ iid: 424251 }), { design }));
+  assert.ok(p.includes(`The full flow is prototyped at \`${join(runDir(424251), 'artifacts', 'flow.html')}\``));
+  const flat = promptFor(cfg('plan'), ctx(ticket({ iid: 424251 }), { design: { ...design, prototype: null } }));
+  assert.doesNotMatch(flat, /The full flow is prototyped/);
 });
 
 // ---------------------------------------------------------------- design tokens

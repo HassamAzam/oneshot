@@ -1395,6 +1395,135 @@ expect_allow "an ordinary build command" \
                                        artifact-guard.cjs "$(bash_payload 'npm test -- --watchAll=false')"
 
 echo
+echo "design-flow-guard"
+SAVED_PHASE="$ONESHOT_PHASE"; SAVED_TICKET="$ONESHOT_TICKET"
+export ONESHOT_PHASE="design"; export ONESHOT_TICKET="990777"
+DART="$ROOT/state/runs/990777/artifacts"
+GUARD_STATE="$ROOT/state/hook-state/design-flow-guard"
+mkdir -p "$DART"
+# A webm/mp4 header padded past the empty-recording floor, and one that is not.
+webm() { printf '\x1a\x45\xdf\xa3' > "$DART/$1"; head -c "$2" /dev/zero >> "$DART/$1"; }
+webm walk.webm 40000
+webm empty.webm 3000
+{ printf '\x00\x00\x00\x18ftypisom'; head -c 40000 /dev/zero; } > "$DART/walk.mp4"
+head -c 40000 /dev/zero | tr '\0' x > "$DART/fake.webm"
+head -c 3000 /dev/zero | tr '\0' x > "$DART/short-fake.webm"
+cat > "$DART/flow.html" <<'HTML'
+<!doctype html><html><head><style>:root{--primary:#1d2a5d}.hero{background:url(data:image/png;base64,iVBORw0KGgo=)}</style></head>
+<body><nav><a href="/home">Home</a> <a href="/organogram/?personId=4">People</a></nav>
+<a href="#compose">Post</a><section id="compose"><a href="#done">Submit</a></section>
+<script>const u = new URL(location.href); const t = '<img src="' + 'x.png' + '">'; onhashchange = () => {};</script></body></html>
+HTML
+printf '<html><head><link rel="stylesheet" href="tokens.css"></head><body><a href="#b">Next</a></body></html>' > "$DART/linked.html"
+printf '<html><body><iframe src="screen-feed.html"></iframe><a href="#b">Next</a></body></html>' > "$DART/framed.html"
+printf '<html><body><h1>Announcements</h1><p>Static picture of a flow.</p></body></html>' > "$DART/still.html"
+design_payload() {
+    printf '{"tool_name":"StructuredOutput","session_id":"%s","tool_input":{"applicable":%s,"flowChange":%s,"screens":[],"prototype":%s}}' "$1" "$2" "$3" "$4"
+}
+proto() { printf '{"entry":"%s","video":"%s"}' "$1" "$2"; }
+# expect_deny_saying <label> <wanted-regex> <unwanted-regex|-> <hook> <json>
+# The reason matters here, not just the decision: a refusal that names the
+# field to clear is answered by clearing it.
+expect_deny_saying() {
+    local out; out="$(run "$4" "$5")"
+    if printf '%s' "$out" | grep -q '"permissionDecision":"deny"' \
+        && printf '%s' "$out" | grep -Eq "$2" \
+        && { [ "$3" = "-" ] || ! printf '%s' "$out" | grep -Eq "$3"; }; then
+        green "  PASS  deny: $1"; PASS=$((PASS+1))
+    else
+        red   "  FAIL  wrong refusal reason: $1"; FAIL=$((FAIL+1))
+    fi
+}
+# expect_file / expect_no_file <label> <path>
+expect_file() {
+    if [ -f "$2" ]; then green "  PASS  $1"; PASS=$((PASS+1));
+    else red "  FAIL  $1"; FAIL=$((FAIL+1)); fi
+}
+expect_no_file() {
+    if [ ! -f "$2" ]; then green "  PASS  $1"; PASS=$((PASS+1));
+    else red "  FAIL  $1"; FAIL=$((FAIL+1)); fi
+}
+
+expect_deny_saying "flow change with no prototype" 'clickable prototype and a walkthrough video' \
+                   'flowChange'          design-flow-guard.cjs "$(design_payload '' true true null)"
+expect_allow "single screen, no prototype" \
+                                       design-flow-guard.cjs "$(design_payload '' true false null)"
+expect_allow "applicable:false owes nothing" \
+                                       design-flow-guard.cjs "$(design_payload '' false true null)"
+expect_allow "self-contained prototype and a real webm (nav links and new URL() are not references)" \
+                                       design-flow-guard.cjs "$(design_payload '' true true "$(proto flow.html walk.webm)")"
+expect_allow "an mp4 walkthrough"      design-flow-guard.cjs "$(design_payload '' true true "$(proto flow.html walk.mp4)")"
+expect_deny  "prototype not on disk"   design-flow-guard.cjs "$(design_payload '' true true "$(proto nowhere.html walk.webm)")"
+expect_deny  "video not on disk"       design-flow-guard.cjs "$(design_payload '' true true "$(proto flow.html nowhere.webm)")"
+expect_deny  "an empty recording"      design-flow-guard.cjs "$(design_payload '' true true "$(proto flow.html empty.webm)")"
+# One round per video defect spends the refusal budget on one file, so the
+# header and the size are judged together.
+expect_deny_saying "a text file named .webm reports its header AND its size at once" \
+                   'is not a real \.webm file.*empty recording' - \
+                                       design-flow-guard.cjs "$(design_payload '' true true "$(proto flow.html short-fake.webm)")"
+expect_deny  "a text file named .webm" design-flow-guard.cjs "$(design_payload '' true true "$(proto flow.html fake.webm)")"
+expect_deny  "a gif is not a walkthrough" \
+                                       design-flow-guard.cjs "$(design_payload '' true true "$(proto flow.html walk.gif)")"
+expect_deny  "prototype links tokens.css instead of inlining it" \
+                                       design-flow-guard.cjs "$(design_payload '' true true "$(proto linked.html walk.webm)")"
+expect_deny  "prototype iframes a sibling mockup" \
+                                       design-flow-guard.cjs "$(design_payload '' true true "$(proto framed.html walk.webm)")"
+expect_deny  "prototype with nothing to click" \
+                                       design-flow-guard.cjs "$(design_payload '' true true "$(proto still.html walk.webm)")"
+expect_deny  "prototype path climbing out of the artifacts" \
+                                       design-flow-guard.cjs "$(design_payload '' true true "$(proto ../../../../config/x.html walk.webm)")"
+expect_deny  "a reported prototype is checked even without flowChange" \
+                                       design-flow-guard.cjs "$(design_payload '' true false "$(proto nowhere.html walk.webm)")"
+expect_allow "another tool in design"  design-flow-guard.cjs '{"tool_name":"Write","tool_input":{"file_path":"/tmp/x"}}'
+export ONESHOT_PHASE="plan"
+expect_allow "StructuredOutput in another phase" \
+                                       design-flow-guard.cjs "$(design_payload '' true true null)"
+export ONESHOT_PHASE="design"
+SESSION="verify-$$-cap"
+for i in 1 2 3; do
+    expect_deny "refusal $i of 3 in one session" \
+                                       design-flow-guard.cjs "$(design_payload "$SESSION" true true null)"
+done
+expect_allow "released after three refusals, for the conductor to fail" \
+                                       design-flow-guard.cjs "$(design_payload "$SESSION" true true null)"
+rm -f "$GUARD_STATE/$SESSION.count"
+
+# The escape the flowChange trigger left open on its own: answer again with the
+# field cleared and the same stills. The obligation is recorded against the
+# session as it is refused, so clearing a field no longer withdraws it.
+WSESSION="verify-$$-withdraw"
+expect_deny  "a flow change with no prototype, first refusal" \
+                                       design-flow-guard.cjs "$(design_payload "$WSESSION" true true null)"
+expect_deny_saying "clearing flowChange after that refusal" 'does not withdraw it' 'flowChange' \
+                                       design-flow-guard.cjs "$(design_payload "$WSESSION" true false null)"
+expect_deny  "answering applicable:false after that refusal" \
+                                       design-flow-guard.cjs "$(design_payload "$WSESSION" false true null)"
+expect_deny  "dropping the prototype that was reported" \
+                                       design-flow-guard.cjs "$(design_payload "$WSESSION" true false null)"
+# A withdrawal is not a desk that cannot record, so it spends none of the three
+# rounds: two are still unspent here, and the honest path is as deep as it was.
+expect_deny  "second refusal of three, after three withdrawals" \
+                                       design-flow-guard.cjs "$(design_payload "$WSESSION" true true null)"
+expect_deny  "third refusal of three"  design-flow-guard.cjs "$(design_payload "$WSESSION" true true null)"
+expect_allow "released on a genuine fourth refusal, never on a withdrawal" \
+                                       design-flow-guard.cjs "$(design_payload "$WSESSION" true true null)"
+rm -f "$GUARD_STATE/$WSESSION.count"
+
+# What the conductor's own check reads, so that a released withdrawal still
+# fails the phase. It lives outside the run directory because `design` holds
+# writes: ['run', 'artifacts'].
+OWED="$GUARD_STATE/990777.owed"
+expect_deny  "a refusal records the debt against the ticket" \
+                                       design-flow-guard.cjs "$(design_payload '' true true null)"
+expect_file  "the debt is recorded outside every phase's write scope" "$OWED"
+expect_allow "an answer with both deliverables"  \
+                                       design-flow-guard.cjs "$(design_payload '' true true "$(proto flow.html walk.webm)")"
+expect_no_file "a good answer clears the debt, so the next lap is not held by it" "$OWED"
+
+rm -rf "$ROOT/state/runs/990777" "$OWED"
+export ONESHOT_PHASE="$SAVED_PHASE"; export ONESHOT_TICKET="$SAVED_TICKET"
+
+echo
 echo "eslint-guard"
 EFE="$ONESHOT_WORKTREE/frontend/src/eslintcases"
 EBIN="$ONESHOT_WORKTREE/node_modules/.bin"

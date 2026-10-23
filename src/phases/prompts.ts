@@ -740,6 +740,7 @@ the design and your own judgement disagree, the design won the argument already 
 wrong, say so rather than quietly improving it, because the reviewer approved what they saw.
 
 ${screens}
+${d.prototype?.entry ? `\nThe full flow is prototyped at \`${join(dir, d.prototype.entry)}\`.` : ''}
 ${d.newPatterns?.length ? `\nApproved as NEW to the design system: ${d.newPatterns.join('; ')}.` : ''}
 `;
 }
@@ -1259,12 +1260,32 @@ Render each at 1280x800 and screenshot it. Then look at your own screenshots onc
 misaligned edges, doubled borders, overflow, contrast. Fix what you find. A flaw you could have
 caught yourself spends the reviewer's round on your typo instead of on your design.
 
-## Multi-screen flows
+## If the flow changes, make it clickable and record it
 
-Set \`flowChange\` when the change spans more than one screen or adds a step to an existing
-journey, and draw each state of that flow as its own screen so the mockups read in order. Do not
-build a clickable prototype and do not record a walkthrough — those follow in a later change,
-once real runs have measured what this phase's budget actually is.
+\`flowChange\` is true when the change spans more than one screen or adds a step to an existing
+journey. Draw each state of that flow as its own screen, in order, and then additionally:
+
+- Build the clickable prototype: ONE self-contained \`.html\`, hash routing, vanilla JS. A
+  reviewer downloads it from the ticket on its own, so paste \`tokens.css\` into a \`<style>\`,
+  make every image a \`data:\` URI, and never load or iframe a sibling mockup. Buttons navigate,
+  forms accept input and carry values forward, submit -> pending -> done actually plays out.
+  Include one unhappy branch. Seed it with data so it is demonstrable with no setup, and click
+  through the whole happy path yourself before you call it done.
+- Record a SILENT annotated walkthrough of the happy path with Playwright's \`recordVideo\`
+  (\`.webm\`, which GitLab renders inline in the comment). No narration and no audio track — ever.
+  The annotations ARE the narration: before each click, inject a small absolutely-positioned
+  overlay with an arrow and a short caption pointing at the control you are about to use, hold it
+  ~1.5s, then click. Keep it under 60 seconds and to one flow. The file is only written when the
+  browser context closes, so close it before you read \`page.video().path()\`.
+- Report both in \`prototype\` (\`entry\` and \`video\`). Your answer is REFUSED until both are on
+  disk and good: a self-contained prototype with something to click, and a real recording. The
+  first refusal RECORDS the obligation, and nothing you answer afterwards revises it away — not
+  re-describing the change, not dropping a field. Spend the turns on building them; there is no
+  other way to finish a flow change.
+
+Annotating is right HERE and wrong in \`ui-evidence\`, and the difference is worth holding on to:
+this video argues for a design, so labelling it helps; that phase's screenshots are evidence that
+a case ran, so drawing on them would be painting the result onto the page.
 
 Everything you make goes in ${join(artifactDir(ctx.ticket.iid), DESIGN_DIR)} (create it if it is
 not there) — the mockups, their renders, and the before-captures, beside the tokens. Report
