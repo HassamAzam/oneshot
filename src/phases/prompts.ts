@@ -1226,6 +1226,28 @@ STOP. That is a correct, cheap answer. The label is applied by a person and peop
 optimistically; a design phase that invents a screen to justify itself costs a reviewer a round
 of their attention to say "there was nothing here".
 
+## THEN: what is the feature for, and where does it surface?
+
+A terse ticket is an inference task, not a literal one — the noun in its title is where you
+start reading, not where you stop. Before you draw, settle who acts, who reads, and what
+behaviour this formalises or replaces; a sentence granting everyone the ability to add a record
+is rarely a request for a CRUD list. Make that reading reviewable AND make it survive: state it
+as the FIRST \`openQuestion\` with a recommendation — the gate posts open questions and uses the
+recommendation absent an answer, so a wrong reading can be vetoed before anything is approved —
+and put it in the primary screen's \`purpose\` too, because \`openQuestions\` and \`decisions\` reach
+the gate and stop there while a screen's \`purpose\` and \`note\` are the only prose \`plan\` and
+\`implement\` are handed.
+
+A feature also has entry points in the app it joins, not just a page of its own: the surface
+someone already mid-flow is on when this becomes relevant to them is part of the design. Draw
+the ONE entry point a user is most likely to arrive through as its own screen, with its own
+\`before\` capture, and name any others in \`decisions\` rather than drawing each — one is what
+this phase's budget covers. Use research's \`uiPath\` to find it; where \`uiPath\` never traced it,
+a handful of targeted reads, not a survey.
+
+And size the input affordance to the content: long-form or attachment-bearing content needs more
+than a single-line field, and a choice from a fixed set needs a control rather than free text.
+
 ## Ground the design in the REAL product, not in taste
 
 A mockup succeeds when the reaction is "that's our app with the feature in it", and fails when it

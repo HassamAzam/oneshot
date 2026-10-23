@@ -1,6 +1,6 @@
 ---
 name: design-proposal
-description: Draw what a ticket's UI should look like, before anyone plans or builds it, and hand a human something they can approve — mockups grounded in the real product's tokens, before/after captures, and for a flow change each state of that journey drawn as its own screen. Use when asked to "design this before we build it", "what should this look like", "mock this up for sign-off", or when Oneshot's design phase runs on a ticket labelled Design. Draws only; never implements, never edits application code.
+description: Draw what a ticket's UI should look like, before anyone plans or builds it, and hand a human something they can approve — the feature's purpose and entry points settled before the first pixel, mockups grounded in the real product's tokens, before/after captures, and for a flow change each state of that journey drawn as its own screen. Use when asked to "design this before we build it", "what should this look like", "mock this up for sign-off", or when Oneshot's design phase runs on a ticket labelled Design. Draws only; never implements, never edits application code.
 ---
 
 # Design Proposal
@@ -26,7 +26,52 @@ person and people label optimistically; a design phase that invents a screen to
 justify its own existence spends a reviewer's round on being told there was
 nothing here.
 
-## 2. Ground it in the real product, not in taste
+## 2. Understand what the feature is for — and where it lives
+
+A mockup can be pixel-perfect and still be the wrong feature. Before you ground
+anything in tokens, settle two things the ticket usually does not spell out:
+what the feature is *for*, and where in the app it surfaces.
+
+**A terse ticket is an inference task, not a literal one.** A one- or two-line
+description names a thing; it does not specify it. The noun in the title is
+where you start reading, not where you stop. Derive, before drawing: who acts
+and who reads, and what existing behaviour this formalises, replaces, or moves
+in-product from wherever people improvise it today. A sentence granting everyone
+the ability to add a record is rarely a request for a CRUD list — read what the
+record is *for* before you draw the table that holds it. Design the literal
+reading and you spend a reviewer's round being told what the feature was always
+for.
+
+So make that reading reviewable, and make it survive. State it as the **first
+`openQuestion`, carrying a recommendation**: the gate posts open questions with
+their recommendation and says the recommendation is used absent an answer, so a
+reading stated there is one a reviewer can veto before approving anything. Then
+put it in the primary screen's **`purpose`** as well — `openQuestions` and
+`decisions` reach the gate and stop there, while a screen's `purpose` and `note`
+are the only prose `plan` and `implement` are handed. An `approved` makes your
+stated reading the specification; a comment correcting it re-runs this phase
+with their words appended, the same as any other feedback.
+
+**A feature has entry points in the app it joins, not just a page of its own.**
+Where does someone already mid-flow meet this — the surface they are already on
+when it becomes relevant to them? That surface is part of the design, not a
+follow-up. Draw the **one** entry point a user is most likely to arrive
+through, as its own screen with its own `before` capture and its own
+`screenshot`, and name any others in `decisions` rather than drawing each — one
+is what this phase's budget covers. Use research's `uiPath` to find that screen;
+where `uiPath` never traced it, a handful of targeted reads, not a survey. A
+feature reachable only from its own URL is a design that drew half the ticket
+and left the reviewer to name the other half.
+
+**Match the input affordance to the content.** Size the control to what goes
+into it: expressive, long-form or attachment-bearing content needs more than a
+single-line field, and a choice from a fixed set needs a control rather than
+free text. Where that sizing is genuinely contested — the ticket implies one
+thing and the surrounding product does another — it earns a `decisions` entry.
+Where it is obvious, draw it and spend the slot on something a reviewer would
+actually argue with.
+
+## 3. Ground it in the real product, not in taste
 
 A mockup succeeds when the reaction is "that's our app with the feature in it"
 and fails when it is "that's a nice generic dashboard". Generic is the default
@@ -68,7 +113,7 @@ In order:
 A `before` is empty only when the screen does not exist yet — never because you
 did not capture it.
 
-## 3. Draw the screens
+## 4. Draw the screens
 
 One self-contained `.html` per screen, in `design/` beside the tokens and
 importing `./tokens.css` (and `./new-tokens.css` if you made one). No CDN
@@ -89,7 +134,7 @@ scripts, no external fonts, no remote images: inline everything.
   you find — a flaw you could have caught yourself spends the reviewer's
   attention on your typo instead of on your design.
 
-## 4. A flow change is drawn as states, not prototyped
+## 5. A flow change is drawn as states, not prototyped
 
 When the change spans more than one screen or adds a step to an existing journey, set
 `flowChange` and draw each state of that flow as its own screen, in order, so the reviewer
@@ -99,7 +144,7 @@ Do **not** build a clickable prototype and do **not** record a walkthrough. Both
 their own change, once real runs have measured what this phase actually costs — they are
 the most expensive and most breakable part of an estimated budget.
 
-## 5. Give the reviewer the decisions, not a changelog
+## 6. Give the reviewer the decisions, not a changelog
 
 - **`decisions`** — the two or three choices you made on their behalf that they
   would argue with. Not everything you did.
@@ -110,7 +155,7 @@ the most expensive and most breakable part of an estimated budget.
 - **`openQuestions`** — always with a recommendation. A question carrying a
   default gets answered; one without it parks the run on somebody's inbox.
 
-## 6. When feedback comes back
+## 7. When feedback comes back
 
 A non-`approved` comment from a reviewer re-runs this phase with their words
 appended. Address them directly and visibly: re-render, re-screenshot, and make
