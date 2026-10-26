@@ -90,12 +90,70 @@ test('a record is graded against labels for its run: real, missed and coverage c
   const g = gradeAgainstGold(graded(), gold);
   assert.notEqual(typeof g, 'string');
   assert.deepEqual(g, {
-    iid: 5, real: 3, notReal: 1, missed: 1, unlabelled: [],
-    coverageLabelled: 3, coverageAgree: 1, falseCovered: 1, falseGap: 1,
+    iid: 5, real: 3, notReal: 1, missed: 1, unlabelled: [], retiredRight: 0, retiredWrong: 0,
+    coverageLabelled: 3, coverageAgree: 1, falseCovered: 1, falseGap: 1, misattributed: 0,
   });
   const lines = formatGold([g as Exclude<typeof g, string>]);
-  assert.ok(lines.some((l) => l.includes('75% of those listed are real, 75% of the real ones were listed')));
-  assert.ok(lines.some((l) => l.includes('33% of 3 labelled call(s) agree — 1 falsely covered, 1 falsely missing')));
+  assert.ok(lines.some((l) => l.includes('75% of those held are real, 75% of the real ones were listed')));
+  assert.ok(lines.some((l) => l.includes(
+    '33% of 3 labelled call(s) agree — 1 falsely covered, 1 falsely missing, 0 on the wrong case')));
+  assert.ok(!lines.some((l) => l.startsWith('retired:')));
+});
+
+test('a judge that covers a requirement with the wrong case is counted apart from overclaiming', () => {
+  const g = gradeAgainstGold(graded(), {
+    project: 'p', runId: 'run-1', real: { R1: 'TC-07' }, notReal: [], missed: [],
+  }) as Exclude<ReturnType<typeof gradeAgainstGold>, string>;
+  assert.equal(g.coverageAgree, 0);
+  assert.equal(g.misattributed, 1);
+  assert.equal(g.falseCovered, 0);
+  assert.equal(g.falseGap, 0);
+  assert.ok(formatGold([g]).some((l) => l.includes('1 on the wrong case')));
+});
+
+test('a retired requirement is scored apart: credit when not real, a recall loss when real', () => {
+  const withRetired = (): EvalRecord => ({
+    ...graded(),
+    requirements: [{ id: 'R1', text: 'One', source: 'ticket', evidence: 'e' }],
+    retired: [{ id: 'R2', text: 'Two', source: 'ticket', evidence: 'e' }],
+  });
+  const right = gradeAgainstGold(withRetired(), {
+    project: 'p', runId: 'run-1', real: { R1: 'TC-01' }, notReal: ['R2'], missed: [],
+  }) as Exclude<ReturnType<typeof gradeAgainstGold>, string>;
+  assert.equal(right.notReal, 0, 'a withdrawn requirement must not count against precision');
+  assert.equal(right.retiredRight, 1);
+  const lines = formatGold([right]);
+  assert.ok(lines.some((l) => l.includes('100% of those held are real')));
+  assert.ok(lines.some((l) => l.includes('retired: 1 withdrawn rightly, 0 real requirement(s) withdrawn')));
+
+  const wrong = gradeAgainstGold(withRetired(), {
+    project: 'p', runId: 'run-1', real: { R1: 'TC-01', R2: 'TC-02' }, notReal: [], missed: [],
+  }) as Exclude<ReturnType<typeof gradeAgainstGold>, string>;
+  assert.equal(wrong.real, 1, 'a withdrawn requirement is not one the judge still holds');
+  assert.equal(wrong.retiredWrong, 1);
+  assert.equal(wrong.coverageLabelled, 1, 'a withdrawn requirement owes the kept list no coverage');
+  assert.ok(formatGold([wrong]).some((l) => l.includes('50% of the real ones were listed')));
+});
+
+test('labels are refused when the requirement they were written against changed', () => {
+  const WORDED = 'Every amount renders with at most two decimals.';
+  const record = (): EvalRecord => {
+    const r = graded();
+    return { ...r, requirements: [{ ...r.requirements[0]!, text: WORDED }, ...r.requirements.slice(1)] };
+  };
+  const texts = { project: 'p', runId: 'run-1', real: { R1: 'TC-01' }, notReal: [], missed: [] };
+  assert.match(
+    String(gradeAgainstGold(record(), { ...texts, requirements: { R1: 'Something else entirely' } })),
+    /R1 has been reworded/,
+  );
+  assert.match(
+    String(gradeAgainstGold(record(), { ...texts, requirements: { R9: 'Gone' } })),
+    /R9 was labelled but the record no longer lists it/,
+  );
+  const reflowed = gradeAgainstGold(record(), {
+    ...texts, requirements: { R1: `  ${WORDED.replace(/ /g, '\n   ')}  ` },
+  });
+  assert.notEqual(typeof reflowed, 'string', 're-wrapping is not a rewording');
 });
 
 test('labels written for another run are refused, and unlabelled ids are named', () => {
