@@ -103,6 +103,31 @@ export interface PhaseOutput {
 const SIGNAL_DEATH_RE = /terminated by signal|SIGKILL|SIGTERM|SIGSEGV/i;
 
 /**
+ * Whether a session that died with an unexplained error (typically the SDK's
+ * bare "Claude Code process exited with code 1") is the machinery rather than
+ * a verdict, so it costs no lap.
+ *
+ * A signal death, or a death before any stream message, is infra. So is a
+ * session that worked for a while and then died WITHOUT a verdict: no
+ * structured output, and either no result frame at all or only an
+ * `error_during_execution` frame. That is the same shape as a timeout or a
+ * stall, which are already infra. On #8344 one of these spent one of verify's
+ * two laps on a crash, and the next lap passed every case.
+ *
+ * A result frame naming a budget (`error_max_turns`, structured-output
+ * retries) stays a failure: the session reached the end of what it was given,
+ * and re-running it unchanged would land in the same place.
+ */
+export function crashIsInfra(
+  message: string, streamMessages: number,
+  verdict: { data: unknown; resultSubtype: string | null },
+): boolean {
+  if (SIGNAL_DEATH_RE.test(message) || !streamMessages) return true;
+  if (verdict.data) return false;
+  return verdict.resultSubtype === null || verdict.resultSubtype === 'error_during_execution';
+}
+
+/**
  * How often a long phase says it is still alive.
  *
  * A session phase is otherwise silent for up to its whole timeout — two hours
@@ -397,6 +422,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   let stderrHead = '';
   let stderrTail = '';
   let settled = false;
+  let settledSubtype: string | null = null;
   let turnsSoFar = 0;
   const phaseStartedAt = Date.now();
   let lastProgressAt = phaseStartedAt;
@@ -535,6 +561,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
           continue;
         }
         settled = true;
+        settledSubtype = String(msg.subtype);
 
         out.turns = msg.num_turns;
         out.sessionId = msg.session_id;
@@ -615,7 +642,12 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       // usage limit, or a terms notice it hard-exits on — and without this they
       // are indistinguishable from a phase that ran and came back wrong, which
       // costs a lap and aborts every run whose onFail says so.
-      if (SIGNAL_DEATH_RE.test(m) || !sawActivity) out.infra = true;
+      //
+      // And a session that worked, then died with no verdict at all, is the
+      // same machinery failure seen later — see crashIsInfra.
+      if (crashIsInfra(m, sawActivity, { data: out.data, resultSubtype: settledSubtype })) {
+        out.infra = true;
+      }
       limitSignals.push(m);
     }
   } finally {
