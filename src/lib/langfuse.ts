@@ -20,8 +20,9 @@
  *
  * What is lost by not being inside the session: per-tool-call and per-subagent
  * spans. What is kept: the run, every phase, timings, models, token spend and
- * outcomes — the shape people actually open Langfuse to see. The full per-turn
- * record was never in Langfuse anyway; it is on disk, in
+ * outcomes — the shape people actually open Langfuse to see — plus, while
+ * config/otel.json's logAssistantResponses is on, each lap's final result text
+ * as its Output. Prompts are never sent. The full per-turn record is on disk, in
  * state/runs/<iid>/transcripts/.
  *
  * Ids are DERIVED rather than random, so re-exporting a run updates its spans
@@ -29,6 +30,8 @@
  * phase and again at the end without any bookkeeping.
  */
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { transcriptPath } from './artifacts.js';
 import { db } from './db.js';
 import { envOr } from './config.js';
 import { otelConfig } from './otel.js';
@@ -52,6 +55,33 @@ export interface UsageRow {
 }
 
 type Tokens = Omit<UsageRow, 'ts' | 'phase'>;
+
+/** Characters of a lap's final text sent to Langfuse. The longest seen is under 4k. */
+export const OUTPUT_CAP = 10_000;
+
+/**
+ * The final text a phase session wrote: `result` on the first result frame of
+ * its transcript. Later frames are ignored, as phase.ts ignores them. Undefined
+ * when the transcript is missing or the session never reached a result.
+ */
+export function finalResultText(transcript: string): string | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(transcript, 'utf8');
+  } catch {
+    return undefined;
+  }
+  for (const line of raw.split('\n')) {
+    if (!line.includes('"type":"result"')) continue;
+    try {
+      const msg = JSON.parse(line) as { type?: string; result?: unknown };
+      if (msg.type === 'result') return typeof msg.result === 'string' ? msg.result : undefined;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
 
 /** OTLP wants 16 bytes of trace id and 8 of span id, as lowercase hex. */
 function traceIdFor(runId: string): string {
@@ -114,7 +144,12 @@ function tokensFor(p: PhaseRecord, usage: UsageRow[]): Tokens | undefined {
 }
 
 /** The run as OTLP spans: a root span for the run and one child per phase lap. */
-export function runSpans(journal: ExportedRun, usage: UsageRow[], genAiSystem: string): unknown[] {
+export function runSpans(
+  journal: ExportedRun,
+  usage: UsageRow[],
+  genAiSystem: string,
+  outputFor?: (p: PhaseRecord) => string | undefined,
+): unknown[] {
   const traceId = traceIdFor(journal.runId);
   const rootId = spanIdFor(journal.runId);
   const started = journal.createdAt;
@@ -165,6 +200,7 @@ export function runSpans(journal: ExportedRun, usage: UsageRow[], genAiSystem: s
         'gen_ai.usage.output_tokens': u?.output,
         'gen_ai.usage.cache_read_input_tokens': u?.cacheRead,
         'gen_ai.usage.cache_creation_input_tokens': u?.cacheWrite,
+        'langfuse.observation.output': outputFor?.(p)?.slice(0, OUTPUT_CAP),
         'oneshot.phase': p.phase,
         'oneshot.lap': p.lap,
         'oneshot.status': p.status,
@@ -206,7 +242,12 @@ export async function exportRun(journal: RunJournal): Promise<void> {
   if (!cfg.enabled || !auth) return;
 
   try {
-    const spans = runSpans(journal, usageRows(journal.runId), 'anthropic');
+    // Only what each session WROTE, and only while config/otel.json asks for
+    // responses. Prompt text is never sent.
+    const outputFor = cfg.logAssistantResponses
+      ? (p: PhaseRecord) => finalResultText(transcriptPath(journal.iid, p.phase, p.lap))
+      : undefined;
+    const spans = runSpans(journal, usageRows(journal.runId), 'anthropic', outputFor);
 
     const body = {
       resourceSpans: [{

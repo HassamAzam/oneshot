@@ -1,12 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runSpans, type ExportedRun, type UsageRow } from './langfuse.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { OUTPUT_CAP, finalResultText, runSpans, type ExportedRun, type UsageRow } from './langfuse.js';
 import type { PhaseRecord } from './artifacts.js';
 
 interface Span {
   spanId: string;
   name: string;
-  attributes: Array<{ key: string; value: { intValue?: string } }>;
+  attributes: Array<{ key: string; value: { intValue?: string; stringValue?: string } }>;
 }
 
 const lap = (phase: string, n: number, startedAt: number, endedAt: number, status: PhaseRecord['status'] = 'ok'): PhaseRecord =>
@@ -62,4 +65,56 @@ test('usage from a lap no longer in the journal is credited to no surviving lap'
 
   assert.equal(inputTokens(spanNamed(spans, 'mr (lap 1)')), undefined);
   assert.equal(inputTokens(spanNamed(spans, 'mr (lap 3)')), 4);
+});
+
+const stringAttr = (span: Span, key: string): string | undefined =>
+  span.attributes.find((a) => a.key === key)?.value.stringValue;
+
+test('a lap span carries its final output text as the Langfuse output, and never an input', () => {
+  const spans = runSpans(
+    run([lap('mr', 1, 1000, 2000), lap('mr-open', 0, 2000, 2100)]),
+    [],
+    'anthropic',
+    (p) => (p.phase === 'mr' ? 'MR !42 opened' : undefined),
+  );
+
+  assert.equal(stringAttr(spanNamed(spans, 'mr (lap 1)'), 'langfuse.observation.output'), 'MR !42 opened');
+  assert.equal(stringAttr(spanNamed(spans, 'mr-open'), 'langfuse.observation.output'), undefined);
+  for (const span of spans as Span[]) {
+    assert.equal(stringAttr(span, 'langfuse.observation.input'), undefined);
+  }
+});
+
+test('an output longer than the cap is cut to the cap', () => {
+  const spans = runSpans(run([lap('plan', 0, 1000, 2000)]), [], 'anthropic', () => 'x'.repeat(OUTPUT_CAP + 50));
+
+  assert.equal(stringAttr(spanNamed(spans, 'plan'), 'langfuse.observation.output')?.length, OUTPUT_CAP);
+});
+
+const withTranscript = (lines: unknown[], check: (path: string) => void): void => {
+  const dir = mkdtempSync(join(tmpdir(), 'langfuse-test-'));
+  try {
+    const path = join(dir, 'mr-lap1.jsonl');
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n'));
+    check(path);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+
+test('the final result text is read from the first result frame of a transcript', () => {
+  withTranscript([
+    { type: 'system', subtype: 'init' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'working' }] } },
+    { type: 'result', subtype: 'success', result: 'MR !42 opened' },
+    { type: 'result', subtype: 'error_during_execution', errors: ['late'] },
+  ], (path) => assert.equal(finalResultText(path), 'MR !42 opened'));
+});
+
+test('a transcript with no result frame yields no output text', () => {
+  withTranscript([{ type: 'system', subtype: 'init' }], (path) => assert.equal(finalResultText(path), undefined));
+});
+
+test('a missing transcript yields no output text', () => {
+  assert.equal(finalResultText(join(tmpdir(), 'langfuse-test-missing', 'none.jsonl')), undefined);
 });
