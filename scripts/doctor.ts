@@ -14,7 +14,7 @@ import {
   phasesOutsideTarget, portPool, projectConfig, repoIdentity, requiredLabels, reviewersConfig, slackConfig,
   type LocalTestsConfig,
 } from '../src/lib/config.js';
-import { describeProvider } from '../src/lib/provider.js';
+import { describeProvider, phaseModel } from '../src/lib/provider.js';
 import { ping, getBranch, listLabels } from '../src/lib/gitlab.js';
 import {
   checkoutFindings, identityFindings, relaxRepoChecks, repoCheckOverrideNotice, wtRootFinding, type Finding,
@@ -372,6 +372,12 @@ async function main(): Promise<void> {
       'and a JSON schema through the real session environment to prove the wiring.');
   }
   for (const n of provider.notes) warn(provider.name, n);
+  // A pin changes which model a phase gets and nothing else says so. Silent
+  // model selection is how a phase ends up on a model that cannot do its job.
+  const pins = phases()
+    .map((ph) => ({ name: ph.name, model: phaseModel(ph.name) }))
+    .filter((p) => p.model);
+  for (const pin of pins) pass(`phase ${pin.name} is pinned`, pin.model);
 
   section('Session auth');
   const auth = auditAuth();

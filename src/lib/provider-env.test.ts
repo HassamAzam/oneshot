@@ -52,7 +52,7 @@ Promise.all([
     credential: auth.credential,
     problems: auth.problems, notes: auth.notes,
     provider: p.name, billing: p.billing,
-    models: { heavy: named('research'), standard: named('implement'), narrator: c.narratorModel() },
+    models: { heavy: named('research'), standard: named('implement'), design: named('design'), narrator: c.narratorModel() },
     printed: [pv.describeProvider(p), auth.credential, ...auth.problems, ...auth.notes].join(' | '),
   }));
 }).catch((e) => { console.error(e); process.exit(1); });
@@ -78,6 +78,7 @@ const NEUTRAL: Record<string, string> = Object.fromEntries([
   'ONESHOT_LLM_PROVIDER', 'ONESHOT_LLM_API_KEY', 'ONESHOT_LLM_BASE_URL', 'ONESHOT_LLM_AUTH',
   'ONESHOT_LLM_MODEL_HEAVY', 'ONESHOT_LLM_MODEL_STANDARD', 'ONESHOT_LLM_MODEL_LIGHT',
   'ONELOOP_LLM_PROVIDER', 'ONELOOP_LLM_API_KEY',
+  'ONESHOT_LLM_MODEL_DESIGN', 'ONELOOP_LLM_MODEL_DESIGN',
   'ONESHOT_REQUIRE_SUBSCRIPTION', 'ONESHOT_ALLOW_1M_CONTEXT',
   'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
 ].map((k) => [k, '']));
@@ -151,8 +152,12 @@ test('the subscription desk is exactly what it was', () => {
   assert.equal(b.base.ANTHROPIC_BASE_URL, undefined, 'the runtime goes to its own endpoint');
   assert.equal(b.base.CLAUDE_CODE_OAUTH_TOKEN, 'oauth-token', 'a headless desk still gets its token');
   assert.equal(b.base.CLAUDE_CODE_DISABLE_1M_CONTEXT, '1', 'the paid 1M window stays off on the subscription');
-  assert.deepEqual(b.models, { heavy: 'claude-opus-5', standard: 'claude-sonnet-5', narrator: 'claude-haiku-4-5-20251001' },
-    'config/models.json still decides on the subscription');
+  assert.deepEqual(b.models, {
+    heavy: 'claude-opus-5',
+    standard: 'claude-sonnet-5',
+    design: 'claude-opus-5',
+    narrator: 'claude-haiku-4-5-20251001',
+  }, 'config/models.json still decides on the subscription, design included');
   assert.deepEqual(b.problems, []);
 });
 
@@ -185,4 +190,30 @@ test('no key ever reaches a log line', () => {
     const b = boot(env);
     assert.ok(!b.printed.includes(KEY), `a key reached printed output: ${b.printed}`);
   }
+});
+
+test('one phase can be pinned to one model without moving its tier', () => {
+  // The measured case: `design` renders mockups and is then told to read its own
+  // screenshots critically, which needs vision — and this provider's heavy model
+  // cannot see. Moving the heavy tier would change six other phases to fix one.
+  const b = boot({
+    ONESHOT_LLM_PROVIDER: 'deepseek',
+    ONESHOT_LLM_API_KEY: KEY,
+    ONESHOT_LLM_MODEL_DESIGN: 'deepseek-flash[1m]',
+  });
+  assert.equal(b.models.design, 'deepseek-flash[1m]', 'the pinned phase takes the pin');
+  assert.equal(b.models.heavy, 'deepseek-v4-pro[1m]', 'its tier-mates are untouched');
+  assert.equal(b.models.standard, 'deepseek-flash[1m]');
+  assert.deepEqual(b.problems, []);
+});
+
+test('with nothing pinned, design is just another heavy phase', () => {
+  const b = boot({ ONESHOT_LLM_PROVIDER: 'deepseek', ONESHOT_LLM_API_KEY: KEY });
+  assert.equal(b.models.design, b.models.heavy);
+});
+
+test('a pin works on the subscription too, and changes nothing else', () => {
+  const b = boot({ ONESHOT_LLM_PROVIDER: 'claude', ONESHOT_LLM_MODEL_DESIGN: 'claude-sonnet-5' });
+  assert.equal(b.models.design, 'claude-sonnet-5');
+  assert.equal(b.models.heavy, 'claude-opus-5', 'config/models.json still decides the tiers');
 });

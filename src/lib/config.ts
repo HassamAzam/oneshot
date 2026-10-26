@@ -26,7 +26,7 @@ import {
 } from './repourl.cjs';
 import { parseMrFeedbackConfig } from '../mrfeedback/config.js';
 import {
-  SUBSCRIPTION_PROVIDER, resolveProvider,
+  SUBSCRIPTION_PROVIDER, phaseModel, resolveProvider,
   type ProvidersTable, type ResolvedProvider, type Tier,
 } from './provider.js';
 import type { MrFeedbackConfig } from '../mrfeedback/types.js';
@@ -897,6 +897,11 @@ function tierTable(): Record<string, string> {
 }
 
 export function modelFor(phase: PhaseConfig): string {
+  // A per-phase pin wins over every tier, because it exists for the case a tier
+  // cannot express: a phase needing a CAPABILITY its tier's model lacks.
+  const pinned = phaseModel(phase.name);
+  if (pinned) return pinned;
+
   const m = loadJson<{ narrator: string; overrides: Record<string, string> }>('models.json');
   const tier = m.overrides[phase.name] ?? phase.tier ?? 'standard';
   const model = tierTable()[tier];

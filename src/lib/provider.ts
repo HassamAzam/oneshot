@@ -76,6 +76,39 @@ export const SUBSCRIPTION_PROVIDER = 'claude';
 
 export function tierVar(tier: Tier): string { return `ONESHOT_LLM_MODEL_${tier.toUpperCase()}`; }
 
+/**
+ * The variable that pins ONE phase to ONE model, overriding its tier.
+ *
+ * For the case where a phase needs a capability its tier's model lacks rather
+ * than more or less of the same thing. The measured example: `design` renders
+ * mockups and is then told to read its own screenshots critically, which needs
+ * vision — and a provider can serve a stronger model that cannot see. Moving
+ * the whole tier would change six other phases to fix one.
+ *
+ * Desk-local on purpose. `config/models.json`'s `overrides` is the fleet-wide
+ * lever and maps a phase to a TIER, so using it here would also re-tier the
+ * phase for every desk on every other provider. This pins a model id, for this
+ * desk, and leaves both alone.
+ */
+export function phaseModelVar(phase: string): string {
+  return `ONESHOT_LLM_MODEL_${phase.replace(/-/g, '_').toUpperCase()}`;
+}
+
+/**
+ * The model pinned for `phase`, or ''.
+ *
+ * A phase whose name would spell a TIER variable is refused rather than allowed
+ * to read it: `ONESHOT_LLM_MODEL_HEAVY` means "the heavy tier", and a phase
+ * named `heavy` silently answering to it would make one line mean two things.
+ * No phase is named that today; this is here so adding one cannot introduce it
+ * quietly.
+ */
+export function phaseModel(phase: string, env: NodeJS.ProcessEnv = process.env): string {
+  const name = phaseModelVar(phase);
+  if (TIERS.some((t) => tierVar(t) === name)) return '';
+  return readEnv(env, name, '');
+}
+
 const AUTH_HEADER_VAR: Record<AuthStyle, ResolvedProvider['authVar']> = {
   bearer: 'ANTHROPIC_AUTH_TOKEN',
   'x-api-key': 'ANTHROPIC_API_KEY',

@@ -96,6 +96,31 @@ ONESHOT_LLM_MODEL_STANDARD=…
 ONESHOT_LLM_MODEL_LIGHT=…
 ```
 
+### Pinning one phase to one model
+
+A tier says how much model a phase needs. Sometimes a phase needs a *capability* the tier's
+model lacks, and then re-tiering it would drag its tier-mates along. Pin it instead:
+
+```bash
+ONESHOT_LLM_MODEL_DESIGN=deepseek-flash[1m]
+```
+
+The variable is `ONESHOT_LLM_MODEL_<PHASE>` with hyphens as underscores, it beats every tier,
+and it is desk-local. `config/models.json`'s `overrides` is the fleet-wide lever and maps a
+phase to a *tier*, so it would change that phase for every desk on every provider.
+
+The case this exists for is real and measured. `design` renders mockups at 1280×800 and is then
+told to read its own screenshots critically, looking for misaligned edges, doubled borders and
+contrast problems. That needs vision. On DeepSeek the heavy tier is `deepseek-v4-pro`, whose
+published capability table says vision is not supported, while `deepseek-flash` supports it. So
+the strongest model available is the one that cannot do this phase's last step. Of the seven
+heavy phases — research, design, plan, testcases, review, remediate, mr-feedback — only `design`
+reads an image back, so pinning that one is the whole fix. `verify`, `ui-evidence` and
+`demo-recording` lean on screenshots too and are all `standard`, so they already have vision.
+
+`npm run doctor` prints every pin, because a model chosen silently is how a phase ends up on one
+that cannot do its job.
+
 An OpenAI-shaped provider needs a translating proxy (LiteLLM, `claude-code-router`) in front
 of it; point `ONESHOT_LLM_BASE_URL` at the proxy and use the `custom` preset.
 

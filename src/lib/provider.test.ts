@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   API_KEY_VAR, AUTH_VAR, BASE_URL_VAR, PROVIDER_VAR, TIERS,
-  describeProvider, resolveProvider, tierVar, type ProvidersTable,
+  describeProvider, phaseModel, phaseModelVar, resolveProvider, tierVar, type ProvidersTable,
 } from './provider.js';
 
 const TABLE: ProvidersTable = {
@@ -147,5 +147,33 @@ test('the shipped config/providers.json resolves for every preset it offers', ()
     assert.ok(p.sessionEnv.ANTHROPIC_BASE_URL?.startsWith('https://'), `${name} needs an https endpoint`);
     for (const tier of TIERS) assert.ok(p.tiers?.[tier], `${name} is missing the ${tier} tier`);
     assert.ok(preset.notes?.length, `${name} should say what it costs a reader to know`);
+  }
+});
+
+// ------------------------------------------------------- per-phase model pin
+
+test('a phase is pinned by a variable named after it, hyphens and all', () => {
+  assert.equal(phaseModelVar('design'), 'ONESHOT_LLM_MODEL_DESIGN');
+  assert.equal(phaseModelVar('ui-evidence'), 'ONESHOT_LLM_MODEL_UI_EVIDENCE');
+  assert.equal(phaseModelVar('mr-feedback'), 'ONESHOT_LLM_MODEL_MR_FEEDBACK');
+});
+
+test('the pin is read for that phase and nothing else', () => {
+  const env = { ONESHOT_LLM_MODEL_DESIGN: 'deepseek-flash[1m]' };
+  assert.equal(phaseModel('design', env), 'deepseek-flash[1m]');
+  assert.equal(phaseModel('review', env), '', 'one phase pinned is not every phase pinned');
+  assert.equal(phaseModel('design', {}), '', 'unset means unpinned');
+});
+
+test('the legacy ONELOOP_ spelling pins a phase too', () => {
+  assert.equal(phaseModel('design', { ONELOOP_LLM_MODEL_DESIGN: 'x' }), 'x');
+});
+
+test('a phase named like a tier cannot hijack that tier variable', () => {
+  // ONESHOT_LLM_MODEL_HEAVY means "the heavy tier". No phase is named `heavy`
+  // today; this is here so adding one cannot quietly make that line mean two
+  // things at once.
+  for (const tier of TIERS) {
+    assert.equal(phaseModel(tier, { [tierVar(tier)]: 'should-not-be-read' }), '');
   }
 });
