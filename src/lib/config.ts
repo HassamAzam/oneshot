@@ -8,7 +8,10 @@
  * variable reaches a session only if it is written here. That is how
  * ANTHROPIC_API_KEY is kept out — in headless/SDK mode Claude Code never
  * prompts about a detected key, it silently uses it, and a subscription fleet
- * becomes a metered API bill with no signal that anything changed.
+ * becomes a metered API bill with no signal that anything changed. The one
+ * sanctioned exception is a provider the desk chose in .env (ONESHOT_LLM_*,
+ * src/lib/provider.ts): its variables are added back AFTER the strip, from
+ * values this code derived, never inherited.
  */
 import { readFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -22,6 +25,10 @@ import {
   type GitlabRepo, type ResolvedPath,
 } from './repourl.cjs';
 import { parseMrFeedbackConfig } from '../mrfeedback/config.js';
+import {
+  SUBSCRIPTION_PROVIDER, phaseModel, resolveProvider,
+  type ProvidersTable, type ResolvedProvider, type Tier,
+} from './provider.js';
 import type { MrFeedbackConfig } from '../mrfeedback/types.js';
 
 export const ROOT: string = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -859,22 +866,56 @@ export function mrFeedbackConfig(): MrFeedbackConfig {
   return _mrFeedback;
 }
 
+let _provider: ResolvedProvider | null = null;
+/**
+ * The provider every session of this desk talks to, resolved once from
+ * config/providers.json and .env. Problems are reported, not thrown: boot and
+ * doctor print all of them and refuse together.
+ */
+export function llmProvider(): ResolvedProvider {
+  if (!_provider) {
+    // A checkout without the file predates the switch, so it is the
+    // subscription — the same answer as an empty selection, rather than a
+    // crash at module init that no message could explain.
+    const table: ProvidersTable = existsSync(join(ROOT, 'config', 'providers.json'))
+      ? loadJson<ProvidersTable>('providers.json')
+      : { default: SUBSCRIPTION_PROVIDER, providers: { [SUBSCRIPTION_PROVIDER]: { billing: 'subscription' } } };
+    _provider = resolveProvider(table);
+  }
+  return _provider;
+}
+
+/**
+ * Tier -> model id. config/models.json is the subscription table; a metered
+ * provider carries its own, because its model names mean nothing to Anthropic
+ * and vice versa.
+ */
+function tierTable(): Record<string, string> {
+  const own = llmProvider().tiers;
+  if (own) return own;
+  return loadJson<{ tiers: Record<string, string> }>('models.json').tiers;
+}
+
 export function modelFor(phase: PhaseConfig): string {
-  const m = loadJson<{
-    tiers: Record<string, string>;
-    narrator: string;
-    overrides: Record<string, string>;
-  }>('models.json');
+  // A per-phase pin wins over every tier, because it exists for the case a tier
+  // cannot express: a phase needing a CAPABILITY its tier's model lacks.
+  const pinned = phaseModel(phase.name);
+  if (pinned) return pinned;
+
+  const m = loadJson<{ narrator: string; overrides: Record<string, string> }>('models.json');
   const tier = m.overrides[phase.name] ?? phase.tier ?? 'standard';
-  const model = m.tiers[tier];
-  if (!model) throw new Error(`config/models.json has no tier '${tier}' (phase ${phase.name})`);
+  const model = tierTable()[tier];
+  if (!model) throw new Error(`no model for tier '${tier}' (phase ${phase.name}): check config/models.json or the provider's tiers`);
   return model;
 }
 
 export function narratorModel(): string {
-  const m = loadJson<{ tiers: Record<string, string>; narrator: string }>('models.json');
-  return m.tiers[m.narrator] ?? m.tiers.light ?? 'claude-haiku-4-5-20251001';
+  const m = loadJson<{ narrator: string }>('models.json');
+  const tiers = tierTable();
+  return tiers[m.narrator] ?? tiers.light ?? 'claude-haiku-4-5-20251001';
 }
+
+export function modelForTier(tier: Tier): string | undefined { return tierTable()[tier]; }
 
 // ------------------------------------------------------------------ paths
 
@@ -1183,16 +1224,34 @@ function buildBaseEnv(): Record<string, string> {
     if (typeof val === 'string' && val !== '') env[v] = val;
   }
 
+  const provider = llmProvider();
+
   // The 1M context window consumes purchased usage credits even when
   // subscription allowance remains — that is a real charge, unlike everything
-  // else here.
-  if (!envFlag('ONESHOT_ALLOW_1M_CONTEXT')) env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1';
+  // else here. It is a fact about Anthropic's plans, not about long contexts:
+  // where the provider's context simply IS 1M there is nothing extra to buy,
+  // and the flag would instead strip the `[1m]` model names its preset uses.
+  if (provider.billing === 'subscription' && !envFlag('ONESHOT_ALLOW_1M_CONTEXT')) {
+    env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1';
+  }
 
-  // Only for a headless box with no interactive login. Subscription credential.
+  // Only for a headless box with no interactive login. Subscription credential,
+  // so it travels only when the subscription is what sessions run on: beside a
+  // metered provider's token it would be a second credential with nothing to do.
   const oauth = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  if (typeof oauth === 'string' && oauth.trim() !== '') env.CLAUDE_CODE_OAUTH_TOKEN = oauth;
+  if (provider.billing === 'subscription' && typeof oauth === 'string' && oauth.trim() !== '') {
+    env.CLAUDE_CODE_OAUTH_TOKEN = oauth;
+  }
 
   for (const v of AUTH_VARS_NEVER_FORWARDED) delete env[v];
+
+  // The strip above removes whatever the SHELL had; a metered provider then
+  // puts the same names back, to values .env chose on purpose. The order is
+  // the control: nothing inherited can reach a session, only what provider.ts
+  // derived from ONESHOT_LLM_*. Empty while the desk is on the subscription,
+  // and empty while the provider has problems, so a half-configured desk fails
+  // at boot rather than in a session.
+  Object.assign(env, provider.sessionEnv);
   return env;
 }
 
@@ -1214,7 +1273,7 @@ export const BASE_ENV: Record<string, string> = buildBaseEnv();
 export interface AuthReport {
   clean: boolean;
   credential: string;
-  /** Would bill to an API key. Fails `doctor`. */
+  /** Would bill to an API key, or could not reach the configured provider at all. Fails `doctor` and refuses boot. */
   problems: string[];
   /** Worth knowing, not a billing risk. Warns only. */
   notes: string[];
@@ -1272,9 +1331,25 @@ export function auditAuth(): AuthReport {
     } catch { /* unreadable settings is not an auth problem */ }
   }
 
-  const credential = BASE_ENV.CLAUDE_CODE_OAUTH_TOKEN
-    ? 'CLAUDE_CODE_OAUTH_TOKEN (subscription)'
-    : 'keychain OAuth from `claude login` (subscription)';
+  // The provider's PROBLEMS belong here, because a desk that cannot reach its
+  // model has an auth failure whatever else is true, and boot refuses on this
+  // report. Its notes do not: they are facts about the provider, printed under
+  // the provider's own heading rather than as remarks about this desk's
+  // credential.
+  const provider = llmProvider();
+  problems.push(...provider.problems);
+  if (provider.billing === 'metered' && envOr('ONESHOT_REQUIRE_SUBSCRIPTION') === '1') {
+    problems.push(
+      `ONESHOT_REQUIRE_SUBSCRIPTION=1 while ONESHOT_LLM_PROVIDER=${provider.name}: a metered provider ` +
+      'is exactly what that flag refuses. Unset one of them.',
+    );
+  }
+
+  const credential = provider.billing === 'metered'
+    ? `ONESHOT_LLM_API_KEY as ${provider.authVar} (metered: ${provider.name})`
+    : BASE_ENV.CLAUDE_CODE_OAUTH_TOKEN
+      ? 'CLAUDE_CODE_OAUTH_TOKEN (subscription)'
+      : 'keychain OAuth from `claude login` (subscription)';
 
   return { clean: problems.length === 0, credential, problems, notes };
 }

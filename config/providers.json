@@ -1,0 +1,71 @@
+{
+  "_comment": "Model providers a desk can run its sessions on. ONESHOT_LLM_PROVIDER in .env picks one by name (default: claude). A metered preset is a base URL that speaks the Anthropic Messages API, an auth style (bearer -> ANTHROPIC_AUTH_TOKEN, x-api-key -> ANTHROPIC_API_KEY), a tier -> model map that replaces config/models.json for that desk, and any extra variables that endpoint needs. Every field is overridable per desk from .env: ONESHOT_LLM_BASE_URL, ONESHOT_LLM_AUTH, ONESHOT_LLM_MODEL_{HEAVY,STANDARD,LIGHT}. The key is always ONESHOT_LLM_API_KEY and never lives here. Resolution and the session variables derived from it: src/lib/provider.ts. Read docs/LLM-PROVIDERS.md before adding one.",
+  "default": "claude",
+
+  "_comment_1m": "A `[1m]` suffix is how the Claude Code runtime is told a model has a 1M context; it strips the suffix before the request. It is paired with CLAUDE_CODE_AUTO_COMPACT_WINDOW because a gateway's own 'context exceeded' error is not recognised, so compaction has to be told when to start rather than discovering it. On the subscription the 1M window draws purchased credits and stays off; on a provider whose context simply IS 1M there is nothing extra to buy.",
+
+  "providers": {
+    "claude": {
+      "label": "Claude on the subscription this fleet was built for",
+      "billing": "subscription",
+      "notes": [
+        "Models come from config/models.json; auth is `claude login` or CLAUDE_CODE_OAUTH_TOKEN; every metered variable is stripped from sessions."
+      ]
+    },
+
+    "deepseek": {
+      "label": "DeepSeek V4 on its first-party Anthropic-compatible endpoint",
+      "billing": "metered",
+      "baseUrl": "https://api.deepseek.com/anthropic",
+      "auth": "bearer",
+      "tiers": {
+        "heavy": "deepseek-v4-pro[1m]",
+        "standard": "deepseek-flash[1m]",
+        "light": "deepseek-flash"
+      },
+      "env": {
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "786432",
+        "API_TIMEOUT_MS": "600000"
+      },
+      "notes": [
+        "deepseek-flash is V4.1-Flash and deepseek-v4-pro is V4-Pro; the older deepseek-chat / deepseek-reasoner names are no longer listed.",
+        "Structured output is what every phase schema depends on and DeepSeek does not document output_config.format: run `npm run llm:probe` and read its schema line before trusting a phase to it.",
+        "Prompt caching is implicit, not cache_control, so weighted-token totals are not comparable with a Claude run; total_cost_usd is priced at Opus rates for an unknown model and overstates the bill by a wide margin.",
+        "Rate limiting is by concurrency (429 past it), not a usage window, so a 429 fails the phase through its onFail policy instead of parking the desk.",
+        "Prices double during the provider's published peak hours; a nightly fleet is on the cheap side of that."
+      ]
+    },
+
+    "byteplus": {
+      "label": "DeepSeek V4 on BytePlus ModelArk (Coding Plan endpoint)",
+      "billing": "metered",
+      "baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding",
+      "auth": "bearer",
+      "tiers": {
+        "heavy": "deepseek-v4-pro[1m]",
+        "standard": "deepseek-v4.1-flash[1m]",
+        "light": "deepseek-v4.1-flash"
+      },
+      "env": {
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
+        "API_TIMEOUT_MS": "600000"
+      },
+      "notes": [
+        "READ THIS FIRST: the Anthropic-compatible endpoint exists only on the Coding Plan subscription, whose terms say the plan is not for API calls and that using its base URL outside an interactive AI coding tool may be treated as abuse — up to account suspension. An unattended conductor is exactly that shape. Check your plan's terms before pointing a fleet at it.",
+        "Quota is counted in REQUESTS over a 5-hour sliding window, not tokens, and one Oneshot ticket is hundreds of model calls across its phases and subagents. The weighted-token ceilings in config/budgets.json do not bound it.",
+        "The pay-as-you-go endpoint (/api/v3) is OpenAI-shaped, not this one. Do not point this preset at it: ModelArk bills /api/v3 separately from the plan. For pay-as-you-go, put LiteLLM in front and use the `custom` preset.",
+        "BytePlus marks the V4 models early-access preview and warns about congestion under load."
+      ]
+    },
+
+    "custom": {
+      "label": "Any endpoint that speaks the Anthropic Messages API, configured entirely from .env",
+      "billing": "metered",
+      "auth": "bearer",
+      "notes": [
+        "Needs ONESHOT_LLM_BASE_URL and all three ONESHOT_LLM_MODEL_* lines. An OpenAI-only provider needs a translating proxy (LiteLLM is the maintained one) in front of it; point the base URL at the proxy and give it model names it knows.",
+        "A proxy must pass assistant thinking blocks back unchanged on tool-calling turns: DeepSeek rejects a tool turn whose reasoning was dropped, which is the known failure of the lighter routers."
+      ]
+    }
+  }
+}

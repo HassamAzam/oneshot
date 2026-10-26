@@ -654,6 +654,9 @@ ticket.
   Oneshot never creates one — so pointing it somewhere else starts with checking that.
 - **Auth:** the Agent SDK uses the same credential as Claude Code — if `claude login` works here,
   phases run with no API key. **Never set `ANTHROPIC_API_KEY`.** See below.
+- **Model provider:** Claude by default, and a desk can run on any endpoint that speaks the
+  Anthropic Messages API instead — `ONESHOT_LLM_PROVIDER` plus `ONESHOT_LLM_API_KEY`, presets in
+  `config/providers.json`. See [docs/LLM-PROVIDERS.md](docs/LLM-PROVIDERS.md).
 - **Kill switches:** `touch state/PAUSE` freezes everything, including sessions already mid-phase.
   `state/PAUSE-QUOTA` is the machine's own park after a usage limit and clears itself — a
   separate file precisely so nothing automatic ever lifts a pause you set.
@@ -896,6 +899,22 @@ empty value is not safe — it still wins its precedence slot — so they are de
 `~/.claude/settings.json`, because phases load user settings and a helper *would* run. The 1M
 context window is disabled fleet-wide: it draws on purchased credits even when subscription
 allowance remains, and that *is* a real charge.
+
+### Running on another model
+
+The same strip is what makes a deliberate switch safe. A desk that sets `ONESHOT_LLM_PROVIDER`
+(a preset in `config/providers.json`) and `ONESHOT_LLM_API_KEY` gets those variables put back
+**after** the strip, from values `src/lib/provider.ts` derived — so a session can only ever
+carry what this desk chose, never what a shell was holding. The provider supplies the tier →
+model map in place of `config/models.json`, and the `opus`/`sonnet`/`haiku` aliases the bundled
+subagents use are remapped with it.
+
+On a metered provider the subscription windows, the reserve and
+`~/.claude/state/ratelimit.json` stop applying, prompt-cache columns go to zero, and
+`total_cost_usd` is priced from a table that has never heard of the model. `npm run llm:probe`
+sends two turns through the real session environment — a reply and a JSON schema — because
+structured output is what every phase depends on and a provider can decline it while answering
+ordinary prompts. Full account: [docs/LLM-PROVIDERS.md](docs/LLM-PROVIDERS.md).
 
 ## Surviving a VPN drop
 

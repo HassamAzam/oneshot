@@ -67,6 +67,9 @@ function writeToken(): string {
 
 function base(): string { return projectConfig().gitlab.apiUrl; }
 
+/** The project's numeric id once GitLab has told us, however we came to ask. */
+let numericId: number | null = null;
+
 /**
  * The `:id` every project endpoint takes: the URL-encoded path (`group%2Fproject`),
  * which GitLab accepts wherever it accepts the number. Using it means the project's
@@ -74,7 +77,74 @@ function base(): string { return projectConfig().gitlab.apiUrl; }
  * alongside it to go stale. The number, where something genuinely needs it, is
  * asked of GitLab: see resolvedProjectId().
  */
-function projectId(): string { return encodeURIComponent(projectConfig().gitlab.project); }
+function projectSegment(): string { return encodeURIComponent(projectConfig().gitlab.project); }
+
+/**
+ * How this process addresses the project: by path until that is PROVEN not to
+ * work, then by the numeric id GitLab gave us for the path we configured.
+ *
+ * Path is still the default and still the preferred form, for the reason the
+ * comment above gives. The fallback exists because "GitLab accepts the path
+ * wherever it accepts the number" is a statement about GitLab, and something in
+ * front of a GitLab can make it false: a front end that decodes `%2F` into a
+ * real slash leaves GitLab routing `/projects/group/project`, which matches no
+ * route at all. Measured on gitlab.arbisoft.com, where every project call 404s
+ * while the same call by id answers 200.
+ */
+let addressing: 'path' | number = 'path';
+
+/** So the unresolvable case is explained once per process, not per call. */
+let warnedUnresolvable = false;
+
+function projectId(): string {
+  return typeof addressing === 'number' ? String(addressing) : projectSegment();
+}
+
+const PROJECT_PREFIX = '/projects/';
+
+/** Is this a project-scoped path addressed by the configured path? */
+function addressedByPath(path: string): boolean {
+  return addressing === 'path' && path.startsWith(`${PROJECT_PREFIX}${projectSegment()}`);
+}
+
+/** The same path, addressed by id. Only the project segment is touched. */
+function readdressed(path: string, id: number): string {
+  const seg = projectSegment();
+  return `${PROJECT_PREFIX}${id}${path.slice(PROJECT_PREFIX.length + seg.length)}`;
+}
+
+/**
+ * A 404 that means "no such ROUTE", not "no such resource".
+ *
+ * The distinction is the whole safety of the fallback. GitLab's API answers an
+ * unmatched route with `{"error":"404 Not Found"}` and a routed-but-missing
+ * resource with `{"message":"404 ... Not Found"}`. Retrying only the first
+ * means a genuinely absent issue stays absent in one call instead of becoming
+ * two calls and a misleading re-address.
+ */
+function isRouteMissing(res: GitlabResult<unknown>): boolean {
+  return res.status === 404 && /"error"\s*:\s*"404 Not Found"/.test(res.error ?? '');
+}
+
+/**
+ * The numeric id for the configured path, found WITHOUT addressing by path.
+ *
+ * Searches the projects this token can see and takes an EXACT
+ * `path_with_namespace` match. Never a near match: addressing the wrong project
+ * would claim tickets, push branches and merge on it, so no id at all is the
+ * only safe answer to "I could not prove which project this is".
+ */
+async function idForConfiguredPath(): Promise<number | null> {
+  const want = projectConfig().gitlab.project;
+  const leaf = want.slice(want.lastIndexOf('/') + 1);
+  const res = await request<Array<{ id: number; path_with_namespace: string }>>(
+    'GET',
+    `/projects?search=${encodeURIComponent(leaf)}&simple=true&membership=true&per_page=100`,
+  );
+  if (!res.ok || !Array.isArray(res.data)) return null;
+  const exact = res.data.find((p) => p.path_with_namespace === want);
+  return exact ? exact.id : null;
+}
 
 /**
  * Classify a failure. 5xx counts as "network" for circuit-breaker purposes:
@@ -90,7 +160,7 @@ function classify(status: number): FailKind {
   return 'client';
 }
 
-async function call<T>(
+async function request<T>(
   method: 'GET' | 'POST' | 'PUT' | 'DELETE',
   path: string,
   body?: unknown,
@@ -127,6 +197,50 @@ async function call<T>(
   } finally {
     clearTimeout(killer);
   }
+}
+
+/**
+ * One API call, re-addressed by id if and only if the path form is unroutable.
+ *
+ * At most one extra round trip per PROCESS: the first route-404 resolves the id
+ * and every later call is addressed by it. Retrying a POST is safe here because
+ * an unmatched route created nothing — the request never reached an endpoint.
+ */
+async function call<T>(
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  path: string,
+  body?: unknown,
+  useWriteToken = false,
+): Promise<GitlabResult<T>> {
+  const first = await request<T>(method, path, body, useWriteToken);
+  if (!isRouteMissing(first) || !addressedByPath(path)) return first;
+
+  const id = await idForConfiguredPath();
+  if (id === null) {
+    // Said once, because the alternative is an operator staring at a 404 whose
+    // real cause is two layers away: the path is unroutable AND no id could be
+    // proven for it. Said once rather than per call so it is readable.
+    if (!warnedUnresolvable) {
+      warnedUnresolvable = true;
+      log.warn(
+        `GitLab did not route /projects/${projectSegment()}, and no project this token can see `
+        + `has the exact path ${projectConfig().gitlab.project}. Every project call will fail `
+        + 'until either the path form routes again or the token can see that project. Check '
+        + 'GITLAB_REPO_URL against the project, and the token\'s access to it.',
+      );
+    }
+    return first;
+  }
+
+  addressing = id;
+  numericId = id;
+  log.warn(
+    `GitLab did not route /projects/${projectSegment()} — this instance decodes the escaped `
+    + `slash, so the path matches no route. Addressing ${projectConfig().gitlab.project} by its `
+    + `numeric id (${id}) for the rest of this process. The path form is the one that should `
+    + 'work; this is a front-end problem worth fixing there.',
+  );
+  return request<T>(method, readdressed(path, id), body, useWriteToken);
 }
 
 export interface Issue {
@@ -988,8 +1102,6 @@ export function mergeRefusal(res: GitlabResult<unknown>): MergeRefusal {
   if (res.status === 405 || res.status === 406) return 'not-mergeable';
   return 'other';
 }
-
-let numericId: number | null = null;
 
 function remember(res: GitlabResult<{ id: number }>): void {
   if (res.ok && typeof res.data?.id === 'number') numericId = res.data.id;

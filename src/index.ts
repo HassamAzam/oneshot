@@ -38,10 +38,11 @@ import { join } from 'node:path';
 import {
   CONTEXT_REPO, DRY_RUN, FOLLOW_TICK_MS, GITLAB_USERNAME, PAUSE, RUNS, MEMORY, ROOT, SKILLS_ROOT,
   PROJECT_TARGET, TICK_MS, WORK_REPO, WT_ROOT,
-  auditAuth, envFlag, envOr, localTestsConfig, mergeTriggerLabel, pathSources,
+  auditAuth, envFlag, envOr, llmProvider, localTestsConfig, mergeTriggerLabel, pathSources,
   phaseByName, phases, portPool, projectConfig,
   repoIdentity, seedFrom, slackConfig,
 } from './lib/config.js';
+import { describeProvider } from './lib/provider.js';
 import {
   checkoutFindings, findCheckout, identityFindings, relaxRepoChecks, repoCheckOverrideNotice, wtRootFinding, type Finding,
 } from './lib/repocheck.js';
@@ -388,12 +389,17 @@ function ensureCollector(): void {
 async function preflight(): Promise<boolean> {
   let fatal = false;
 
+  const provider = llmProvider();
   const auth = auditAuth();
+  log.info(`llm        ${describeProvider(provider)}`);
   if (auth.clean) {
     log.ok(`auth       ${auth.credential}`);
   } else {
     for (const p of auth.problems) log.error(`auth       ${p}`);
-    if (envOr('ONESHOT_REQUIRE_SUBSCRIPTION') === '1') {
+    if (provider.problems.length) {
+      log.error(`ONESHOT_LLM_PROVIDER=${provider.name} is not usable — every session would fail; refusing to start`);
+      fatal = true;
+    } else if (envOr('ONESHOT_REQUIRE_SUBSCRIPTION') === '1') {
       log.error('ONESHOT_REQUIRE_SUBSCRIPTION=1 and auth is not clean — refusing to start');
       fatal = true;
     }

@@ -538,6 +538,19 @@ HOME="$(dirname "$ROOT")" expect_deny "cat by a ~ path" secret-guard.cjs \
     "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"cat ~/%s/.env"}}' "$(basename "$ROOT")")"
 HOME="$(dirname "$ROOT")" expect_deny "grep by a \$HOME path" secret-guard.cjs \
     "$(printf '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"grep TOKEN $HOME/%s/.env"}}' "$(basename "$ROOT")")"
+# A session on a metered provider (or a headless OAuth desk) carries its model
+# credential in the environment; naming it or dumping the environment is denied
+# there, and only there.
+ANTHROPIC_AUTH_TOKEN=not-a-real-token expect_deny "echo of the provider token" secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"echo $ANTHROPIC_AUTH_TOKEN"}}'
+ANTHROPIC_AUTH_TOKEN=not-a-real-token expect_deny "bare env dump with a token present" secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"printenv"}}'
+ANTHROPIC_AUTH_TOKEN=not-a-real-token expect_allow "naming an ONESHOT_ variable" secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"printenv ONESHOT_PHASE"}}'
+ANTHROPIC_AUTH_TOKEN=not-a-real-token expect_allow "env as a command prefix" secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"env FOO=1 node -e 1"}}'
+expect_allow "the same mention on a keychain desk" secret-guard.cjs \
+    '{"tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"echo $ANTHROPIC_AUTH_TOKEN"}}'
 expect_deny  "Grep tool on this repo's .env"    secret-guard.cjs \
     "$(printf '{"tool_name":"Grep","tool_input":{"pattern":"TOKEN","path":"%s/.env","output_mode":"content"}}' "$ROOT")"
 # A redirect write is as much a hazard as sed -i: one > blanks GITLAB_TOKEN.
