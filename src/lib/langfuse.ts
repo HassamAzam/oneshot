@@ -33,7 +33,25 @@ import { db } from './db.js';
 import { envOr } from './config.js';
 import { otelConfig } from './otel.js';
 import { log } from './log.js';
-import type { RunJournal } from './artifacts.js';
+import type { PhaseRecord, RunJournal } from './artifacts.js';
+
+/** The parts of a run journal its trace is built from. */
+export type ExportedRun = Pick<
+  RunJournal,
+  'runId' | 'iid' | 'title' | 'status' | 'createdAt' | 'phases' | 'branch' | 'mrIid' | 'mergedSha' | 'blockedWhy'
+>;
+
+/** One usage-ledger row: what one session spent, and when it was recorded. */
+export interface UsageRow {
+  ts: number;
+  phase: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+type Tokens = Omit<UsageRow, 'ts' | 'phase'>;
 
 /** OTLP wants 16 bytes of trace id and 8 of span id, as lowercase hex. */
 function traceIdFor(runId: string): string {
@@ -59,24 +77,108 @@ function attrs(pairs: Record<string, AttrValue | undefined>): unknown[] {
 
 const ns = (ms: number): string => `${Math.round(ms)}000000`;
 
-/** Raw token counts for a run, per phase, from the usage ledger. */
-function usageByPhase(runId: string): Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> {
-  const out = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }>();
+/** Every usage-ledger row for a run. */
+function usageRows(runId: string): UsageRow[] {
   try {
-    const rows = db.prepare(
-      `SELECT phase,
-              SUM(input) AS input, SUM(output) AS output,
-              SUM(cache_read) AS cache_read, SUM(cache_creation) AS cache_creation
-       FROM quota_usage WHERE run_id = ? GROUP BY phase`,
-    ).all(runId) as Array<{ phase: string; input: number; output: number; cache_read: number; cache_creation: number }>;
-    for (const r of rows) {
-      out.set(r.phase, {
-        input: r.input ?? 0, output: r.output ?? 0,
-        cacheRead: r.cache_read ?? 0, cacheWrite: r.cache_creation ?? 0,
-      });
-    }
-  } catch { /* the ledger is a nicety here, not a precondition */ }
-  return out;
+    return db.prepare(
+      `SELECT ts, phase,
+              COALESCE(input, 0) AS input, COALESCE(output, 0) AS output,
+              COALESCE(cache_read, 0) AS cacheRead, COALESCE(cache_creation, 0) AS cacheWrite
+       FROM quota_usage WHERE run_id = ?`,
+    ).all(runId) as UsageRow[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * What one lap spent, or undefined when no ledger row falls inside it.
+ *
+ * The ledger has no lap column, but a session records its usage before the
+ * runner stamps the lap's endedAt, so every row lands inside exactly one lap's
+ * window. A row from a lap that was later pruned from the journal falls inside
+ * none, and is credited to nothing rather than to a lap that did not spend it.
+ */
+function tokensFor(p: PhaseRecord, usage: UsageRow[]): Tokens | undefined {
+  const rows = usage.filter((r) => r.phase === p.phase && r.ts >= p.startedAt && r.ts <= p.endedAt);
+  if (!rows.length) return undefined;
+  return rows.reduce<Tokens>(
+    (sum, r) => ({
+      input: sum.input + r.input,
+      output: sum.output + r.output,
+      cacheRead: sum.cacheRead + r.cacheRead,
+      cacheWrite: sum.cacheWrite + r.cacheWrite,
+    }),
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  );
+}
+
+/** The run as OTLP spans: a root span for the run and one child per phase lap. */
+export function runSpans(journal: ExportedRun, usage: UsageRow[], genAiSystem: string): unknown[] {
+  const traceId = traceIdFor(journal.runId);
+  const rootId = spanIdFor(journal.runId);
+  const started = journal.createdAt;
+  const ended = journal.phases.reduce((a, p) => Math.max(a, p.endedAt), started) || Date.now();
+  const weighted = journal.phases.reduce((a, p) => a + (p.weighted ?? 0), 0);
+
+  const spans: unknown[] = [{
+    traceId,
+    spanId: rootId,
+    name: `oneshot #${journal.iid} ${journal.title}`.slice(0, 120),
+    kind: 1,
+    startTimeUnixNano: ns(started),
+    endTimeUnixNano: ns(ended),
+    attributes: attrs({
+      'oneshot.run_id': journal.runId,
+      'oneshot.ticket': journal.iid,
+      'oneshot.status': journal.status,
+      'oneshot.branch': journal.branch,
+      'oneshot.mr_iid': journal.mrIid,
+      'oneshot.merged_sha': journal.mergedSha,
+      'oneshot.weighted_tokens': weighted,
+      'oneshot.phases': journal.phases.length,
+      'oneshot.blocked_why': journal.blockedWhy?.slice(0, 300),
+      'langfuse.session.id': journal.runId,
+      'langfuse.trace.name': `#${journal.iid} ${journal.title}`.slice(0, 120),
+    }),
+    status: { code: journal.status === 'done' ? 1 : 2 },
+  }];
+
+  for (const p of journal.phases) {
+    const u = tokensFor(p, usage);
+    spans.push({
+      traceId,
+      // Keyed by when the lap started, never by its index: pruning a failed
+      // lap shifts every later index, and a new id is a second copy in Langfuse.
+      spanId: spanIdFor(`${journal.runId}:${p.phase}:${p.lap}:${p.startedAt}`),
+      parentSpanId: rootId,
+      name: p.lap > 0 ? `${p.phase} (lap ${p.lap})` : p.phase,
+      kind: 1,
+      startTimeUnixNano: ns(p.startedAt),
+      endTimeUnixNano: ns(p.endedAt),
+      attributes: attrs({
+        // gen_ai.* is what makes Langfuse render a span as a generation with
+        // a model and a token count rather than a bare span.
+        'gen_ai.system': genAiSystem,
+        'gen_ai.request.model': p.model,
+        'gen_ai.usage.input_tokens': u?.input,
+        'gen_ai.usage.output_tokens': u?.output,
+        'gen_ai.usage.cache_read_input_tokens': u?.cacheRead,
+        'gen_ai.usage.cache_creation_input_tokens': u?.cacheWrite,
+        'oneshot.phase': p.phase,
+        'oneshot.lap': p.lap,
+        'oneshot.status': p.status,
+        'oneshot.turns': p.turns,
+        'oneshot.weighted_tokens': p.weighted,
+        'oneshot.session_id': p.sessionId,
+        'oneshot.error': p.error?.slice(0, 300),
+        'langfuse.session.id': journal.runId,
+      }),
+      // OTel: 1 OK, 2 ERROR, 0 UNSET. A park is a wait on a person, not an error.
+      status: { code: p.status === 'ok' || p.status === 'warned' ? 1 : p.status === 'parked' ? 0 : 2 },
+    });
+  }
+  return spans;
 }
 
 function endpoint(): string {
@@ -104,68 +206,7 @@ export async function exportRun(journal: RunJournal): Promise<void> {
   if (!cfg.enabled || !auth) return;
 
   try {
-    const traceId = traceIdFor(journal.runId);
-    const rootId = spanIdFor(journal.runId);
-    const usage = usageByPhase(journal.runId);
-    const started = journal.createdAt;
-    const ended = journal.phases.reduce((a, p) => Math.max(a, p.endedAt), started) || Date.now();
-    const weighted = journal.phases.reduce((a, p) => a + (p.weighted ?? 0), 0);
-
-    const spans: unknown[] = [{
-      traceId,
-      spanId: rootId,
-      name: `oneshot #${journal.iid} ${journal.title}`.slice(0, 120),
-      kind: 1,
-      startTimeUnixNano: ns(started),
-      endTimeUnixNano: ns(ended),
-      attributes: attrs({
-        'oneshot.run_id': journal.runId,
-        'oneshot.ticket': journal.iid,
-        'oneshot.status': journal.status,
-        'oneshot.branch': journal.branch,
-        'oneshot.mr_iid': journal.mrIid,
-        'oneshot.merged_sha': journal.mergedSha,
-        'oneshot.weighted_tokens': weighted,
-        'oneshot.phases': journal.phases.length,
-        'oneshot.blocked_why': journal.blockedWhy?.slice(0, 300),
-        'langfuse.session.id': journal.runId,
-        'langfuse.trace.name': `#${journal.iid} ${journal.title}`.slice(0, 120),
-      }),
-      status: { code: journal.status === 'done' ? 1 : 2 },
-    }];
-
-    for (const [i, p] of journal.phases.entries()) {
-      const u = usage.get(p.phase);
-      spans.push({
-        traceId,
-        spanId: spanIdFor(`${journal.runId}:${p.phase}:${p.lap}:${i}`),
-        parentSpanId: rootId,
-        name: p.lap > 0 ? `${p.phase} (lap ${p.lap})` : p.phase,
-        kind: 1,
-        startTimeUnixNano: ns(p.startedAt),
-        endTimeUnixNano: ns(p.endedAt),
-        attributes: attrs({
-          // gen_ai.* is what makes Langfuse render a span as a generation with
-          // a model and a token count rather than a bare span.
-          'gen_ai.system': 'anthropic',
-          'gen_ai.request.model': p.model,
-          'gen_ai.usage.input_tokens': u?.input,
-          'gen_ai.usage.output_tokens': u?.output,
-          'gen_ai.usage.cache_read_input_tokens': u?.cacheRead,
-          'gen_ai.usage.cache_creation_input_tokens': u?.cacheWrite,
-          'oneshot.phase': p.phase,
-          'oneshot.lap': p.lap,
-          'oneshot.status': p.status,
-          'oneshot.turns': p.turns,
-          'oneshot.weighted_tokens': p.weighted,
-          'oneshot.session_id': p.sessionId,
-          'oneshot.error': p.error?.slice(0, 300),
-          'langfuse.session.id': journal.runId,
-        }),
-        // OTel: 1 OK, 2 ERROR, 0 UNSET. A park is a wait on a person, not an error.
-        status: { code: p.status === 'ok' || p.status === 'warned' ? 1 : p.status === 'parked' ? 0 : 2 },
-      });
-    }
+    const spans = runSpans(journal, usageRows(journal.runId), 'anthropic');
 
     const body = {
       resourceSpans: [{
