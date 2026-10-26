@@ -319,6 +319,21 @@ test('a partial whose findings is not an array salvages nothing instead of throw
   assert.equal(salvagedReview([null, 'x', finding('F-01', 'blocker')], null)?.findings.length, 1);
 });
 
+test('a review that requests changes fails, so it cycles its findings to implement', () => {
+  const why = failedCases('review', { verdict: 'changes-requested', findings: [finding('F-01', 'major'), finding('F-02', 'minor')] });
+  assert.match(why ?? '', /1 blocker\/major finding\(s\): F-01 \[major\]/);
+});
+
+test('an approving review does not fail, whatever minors it lists', () => {
+  assert.equal(failedCases('review', { verdict: 'approve', findings: [finding('F-01', 'minor')] }), null);
+  assert.equal(failedCases('review', null), null);
+});
+
+test('a salvaged review is failed the same way, so a dead session still sends its blocker to implement', () => {
+  const salvaged = salvagedReview([finding('F-01', 'blocker')], 'timed out');
+  assert.match(failedCases('review', salvaged) ?? '', /F-01 \[blocker\]/);
+});
+
 test('--follow stops on a refusal only a person can clear, and keeps checking one that clears by waiting', () => {
   const refused = (reason: string) => ({ runId: '', iid: 101, status: 'refused' as const, reason });
   assert.equal(refusalIsFinal(refused('assigned to someone.else')), true);

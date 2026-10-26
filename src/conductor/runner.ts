@@ -594,16 +594,12 @@ export interface PartialFinding { severity?: string; [k: string]: unknown }
  * does not make less true. A partial holding only minors is left alone — the
  * infra re-attempt it would otherwise pre-empt is the better answer there.
  *
- * What the salvaged 'changes-requested' buys is a verdict ON RECORD, not an
- * implement lap. The salvage marks the phase ok, and `failedCases()` only
- * fails `verify`, so review's own `cycle → implement` does not fire and the
- * run moves on. The recorded verdict then does two things: `findingsOf()`
- * hands these findings to implement if a later verify cycle sends the run
- * back there, and `qualityGate()` refuses the merge on it — so the run stops
- * at the merge with the blocker named, instead of burning its infra attempts
- * at review with nothing on record. An implement lap spent on the salvaged
- * blocker itself would need `failedCases()` to fail review too; that is a
- * separate change.
+ * The salvaged 'changes-requested' is treated like a complete review's: the
+ * salvage marks the session ok, then `failedCases()` (via
+ * reviewRequestsChanges) fails the phase, so review's own `cycle → implement`
+ * sends these findings to implement, instead of burning its infra attempts at
+ * review with nothing on record. If review's laps run out, `qualityGate()`
+ * still refuses the merge on the recorded verdict.
  *
  * Every finding is carried into the artifact, not just the serious ones: the
  * verdict is decided by the serious ones, but a minor the session had already
@@ -634,6 +630,27 @@ export function salvagedReview(
 }
 
 /**
+ * A review that asked for changes did not pass, so it cycles to implement.
+ *
+ * Before #8344 a 'changes-requested' review was recorded ok and the run moved
+ * on. Its findings reached implement only if verify ALSO failed, and nothing
+ * else ever fixed them: on #8344 verify passed, so two major findings rode
+ * through ui-evidence and the MR untouched, and the merge refused at the very
+ * end. Failing the phase here sends the findings to implement through review's
+ * own `cycle` policy, bounded by its maxLaps. When those laps are spent the
+ * runner lets the run continue to the MR, and qualityGate still refuses the
+ * merge on the same verdict — the same end state as before, reached only after
+ * the run has tried to fix it.
+ */
+export function reviewRequestsChanges(data: Record<string, unknown> | null | undefined): string | null {
+  const review = data as { verdict?: string; findings?: Array<{ id?: string; severity?: string }> } | null;
+  if (review?.verdict !== 'changes-requested') return null;
+  const serious = (review.findings ?? []).filter((f) => f.severity === 'blocker' || f.severity === 'major');
+  const ids = serious.map((f) => `${f.id ?? '?'} [${f.severity}]`).join(', ') || 'none listed';
+  return `review requested changes with ${serious.length} blocker/major finding(s): ${ids}`;
+}
+
+/**
  * A phase that executed its case list and recorded failures did NOT succeed.
  *
  * `verify` returns ok for *running* the list, whatever the verdicts —
@@ -651,6 +668,7 @@ export function salvagedReview(
  * at the merge, and a check that only runs early is a check a resumed run skips.
  */
 export function failedCases(name: string, data: Record<string, unknown> | null | undefined): string | null {
+  if (name === 'review') return reviewRequestsChanges(data);
   if (name !== 'verify') return null;
   const results = (data as { results?: Array<{ id?: string; result?: string }> } | null)?.results;
   if (!Array.isArray(results) || results.length === 0) return null;
@@ -733,7 +751,7 @@ export function applyBaseCheck(
  * - A usage limit or an account gate is 'died' at once: every re-attempt
  *   would hit it again.
  * - Only a plain infra death (a timeout, a stall, a killed spawn) is
- *   re-attempted in place (`retry`), up to MAX_INFRA_ATTEMPTS. Past that it
+ *   re-attempted in place (`retry`), up to MAX_BASE_CHECK_ATTEMPTS. Past that it
  *   is 'exhausted', which stops the run rather than handing verify an infra
  *   death: afterFailure() would re-run verify, and each verify re-run calls
  *   base-check afresh with its own attempts, so the two caps multiplied —
@@ -764,7 +782,7 @@ export function baseCheckOutcome(
   if (out.rateLimited || out.accountAction) {
     return { kind: 'died', why: `the base-check session died: ${out.accountAction ?? out.error ?? 'no error text'}` };
   }
-  if (attempt < MAX_INFRA_ATTEMPTS) return { kind: 'retry' };
+  if (attempt < MAX_BASE_CHECK_ATTEMPTS) return { kind: 'retry' };
   return {
     kind: 'exhausted',
     why: `the base-check session died of infrastructure ${attempt + 1} times in a row: ${out.error ?? 'no error text'}`,
@@ -1068,12 +1086,21 @@ export function nextIndex(
 /**
  * Free re-attempts a phase gets for deaths that were never its own verdict.
  *
- * Two, because the failures this exists for are one-offs — a conductor
- * restart, a cancelled session, a machine hiccup — and anything that survives
- * two clean re-attempts is a real problem that should reach a person through
- * the ordinary onFail policy rather than spin here.
+ * Three, raised from two after #8344: a large ticket's sessions run long
+ * enough that a flaky connection kills more of them, and both verify and
+ * implement used up their two re-attempts on stalls within an hour, blocking
+ * the run overnight on a network that came back. Still bounded, because
+ * anything that survives three clean re-attempts is a real problem that should
+ * reach a person rather than spin here.
  */
-const MAX_INFRA_ATTEMPTS = 2;
+const MAX_INFRA_ATTEMPTS = 3;
+
+/**
+ * base-check's own in-place re-attempts, kept at two when the phase cap rose to
+ * three: every verify re-run starts base-check's attempts over, so the two caps
+ * multiply (see baseCheckOutcome), and #8344 never lost a base-check session.
+ */
+const MAX_BASE_CHECK_ATTEMPTS = 2;
 
 interface PhaseResult {
   cfg: PhaseConfig;
@@ -2196,6 +2223,28 @@ export async function runTicket(
           // gracefully through afterFailure.
           claim({ kind: 'stop', status: 'blocked', reason: `${r.cfg.name}: ${r.out.blocked}` }, r.cfg.name);
         } else if (
+          r.cfg.name === 'review' && caseFail
+          && failedLapsOf(iid, 'review', lapWindowFor('review')) >= (r.cfg.maxLaps ?? 2)
+        ) {
+          // Review's laps through implement are spent and it still asks for
+          // changes. Blocking here would stop the run before the MR exists, so
+          // a person would have nothing to review. Carry on instead: the MR
+          // opens with the findings listed, and qualityGate refuses the merge
+          // on the same verdict, read from findings.json.
+          log.warn('review still requests changes after its laps — continuing to the MR; merge will refuse', {
+            why: caseFail.slice(0, 160),
+          });
+          // Re-recorded 'warned' so a resume reads review as settled rather
+          // than re-running it, and the verdict stays in prior for qualityGate.
+          recordPhase(iid, {
+            phase: 'review', lap: r.lap, status: 'warned',
+            startedAt: r.startedAt, endedAt: r.endedAt, model: modelFor(r.cfg),
+            turns: r.out.turns, weighted: r.out.weighted, sessionId: r.out.sessionId,
+            error: `${caseFail} — still outstanding after its laps through ${r.cfg.cycleTo}; the merge will refuse`,
+          });
+          j = readJournal(iid) ?? j;
+          prior[r.cfg.name] = r.out.data;
+        } else if (
           r.cfg.name === 'verify' && caseFail
           && failedLapsOf(iid, 'verify', lapWindowFor('verify')) >= (r.cfg.maxLaps ?? 2)
         ) {
@@ -3050,7 +3099,7 @@ export async function runTicket(
 
       if (outcome.kind === 'retry') {
         log.warn('base-check died of infrastructure — re-attempting in place', {
-          attempt: attempt + 1, of: MAX_INFRA_ATTEMPTS, why: (out.error ?? '').slice(0, 120),
+          attempt: attempt + 1, of: MAX_BASE_CHECK_ATTEMPTS, why: (out.error ?? '').slice(0, 120),
         });
         continue;
       }
