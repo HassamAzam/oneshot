@@ -27,6 +27,8 @@
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "786432",
         "API_TIMEOUT_MS": "600000"
       },
+      "_comment_idle": "Measured on the first live ticket (#8947): review, verify, ui-evidence and remediate were all aborted at the Claude-tuned 15 minutes of silence, three of them having emitted almost nothing. v4-pro reasons without the runtime emitting a frame, and DeepSeek queues by concurrency while sending only keep-alives, so silence here is not the evidence of a wedged session that it is on Claude. 25 is provisional: it still fires inside the 30-minute phases, which is the point of the check. ONESHOT_PHASE_IDLE_MIN overrides it per desk.",
+      "idleMin": 25,
       "notes": [
         "deepseek-flash is V4.1-Flash and deepseek-v4-pro is V4-Pro; the older deepseek-chat / deepseek-reasoner names are no longer listed.",
         "Structured output is what every phase schema depends on and DeepSeek does not document output_config.format: run `npm run llm:probe` and read its schema line before trusting a phase to it.",
@@ -50,6 +52,7 @@
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
         "API_TIMEOUT_MS": "600000"
       },
+      "idleMin": 25,
       "notes": [
         "READ THIS FIRST: the Anthropic-compatible endpoint exists only on the Coding Plan subscription, whose terms say the plan is not for API calls and that using its base URL outside an interactive AI coding tool may be treated as abuse — up to account suspension. An unattended conductor is exactly that shape. Check your plan's terms before pointing a fleet at it.",
         "Quota is counted in REQUESTS over a 5-hour sliding window, not tokens, and one Oneshot ticket is hundreds of model calls across its phases and subagents. The weighted-token ceilings in config/budgets.json do not bound it.",

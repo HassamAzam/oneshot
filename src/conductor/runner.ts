@@ -601,9 +601,11 @@ export interface PartialFinding { severity?: string; [k: string]: unknown }
  * hands these findings to implement if a later verify cycle sends the run
  * back there, and `qualityGate()` refuses the merge on it — so the run stops
  * at the merge with the blocker named, instead of burning its infra attempts
- * at review with nothing on record. An implement lap spent on the salvaged
- * blocker itself would need `failedCases()` to fail review too; that is a
- * separate change.
+ * at review with nothing on record. An implement lap is still NOT spent on a
+ * salvaged blocker: `failedCases()` fails review on a COMPLETED
+ * 'changes-requested' only, and skips one carrying `partial`. A review that
+ * died cannot say what it did not read, so the lap would be aimed at part of a
+ * list; the merge gate stops the run instead and a person decides.
  *
  * Every finding is carried into the artifact, not just the serious ones: the
  * verdict is decided by the serious ones, but a minor the session had already
@@ -616,7 +618,7 @@ export interface PartialFinding { severity?: string; [k: string]: unknown }
  */
 export function salvagedReview(
   findings: unknown, error: string | null,
-): { summary: string; blocked: null; verdict: string; findings: PartialFinding[] } | null {
+): { summary: string; blocked: null; verdict: string; findings: PartialFinding[]; partial: true } | null {
   if (!Array.isArray(findings) || findings.length === 0) return null;
   const list = findings.filter((f): f is PartialFinding => typeof f === 'object' && f !== null);
   const serious = list.filter((f) => f.severity === 'blocker' || f.severity === 'major');
@@ -630,6 +632,11 @@ export function salvagedReview(
     blocked: null,
     verdict: 'changes-requested',
     findings: list,
+    // Tells failedCases() this verdict came from a session that died. A
+    // completed review is trusted enough to spend an implement lap on; this
+    // one is not, for the reason above — a dimension that never reported is
+    // unreviewed, and its finding list is not the whole story.
+    partial: true,
   };
 }
 
@@ -650,7 +657,43 @@ export function salvagedReview(
  * stays where it is as a backstop: it re-derives the same fact deterministically
  * at the merge, and a check that only runs early is a check a resumed run skips.
  */
+/**
+ * A review that asked for changes did NOT succeed.
+ *
+ * Same argument as the verify half above, one phase over. `review` returns ok
+ * for *producing* its artifact, whatever the verdict, so a 'changes-requested'
+ * used to travel all the way to `qualityGate()` at the merge — after
+ * `ui-evidence` had run and an MR existed — and the lap that would have fixed
+ * the finding was spent opening an MR nobody could merge. The phase is already
+ * configured `onFail: cycle → implement`; this makes that policy fire on the
+ * thing it was written for.
+ *
+ * THE CONDITION MIRRORS `qualityGate()` EXACTLY, and that matters more than
+ * which condition it is. Anything that refuses the merge but does not cycle
+ * implement is a dead end: the run cannot proceed and cannot fix itself. If one
+ * of the two is ever changed, change both.
+ *
+ * A SALVAGED review is the one exception, and it is deliberate: a session that
+ * died cannot say what it did not read, so an implement lap would be aimed at
+ * part of a list. Those still stop at the merge for a person to judge.
+ */
+function unaddressedReview(data: Record<string, unknown> | null | undefined): string | null {
+  const d = data as {
+    verdict?: string; partial?: boolean; findings?: Array<{ id?: string; severity?: string }>;
+  } | null | undefined;
+  if (!d || d.partial === true) return null;
+
+  const serious = (d.findings ?? [])
+    .filter((f) => f.severity === 'blocker' || f.severity === 'major');
+  if (d.verdict !== 'changes-requested' && serious.length === 0) return null;
+
+  const ids = serious.map((f) => `${f.id ?? '?'} [${f.severity}]`).join(', ') || 'none listed';
+  return `review returned verdict '${d.verdict ?? 'unknown'}' with ${serious.length} `
+    + `blocker/major finding(s): ${ids}`;
+}
+
 export function failedCases(name: string, data: Record<string, unknown> | null | undefined): string | null {
+  if (name === 'review') return unaddressedReview(data);
   if (name !== 'verify') return null;
   const results = (data as { results?: Array<{ id?: string; result?: string }> } | null)?.results;
   if (!Array.isArray(results) || results.length === 0) return null;

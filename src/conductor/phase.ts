@@ -14,7 +14,8 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { appendFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  BASE_ENV, DRY_RUN, ROOT, artifactDir, envOr, modelFor, projectConfig, projectSessionEnv, runDir,
+  BASE_ENV, DRY_RUN, ROOT, artifactDir, envOr, llmProvider, modelFor, projectConfig,
+  projectSessionEnv, runDir,
   type PhaseConfig,
 } from '../lib/config.js';
 import { DEFAULT_MAX_TURNS, MEMORY } from '../lib/config.js';
@@ -124,7 +125,27 @@ const PROGRESS_EVERY_MS = 60_000;
  * fresh connection instead of after the full budget.
  * ONESHOT_PHASE_IDLE_MIN overrides it; 0 disables the check.
  */
-const IDLE_STALL_MS = Math.max(0, Number(envOr('ONESHOT_PHASE_IDLE_MIN', '15')) || 0) * 60_000;
+const DEFAULT_IDLE_MIN = 15;
+
+/**
+ * Minutes of silence before a phase is judged stalled.
+ *
+ * `ONESHOT_PHASE_IDLE_MIN` is the desk's explicit answer and wins. Otherwise
+ * the PROVIDER decides, because the provider is what changes the meaning of
+ * silence: the default above is tuned for Claude Code, where the only
+ * legitimate silent stretch is a tool call the CLI caps at ten minutes, and a
+ * reasoning model can think for far longer than that without the runtime
+ * emitting a frame. Read per call rather than captured at import so a desk can
+ * change providers without reloading the module.
+ */
+export function idleStallMs(): number {
+  const explicit = envOr('ONESHOT_PHASE_IDLE_MIN');
+  const minutes = explicit !== ''
+    ? Number(explicit)
+    : llmProvider().idleMin ?? DEFAULT_IDLE_MIN;
+  return Math.max(0, Number.isFinite(minutes) ? minutes : 0) * 60_000;
+}
+
 const IDLE_CHECK_MS = 30_000;
 
 /** Write scopes handed to hooks/write-scope.cjs. Anything outside is denied. */
@@ -362,11 +383,12 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   const killer = setTimeout(() => { timedOut = true; ac.abort(); armForce(); }, cfg.timeoutMin * 60_000);
   let lastFrameAt = Date.now();
   let stalled = false;
-  const watchdog = IDLE_STALL_MS > 0
+  const idleMs = idleStallMs();
+  const watchdog = idleMs > 0
     ? setInterval(() => {
-      if (stalled || timedOut || Date.now() - lastFrameAt < IDLE_STALL_MS) return;
+      if (stalled || timedOut || Date.now() - lastFrameAt < idleMs) return;
       stalled = true;
-      log.warn(`${cfg.name}: no stream message for ${Math.round(IDLE_STALL_MS / 60_000)}m — aborting the stalled session`);
+      log.warn(`${cfg.name}: no stream message for ${Math.round(idleMs / 60_000)}m — aborting the stalled session`);
       ac.abort();
       armForce();
     }, IDLE_CHECK_MS)
@@ -576,7 +598,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
       // Not a verdict and not a budget problem: the connection to the model
       // went quiet mid-session. Kept out of limitSignals — it says nothing
       // about the account.
-      out.error = `stalled: no stream message for ${Math.round(IDLE_STALL_MS / 60_000)}m after `
+      out.error = `stalled: no stream message for ${Math.round(idleMs / 60_000)}m after `
         + `${sawActivity} message(s) — the model connection went silent mid-session, so it was `
         + 'aborted early rather than left to run out its wall clock';
       out.infra = true;

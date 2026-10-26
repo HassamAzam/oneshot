@@ -23,6 +23,7 @@ const TABLE: ProvidersTable = {
       auth: 'bearer',
       tiers: { heavy: 'deepseek-v4-pro', standard: 'deepseek-flash', light: 'deepseek-flash' },
       env: { API_TIMEOUT_MS: '600000' },
+      idleMin: 25,
       notes: ['no prompt caching here'],
     },
     custom: { billing: 'metered', auth: 'bearer' },
@@ -175,5 +176,44 @@ test('a phase named like a tier cannot hijack that tier variable', () => {
   // things at once.
   for (const tier of TIERS) {
     assert.equal(phaseModel(tier, { [tierVar(tier)]: 'should-not-be-read' }), '');
+  }
+});
+
+// ------------------------------------------------- how long silence may last
+
+test('a provider that changes the meaning of silence carries the number', () => {
+  assert.equal(resolveProvider(TABLE, metered()).idleMin, 25);
+});
+
+test('the subscription has no opinion, so the default stands', () => {
+  assert.equal(resolveProvider(TABLE, {}).idleMin, null);
+});
+
+test('a preset that says nothing leaves the default alone', () => {
+  assert.equal(resolveProvider(TABLE, { [PROVIDER_VAR]: 'custom', [API_KEY_VAR]: KEY,
+    [BASE_URL_VAR]: 'https://x.test', [tierVar('heavy')]: 'a',
+    [tierVar('standard')]: 'b', [tierVar('light')]: 'c' }).idleMin, null);
+});
+
+test('a nonsense idle window is ignored rather than disabling the check', () => {
+  // 0 would switch the watchdog off entirely, which is the opposite of what a
+  // preset asking for "more patience" means.
+  for (const bad of [0, -5]) {
+    const table = { ...TABLE, providers: { ...TABLE.providers, deepseek: { ...TABLE.providers.deepseek, idleMin: bad } } };
+    assert.equal(resolveProvider(table as typeof TABLE, metered()).idleMin, null, String(bad));
+  }
+});
+
+test('every shipped metered preset that sets an idle window still fires inside a 30-minute phase', () => {
+  // The check exists to end a wedged session EARLY. A window longer than the
+  // shortest reasoning phase's budget would never fire there, leaving the hard
+  // timeout to do it and the check to do nothing.
+  const table = JSON.parse(
+    readFileSync(join(import.meta.dirname, '..', '..', 'config', 'providers.json'), 'utf8'),
+  ) as ProvidersTable;
+  for (const [name, preset] of Object.entries(table.providers)) {
+    if (typeof preset.idleMin !== 'number') continue;
+    assert.ok(preset.idleMin < 30, `${name} idleMin ${preset.idleMin} would never fire for a 30-minute phase`);
+    assert.ok(preset.idleMin > 15, `${name} idleMin ${preset.idleMin} is no more patient than the default`);
   }
 });

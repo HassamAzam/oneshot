@@ -124,6 +124,23 @@ that cannot do its job.
 An OpenAI-shaped provider needs a translating proxy (LiteLLM, `claude-code-router`) in front
 of it; point `ONESHOT_LLM_BASE_URL` at the proxy and use the `custom` preset.
 
+### How long silence may last
+
+A phase that emits nothing for long enough is aborted as stalled. The default of 15 minutes is a
+Claude fact: the only legitimate silent stretch there is one tool call, and the CLI caps a Bash
+call at ten minutes, so fifteen is past any real one.
+
+A reasoning model breaks that. It can think for far longer than ten minutes without the runtime
+emitting a frame, and a provider that queues by concurrency can be silent before it has started.
+Silence stops being evidence of a wedged session, so the preset carries its own `idleMin` and the
+provider decides. `ONESHOT_PHASE_IDLE_MIN` still overrules it for one desk.
+
+Measured, not guessed. On the first live DeepSeek ticket four phases — review, verify,
+`ui-evidence` and `remediate` — were all aborted at fifteen minutes of silence, three of them
+having emitted almost nothing, and the run reached `merge` with a salvaged review verdict as a
+direct result. The shipped 25 is provisional and deliberately under 30, because a window longer
+than the shortest reasoning phase's budget would never fire and the check would do nothing.
+
 ## What does not come with you
 
 Running off the subscription turns off things that were only ever true of it. None of these

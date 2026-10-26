@@ -40,6 +40,18 @@ export interface ProviderPreset {
   tiers?: Partial<Record<Tier, string>>;
   /** Extra variables the runtime needs for this endpoint, set verbatim in every session. */
   env?: Record<string, string>;
+  /**
+   * How long a phase may emit nothing before it is judged stalled, in minutes.
+   *
+   * The default is tuned for Claude Code, where the only legitimate silent
+   * stretch is one tool call and the CLI caps a Bash call at ten minutes. A
+   * reasoning model breaks that assumption: it can think for a long time
+   * without the runtime emitting a frame, and a provider that queues can be
+   * silent before it has even started. Silence stops being evidence of a
+   * wedged session, so the provider that changes the meaning carries the
+   * number.
+   */
+  idleMin?: number;
   /** Shown by doctor and the boot banner: what to know before trusting this preset. */
   notes?: string[];
 }
@@ -62,6 +74,8 @@ export interface ResolvedProvider {
   tiers: Record<Tier, string> | null;
   /** What reaches every session on top of the scrubbed base environment. */
   sessionEnv: Record<string, string>;
+  /** Minutes of silence before a phase is judged stalled; null leaves the default alone. */
+  idleMin: number | null;
   /** A session started with these would fail or bill somewhere unintended. Refuses boot. */
   problems: string[];
   /** Worth knowing; nothing to fix. */
@@ -176,7 +190,7 @@ export function resolveProvider(table: ProvidersTable, env: NodeJS.ProcessEnv = 
     if (hasKey) notes.push(`${API_KEY_VAR} is set but ${PROVIDER_VAR} is ${name}: the key is ignored and never reaches a session`);
     return {
       name, label, billing, baseUrl: null, authVar: 'ANTHROPIC_AUTH_TOKEN', hasKey,
-      tiers: null, sessionEnv: {}, problems, notes,
+      tiers: null, sessionEnv: {}, idleMin: null, problems, notes,
     };
   }
 
@@ -211,9 +225,11 @@ export function resolveProvider(table: ProvidersTable, env: NodeJS.ProcessEnv = 
     ? meteredSessionEnv({ baseUrl, authVar, apiKey, tiers, extra: preset?.env ?? {} })
     : {};
 
+  const idleMin = typeof preset?.idleMin === 'number' && preset.idleMin > 0 ? preset.idleMin : null;
+
   return {
     name, label, billing, baseUrl: baseUrl || null, authVar, hasKey,
-    tiers: missing.length === 0 ? tiers : null, sessionEnv, problems, notes,
+    tiers: missing.length === 0 ? tiers : null, sessionEnv, idleMin, problems, notes,
   };
 }
 
