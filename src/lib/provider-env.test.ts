@@ -63,6 +63,25 @@ Promise.all([
  * report what a session would have been started with. The environment is built
  * rather than inherited, so the desk running the suite cannot change the answer.
  */
+/**
+ * Every variable these cases are about, blanked.
+ *
+ * Load-bearing, not tidiness: the probe runs in this repo, config.ts loads this
+ * repo's .env, and dotenv fills any key that is ABSENT. A desk with a real
+ * ONESHOT_LLM_API_KEY in .env would therefore hand one to the case that asserts
+ * a provider with NO key refuses — and the case would fail on a configured desk
+ * while passing on a bare checkout. Blanking is what makes the environment the
+ * argument rather than a property of whoever is running the suite; readEnv()
+ * counts a blank as unset, so '' is the same as never-set to the code.
+ */
+const NEUTRAL: Record<string, string> = Object.fromEntries([
+  'ONESHOT_LLM_PROVIDER', 'ONESHOT_LLM_API_KEY', 'ONESHOT_LLM_BASE_URL', 'ONESHOT_LLM_AUTH',
+  'ONESHOT_LLM_MODEL_HEAVY', 'ONESHOT_LLM_MODEL_STANDARD', 'ONESHOT_LLM_MODEL_LIGHT',
+  'ONELOOP_LLM_PROVIDER', 'ONELOOP_LLM_API_KEY',
+  'ONESHOT_REQUIRE_SUBSCRIPTION', 'ONESHOT_ALLOW_1M_CONTEXT',
+  'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+].map((k) => [k, '']));
+
 function boot(overrides: Record<string, string>): Boot {
   let out: string;
   try {
@@ -75,6 +94,7 @@ function boot(overrides: Record<string, string>): Boot {
         HOME: process.env.HOME ?? '',
         GITLAB_REPO_URL: 'https://gitlab.example.com/acme/erp',
         GITLAB_TOKEN: 'glpat-not-a-real-token',
+        ...NEUTRAL,
         ...overrides,
       },
     });
