@@ -71,7 +71,7 @@ import {
   type ReviewGateState, type RunJournal,
 } from '../lib/artifacts.js';
 import {
-  addIssueNote, issueNotes, issueUrl, swapLabel, uploadFile, type IssueNote, type Upload,
+  addIssueNote, issueNotes, issueUrl, swapLabel, updateIssueNote, uploadFile, type IssueNote, type Upload,
 } from '../lib/gitlab.js';
 import { slackEnabled, thread, userIdForEmail, userIdForHandle } from '../lib/slack.js';
 import { isMachineNote } from '../lib/claims.js';
@@ -507,6 +507,42 @@ async function uploadAll(iid: number, attachments: GateAttachment[]): Promise<st
   return links;
 }
 
+/** The request body with its attachments uploaded and linked below it. */
+async function requestWithAttachments(
+  iid: number, requestBody: string, attachments: GateAttachment[] | undefined,
+): Promise<string> {
+  const links = attachments?.length ? await uploadAll(iid, attachments) : [];
+  const missing = (attachments?.length ?? 0) - links.length;
+  return `${requestBody}`
+    + (links.length ? `\n\n${links.join('\n\n')}` : '')
+    + (missing > 0 ? `\n\n_${missing} attachment(s) could not be uploaded to GitLab._` : '');
+}
+
+/**
+ * Rewrite the standing request comment in place with fresh uploads, and stamp
+ * it as showing `subject`, so the gate keeps reading replies on the same
+ * comment instead of posting a new one. Returns the edited note id, or null
+ * when there is no standing request or the edit did not land.
+ */
+export async function editGateRequest(opts: {
+  iid: number; gate: Gate; requestBody: string; subject: unknown; attachments?: GateAttachment[];
+}): Promise<number | null> {
+  const journal = readJournal(opts.iid);
+  if (!journal) return null;
+  const state = stateOf(journal, opts.gate);
+  const noteId = state.requestNoteId;
+  if (noteId == null || state.approved) return null;
+  const body = await requestWithAttachments(opts.iid, opts.requestBody, opts.attachments);
+  const edited = await updateIssueNote(opts.iid, noteId, body);
+  if (!edited.ok) {
+    log.warn(`${opts.gate} request ${noteId} could not be edited on #${opts.iid}`, { error: edited.error?.slice(0, 120) });
+    return null;
+  }
+  persist(opts.iid, opts.gate, { ...state, requestedDigest: gateSubjectDigest(opts.subject) });
+  log.phase(`${opts.gate} request ${noteId} edited on #${opts.iid}`);
+  return noteId;
+}
+
 /**
  * One check of one gate. Never sleeps, never loops — see the file header.
  *
@@ -553,11 +589,7 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
   // compare every note against a number no note will ever exceed. Absent
   // means "not armed on the ticket yet", which re-asks — the only safe read.
   if (state.requestNoteId == null) {
-    const links = opts.attachments?.length ? await uploadAll(iid, opts.attachments) : [];
-    const missing = (opts.attachments?.length ?? 0) - links.length;
-    const body = `${requestBody}`
-      + (links.length ? `\n\n${links.join('\n\n')}` : '')
-      + (missing > 0 ? `\n\n_${missing} attachment(s) could not be uploaded to GitLab._` : '');
+    const body = await requestWithAttachments(iid, requestBody, opts.attachments);
     const posted = await addIssueNote(iid, body);
     if (!posted.ok || !posted.data) {
       log.warn(`${gate} approval request could not be posted to the ticket — will retry next tick`, { iid });
