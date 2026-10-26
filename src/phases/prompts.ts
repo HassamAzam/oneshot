@@ -716,6 +716,30 @@ const ORACLE =
  * only the first, with "rather than new ones", told plan and implement to avoid
  * exactly the values the reviewer was shown as additions.
  */
+/**
+ * The design request already on the ticket is missing some of its files. This
+ * run produces those only; the comment is then edited in place, so changing
+ * anything the reviewer is already looking at would change it under them.
+ */
+export function designHtmlRepairBlock(ctx: PromptCtx): string {
+  const repair = ctx.journal.designHtmlRepair;
+  if (!repair?.pending || !repair.missing.length) return '';
+  return `
+## Missing design files — repair run
+The approval request already on the ticket is missing:
+${repair.missing.map((f) => `- ${f}`).join('\n')}
+
+Produce each one as described below. A file path is produced at exactly that artifact-relative
+path and reported in the same field it was named in: a \`before\` is a capture of the running app,
+a screenshot is a 1280x800 render of its mockup, an \`.html\` is the mockup itself. "A screen for
+route X" is a new screen for that research \`uiSurfaces\` entry, with \`route\` set to X and its
+own mockup, render and \`before\`. "A before capture for route X" is that page captured from the
+running app today and set as the \`before\` of the screen whose \`route\` is X. Keep every other screen, file,
+decision and question as it already is: the request comment will be edited in place with these
+files added, and the reviewer may already be reading it.
+`;
+}
+
 function approvedDesignBlock(ctx: PromptCtx): string {
   const d = artifact<DesignArtifact>(ctx, 'design');
   if (!d.screens || d.applicable === false) return '';
@@ -1187,6 +1211,11 @@ Work out what this ticket actually requires, and trace the code that implements 
   the only source they are given is the diff — which for a logic-layer fix contains none of
   it, so each of them re-excavates the screen from scratch. Set \`reachable\` false and leave
   the rest empty when the change genuinely has no UI surface.
+- Fill \`uiSurfaces\`: every screen this ticket changes or adds, one entry per route. For a
+  screen in the app today set \`exists\` true and give the repo-relative \`file:line\` where its
+  route is defined — this is checked against the code, so cite the line that names the route. For
+  a screen the ticket adds, \`exists\` false and empty \`evidence\`. The design phase must draw
+  every entry, and capture a \`before\` of every existing one. Empty when nothing is reachable.
 - List what you could NOT determine. An explicit unknown is worth more than a confident
   guess — the plan phase can work around a stated gap and cannot work around a wrong claim.
 - LAND THE PLANE at ~${landAt} turns — about 70% of your ${turns}. Keep a rough count of your
@@ -1201,6 +1230,7 @@ Do not write or modify any code.`;
 
   design: (ctx) => `${ticketBlock(ctx.ticket)}
 ${reviewGateFeedbackBlock(ctx.journal.designApproval?.feedback, 'Reviewer feedback on an earlier design', 'Design')}
+${designHtmlRepairBlock(ctx)}
 ## Research (phase 1)
 ${JSON.stringify(ctx.prior.research ?? {}, null, 2)}
 
@@ -1245,6 +1275,9 @@ is "that's a nice generic dashboard". So, in order:
    capture is the \`before\` on each screen, and it is also where you read the real shell — nav,
    header, density, spacing — which every mockup then reproduces.
 3. Use research's \`uiPath\` to find those screens rather than hunting for them.
+4. Research's \`uiSurfaces\` lists every screen to draw. Draw at least one screen per entry and set
+   its \`route\` to that entry's route, copied exactly. Every entry with \`exists\` true needs a
+   \`before\` capture. Both are checked once the request is on the ticket.
 
 ## What to draw
 

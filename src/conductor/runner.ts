@@ -47,11 +47,11 @@
  * continues from the phase remediation says to resume at.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
+  DRY_RUN, artifactDir, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -94,6 +94,10 @@ import {
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
+import {
+  DESIGN_EVAL_RECORD, appendRound, gradeRequest, needsGrading, nextRepair, repairDue, repairTarget,
+  routeEvidenceHolds, unlinkedFiles, type DesignEvalRecord, type DesignEvalRound,
+} from '../lib/designeval.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
@@ -103,7 +107,7 @@ import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
   MAX_CONFIRMATIONS, rearmGate,
-  designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
+  designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, editGateRequest, gatesApply,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
   gateAsked, type GateTrigger,
@@ -114,7 +118,8 @@ import {
 } from './zoneguard.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import {
-  countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type Ticket, type TestCase,
+  countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type DesignArtifact, type Ticket, type TestCase,
+  type UiSurface,
 } from '../phases/types.js';
 import {
   activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
@@ -1597,6 +1602,18 @@ export async function runTicket(
         log.warn(`design.json changed since its approval on #${iid} — re-arming the design gate`);
         j = rearmGate(iid, 'design') ?? j;
       }
+      const designIdx = list.findIndex((p) => p.name === 'design');
+      const evalCtx: DesignEvalCtx = {
+        surfaces: researchSurfaces(prior.research ?? null),
+        repoDir: worktree ?? WORK_REPO,
+      };
+      const repairRound = await repairDesignRequest(iid, j, design, evalCtx);
+      j = readJournal(iid) ?? j;
+      if (repairRound && designIdx !== -1 && requestHtmlRepair(iid, j, repairRound)) {
+        forced.add('design');
+        i = designIdx;
+        continue;
+      }
       const gate = await checkApprovalGate({
         iid,
         gate: 'design',
@@ -1606,6 +1623,12 @@ export async function runTicket(
         onApproved: async () => { await addIssueNote(iid, designApprovedRecordBody(design)); },
       });
       j = readJournal(iid) ?? j;
+      const graded = await gradeDesignRequest(iid, j.designApproval?.requestNoteId, design, evalCtx);
+      if (gate.verdict === 'pending' && graded && designIdx !== -1 && requestHtmlRepair(iid, j, graded)) {
+        forced.add('design');
+        i = designIdx;
+        continue;
+      }
       if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
       if (gate.verdict === 'pending') {
         return finish(j, 'parked',
@@ -1613,7 +1636,6 @@ export async function runTicket(
           + 'or comments there what to change to have the design redrawn');
       }
       if (gate.verdict === 'feedback') {
-        const designIdx = list.findIndex((p) => p.name === 'design');
         if (designIdx !== -1) {
           forced.add('design');
           i = designIdx;
@@ -3605,4 +3627,108 @@ function milestoneText(p: PhaseConfig, data: Record<string, unknown> | null, iid
       `${empty.length ? `\nempty passes: ${empty.join(', ')}` : ''}`;
   }
   return `*#${iid} ${p.name}* — ${data.summary ?? 'done'}`;
+}
+
+/** What the design eval reads besides the design: research's screen list and the repo its evidence cites. */
+interface DesignEvalCtx {
+  surfaces: UiSurface[];
+  repoDir: string;
+}
+
+function researchSurfaces(research: Record<string, unknown> | null): UiSurface[] {
+  const list = research?.uiSurfaces;
+  return Array.isArray(list) ? (list as UiSurface[]) : [];
+}
+
+/** A repo file's text, or null when it is missing or the path leaves the repo. */
+function readRepoFile(repoDir: string, rel: string): string | null {
+  const full = resolve(repoDir, rel);
+  if (!full.startsWith(resolve(repoDir) + sep)) return null;
+  try {
+    return readFileSync(full, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Live check that the design request just posted links every design file.
+ * Reads the comment back from GitLab once per request; a dry run posts nothing
+ * to check. `repair` re-grades a comment that was just edited, so it bypasses
+ * the once-per-comment rule and tags the round with the attempt.
+ */
+async function gradeDesignRequest(
+  iid: number, noteId: number | null | undefined, design: Record<string, unknown> | null,
+  ctx: DesignEvalCtx, repair?: number,
+): Promise<DesignEvalRound | null> {
+  if (DRY_RUN || noteId == null) return null;
+  const record = readArtifact<DesignEvalRecord>(iid, DESIGN_EVAL_RECORD);
+  if (repair === undefined && !needsGrading(record, noteId)) return null;
+  const graded = await gradeRequest({
+    iid,
+    noteId,
+    design: design as Partial<DesignArtifact> | null,
+    artifactDir: artifactDir(iid),
+    surfaces: ctx.surfaces,
+    evidenceHolds: (evidence, route) => routeEvidenceHolds(evidence, route, (rel) => readRepoFile(ctx.repoDir, rel)),
+    readNote: async (id) => {
+      const res = await getIssueNote(iid, id);
+      return res.ok && res.data ? res.data.body : null;
+    },
+  });
+  const round = repair === undefined ? graded : { ...graded, repair };
+  writeArtifact(iid, DESIGN_EVAL_RECORD, appendRound(record, iid, round));
+  const failed = unlinkedFiles(round);
+  if (round.pass) {
+    log.ok(`design-eval #${iid}: all ${round.files.length} design files linked on note ${noteId}`);
+  } else if (!round.readBack) {
+    log.warn(`design-eval #${iid}: could not read note ${noteId} back`, { iid });
+  } else {
+    log.warn(`design-eval #${iid}: ${failed.length}/${round.files.length} design files not on the ticket`, {
+      iid, note: noteId, failed: round.files.filter((f) => f.status !== 'linked').map((f) => `${f.file}:${f.status}`),
+    });
+  }
+  return round;
+}
+
+/**
+ * Record that a failing round sends the run back to `design`, when the cap
+ * allows. True means the caller re-routes; false leaves the request as it is.
+ */
+function requestHtmlRepair(iid: number, j: RunJournal, round: DesignEvalRound): boolean {
+  if (!repairDue(j.designHtmlRepair, round)) {
+    if (round.readBack && !round.pass) {
+      log.warn(`design-eval #${iid}: html repair cap reached on note ${round.noteId} — leaving the request as it is`);
+    }
+    return false;
+  }
+  const next = nextRepair(j.designHtmlRepair, round);
+  updateJournal(iid, { designHtmlRepair: next });
+  log.warn(`design-eval #${iid}: back to design for ${next.missing.length} missing design files`, {
+    iid, note: round.noteId, attempt: next.attempts, missing: next.missing,
+  });
+  return true;
+}
+
+/**
+ * After a repair's design run, edit the standing request in place with fresh
+ * uploads and grade it again. Returns that round, or null when nothing was owed.
+ */
+async function repairDesignRequest(
+  iid: number, j: RunJournal, design: Record<string, unknown> | null, ctx: DesignEvalCtx,
+): Promise<DesignEvalRound | null> {
+  const repair = j.designHtmlRepair;
+  const target = repairTarget(repair, j.designApproval?.requestNoteId);
+  if (target === 'none' || !repair) return null;
+  updateJournal(iid, { designHtmlRepair: { ...repair, pending: false } });
+  if (target === 'drop') return null;
+  const edited = await editGateRequest({
+    iid,
+    gate: 'design',
+    requestBody: designApprovalRequestBody(iid, design),
+    subject: design,
+    attachments: designAttachments(iid, design),
+  });
+  if (edited == null) return null;
+  return gradeDesignRequest(iid, edited, design, ctx, repair.attempts);
 }

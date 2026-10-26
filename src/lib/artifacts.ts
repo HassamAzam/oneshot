@@ -194,6 +194,13 @@ export function approvedDigestFor(state: ReviewGateState, subject: unknown): str
   return state.requestedDigest ?? gateSubjectDigest(subject);
 }
 
+export interface DesignHtmlRepair {
+  noteId: number;
+  attempts: number;
+  missing: string[];
+  pending: boolean;
+}
+
 export interface RunJournal {
   runId: string;
   iid: number;
@@ -244,6 +251,12 @@ export interface RunJournal {
    * whatever the code-review posture happens to be.
    */
   designApproval?: ReviewGateState;
+  /**
+   * A design request comment the live design eval found without some of its
+   * mockup HTML. `pending` while the run is back in `design` writing them; the
+   * next gate check then edits that comment in place with fresh uploads.
+   */
+  designHtmlRepair?: DesignHtmlRepair;
   planApproval?: ReviewGateState;
   /** Test-case approval gate state (Review label, between `testcases` and `review`). */
   testcasesApproval?: ReviewGateState;
