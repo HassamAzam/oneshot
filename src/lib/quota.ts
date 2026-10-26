@@ -10,10 +10,14 @@
  *
  * Raw token counts are not comparable to each other, so everything is weighted
  * into input-token-equivalents before it is measured against a ceiling.
+ *
+ * On a metered provider (ONESHOT_LLM_PROVIDER other than claude) there is no
+ * shared window: the counts are still recorded, so a run's spend stays
+ * visible, but the account-wide reserve has nothing to read and stays off.
  */
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
-import { PAUSE_QUOTA, STATE, budgetConfig, envOr } from './config.js';
+import { PAUSE_QUOTA, STATE, budgetConfig, envOr, llmProvider } from './config.js';
 import { db, logEvent } from './db.js';
 import { log } from './log.js';
 
@@ -88,6 +92,7 @@ export interface QuotaVerdict {
  * than trusted — the file only refreshes while an interactive session is open.
  */
 export function accountWindowPct(): number | null {
+  if (llmProvider().billing !== 'subscription') return null;
   const path = envOr('ONESHOT_RATELIMIT_SIGNAL',
     `${process.env.HOME ?? ''}/.claude/state/ratelimit.json`);
   if (!existsSync(path)) return null;

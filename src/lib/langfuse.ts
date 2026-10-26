@@ -30,7 +30,7 @@
  */
 import { createHash } from 'node:crypto';
 import { db } from './db.js';
-import { envOr } from './config.js';
+import { envOr, llmProvider } from './config.js';
 import { otelConfig } from './otel.js';
 import { log } from './log.js';
 import type { RunJournal } from './artifacts.js';
@@ -99,6 +99,7 @@ function authHeader(): string {
  * record of truth either way.
  */
 export async function exportRun(journal: RunJournal): Promise<void> {
+  const provider = llmProvider();
   const cfg = otelConfig();
   const auth = authHeader();
   if (!cfg.enabled || !auth) return;
@@ -134,6 +135,11 @@ export async function exportRun(journal: RunJournal): Promise<void> {
       status: { code: journal.status === 'done' ? 1 : 2 },
     }];
 
+    // What served these phases. `anthropic` is the registered gen_ai.system
+    // value, so a subscription run keeps rendering as it always has; another
+    // provider is named rather than mislabelled.
+    const genAiSystem = provider.billing === 'subscription' ? 'anthropic' : provider.name;
+
     for (const [i, p] of journal.phases.entries()) {
       const u = usage.get(p.phase);
       spans.push({
@@ -147,7 +153,7 @@ export async function exportRun(journal: RunJournal): Promise<void> {
         attributes: attrs({
           // gen_ai.* is what makes Langfuse render a span as a generation with
           // a model and a token count rather than a bare span.
-          'gen_ai.system': 'anthropic',
+          'gen_ai.system': genAiSystem,
           'gen_ai.request.model': p.model,
           'gen_ai.usage.input_tokens': u?.input,
           'gen_ai.usage.output_tokens': u?.output,

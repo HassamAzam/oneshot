@@ -1,5 +1,5 @@
 {
-  "_comment": "Tier -> model id. Phases reference a TIER, never a model id, so re-tiering the whole pipeline is one edit here. Ids verified against the Claude 5 family (Opus 5, Sonnet 5, Haiku 4.5).",
+  "_comment": "Tier -> model id ON THE CLAUDE SUBSCRIPTION. Phases reference a TIER, never a model id, so re-tiering the whole pipeline is one edit here. Ids verified against the Claude 5 family (Opus 5, Sonnet 5, Haiku 4.5). A desk on another provider (ONESHOT_LLM_PROVIDER in .env) takes its tiers from config/providers.json instead; `narrator` and `overrides` still apply there.",
 
   "tiers": {
     "heavy": "claude-opus-5",

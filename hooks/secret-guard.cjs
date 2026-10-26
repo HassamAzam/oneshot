@@ -79,6 +79,24 @@ const CANDIDATE = /(?:^|[\s'"<>|])([^\s'"<>|]*\.env)(?=$|[\s'"<>|])/g;
 const READER = /^\s*(cat|bat|less|more|head|tail|grep|egrep|rg|awk|sed|cut|sort|strings|xxd|od|open|cp|scp|rsync|source|\.)\b/;
 const WRITER = /^\s*(tee|dd|truncate|mv|ln|install)\b/;
 
+// ------------------------------------------------------ session credentials
+
+/** Credentials that CAN be in a session's environment, by name. */
+const TOKEN_VARS = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
+const TOKEN_NAME = new RegExp(`\\b(?:${TOKEN_VARS.join('|')})\\b`);
+/** A command that prints the whole environment, however it is spelled. */
+const ENV_DUMP = /^\s*(?:(?:env|printenv|export|declare|set|typeset)(?:\s+-[a-zA-Z]+)*\s*$|cat\s+\/proc\/[^/\s]+\/environ\b)/;
+
+const TOKEN_DENIAL =
+  'Denied: this session\'s environment carries the credential its model calls are made with, ' +
+  'and everything a phase prints lands in a transcript that outlives the run. Naming that ' +
+  'variable, or dumping the environment, reveals it.\n' +
+  'Nothing in a session needs it: the runtime authenticates every call itself. Name the variable ' +
+  'you need instead (`printenv ONESHOT_PHASE`, `echo "$ONESHOT_WORKTREE"`); a bare `env` or `printenv` ' +
+  'prints everything, whatever it is piped into.\n' +
+  'If something genuinely cannot proceed without a credential, report that in `blocked` — ' +
+  'the variable\'s name, never its value.';
+
 /** Expand what the shell would: `~`, $HOME and $ONESHOT_HOME, braced or not. */
 function expand(candidate) {
   return candidate
@@ -715,6 +733,22 @@ try {
   }
 
   if (tool === 'Bash' && typeof input.command === 'string') {
+    // The session environment is a whitelist, but on two desks it does carry a
+    // credential: CLAUDE_CODE_OAUTH_TOKEN on a headless box, and a metered
+    // provider's ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY (src/lib/provider.ts).
+    // There, naming the variable is reading it — `echo $ANTHROPIC_AUTH_TOKEN`
+    // is the whole exploit — and so is dumping the environment. Judged only
+    // while this hook's own environment (the session's) holds one, so a desk
+    // on keychain auth loses nothing.
+    if (TOKEN_VARS.some((v) => process.env[v])) {
+      for (const segment of segments(input.command)) {
+        if (TOKEN_NAME.test(segment) || ENV_DUMP.test(segment)) {
+          C.event('denied_session_token', { segment: segment.slice(0, 120) });
+          C.deny(TOKEN_DENIAL);
+        }
+      }
+    }
+
     for (const segment of segments(input.command)) {
       // A bare mention is not a read. `grep -rn GITLAB_TOKEN src/` is a
       // legitimate thing for a phase to do; it is the path that matters, and

@@ -10,10 +10,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   CONTEXT_REPO, PROJECT_TARGET, SKILLS_ROOT, WORK_REPO, WT_ROOT, pathSources, seedFrom,
-  auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, localTestsConfig, phases,
+  auditAuth, budgetConfig, bugReproductionEnabled, envOr, expandPath, llmProvider, localTestsConfig, phases,
   phasesOutsideTarget, portPool, projectConfig, repoIdentity, requiredLabels, reviewersConfig, slackConfig,
   type LocalTestsConfig,
 } from '../src/lib/config.js';
+import { describeProvider } from '../src/lib/provider.js';
 import { ping, getBranch, listLabels } from '../src/lib/gitlab.js';
 import {
   checkoutFindings, identityFindings, relaxRepoChecks, repoCheckOverrideNotice, wtRootFinding, type Finding,
@@ -361,10 +362,22 @@ async function main(): Promise<void> {
   console.log('\nOneshot doctor');
 
   // ------------------------------------------------------------------ auth
-  section('Claude auth');
+  section('Model provider');
+  const provider = llmProvider();
+  if (provider.problems.length) fail(`ONESHOT_LLM_PROVIDER=${provider.name} is not usable`, describeProvider(provider));
+  else pass(provider.label, describeProvider(provider));
+  if (provider.billing === 'metered') {
+    warn('metered billing', 'every session bills to ONESHOT_LLM_API_KEY; the subscription windows, ' +
+      'the reserve and ~/.claude/state/ratelimit.json do not apply. `npm run llm:probe` sends a reply ' +
+      'and a JSON schema through the real session environment to prove the wiring.');
+  }
+  for (const n of provider.notes) warn(provider.name, n);
+
+  section('Session auth');
   const auth = auditAuth();
   if (auth.clean) {
-    pass('no metered-billing credential in the environment', auth.credential);
+    pass(provider.billing === 'metered' ? 'credential reaches sessions' : 'no metered-billing credential in the environment',
+      auth.credential);
   } else {
     for (const p of auth.problems) fail('auth', p);
   }
