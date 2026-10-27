@@ -1452,11 +1452,12 @@ test('the journal\'s old Loop gate state no longer reaches the prompt', () => {
 });
 
 test('a pending repair tells design which files to produce and to change nothing else', () => {
-  const repair = { noteId: 7, attempts: 1, missing: ['design/a.html', 'design/flow.html'], pending: true };
+  const repair = { attempts: 1, missing: ['design/a.html', 'design/flow.html'], pending: true };
   const c = { ...ctx(ticket()), journal: { designHtmlRepair: repair } } as unknown as PromptCtx;
   const block = designHtmlRepairBlock(c);
   assert.ok(block.includes('- design/a.html') && block.includes('- design/flow.html'));
-  assert.match(block, /edited in place/);
+  assert.match(block, /checked before its approval request was posted/);
+  assert.doesNotMatch(block, /edited in place/);
   assert.equal(designHtmlRepairBlock({ ...c, journal: { designHtmlRepair: { ...repair, pending: false } } } as unknown as PromptCtx), '');
   assert.equal(designHtmlRepairBlock(ctx(ticket())), '');
 });

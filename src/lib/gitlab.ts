@@ -579,19 +579,6 @@ export async function addIssueNote(
   );
 }
 
-/** Replace the body of one of our own notes in place. */
-export async function updateIssueNote(
-  iid: number, noteId: number, body: string,
-): Promise<GitlabResult<{ id: number }>> {
-  if (DRY_RUN) {
-    log.warn(`[dry-run] would edit note ${noteId} on #${iid}`, { chars: body.length });
-    return { ok: true, kind: 'ok', status: 200, data: null };
-  }
-  return call<{ id: number }>(
-    'PUT', `/projects/${projectId()}/issues/${iid}/notes/${noteId}`, { body }, true,
-  );
-}
-
 export interface Upload {
   url: string;
   markdown: string;

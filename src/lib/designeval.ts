@@ -1,14 +1,16 @@
 /**
- * The live check that a design approval request carries every file the
- * design made: each screen's `before` capture, its rendered screenshot and its
- * mockup HTML, plus the prototype's entry on a flow change.
+ * The check that a design approval request carries every file the design
+ * made: each screen's `before` capture, its rendered screenshot and its mockup
+ * HTML, plus the prototype's entry on a flow change.
  *
- * Deterministic: no judge. After the design gate posts its request, the
- * conductor reads that comment back from GitLab and asks of every file whether
- * the comment links it as an upload. Reading the comment back rather than
- * trusting what was sent is the point: an upload that failed, a file that was
- * never written, or an attachment list that stopped including a kind of file
- * all show up here as something the reviewer cannot see.
+ * Deterministic: no judge, and it runs twice. Before the request is posted,
+ * every file must be on disk and every research screen covered; a failure
+ * sends the run back to `design` before any reviewer is pinged, so nobody can
+ * reply to a request that is about to change. After it is posted, the comment
+ * is read back from GitLab and every file must be linked as an upload — an
+ * upload that failed, or an attachment list that stopped including a kind of
+ * file, shows up there. The read-back only records and logs: the comment is
+ * never edited, because a reply on it is a verdict on what it showed.
  *
  * Research's `uiSurfaces` is the independent list of screens the ticket
  * touches. Every entry must have a design screen on its route, and every entry
@@ -17,11 +19,12 @@
  * a screen research does not list, or cannot prove, is left alone.
  *
  * The record belongs to the ticket, at state/runs/<iid>/design-eval.json, with
- * one round per request comment, so a redraw after feedback is checked again.
+ * one read-back round per request comment, so a redraw after feedback is
+ * checked again.
  *
- * A failing round sends the run back to `design` to write what is missing, and
- * the same comment is then edited in place and graded again — at most
- * MAX_HTML_REPAIRS times per comment, because each repair is a design session.
+ * A failed check before posting costs at most MAX_HTML_REPAIRS design re-runs
+ * per request, because each is a design session; past that the request posts
+ * as it is and the read-back records what is missing.
  */
 
 import { existsSync } from 'node:fs';
@@ -31,16 +34,16 @@ import type { DesignArtifact, UiSurface } from '../phases/types.js';
 
 export const DESIGN_EVAL_RECORD = 'design-eval.json';
 
-/** Design re-runs one request comment may cost to get its files onto the ticket. */
+/** Design re-runs one request may cost, before it is posted, to produce what it is missing. */
 export const MAX_HTML_REPAIRS = 1;
 
 export type HtmlStatus =
-  | 'linked' | 'missing-on-disk' | 'not-linked'
+  | 'linked' | 'on-disk' | 'missing-on-disk' | 'not-linked'
   | 'covered' | 'screen-missing' | 'before-missing';
 
 export type DesignFileKind = 'before' | 'screenshot' | 'html' | 'screen';
 
-const PASSING: ReadonlySet<HtmlStatus> = new Set(['linked', 'covered']);
+const PASSING: ReadonlySet<HtmlStatus> = new Set(['linked', 'on-disk', 'covered']);
 
 export interface HtmlCheck {
   /** Artifact-relative path the design named, or the route for a `screen` / missing `before`. */
@@ -64,8 +67,6 @@ export interface DesignEvalRound {
   readBack: boolean;
   files: HtmlCheck[];
   pass: boolean;
-  /** The repair attempt that produced this round, when it re-grades an edited comment. */
-  repair?: number;
 }
 
 export interface DesignEvalRecord {
@@ -189,6 +190,23 @@ export function gradeSurfaces(
   });
 }
 
+/**
+ * Pure: what a request would be missing if posted now — every file the design
+ * names must be on disk, and every research surface covered.
+ */
+export function checkBeforePosting(
+  design: Partial<DesignArtifact> | null,
+  onDisk: (file: string) => boolean,
+  surfaces: readonly UiSurface[],
+  evidenceHolds: (evidence: string, route: string) => boolean,
+): HtmlCheck[] {
+  return [
+    ...expectedFiles(design).map(({ file, owner, kind }): HtmlCheck => (
+      { file, owner, kind, status: onDisk(file) ? 'on-disk' : 'missing-on-disk' })),
+    ...gradeSurfaces(surfaces, design, evidenceHolds),
+  ];
+}
+
 /** Whether this request comment still needs grading. */
 export function needsGrading(record: DesignEvalRecord | null, noteId: number | null | undefined): noteId is number {
   if (noteId == null) return false;
@@ -272,9 +290,9 @@ export function formatDesignEval(records: readonly DesignEvalRecord[]): string[]
   ];
 }
 
-/** What a failing round says is missing, worded for the design repair prompt. */
-export function unlinkedFiles(round: DesignEvalRound): string[] {
-  return round.files.filter((f) => !PASSING.has(f.status)).map((f) => {
+/** What a set of checks says is missing, worded for the design repair prompt. */
+export function missingItems(files: readonly HtmlCheck[]): string[] {
+  return files.filter((f) => !PASSING.has(f.status)).map((f) => {
     if (f.status === 'screen-missing') return `a screen for route ${f.file}`;
     if (f.status === 'before-missing') return `a before capture for route ${f.file}`;
     return f.file;
@@ -282,25 +300,14 @@ export function unlinkedFiles(round: DesignEvalRound): string[] {
 }
 
 /**
- * Whether a round should send the run back to `design`. Never for a comment
- * that could not be read back — that is GitLab, not the design — and never
- * past the cap for the same comment.
+ * Whether a failed check before posting should send the run back to `design`:
+ * only when something is missing, and never past the cap for this request.
  */
-export function repairDue(repair: DesignHtmlRepair | undefined, round: DesignEvalRound): boolean {
-  if (!round.readBack || round.pass || unlinkedFiles(round).length === 0) return false;
-  const used = repair?.noteId === round.noteId ? repair.attempts : 0;
-  return used < MAX_HTML_REPAIRS;
+export function repairDue(repair: DesignHtmlRepair | undefined, files: readonly HtmlCheck[]): boolean {
+  if (roundPasses(files) || missingItems(files).length === 0) return false;
+  return (repair?.attempts ?? 0) < MAX_HTML_REPAIRS;
 }
 
-export function nextRepair(repair: DesignHtmlRepair | undefined, round: DesignEvalRound): DesignHtmlRepair {
-  const used = repair?.noteId === round.noteId ? repair.attempts : 0;
-  return { noteId: round.noteId, attempts: used + 1, missing: unlinkedFiles(round), pending: true };
-}
-
-/** A pending repair is for the standing request only; one for an older comment is dropped. */
-export function repairTarget(
-  repair: DesignHtmlRepair | undefined, requestNoteId: number | null | undefined,
-): 'edit' | 'drop' | 'none' {
-  if (!repair?.pending) return 'none';
-  return repair.noteId === requestNoteId ? 'edit' : 'drop';
+export function nextRepair(repair: DesignHtmlRepair | undefined, files: readonly HtmlCheck[]): DesignHtmlRepair {
+  return { attempts: (repair?.attempts ?? 0) + 1, missing: missingItems(files), pending: true };
 }
