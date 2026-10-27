@@ -51,7 +51,7 @@ import { existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
+  DRY_RUN, artifactDir, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -98,6 +98,11 @@ import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
+import {
+  MAX_VERIFY_EVAL_RETRIES, VERIFY_EVAL_RECORD, appendRound as appendVerifyEvalRound, dropOrphans,
+  feedbackNote, gradeVerify, orphanIds, rerunnable,
+  type VerifyEvalRecord, type VerifyEvalRound,
+} from '../lib/verifyeval.js';
 import { schemaFor } from './schemas.js';
 import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
@@ -2034,6 +2039,66 @@ export async function runTicket(
         }
       }
 
+      // verify-eval: verify.json must be internally honest before the run
+      // carries it to the MR. Every case it reports is a real case from the
+      // pinned testcases.json, and every 'pre-existing' label — the one verdict
+      // that walks a failing case past the merge gate — carries an evidence
+      // line AND a screenshot on disk. Run AFTER applyBaseCheck above, so it
+      // grades the labels the gate will actually read.
+      //
+      // Two findings, two resolutions. An ORPHAN id (reported but not in
+      // testcases.json) is #259's TC-15: a case the plan descoped that verify
+      // kept failing, blocking the merge on retired work. It cannot be re-run,
+      // so it is dropped here, by the conductor, with no model lap. A
+      // 'pre-existing' label without its proof IS a real case, so it is handed
+      // to ONE scoped re-run with the finding as feedback. Whatever still stands
+      // after that is recorded with a warning and the run continues: this eval
+      // never blocks, never cycles to implement, never retries a second time.
+      if (r.cfg.name === 'verify' && r.out.ok && !overruled.has(r)) {
+        const tcCases = readArtifact<{ cases?: Array<{ id?: unknown }> }>(iid, 'testcases.json')?.cases;
+        const tcIds = Array.isArray(tcCases)
+          ? new Set(tcCases.map((c) => (typeof c.id === 'string' ? c.id : '')).filter(Boolean))
+          : null;
+        const onDisk = (f: string): boolean => existsSync(join(artifactDir(iid), f));
+        let record = readArtifact<VerifyEvalRecord>(iid, VERIFY_EVAL_RECORD);
+        const writeRound = (round: VerifyEvalRound): void => {
+          record = appendVerifyEvalRound(record, iid, round);
+          writeArtifact(iid, VERIFY_EVAL_RECORD, record);
+        };
+
+        let results = (r.out.data?.results ?? []) as CaseResult[];
+        const dropped = orphanIds(results, tcIds);
+        if (dropped.length) {
+          results = dropOrphans(results, tcIds);
+          r.out.data = { ...r.out.data, results };
+          writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
+          log.warn(`verify-eval dropped ${dropped.length} case(s) not in testcases.json: ${dropped.join(', ')}`);
+        }
+        let issues = gradeVerify(results, tcIds, onDisk);
+        writeRound({
+          at: new Date().toISOString(), attempt: 0, droppedOrphans: dropped, issues,
+          pass: issues.length === 0, unresolved: false,
+        });
+
+        const toRerun = rerunnable(issues);
+        if (toRerun.length) {
+          log.phase(`verify-eval re-running ${toRerun.length} pre-existing case(s) for proof: ${toRerun.join(', ')}`, { iid });
+          const merged = await runScopedVerifyForEval(r.cfg, toRerun, feedbackNote(issues), results);
+          if (merged) {
+            results = dropOrphans(merged, tcIds);
+            r.out.data = { ...r.out.data, results };
+            writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
+          }
+          issues = gradeVerify(results, tcIds, onDisk);
+          const unresolved = issues.length > 0;
+          writeRound({ at: new Date().toISOString(), attempt: 1, droppedOrphans: [], issues, pass: !unresolved, unresolved });
+          if (unresolved) {
+            log.warn(`verify-eval unresolved after ${MAX_VERIFY_EVAL_RETRIES} scoped re-run — continuing to the next `
+              + `phase for #${iid}: ${issues.map((i) => i.detail).join('; ')}`);
+          }
+        }
+      }
+
       // The same bargain for the phase that WRITES the list rather than executing
       // it. testcases is onFail 'abort', so a session that dies at its cap does
       // not cost a lap — it costs the whole run, and every turn it spent reading
@@ -3041,6 +3106,68 @@ export async function runTicket(
    * park would otherwise be refused by checkQuota() as 'unavailable', which
    * spends the verify lap this exists to save.
    */
+  /**
+   * One scoped verify re-run for the verify-eval, folded back over the full
+   * list. Mirrors the QA `missing-steps` rescope and `runBaseCheck`'s inline
+   * dispatch: snapshot the baseline to verify-prescope.json (the scoped session
+   * overwrites verify.json with only its cases), run verify scoped to `scope`
+   * with `feedback` in the prompt, then merge its fresh results back.
+   *
+   * Recorded as its own phase row so the cost is visible, but a death is marked
+   * 'infra', never 'failed', so this re-run can never spend the implement↔verify
+   * cycle budget (`failedLapsOf` ignores 'infra'). Returns the merged results,
+   * or null when it could not run or the session did not finish — the caller
+   * then records the finding as unresolved and carries on. Never blocks.
+   */
+  async function runScopedVerifyForEval(
+    cfgV: PhaseConfig, scope: string[], feedback: string, baseline: CaseResult[],
+  ): Promise<CaseResult[] | null> {
+    if (!isImplemented(cfgV.name)) return null;
+    if (Boolean(opts.signal?.aborted) || existsSync(PAUSE) || quotaParked()) {
+      log.warn('verify-eval re-run skipped — the run is stopped or paused');
+      return null;
+    }
+    const leaseError = ensureLeases(cfgV);
+    if (leaseError) { log.warn(`verify-eval re-run skipped — ${leaseError}`); return null; }
+    const lap = lapsOf(iid, cfgV.name);
+    const quota = checkQuota(runId, cfgV.name, lap);
+    if (!quota.allowed) { log.warn(`verify-eval re-run skipped — quota: ${quota.reason}`); return null; }
+
+    writeArtifact(iid, 'verify-prescope.json', { results: baseline });
+    j = updateJournal(iid, { verifyRescopeCases: scope, verifyEvalFeedback: feedback }) ?? j;
+    const clear = (): void => {
+      j = updateJournal(iid, { verifyRescopeCases: [], verifyEvalFeedback: undefined }) ?? readJournal(iid) ?? j;
+    };
+
+    const startedAt = Date.now();
+    await updateCard(j.slackTs ?? '', cardState(j, [cfgV.name]));
+    updateRun(runId, { phase: cfgV.name, status: 'running', owner_seen_at: Date.now() });
+    const ctx: PromptCtx = { ticket, runId, lap, branch, worktree, port, prior, journal: j };
+    const rowId = phaseStart(runId, cfgV.name, lap, modelFor(cfgV));
+    const out = await runPhase({
+      iid, runId, lap, cfg: cfgV,
+      prompt: promptFor(cfgV, ctx), systemPrompt: systemPromptFor(cfgV, ctx),
+      worktree, port, branch, signal: opts.signal,
+    });
+    const status = out.ok ? 'ok' : 'infra';
+    phaseEnd(rowId, status, {
+      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+      detail: out.error ?? out.blocked ?? undefined,
+    });
+    recordPhase(iid, {
+      phase: cfgV.name, lap, status, startedAt, endedAt: Date.now(), model: modelFor(cfgV),
+      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
+      error: out.accountAction ?? out.error ?? out.blocked ?? undefined,
+    });
+    clear();
+    if (!out.ok) {
+      log.warn(`verify-eval re-run did not finish (${out.error ?? out.blocked ?? 'no output'}) — recording unresolved`);
+      return null;
+    }
+    const fresh = (out.data?.results ?? []) as CaseResult[];
+    return mergeScopedVerify(baseline, fresh, new Set(scope));
+  }
+
   async function runBaseCheck(): Promise<
     | { kind: 'answered'; data: BaseCheck }
     | { kind: 'unavailable'; why: string }
