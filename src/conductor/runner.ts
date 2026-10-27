@@ -67,7 +67,7 @@ import {
 import {
   approvalCovers, archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
   phaseSucceeded, phaseSettled, readArtifact,
-  readJournal, recordPhase, recordRemediation, reapScratch, updateJournal, writeArtifact,
+  readJournal, recordPhase, recordRemediation, reapScratch, requestCovers, updateJournal, writeArtifact,
   writeJournal,
   type PhaseRecord, type Remediation, type RunJournal,
 } from '../lib/artifacts.js';
@@ -95,8 +95,8 @@ import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
 import {
-  DESIGN_EVAL_RECORD, appendRound, gradeRequest, needsGrading, nextRepair, repairDue, repairTarget,
-  routeEvidenceHolds, unlinkedFiles, type DesignEvalRecord, type DesignEvalRound,
+  DESIGN_EVAL_RECORD, appendRound, checkBeforePosting, gradeRequest, missingItems, needsGrading, nextRepair,
+  repairDue, routeEvidenceHolds, type DesignEvalRecord, type DesignEvalRound,
 } from '../lib/designeval.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
@@ -107,7 +107,7 @@ import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
   MAX_CONFIRMATIONS, rearmGate,
-  designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, editGateRequest, gatesApply,
+  designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
   gateAsked, type GateTrigger,
@@ -1607,9 +1607,9 @@ export async function runTicket(
         surfaces: researchSurfaces(prior.research ?? null),
         repoDir: worktree ?? WORK_REPO,
       };
-      const repairRound = await repairDesignRequest(iid, j, design, evalCtx);
-      j = readJournal(iid) ?? j;
-      if (repairRound && designIdx !== -1 && requestHtmlRepair(iid, j, repairRound)) {
+      const approval = j.designApproval;
+      const asking = approval?.requestNoteId == null || !requestCovers(approval, design);
+      if (asking && designIdx !== -1 && sendDesignBackForMissing(iid, j, design, evalCtx)) {
         forced.add('design');
         i = designIdx;
         continue;
@@ -1623,12 +1623,11 @@ export async function runTicket(
         onApproved: async () => { await addIssueNote(iid, designApprovedRecordBody(design)); },
       });
       j = readJournal(iid) ?? j;
-      const graded = await gradeDesignRequest(iid, j.designApproval?.requestNoteId, design, evalCtx);
-      if (gate.verdict === 'pending' && graded && designIdx !== -1 && requestHtmlRepair(iid, j, graded)) {
-        forced.add('design');
-        i = designIdx;
-        continue;
+      const postedNoteId = j.designApproval?.requestNoteId;
+      if (asking && postedNoteId != null && j.designHtmlRepair) {
+        j = updateJournal(iid, { designHtmlRepair: undefined }) ?? j;
       }
+      await gradeDesignRequest(iid, postedNoteId, design, evalCtx);
       if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
       if (gate.verdict === 'pending') {
         return finish(j, 'parked',
@@ -3652,19 +3651,53 @@ function readRepoFile(repoDir: string, rel: string): string | null {
 }
 
 /**
- * Live check that the design request just posted links every design file.
- * Reads the comment back from GitLab once per request; a dry run posts nothing
- * to check. `repair` re-grades a comment that was just edited, so it bypasses
- * the once-per-comment rule and tags the round with the attempt.
+ * Before the design request is posted: check every file the design names is
+ * on disk and every research screen is covered. When something is missing and
+ * the cap allows, record a repair and return true so the caller re-runs
+ * `design` — nobody has been pinged yet, so nothing on the ticket changes
+ * under a reviewer. A dry run posts nothing, so it is never sent back.
+ */
+function sendDesignBackForMissing(
+  iid: number, j: RunJournal, design: Record<string, unknown> | null, ctx: DesignEvalCtx,
+): boolean {
+  if (DRY_RUN) return false;
+  const files = checkBeforePosting(
+    design as Partial<DesignArtifact> | null,
+    (f) => existsSync(join(artifactDir(iid), f)),
+    ctx.surfaces,
+    (evidence, route) => routeEvidenceHolds(evidence, route, (rel) => readRepoFile(ctx.repoDir, rel)),
+  );
+  const missing = missingItems(files);
+  if (repairDue(j.designHtmlRepair, files)) {
+    const next = nextRepair(j.designHtmlRepair, files);
+    updateJournal(iid, { designHtmlRepair: next });
+    log.warn(`design-eval #${iid}: back to design before posting, ${missing.length} item(s) missing`, {
+      iid, attempt: next.attempts, missing,
+    });
+    return true;
+  }
+  if (missing.length) {
+    log.warn(`design-eval #${iid}: repair cap reached — posting the request without ${missing.length} item(s)`, {
+      iid, missing,
+    });
+  }
+  if (j.designHtmlRepair?.pending) updateJournal(iid, { designHtmlRepair: { ...j.designHtmlRepair, pending: false } });
+  return false;
+}
+
+/**
+ * Read the design request just posted back from GitLab and record whether it
+ * links every design file. Log only: the comment is never edited, because a
+ * reply on it is a verdict on what it showed. Once per comment; a dry run
+ * posts nothing to read.
  */
 async function gradeDesignRequest(
-  iid: number, noteId: number | null | undefined, design: Record<string, unknown> | null,
-  ctx: DesignEvalCtx, repair?: number,
-): Promise<DesignEvalRound | null> {
-  if (DRY_RUN || noteId == null) return null;
+  iid: number, noteId: number | null | undefined, design: Record<string, unknown> | null, ctx: DesignEvalCtx,
+): Promise<void> {
+  if (DRY_RUN || noteId == null) return;
   const record = readArtifact<DesignEvalRecord>(iid, DESIGN_EVAL_RECORD);
-  if (repair === undefined && !needsGrading(record, noteId)) return null;
-  const graded = await gradeRequest({
+  if (!needsGrading(record, noteId)) return;
+  const round: DesignEvalRound = await gradeRequest({
     iid,
     noteId,
     design: design as Partial<DesignArtifact> | null,
@@ -3676,59 +3709,15 @@ async function gradeDesignRequest(
       return res.ok && res.data ? res.data.body : null;
     },
   });
-  const round = repair === undefined ? graded : { ...graded, repair };
   writeArtifact(iid, DESIGN_EVAL_RECORD, appendRound(record, iid, round));
-  const failed = unlinkedFiles(round);
   if (round.pass) {
-    log.ok(`design-eval #${iid}: all ${round.files.length} design files linked on note ${noteId}`);
+    log.ok(`design-eval #${iid}: all ${round.files.length} checks passed on note ${noteId}`);
   } else if (!round.readBack) {
     log.warn(`design-eval #${iid}: could not read note ${noteId} back`, { iid });
   } else {
-    log.warn(`design-eval #${iid}: ${failed.length}/${round.files.length} design files not on the ticket`, {
-      iid, note: noteId, failed: round.files.filter((f) => f.status !== 'linked').map((f) => `${f.file}:${f.status}`),
+    const missing = missingItems(round.files);
+    log.warn(`design-eval #${iid}: ${missing.length}/${round.files.length} checks failed on note ${noteId}`, {
+      iid, note: noteId, missing,
     });
   }
-  return round;
-}
-
-/**
- * Record that a failing round sends the run back to `design`, when the cap
- * allows. True means the caller re-routes; false leaves the request as it is.
- */
-function requestHtmlRepair(iid: number, j: RunJournal, round: DesignEvalRound): boolean {
-  if (!repairDue(j.designHtmlRepair, round)) {
-    if (round.readBack && !round.pass) {
-      log.warn(`design-eval #${iid}: html repair cap reached on note ${round.noteId} — leaving the request as it is`);
-    }
-    return false;
-  }
-  const next = nextRepair(j.designHtmlRepair, round);
-  updateJournal(iid, { designHtmlRepair: next });
-  log.warn(`design-eval #${iid}: back to design for ${next.missing.length} missing design files`, {
-    iid, note: round.noteId, attempt: next.attempts, missing: next.missing,
-  });
-  return true;
-}
-
-/**
- * After a repair's design run, edit the standing request in place with fresh
- * uploads and grade it again. Returns that round, or null when nothing was owed.
- */
-async function repairDesignRequest(
-  iid: number, j: RunJournal, design: Record<string, unknown> | null, ctx: DesignEvalCtx,
-): Promise<DesignEvalRound | null> {
-  const repair = j.designHtmlRepair;
-  const target = repairTarget(repair, j.designApproval?.requestNoteId);
-  if (target === 'none' || !repair) return null;
-  updateJournal(iid, { designHtmlRepair: { ...repair, pending: false } });
-  if (target === 'drop') return null;
-  const edited = await editGateRequest({
-    iid,
-    gate: 'design',
-    requestBody: designApprovalRequestBody(iid, design),
-    subject: design,
-    attachments: designAttachments(iid, design),
-  });
-  if (edited == null) return null;
-  return gradeDesignRequest(iid, edited, design, ctx, repair.attempts);
 }

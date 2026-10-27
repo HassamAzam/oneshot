@@ -10,8 +10,8 @@ import { join } from 'node:path';
 import type { DesignArtifact, DesignScreen, UiSurface } from '../phases/types.js';
 import {
   MAX_HTML_REPAIRS, appendRound, expectedFiles, formatDesignEval, gradeDesignNote, gradeRequest, needsGrading,
-  gradeSurfaces, nextRepair, repairDue, repairTarget, roundPasses, routeEvidenceHolds, summariseDesignEval,
-  unlinkedFiles, uploadedNames, type DesignEvalRecord, type DesignEvalRound,
+  gradeSurfaces, checkBeforePosting, missingItems, nextRepair, repairDue, roundPasses, routeEvidenceHolds, summariseDesignEval,
+  uploadedNames, type DesignEvalRecord, type DesignEvalRound, type HtmlCheck,
 } from './designeval.js';
 
 const screen = (id: string, over: Partial<DesignScreen> = {}): DesignScreen => ({
@@ -154,33 +154,40 @@ test('rounds accumulate and the report totals them', () => {
   assert.match(lines[1] ?? '', /#5 note 2 {2}FAIL {2}0\/1 checks ok {2}— design\/a\.html \(not-linked\)/);
 });
 
-const failing = (noteId: number, files = ['design/a.html']): DesignEvalRound => ({
-  noteId, at: 't', readBack: true, pass: false,
-  files: files.map((file) => ({ file, owner: 'a', kind: 'html' as const, status: 'not-linked' as const })),
+const missingOnDisk = (files = ['design/a.html']): HtmlCheck[] =>
+  files.map((file) => ({ file, owner: 'a', kind: 'html' as const, status: 'missing-on-disk' as const }));
+
+test('a failed check before posting sends the run back to design once per request', () => {
+  assert.equal(repairDue(undefined, missingOnDisk()), true);
+  const first = nextRepair(undefined, missingOnDisk(['design/a.html', 'design/b.html']));
+  assert.deepEqual(first, { attempts: 1, missing: ['design/a.html', 'design/b.html'], pending: true });
+  assert.equal(repairDue(first, missingOnDisk()), MAX_HTML_REPAIRS > 1);
+  assert.equal(nextRepair(first, missingOnDisk()).attempts, 2);
 });
 
-test('a failing round sends the run back to design once per comment', () => {
-  assert.equal(repairDue(undefined, failing(7)), true);
-  const first = nextRepair(undefined, failing(7, ['design/a.html', 'design/b.html']));
-  assert.deepEqual(first, { noteId: 7, attempts: 1, missing: ['design/a.html', 'design/b.html'], pending: true });
-  assert.equal(repairDue(first, failing(7)), MAX_HTML_REPAIRS > 1);
-  assert.equal(repairDue(first, failing(8)), true, 'a new comment gets its own repair');
-  assert.equal(nextRepair(first, failing(8)).attempts, 1);
+test('a passing or empty check never re-routes', () => {
+  const ok: HtmlCheck[] = [{ file: 'design/a.html', owner: 'a', kind: 'html', status: 'on-disk' }];
+  assert.equal(repairDue(undefined, ok), false);
+  assert.equal(repairDue(undefined, []), false);
 });
 
-test('a passing, unread or html-less round never re-routes', () => {
-  assert.equal(repairDue(undefined, { ...failing(7), pass: true }), false);
-  assert.equal(repairDue(undefined, { noteId: 7, at: 't', readBack: false, files: [], pass: false }), false);
-  assert.equal(repairDue(undefined, { noteId: 7, at: 't', readBack: true, files: [], pass: false }), false);
+test('before posting, a file the design named but never wrote fails and the rest pass', () => {
+  const d = design([screen('a')]);
+  const files = checkBeforePosting(d, (f) => f !== 'design/a.html', [], () => false);
+  assert.deepEqual(files.map((f) => [f.file, f.status]), [
+    ['design/a-before.png', 'on-disk'], ['design/a.png', 'on-disk'], ['design/a.html', 'missing-on-disk'],
+  ]);
+  assert.equal(roundPasses(files), false);
+  assert.deepEqual(missingItems(files), ['design/a.html']);
+  assert.equal(roundPasses(checkBeforePosting(d, () => true, [], () => false)), true);
 });
 
-test('a pending repair edits only the standing request', () => {
-  const repair = { noteId: 7, attempts: 1, missing: ['design/a.html'], pending: true };
-  assert.equal(repairTarget(undefined, 7), 'none');
-  assert.equal(repairTarget({ ...repair, pending: false }, 7), 'none');
-  assert.equal(repairTarget(repair, 7), 'edit');
-  assert.equal(repairTarget(repair, null), 'drop', 'feedback cleared the request, so the repair is moot');
-  assert.equal(repairTarget(repair, 9), 'drop');
+test('before posting, every research screen must be drawn and every proven one needs a before', () => {
+  const d = design([screen('login', { route: '/login', before: '' })]);
+  const files = checkBeforePosting(d, () => true,
+    [surface('/login', true, 'frontend/src/routes.js:3'), surface('/login/locked', false)],
+    (e, r) => routeEvidenceHolds(e, r, repo));
+  assert.deepEqual(missingItems(files), ['a before capture for route /login', 'a screen for route /login/locked']);
 });
 
 const routes = `const ROUTES = [
@@ -260,16 +267,13 @@ test('one before among several screens on the same route is enough', () => {
 });
 
 test('the repair prompt is told which screens and befores are missing', () => {
-  const round: DesignEvalRound = {
-    noteId: 1, at: 't', readBack: true, pass: false,
-    files: [
+  const files: HtmlCheck[] = [
       { file: 'design/a.png', owner: 'a', kind: 'screenshot', status: 'not-linked' },
       { file: '/login/locked', owner: '/login/locked', kind: 'screen', status: 'screen-missing' },
       { file: '/login', owner: 'login', kind: 'before', status: 'before-missing' },
       { file: '/login', owner: 'login', kind: 'screen', status: 'covered' },
-    ],
-  };
-  assert.deepEqual(unlinkedFiles(round), [
+  ];
+  assert.deepEqual(missingItems(files), [
     'design/a.png', 'a screen for route /login/locked', 'a before capture for route /login',
   ]);
 });

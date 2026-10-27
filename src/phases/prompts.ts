@@ -717,16 +717,16 @@ const ORACLE =
  * exactly the values the reviewer was shown as additions.
  */
 /**
- * The design request already on the ticket is missing some of its files. This
- * run produces those only; the comment is then edited in place, so changing
- * anything the reviewer is already looking at would change it under them.
+ * The design is missing files or screens its approval request needs, found
+ * before the request was posted. This run produces those only; the rest of the
+ * design was already checked and stays as it is.
  */
 export function designHtmlRepairBlock(ctx: PromptCtx): string {
   const repair = ctx.journal.designHtmlRepair;
   if (!repair?.pending || !repair.missing.length) return '';
   return `
 ## Missing design files — repair run
-The approval request already on the ticket is missing:
+Your design was checked before its approval request was posted, and it is missing:
 ${repair.missing.map((f) => `- ${f}`).join('\n')}
 
 Produce each one as described below. A file path is produced at exactly that artifact-relative
@@ -735,8 +735,8 @@ a screenshot is a 1280x800 render of its mockup, an \`.html\` is the mockup itse
 route X" is a new screen for that research \`uiSurfaces\` entry, with \`route\` set to X and its
 own mockup, render and \`before\`. "A before capture for route X" is that page captured from the
 running app today and set as the \`before\` of the screen whose \`route\` is X. Keep every other screen, file,
-decision and question as it already is: the request comment will be edited in place with these
-files added, and the reviewer may already be reading it.
+decision and question as it already is. The request is posted only after this run, so nothing
+here has been shown to a reviewer yet.
 `;
 }
 

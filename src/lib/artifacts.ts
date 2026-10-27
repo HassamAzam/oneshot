@@ -195,7 +195,6 @@ export function approvedDigestFor(state: ReviewGateState, subject: unknown): str
 }
 
 export interface DesignHtmlRepair {
-  noteId: number;
   attempts: number;
   missing: string[];
   pending: boolean;
@@ -252,9 +251,9 @@ export interface RunJournal {
    */
   designApproval?: ReviewGateState;
   /**
-   * A design request comment the live design eval found without some of its
-   * mockup HTML. `pending` while the run is back in `design` writing them; the
-   * next gate check then edits that comment in place with fresh uploads.
+   * What the design request is missing, found before it was posted. `pending`
+   * while the run is back in `design` producing it; cleared once the request
+   * is posted, so the next request gets its own repair.
    */
   designHtmlRepair?: DesignHtmlRepair;
   planApproval?: ReviewGateState;
