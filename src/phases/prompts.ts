@@ -2003,8 +2003,17 @@ above, under the run directory — nothing else.`;
     // No code changed since the last lap — every other case keeps its verdict.
     const rescope = ctx.journal.verifyRescopeCases ?? [];
     const scopedCases = rescope.length ? cases.filter((c) => rescope.includes(c.id)) : cases;
+    const evalFeedback = ctx.journal.verifyEvalFeedback;
     const scopeBlock = rescope.length
-      ? `## Scoped re-run — ONLY ${rescope.join(', ')}
+      ? evalFeedback
+        ? `## Scoped re-run — ONLY ${rescope.join(', ')}
+
+${evalFeedback}
+
+**No code has changed** since the last lap. Run ONLY the case(s) listed here and output a result
+for each. Do NOT run or re-report any other case: their verdicts stand.
+`
+        : `## Scoped re-run — ONLY ${rescope.join(', ')}
 
 A QA reviewer said ${rescope.length === 1 ? 'this case was' : 'these cases were'} failing because the
 steps were incomplete, and supplied corrected steps — already written into the list below. **No code
