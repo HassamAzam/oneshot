@@ -1,11 +1,16 @@
 /**
  * The check that verify.json is internally honest: every case it reports is a
- * real case from testcases.json, and every `pre-existing` label — the one
- * verdict that walks a failing case past both the verify cycle and the merge
- * gate — carries the evidence and screenshot that make the claim checkable.
+ * real case from testcases.json, and every case it reports carries an evidence
+ * line, whatever its verdict.
  *
- * Deterministic: no judge. It runs on verify's own output, the pinned
- * testcases.json, and the screenshot files on disk.
+ * `evidenceRubric()` below is the single statement of that rule. The verify
+ * prompt shows it to the session that writes the results, the eval sends it
+ * back verbatim to a re-run, and `gradeVerify()` checks it. One text: a
+ * labeller held to different words than the grader produces findings that are
+ * only the two wordings disagreeing.
+ *
+ * Deterministic: no judge. It runs on verify's own output and the pinned
+ * testcases.json.
  *
  * Two findings, two resolutions, because they are not the same kind of wrong:
  *
@@ -17,10 +22,9 @@
  *     conductor does it, no model lap, and records which ids went. The drop has
  *     a floor: past `MAX_ORPHAN_DROP_SHARE` of the list it is ID DRIFT, not
  *     salvage, and the whole list is kept and flagged rather than emptied.
- *   - A `pre-existing` label with no evidence or a missing screenshot IS a real
- *     case, so it is handed back to a scoped verify re-run — only those cases,
- *     with the finding as feedback — to capture the proof or downgrade to
- *     `fail`.
+ *   - A case with no evidence IS a real case, so it is handed back to a scoped
+ *     verify re-run — only those cases, with the rubric as feedback — to be run
+ *     again and reported with what was observed.
  *
  * The record belongs to the ticket, at state/runs/<iid>/verify-eval.json, one
  * round per grade: round 0 is the first read (with any orphans it dropped),
@@ -34,7 +38,7 @@ export const VERIFY_EVAL_RECORD = 'verify-eval.json';
 /** Scoped re-runs one verify output may cost to resolve its findings. One. */
 export const MAX_VERIFY_EVAL_RETRIES = 1;
 
-export type VerifyIssueKind = 'orphan-id' | 'id-drift' | 'no-evidence' | 'no-screenshot';
+export type VerifyIssueKind = 'orphan-id' | 'id-drift' | 'no-evidence';
 
 export interface VerifyEvalIssue {
   id: string;
@@ -151,16 +155,46 @@ export function reconcileOrphans(
 }
 
 /**
+ * What a verify result must carry. The one source: shown to the verify session
+ * that writes the results (`prompts.ts`), sent back verbatim to a scoped re-run
+ * (`feedbackNote()`), and checked by `gradeVerify()`.
+ *
+ * One line per case, every verdict. Whether the evidence is TRUE is nobody's
+ * job here — `base-check` re-runs a 'pre-existing' claim on the base branch and
+ * review reads the rest. This asks only that the verdict have something behind
+ * it, which is the half a file can settle.
+ */
+export function evidenceRubric(): string {
+  return [
+    'Every case you report carries an `evidence` line — one line of what you actually observed,',
+    'whatever the verdict. It is the only part of a result a later phase can act on: `implement`',
+    'fixes from it, the MR note quotes it, and the merge gate reads it.',
+    '',
+    "  - pass — the measured value that satisfies the case's oracle.",
+    '  - fail — ACTUAL vs EXPECTED, in that order.',
+    '  - blocked / skipped — the precondition that was missing, named.',
+    '  - pre-existing — ACTUAL vs EXPECTED, then the base-branch proof that label requires.',
+    '',
+    'Evidence:',
+    "  TC-04 pass — \"distinct row filters=['none']; processed row visible; salary present=true\"",
+    '  TC-22 fail — "ACTUAL: export returns 500. EXPECTED: a CSV download."',
+    '',
+    'Not evidence:',
+    '  TC-04 pass — "" — a verdict with nothing behind it.',
+    '  TC-22 fail — "did not work" — nothing the next `implement` lap can act on.',
+    '',
+    'A case reported with an empty `evidence` is handed straight back to you to run again.',
+  ].join('\n');
+}
+
+/**
  * Pure: everything wrong with a verify output. An orphan id — or, past the drop
- * floor, the one `id-drift` finding that stands for all of them — and, for every
- * case labelled `pre-existing` — a missing evidence line or a screenshot that
- * is absent or not on disk. `pre-existing` is the only label checked for proof
- * because it is the only one that lets a failing case through unchallenged.
+ * floor, the one `id-drift` finding that stands for all of them — and every case
+ * reported without the evidence line `evidenceRubric()` asks of it.
  */
 export function gradeVerify(
   results: readonly CaseLike[],
   testcaseIds: ReadonlySet<string> | null,
-  screenshotOnDisk: (file: string) => boolean,
 ): VerifyEvalIssue[] {
   const issues: VerifyEvalIssue[] = [];
   const { drop, drift } = reconcileOrphans(results, testcaseIds);
@@ -171,18 +205,11 @@ export function gradeVerify(
       issues.push({ id, kind: 'orphan-id', detail: `${id} is reported in verify.json but is not a case in testcases.json` });
     }
   }
+  const orphaned = new Set(drop);
   for (const r of results) {
-    if (r.result !== 'pre-existing') continue;
     const id = asId(r.id) || '(unnamed)';
-    if (!text(r.evidence)) {
-      issues.push({ id, kind: 'no-evidence', detail: `${id} is labelled pre-existing with no evidence` });
-    }
-    const shot = text(r.screenshot);
-    if (!shot) {
-      issues.push({ id, kind: 'no-screenshot', detail: `${id} is labelled pre-existing with no screenshot` });
-    } else if (!screenshotOnDisk(shot)) {
-      issues.push({ id, kind: 'no-screenshot', detail: `${id} is labelled pre-existing but its screenshot ${shot} is not on disk` });
-    }
+    if (orphaned.has(id) || text(r.evidence)) continue;
+    issues.push({ id, kind: 'no-evidence', detail: `${id} is reported '${text(r.result) || 'no verdict'}' with no evidence` });
   }
   return issues;
 }
@@ -196,10 +223,10 @@ export function evalPasses(issues: readonly VerifyEvalIssue[]): boolean {
  * among them: an orphan is dropped and a drift is for a person, and neither
  * leaves a case a session could be asked to run.
  */
-const RERUNNABLE: ReadonlySet<VerifyIssueKind> = new Set<VerifyIssueKind>(['no-evidence', 'no-screenshot']);
+const RERUNNABLE: ReadonlySet<VerifyIssueKind> = new Set<VerifyIssueKind>(['no-evidence']);
 
 /**
- * The case ids a scoped re-run can act on — the `pre-existing` findings only.
+ * The case ids a scoped re-run can act on — the no-evidence findings only.
  * Orphan and drift ids are never handed to a session.
  */
 export function rerunnable(issues: readonly VerifyEvalIssue[]): string[] {
@@ -215,20 +242,22 @@ export function rerunnable(issues: readonly VerifyEvalIssue[]): string[] {
   return out;
 }
 
-/** The feedback a scoped re-run is given: what each case must fix, worded for the prompt. */
+/**
+ * The feedback a scoped re-run is given. The rule is `evidenceRubric()`
+ * verbatim — the same text the verify prompt showed the session that wrote the
+ * result — so the re-run is held to what it was asked for, not to a paraphrase.
+ */
 export function feedbackNote(issues: readonly VerifyEvalIssue[]): string {
-  const rerun = issues.filter((i) => RERUNNABLE.has(i.kind));
-  const lines = rerun.map((i) => `- **${i.id}**: ${i.detail}`);
+  const lines = issues.filter((i) => RERUNNABLE.has(i.kind)).map((i) => `- **${i.id}**: ${i.detail}`);
   return [
-    'A deterministic check of your last run found `pre-existing` label(s) without the proof the '
-    + 'label requires. A `pre-existing` verdict lets a failing case past the merge gate, so it must '
-    + 'carry a one-line evidence of what the base branch does AND a screenshot file saved under '
-    + 'artifacts/. Re-run ONLY the case(s) below and either:',
-    '',
-    '  1. capture that evidence and screenshot and keep the `pre-existing` label, or',
-    '  2. if you cannot prove it on the base branch, record the case as `fail`.',
+    'A deterministic check of your last run found case(s) reported with no evidence:',
     '',
     ...lines,
+    '',
+    evidenceRubric(),
+    '',
+    'Run ONLY the case(s) named above again and report each one with what you observed. Every',
+    'other case keeps the verdict it already has.',
   ].join('\n');
 }
 
@@ -246,7 +275,6 @@ export interface VerifyEvalTotals {
   orphansDropped: number;
   issuesOpen: number;
   noEvidence: number;
-  noScreenshot: number;
   idDrift: number;
 }
 
@@ -263,7 +291,6 @@ export function summariseVerifyEval(records: readonly VerifyEvalRecord[]): Verif
     orphansDropped: rounds.reduce((a, r) => a + r.droppedOrphans.length, 0),
     issuesOpen: open.length,
     noEvidence: count('no-evidence'),
-    noScreenshot: count('no-screenshot'),
     idDrift: count('id-drift'),
   };
 }
@@ -286,6 +313,6 @@ export function formatVerifyEval(records: readonly VerifyEvalRecord[]): string[]
     '',
     `tickets ${t.tickets}  rounds ${t.rounds}  passed ${t.passed}/${t.tickets}  unresolved ${t.unresolved}`,
     `orphans dropped ${t.orphansDropped}  issues still open ${t.issuesOpen}: `
-      + `no evidence ${t.noEvidence}, no screenshot ${t.noScreenshot}, id drift ${t.idDrift}`,
+      + `no evidence ${t.noEvidence}, id drift ${t.idDrift}`,
   ];
 }

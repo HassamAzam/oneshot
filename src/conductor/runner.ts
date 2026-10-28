@@ -51,7 +51,7 @@ import { existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, artifactDir, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
+  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -2041,10 +2041,11 @@ export async function runTicket(
 
       // verify-eval: verify.json must be internally honest before the run
       // carries it to the MR. Every case it reports is a real case from the
-      // pinned testcases.json, and every 'pre-existing' label — the one verdict
-      // that walks a failing case past the merge gate — carries an evidence
-      // line AND a screenshot on disk. Run AFTER applyBaseCheck above, so it
-      // grades the labels the gate will actually read.
+      // pinned testcases.json, and every case carries the evidence line
+      // evidenceRubric() asks of it. That rubric is stated once, in
+      // lib/verifyeval.ts, and the verify prompt shows the session that writes
+      // the results the same text the grader scores them by. Run AFTER
+      // applyBaseCheck above, so it grades the results the gate will read.
       //
       // Two findings, two resolutions. An ORPHAN id (reported but not in
       // testcases.json) is #259's TC-15: a case the plan descoped that verify
@@ -2052,17 +2053,16 @@ export async function runTicket(
       // so it is dropped here, by the conductor, with no model lap — up to the
       // floor in reconcileOrphans(), past which the two lists disagree wholesale
       // and the whole list is KEPT and flagged, because emptying verify.json
-      // leaves the merge gate nothing to fail on. A 'pre-existing' label without
-      // its proof IS a real case, so it is handed to ONE scoped re-run with the
-      // finding as feedback. Whatever still stands after that is recorded with a
-      // warning and the run continues: this eval never blocks, never cycles to
+      // leaves the merge gate nothing to fail on. A case with no evidence IS a
+      // real case, so it is handed to ONE scoped re-run with the rubric as
+      // feedback. Whatever still stands after that is recorded with a warning
+      // and the run continues: this eval never blocks, never cycles to
       // implement, never retries a second time.
       if (r.cfg.name === 'verify' && r.out.ok && !overruled.has(r)) {
         const tcCases = readArtifact<{ cases?: Array<{ id?: unknown }> }>(iid, 'testcases.json')?.cases;
         const tcIds = Array.isArray(tcCases)
           ? new Set(tcCases.map((c) => (typeof c.id === 'string' ? c.id : '')).filter(Boolean))
           : null;
-        const onDisk = (f: string): boolean => existsSync(join(artifactDir(iid), f));
         let record = readArtifact<VerifyEvalRecord>(iid, VERIFY_EVAL_RECORD);
         const writeRound = (round: VerifyEvalRound): void => {
           record = appendVerifyEvalRound(record, iid, round);
@@ -2078,7 +2078,7 @@ export async function runTicket(
           log.warn(`verify-eval dropped ${dropped.length} case(s) not in testcases.json: ${dropped.join(', ')}`);
         }
         if (drift) log.warn(`verify-eval kept every case on #${iid} — ${drift.detail}`);
-        let issues = gradeVerify(results, tcIds, onDisk);
+        let issues = gradeVerify(results, tcIds);
 
         // Drift suspends the re-run too: when the lists disagree about which
         // cases exist, a session scoped to ids out of that list has nothing to
@@ -2091,7 +2091,7 @@ export async function runTicket(
         });
 
         if (toRerun.length) {
-          log.phase(`verify-eval re-running ${toRerun.length} pre-existing case(s) for proof: ${toRerun.join(', ')}`, { iid });
+          log.phase(`verify-eval re-running ${toRerun.length} case(s) reported with no evidence: ${toRerun.join(', ')}`, { iid });
           const merged = await runScopedVerifyForEval(r.cfg, toRerun, feedbackNote(issues), results);
           // Written back on every outcome, not just a merge. By the time the
           // re-run returns, the scoped session has already overwritten
@@ -2106,7 +2106,7 @@ export async function runTicket(
           if (merged) results = dropOrphans(merged, tcIds);
           r.out.data = { ...r.out.data, results };
           writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
-          issues = gradeVerify(results, tcIds, onDisk);
+          issues = gradeVerify(results, tcIds);
           const unresolved = issues.length > 0;
           writeRound({ at: new Date().toISOString(), attempt: 1, droppedOrphans: [], issues, pass: !unresolved, unresolved });
           if (unresolved) {
