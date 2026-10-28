@@ -14,7 +14,9 @@
  *     #259 descoped TC-15 into testcases.json's `descoped` list, verify kept
  *     reporting TC-15 as a `fail`, and the merge gate blocked on a case the
  *     plan had retired. So an orphan is DROPPED from verify.json here; the
- *     conductor does it, no model lap, and records which ids went.
+ *     conductor does it, no model lap, and records which ids went. The drop has
+ *     a floor: past `MAX_ORPHAN_DROP_SHARE` of the list it is ID DRIFT, not
+ *     salvage, and the whole list is kept and flagged rather than emptied.
  *   - A `pre-existing` label with no evidence or a missing screenshot IS a real
  *     case, so it is handed back to a scoped verify re-run — only those cases,
  *     with the finding as feedback — to capture the proof or downgrade to
@@ -32,7 +34,7 @@ export const VERIFY_EVAL_RECORD = 'verify-eval.json';
 /** Scoped re-runs one verify output may cost to resolve its findings. One. */
 export const MAX_VERIFY_EVAL_RETRIES = 1;
 
-export type VerifyIssueKind = 'orphan-id' | 'no-evidence' | 'no-screenshot';
+export type VerifyIssueKind = 'orphan-id' | 'id-drift' | 'no-evidence' | 'no-screenshot';
 
 export interface VerifyEvalIssue {
   id: string;
@@ -102,7 +104,55 @@ export function dropOrphans<T extends CaseLike>(
 }
 
 /**
- * Pure: everything wrong with a verify output. An orphan id, and — for every
+ * The largest share of a verify run's reported cases an orphan drop may take
+ * before it stops being salvage. Dropping the one case a plan descoped is the
+ * job; dropping most of the list means testcases.json and verify.json are not
+ * describing the same cases at all — an empty `cases` array (schema-valid, no
+ * `minItems`), or ids that drifted wholesale, `TC-1..TC-9` reconciled against
+ * `TC-01..TC-09`. Rewriting verify.json to `results: []` there would leave
+ * `failedCases`, `qualityGate` and the MR note with nothing to fail on and the
+ * eval reporting a pass on the run it had just blanked. So the drop is refused
+ * above this share and the mismatch is recorded for a person to read.
+ */
+export const MAX_ORPHAN_DROP_SHARE = 0.5;
+
+/** The `id` an `id-drift` finding carries: it is about the list, not one case. */
+export const DRIFT_ID = '(list)';
+
+/** What becomes of the ids verify reported that testcases.json does not list. */
+export interface OrphanVerdict {
+  /** The ids to remove from verify.json — empty when the drop was refused. */
+  drop: string[];
+  /** The finding recorded in place of a refused drop, or null when none was refused. */
+  drift: VerifyEvalIssue | null;
+}
+
+/**
+ * The orphan ids' fate under the drop floor: a minority of unknown ids is
+ * descope salvage and is dropped, and anything over `MAX_ORPHAN_DROP_SHARE` of
+ * the list is drift, which keeps every case and becomes an `id-drift` finding no
+ * re-run can act on. Pure — the caller writes verify.json and records it.
+ */
+export function reconcileOrphans(
+  results: readonly CaseLike[], testcaseIds: ReadonlySet<string> | null,
+): OrphanVerdict {
+  const orphans = orphanIds(results, testcaseIds);
+  if (!orphans.length) return { drop: [], drift: null };
+  if (orphans.length <= results.length * MAX_ORPHAN_DROP_SHARE) return { drop: orphans, drift: null };
+  return {
+    drop: [],
+    drift: {
+      id: DRIFT_ID,
+      kind: 'id-drift',
+      detail: `${orphans.length} of ${results.length} case(s) reported in verify.json are not in `
+        + `testcases.json (${orphans.join(', ')}) — the two lists disagree wholesale, so nothing was dropped`,
+    },
+  };
+}
+
+/**
+ * Pure: everything wrong with a verify output. An orphan id — or, past the drop
+ * floor, the one `id-drift` finding that stands for all of them — and, for every
  * case labelled `pre-existing` — a missing evidence line or a screenshot that
  * is absent or not on disk. `pre-existing` is the only label checked for proof
  * because it is the only one that lets a failing case through unchallenged.
@@ -113,8 +163,13 @@ export function gradeVerify(
   screenshotOnDisk: (file: string) => boolean,
 ): VerifyEvalIssue[] {
   const issues: VerifyEvalIssue[] = [];
-  for (const id of orphanIds(results, testcaseIds)) {
-    issues.push({ id, kind: 'orphan-id', detail: `${id} is reported in verify.json but is not a case in testcases.json` });
+  const { drop, drift } = reconcileOrphans(results, testcaseIds);
+  if (drift) {
+    issues.push(drift);
+  } else {
+    for (const id of drop) {
+      issues.push({ id, kind: 'orphan-id', detail: `${id} is reported in verify.json but is not a case in testcases.json` });
+    }
   }
   for (const r of results) {
     if (r.result !== 'pre-existing') continue;
@@ -137,14 +192,21 @@ export function evalPasses(issues: readonly VerifyEvalIssue[]): boolean {
 }
 
 /**
+ * The finding kinds a scoped verify re-run can act on. The id findings are not
+ * among them: an orphan is dropped and a drift is for a person, and neither
+ * leaves a case a session could be asked to run.
+ */
+const RERUNNABLE: ReadonlySet<VerifyIssueKind> = new Set<VerifyIssueKind>(['no-evidence', 'no-screenshot']);
+
+/**
  * The case ids a scoped re-run can act on — the `pre-existing` findings only.
- * Orphan ids are dropped, not re-run, so they are never handed to a session.
+ * Orphan and drift ids are never handed to a session.
  */
 export function rerunnable(issues: readonly VerifyEvalIssue[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const i of issues) {
-    if (i.kind === 'orphan-id') continue;
+    if (!RERUNNABLE.has(i.kind)) continue;
     if (!seen.has(i.id)) {
       seen.add(i.id);
       out.push(i.id);
@@ -155,7 +217,7 @@ export function rerunnable(issues: readonly VerifyEvalIssue[]): string[] {
 
 /** The feedback a scoped re-run is given: what each case must fix, worded for the prompt. */
 export function feedbackNote(issues: readonly VerifyEvalIssue[]): string {
-  const rerun = issues.filter((i) => i.kind !== 'orphan-id');
+  const rerun = issues.filter((i) => RERUNNABLE.has(i.kind));
   const lines = rerun.map((i) => `- **${i.id}**: ${i.detail}`);
   return [
     'A deterministic check of your last run found `pre-existing` label(s) without the proof the '
@@ -185,6 +247,7 @@ export interface VerifyEvalTotals {
   issuesOpen: number;
   noEvidence: number;
   noScreenshot: number;
+  idDrift: number;
 }
 
 export function summariseVerifyEval(records: readonly VerifyEvalRecord[]): VerifyEvalTotals {
@@ -201,6 +264,7 @@ export function summariseVerifyEval(records: readonly VerifyEvalRecord[]): Verif
     issuesOpen: open.length,
     noEvidence: count('no-evidence'),
     noScreenshot: count('no-screenshot'),
+    idDrift: count('id-drift'),
   };
 }
 
@@ -222,6 +286,6 @@ export function formatVerifyEval(records: readonly VerifyEvalRecord[]): string[]
     '',
     `tickets ${t.tickets}  rounds ${t.rounds}  passed ${t.passed}/${t.tickets}  unresolved ${t.unresolved}`,
     `orphans dropped ${t.orphansDropped}  issues still open ${t.issuesOpen}: `
-      + `no evidence ${t.noEvidence}, no screenshot ${t.noScreenshot}`,
+      + `no evidence ${t.noEvidence}, no screenshot ${t.noScreenshot}, id drift ${t.idDrift}`,
   ];
 }

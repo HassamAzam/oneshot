@@ -100,7 +100,7 @@ import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import {
   MAX_VERIFY_EVAL_RETRIES, VERIFY_EVAL_RECORD, appendRound as appendVerifyEvalRound, dropOrphans,
-  feedbackNote, gradeVerify, orphanIds, rerunnable,
+  feedbackNote, gradeVerify, reconcileOrphans, rerunnable,
   type VerifyEvalRecord, type VerifyEvalRound,
 } from '../lib/verifyeval.js';
 import { schemaFor } from './schemas.js';
@@ -2049,11 +2049,14 @@ export async function runTicket(
       // Two findings, two resolutions. An ORPHAN id (reported but not in
       // testcases.json) is #259's TC-15: a case the plan descoped that verify
       // kept failing, blocking the merge on retired work. It cannot be re-run,
-      // so it is dropped here, by the conductor, with no model lap. A
-      // 'pre-existing' label without its proof IS a real case, so it is handed
-      // to ONE scoped re-run with the finding as feedback. Whatever still stands
-      // after that is recorded with a warning and the run continues: this eval
-      // never blocks, never cycles to implement, never retries a second time.
+      // so it is dropped here, by the conductor, with no model lap — up to the
+      // floor in reconcileOrphans(), past which the two lists disagree wholesale
+      // and the whole list is KEPT and flagged, because emptying verify.json
+      // leaves the merge gate nothing to fail on. A 'pre-existing' label without
+      // its proof IS a real case, so it is handed to ONE scoped re-run with the
+      // finding as feedback. Whatever still stands after that is recorded with a
+      // warning and the run continues: this eval never blocks, never cycles to
+      // implement, never retries a second time.
       if (r.cfg.name === 'verify' && r.out.ok && !overruled.has(r)) {
         const tcCases = readArtifact<{ cases?: Array<{ id?: unknown }> }>(iid, 'testcases.json')?.cases;
         const tcIds = Array.isArray(tcCases)
@@ -2067,28 +2070,42 @@ export async function runTicket(
         };
 
         let results = (r.out.data?.results ?? []) as CaseResult[];
-        const dropped = orphanIds(results, tcIds);
+        const { drop: dropped, drift } = reconcileOrphans(results, tcIds);
         if (dropped.length) {
           results = dropOrphans(results, tcIds);
           r.out.data = { ...r.out.data, results };
           writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
           log.warn(`verify-eval dropped ${dropped.length} case(s) not in testcases.json: ${dropped.join(', ')}`);
         }
+        if (drift) log.warn(`verify-eval kept every case on #${iid} — ${drift.detail}`);
         let issues = gradeVerify(results, tcIds, onDisk);
+
+        // Drift suspends the re-run too: when the lists disagree about which
+        // cases exist, a session scoped to ids out of that list has nothing to
+        // prove. The finding carries no case a re-run could act on, so round 0
+        // closes it as unresolved and the run continues.
+        const toRerun = drift ? [] : rerunnable(issues);
         writeRound({
           at: new Date().toISOString(), attempt: 0, droppedOrphans: dropped, issues,
-          pass: issues.length === 0, unresolved: false,
+          pass: issues.length === 0, unresolved: issues.length > 0 && toRerun.length === 0,
         });
 
-        const toRerun = rerunnable(issues);
         if (toRerun.length) {
           log.phase(`verify-eval re-running ${toRerun.length} pre-existing case(s) for proof: ${toRerun.join(', ')}`, { iid });
           const merged = await runScopedVerifyForEval(r.cfg, toRerun, feedbackNote(issues), results);
-          if (merged) {
-            results = dropOrphans(merged, tcIds);
-            r.out.data = { ...r.out.data, results };
-            writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
-          }
+          // Written back on every outcome, not just a merge. By the time the
+          // re-run returns, the scoped session has already overwritten
+          // verify.json with its own short list — phase.ts writes the artifact
+          // whenever the session produced data, `ok` or not, and a session that
+          // returns `{blocked: ..., results: []}` produced data. So on a merge
+          // this stores the folded list, and on a re-run that blocked or died it
+          // puts `results` back exactly as it stood, which is the baseline.
+          // Leaving the scoped list on disk would hand the MR note an empty
+          // verify section, the next lap's prompt no cases, and a resumed run's
+          // qualityGate a list whose real failures are gone.
+          if (merged) results = dropOrphans(merged, tcIds);
+          r.out.data = { ...r.out.data, results };
+          writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
           issues = gradeVerify(results, tcIds, onDisk);
           const unresolved = issues.length > 0;
           writeRound({ at: new Date().toISOString(), attempt: 1, droppedOrphans: [], issues, pass: !unresolved, unresolved });
@@ -3117,7 +3134,8 @@ export async function runTicket(
    * 'infra', never 'failed', so this re-run can never spend the implement↔verify
    * cycle budget (`failedLapsOf` ignores 'infra'). Returns the merged results,
    * or null when it could not run or the session did not finish — the caller
-   * then records the finding as unresolved and carries on. Never blocks.
+   * records the finding as unresolved, restores verify.json from the baseline it
+   * passed in, and carries on. Never blocks.
    */
   async function runScopedVerifyForEval(
     cfgV: PhaseConfig, scope: string[], feedback: string, baseline: CaseResult[],
