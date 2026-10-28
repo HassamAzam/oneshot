@@ -32,6 +32,8 @@ import { DESIGN_DIR, NEW_TOKENS_FILE, TOKENS_FILE } from '../lib/designtokens.js
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import { PRIOR_ART_KINDS } from '../conductor/schemas.js';
+import { coverageRubric } from '../lib/rubric.js';
+import { requirementsFrom } from '../lib/testcaseseval.js';
 import {
   GITLAB_PROJECT_URL, countsAsFailure, ticketScopeIds,
   type CaseResult, type DesignArtifact, type Finding, type Screenshot, type TestCase,
@@ -360,6 +362,34 @@ function reviewGateFeedbackBlock(
   return `\n## ${heading}\nThis ticket carries **${label}**: a human read an earlier version of this and replied ` +
     'with the feedback below instead of `approved`. Address it directly.\n\n' +
     `${rounds.map((f, i) => `### Round ${i + 1}\n${f}`).join('\n\n')}\n`;
+}
+
+/**
+ * The automatic evaluation's findings, for the `testcases` re-run they caused.
+ * Its own heading and its own source (journal.testcasesEval), so a reader of
+ * the prompt — and the session — can never take a model's finding for a
+ * human reviewer's instruction.
+ */
+function evalFeedbackBlock(feedback: string | null | undefined): string {
+  if (!feedback?.trim()) return '';
+  return '\n## Automatic evaluation of the current list\nAn evaluator checked the current list against ' +
+    'this ticket and found the gaps below, each with its evidence. It is not a human reviewer. Close ' +
+    `each gap; keep what it lists as already covered.\n\n${feedback.trim()}\n`;
+}
+
+/**
+ * The list a revision starts from, in full. Read off disk first because that is
+ * what the gate approved against and what an appended edge case rewrote; the
+ * prior artifact is the fallback. Empty unless this is a revision — a first
+ * write has no list to start from.
+ */
+function currentListBlock(ctx: PromptCtx): string {
+  const revising = Boolean(ctx.journal.testcasesApproval?.feedback?.length)
+    || Boolean(ctx.journal.testcasesEval?.feedback?.trim());
+  if (!revising) return '';
+  const onDisk = readArtifact<{ cases?: TestCase[] }>(ctx.ticket.iid, 'testcases.json')?.cases;
+  const list = onDisk?.length ? onDisk : testCases(ctx);
+  return `\n## The current list — the one you are revising\n${caseList(list, { steps: true })}\n`;
 }
 
 // ------------------------------------------------------------------ slicing
@@ -1467,12 +1497,14 @@ ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 
 ## What implement (phase 3) actually built
 ${JSON.stringify(ctx.prior.implement ?? {}, null, 2)}
-${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'QA feedback on an earlier version of this list')}${betaBlock(ctx, 'testcases')}
+${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'QA feedback on an earlier version of this list')}${evalFeedbackBlock(ctx.journal.testcasesEval?.feedback)}${currentListBlock(ctx)}${betaBlock(ctx, 'testcases')}
 Write the test cases for this ticket.
 
-If there is QA feedback above, you are REVISING a list that already exists, not writing a new
-one — the current list is in \`testcases.json\` in your worktree and you output the whole
-revised list. Route each point by what it asks for: a case to ADD is appended, a case to DROP
+If there is QA feedback or an automatic evaluation above, you are REVISING the current list shown
+above, not writing a new one, and you output the whole revised list. Keep every case nobody asked
+you to change exactly as it is, id included: a revision that fixes one gap by dropping coverage
+the list already had is a worse list. For evaluation findings, add or edit cases to close each
+gap named; nothing else is asked of you. For QA feedback, route each point by what it asks for: a case to ADD is appended, a case to DROP
 is removed outright, a case to CHANGE is edited where it stands and keeps its id. "TC-05 is
 replaced by the three cases below" means TC-05 is GONE and three cases take its place — it does
 not mean four cases. Never restate the reviewer's instruction as a case: a scenario reading
@@ -1623,6 +1655,43 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
   final fields). If this session dies at its cap anyway, the conductor salvages that file
   instead of blocking the run and throwing every turn you spent away. A session that kept it
   current has already succeeded, whatever happens to its last turn.`,
+
+  'testcases-eval': (ctx) => {
+    const requirements = requirementsFrom(
+      artifact<{ acceptanceCriteria: string[] }>(ctx, 'research').acceptanceCriteria ?? [],
+    );
+    return `${ticketBlock(ctx.ticket)}
+
+## The requirements — judge against these ids only
+${requirements.map((r) => `  - ${r.id}: ${r.text}`).join('\n') || '  (none recorded)'}
+
+These are the acceptance criteria \`research\` read off this ticket, numbered by position. The list is
+FIXED: you do not decide what the ticket requires, and every evaluation of this ticket is judged
+against these exact ids. A requirement above you believe is wrong, and a requirement you believe is
+missing from it, are both FINDINGS — never a change to the list.
+
+## The test-case list to evaluate
+${caseList(testCases(ctx), { steps: true })}
+
+## The rubric — what "covered" means
+
+${coverageRubric()}
+
+## Your job
+
+Judge whether this list tests what the requirements above demand. You do not write or fix cases; the
+conductor sends your findings back to the phase that does.
+
+1. **Coverage.** One entry in \`coverage\` per requirement id above — the one case that covers it under
+   the rubric, or \`none\`. A case id you name must be in the list above.
+2. **Findings.** What is missing or wrong, each rated and evidenced exactly as the rubric defines.
+
+Do NOT list every theoretically possible edge. A list that covers what the requirements demand and
+the edges this change can plausibly break is complete, and \`findings: []\` is then the right answer.
+
+The change is on \`${ctx.branch ?? 'the ticket branch'}\` in your worktree: \`git diff origin/${baseBranch()}\`
+shows it. Read only what a requirement or a finding needs. Change nothing — you are read-only.`;
+  },
 
   implement: (ctx) => {
     const r = (ctx.prior.research ?? {}) as {

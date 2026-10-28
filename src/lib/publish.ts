@@ -27,6 +27,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { basename, extname, isAbsolute, join } from 'node:path';
 import { artifactDir, localTestsPatchFile, projectConfig, reviewersConfig, WORK_REPO } from './config.js';
 import { readArtifact, readJournal, updateJournal, type RunJournal } from './artifacts.js';
+import { EVAL_RECORD, unresolvedSection, type EvalRecord } from './testcaseseval.js';
 import {
   addIssueNote, addMergeRequestNote, mergeRequestUrl, projectUrl, uploadFile, type Upload,
 } from './gitlab.js';
@@ -740,6 +741,19 @@ export function localTestsStartNote(s: LocalTestsStart): string {
 }
 
 /**
+ * The published test-case note. `evaluation` is the automatic coverage check's
+ * open gaps (testcaseseval.unresolvedSection), carried here instead of in a
+ * comment of its own; empty when there is nothing to act on.
+ */
+export function testcasesNoteBody(cases: TestCase[], evaluation: string): string {
+  const high = cases.filter((c) => c.blast === 'high').length;
+  return `**Test cases** — ${cases.length} case(s), ${high} high blast radius. ` +
+    'CSV attached in the team format (Test Scenario · Pre Condition · Steps). ' +
+    'This one list is executed against a real browser on the branch, and is the same list the screenshots come from.' +
+    (evaluation ? `\n\n${evaluation}` : '');
+}
+
+/**
  * What the flow and file-table renderers dropped or trimmed while drawing a
  * plan. `renderPlanMd` keeps only the markdown, so the warnings are gathered
  * here and logged once per published plan rather than once per rendering.
@@ -779,11 +793,8 @@ const SPECS: Spec[] = [
     build: (data, ctx) => {
       const cases = (data.cases as TestCase[]) ?? [];
       if (!cases.length) return null;
-      const high = cases.filter((c) => c.blast === 'high').length;
       return {
-        body: `**Test cases** — ${cases.length} case(s), ${high} high blast radius. ` +
-          'CSV attached in the team format (Test Scenario · Pre Condition · Steps). ' +
-          'This one list is executed against a real browser on the branch, and is the same list the screenshots come from.',
+        body: testcasesNoteBody(cases, unresolvedSection(readArtifact<EvalRecord>(ctx.iid, EVAL_RECORD))),
         attachments: [{
           name: `testcases-${ctx.iid}.csv`,
           content: renderTestcasesCsv(cases),

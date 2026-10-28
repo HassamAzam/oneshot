@@ -486,6 +486,62 @@ export const TESTCASES_SCHEMA = phaseSchema({
   ),
 }, ['module', 'lv', 'cases', 'passesEmpty']);
 
+/**
+ * The on-demand `testcases-eval` judgement of one test-case list against its
+ * ticket's acceptance criteria.
+ *
+ * The requirements are GIVEN — research's acceptance criteria, numbered AC1,
+ * AC2, … in the prompt — so this session never lists, proposes or withdraws
+ * one; it maps coverage onto the ids it was handed and reports what is missing.
+ * What "covered" means, and what each severity means, are stated once in
+ * evals/testcases-eval/rubric.md, which the prompt embeds in full: nothing here
+ * restates the rule, because two statements of it drift.
+ *
+ * The conductor, not this session, decides what a finding costs — see
+ * src/lib/testcaseseval.ts — so every field here is evidence, not a verdict on
+ * the run.
+ */
+export const TESTCASES_EVAL_SCHEMA = phaseSchema({
+  coverage: {
+    type: 'array',
+    description: 'Exactly one entry per requirement id you were given, in order.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        requirement: str('The given requirement id: AC1, AC2, …'),
+        coveredBy: str('The ONE case id that covers it under the rubric in your prompt, or "none".'),
+      },
+      required: ['requirement', 'coveredBy'],
+    },
+  },
+  findings: {
+    type: 'array',
+    description: 'Gaps and defects in the list. Empty when there are none — that is a valid answer.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: str('F1, F2, …'),
+        kind: {
+          type: 'string',
+          enum: ['missing', 'incorrect', 'redundant', 'contradictory'],
+          description: 'missing: no case covers it. incorrect: a case expects behaviour the ticket or code contradicts. redundant / contradictory: about the cases named.',
+        },
+        requirement: str('The given requirement id it concerns, or empty string.'),
+        cases: strArr('Case ids the finding is about. Empty for a missing scenario — except an edge under a covered requirement that its covering case stops short of: name that case.'),
+        gap: str('What is missing or wrong, in one sentence.'),
+        evidence: str('A verbatim quote from the ticket, or file:line. Empty string if you have none. Checked mechanically — see the rubric.'),
+        validity: { type: 'string', enum: ['supported', 'unsupported', 'uncertain'], description: 'Rated as the rubric defines these.' },
+        relevance: { type: 'string', enum: ['in-scope', 'out-of-scope'], description: 'Rated as the rubric defines these.' },
+        severity: { type: 'string', enum: ['critical', 'major', 'minor'], description: 'Rated as the rubric defines these.' },
+        rationale: str('Why this severity, in one line.'),
+      },
+      required: ['id', 'kind', 'requirement', 'cases', 'gap', 'evidence', 'validity', 'relevance', 'severity', 'rationale'],
+    },
+  },
+}, ['coverage', 'findings']);
+
 export const IMPLEMENT_SCHEMA = phaseSchema({
   commits: strArr('Short SHAs committed this lap.'),
   filesChanged: strArr('Repo-relative paths.'),
@@ -914,6 +970,7 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   design: DESIGN_SCHEMA,
   plan: PLAN_SCHEMA,
   testcases: TESTCASES_SCHEMA,
+  'testcases-eval': TESTCASES_EVAL_SCHEMA,
   implement: IMPLEMENT_SCHEMA,
   review: FINDINGS_SCHEMA,
   verify: VERIFY_SCHEMA,
