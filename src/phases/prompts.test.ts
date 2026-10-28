@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeDesignTokens } from '../lib/designtokens.js';
+import { coverageRubric } from '../lib/rubric.js';
 import type { Ticket } from './types.js';
 import { PRIOR_ART_KINDS, RESEARCH_SCHEMA } from '../conductor/schemas.js';
 
@@ -1465,10 +1466,9 @@ test('a pending repair tells design which files to produce and to change nothing
 // ------------------------------------------- testcases-eval judges the ticket
 
 /**
- * The evaluator judges a list against the ticket, so it is shown the ticket,
- * the code and the list — and nothing of how the list was made. Fixture iids
- * are in the reserved 990000+ band because a re-evaluation reads the ticket's
- * record off disk.
+ * The evaluator judges a list against the ticket's acceptance criteria, so it
+ * is shown the ticket, those criteria, the rubric and the list — and nothing of
+ * how the list was made. Fixture iids are in the reserved 990000+ band.
  */
 const EVAL_CASES = {
   summary: 'GENERATOR-REASONING: wrote nine cases, skipped the year-end pass',
@@ -1486,7 +1486,7 @@ function evalPrompt(iid: number, record?: unknown): string {
   }
   try {
     const c = ctx(ticket({ iid, description: 'Carry the leave balance forward at year end.' }), {
-      research: { acceptanceCriteria: ['Leave balance carries forward at year end'] },
+      research: { acceptanceCriteria: ['Leave balance carries forward at year end', 'A zero balance opens at zero'] },
       testcases: EVAL_CASES,
     });
     (c as { journal: unknown }).journal = { testcasesApproval: { feedback: ['QA-GATE-FEEDBACK: drop TC-01'] } };
@@ -1505,116 +1505,51 @@ test('testcases-eval is an on-demand, read-only phase outside the check group', 
   assert.equal(names.indexOf('review'), names.indexOf('testcases') + 1);
 });
 
-test('the first evaluation asks for requirements with evidence and shows every case in full', () => {
+test('the requirements are research\'s criteria, numbered, and the judge is told the list is fixed', () => {
   const p = evalPrompt(990201);
-  assert.match(p, /## First evaluation — list the requirements/);
-  assert.match(p, /verbatim\s+quote from the ticket/);
+  assert.match(p, /## The requirements — judge against these ids only/);
+  assert.match(p, /- AC1: Leave balance carries forward at year end/);
+  assert.match(p, /- AC2: A zero balance opens at zero/);
+  assert.match(p, /The list is\s+FIXED/);
+  assert.match(p, /are both FINDINGS — never a change to the list/);
+});
+
+test('the judge is never asked to list, propose or withdraw a requirement', () => {
+  const p = evalPrompt(990202);
+  assert.doesNotMatch(p, /list the requirements/i);
+  assert.doesNotMatch(p, /proposedRequirements|invalidRequirements/);
+  assert.doesNotMatch(p, /RE-EVALUATION|frozen/i);
+});
+
+test('the one rubric file is embedded, so the judge and a labeller read the same rule', () => {
+  const p = evalPrompt(990203);
+  const rubric = coverageRubric();
+  assert.ok(p.includes(rubric), 'the rubric is embedded verbatim');
+  assert.match(p, /would \*\*fail if the software got that requirement wrong\*\*/);
+  assert.match(p, /## The rubric — what "covered" means/);
+  assert.ok(rubric.includes('## Not covered'), 'the anchored not-covered examples travel with it');
+});
+
+test('every case is shown in full, with its steps and expected result', () => {
+  const p = evalPrompt(990204);
   assert.match(p, /TC-01 \[high\] Verify that balance carries forward/);
   assert.match(p, /1\. Close the year/);
   assert.match(p, /expects: The new year opens with 3/);
-  assert.match(p, /never this list/);
 });
 
 test('the evaluator never sees the generator\'s summary or the Review gate\'s feedback', () => {
-  const p = evalPrompt(990202);
+  const p = evalPrompt(990205);
   assert.doesNotMatch(p, /GENERATOR-REASONING/);
   assert.doesNotMatch(p, /QA-GATE-FEEDBACK/);
 });
 
-test('a re-evaluation is held to the frozen ids and never shown its own earlier findings', () => {
-  const p = evalPrompt(990203, {
-    iid: 990203, project: 'p', runId: 'r',
-    requirements: [{ id: 'R1', text: 'Balance carries forward', source: 'ticket', evidence: '"Carry the leave balance forward"' }],
+test('a record on disk changes nothing: every attempt is judged by the same prompt, never shown its own findings', () => {
+  const record = {
+    iid: 990206, project: 'p', runId: 'r',
+    requirements: [{ id: 'AC1', text: 'Leave balance carries forward at year end' }],
     attempts: [{ n: 0, findings: [{ gap: 'EARLIER-FINDING: no case for a zero balance' }], feedbackSent: 'EARLIER-FEEDBACK' }],
-  });
-  assert.match(p, /This is a RE-EVALUATION/);
-  assert.match(p, /R1 \[ticket\] Balance carries forward/);
-  assert.match(p, /`requirements: \[\]`/);
-  assert.doesNotMatch(p, /EARLIER-FINDING|EARLIER-FEEDBACK/);
-});
-
-test('the first evaluation numbers research\'s criteria and asks each requirement to name the one it comes from', () => {
-  const p = evalPrompt(990205);
-  assert.match(p, /AC1: Leave balance carries forward at year end/);
-  assert.match(p, /Set `criterion` to the research criterion/);
-  assert.match(p, /at least\s+four words long/);
-  assert.match(p, /`invalidRequirements: \[\]`/);
-});
-
-test('requirements frozen before any attempt was recorded still make it a re-evaluation', () => {
-  const p = evalPrompt(990206, {
-    iid: 990206, project: 'p', runId: 'r', frozen: true, attempts: [],
-    requirements: [{ id: 'R1', text: 'Balance carries forward', source: 'ticket', evidence: '"Carry the leave balance forward"', criterion: 'AC1' }],
-  });
-  assert.match(p, /This is a RE-EVALUATION/);
-  assert.match(p, /R1 \[ticket, AC1\] Balance carries forward/);
-  assert.match(p, /`invalidRequirements`/);
-  assert.match(p, /adopted only when another judgement proposes it too/);
-});
-
-test('the evaluator is told an empty findings list is a valid answer and not to invent rules', () => {
-  const p = evalPrompt(990204);
-  assert.match(p, /`findings: \[\]` is then the right answer/);
-  assert.match(p, /never invent a business\s+rule/);
-});
-
-// --------------------------------------- a revision starts from the real list
-
-/**
- * The revise instruction used to point at a `testcases.json` in the worktree
- * that was never copied there, and the list was never in the prompt — so every
- * "revision" was a rewrite from scratch. Both revision sources (the Review gate
- * and the automatic evaluation) now get the current list, in full, and each
- * source keeps its own heading.
- */
-function testcasesPrompt(iid: number, journal: unknown, onDisk?: unknown): string {
-  const dir = runDir(iid);
-  if (onDisk) {
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'testcases.json'), JSON.stringify(onDisk));
-  }
-  try {
-    const c = ctx(ticket({ iid }), { testcases: EVAL_CASES });
-    (c as { journal: unknown }).journal = journal;
-    return promptFor(cfg('testcases'), c);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-const ON_DISK = {
-  cases: [{
-    id: 'TC-07', scenario: 'Verify that the appended edge case is kept', precondition: '',
-    steps: ['Open the year-end screen'], expected: 'The edge holds', pass: ['boundary'], blast: 'medium',
-  }],
-};
-
-test('a first write is shown no current list and no evaluation', () => {
-  const p = testcasesPrompt(990211, {});
-  assert.doesNotMatch(p, /## The current list/);
-  assert.doesNotMatch(p, /## Automatic evaluation/);
-});
-
-test('a Review-gate revision is shown the list on disk in full, steps and all', () => {
-  const p = testcasesPrompt(990212, { testcasesApproval: { feedback: ['add a case for a negative balance'] } }, ON_DISK);
-  assert.match(p, /## The current list — the one you are revising/);
-  assert.match(p, /TC-07 \[medium\] Verify that the appended edge case is kept/);
-  assert.match(p, /1\. Open the year-end screen/);
-  assert.doesNotMatch(p, /in your worktree and you output/);
-  assert.doesNotMatch(p, /## Automatic evaluation/);
-});
-
-test('an evaluation retry gets its findings under their own heading, never as QA feedback', () => {
-  const p = testcasesPrompt(990213, { testcasesEval: { attempts: 1, status: 'fail', feedback: 'Gaps to fix:\n- [critical] missing (R2): no zero-balance case' } });
-  assert.match(p, /## Automatic evaluation of the current list/);
-  assert.match(p, /It is not a human reviewer/);
-  assert.match(p, /no zero-balance case/);
-  assert.doesNotMatch(p, /QA feedback on an earlier version/);
-  assert.match(p, /TC-01 \[high\] Verify that balance carries forward/);
-});
-
-test('an evaluation with no pending feedback adds nothing to the prompt', () => {
-  const p = testcasesPrompt(990214, { testcasesEval: { attempts: 1, status: 'pass', feedback: null } });
-  assert.doesNotMatch(p, /## Automatic evaluation/);
-  assert.doesNotMatch(p, /## The current list/);
+  };
+  const resumed = evalPrompt(990206, record);
+  assert.doesNotMatch(resumed, /EARLIER-FINDING|EARLIER-FEEDBACK/);
+  assert.equal(resumed.replace(/990206/g, 'IID'), evalPrompt(990206).replace(/990206/g, 'IID'));
 });

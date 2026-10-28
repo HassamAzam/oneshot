@@ -56,28 +56,30 @@ test('the printed report has a row per ticket and the pooled coverage', () => {
   assert.deepEqual(formatReport([]), ['No ticket has a test-case evaluation yet.']);
 });
 
-test('judge agreement and reviewer additions are summed across tickets', () => {
+test('reviewer additions are summed across tickets', () => {
   const t = summarise([
-    row(1, { score: score({ coverageCalls: 8, disputed: 1 }), review: { added: ['a', 'b'], removed: [], revisions: 1 } }),
-    row(2, { score: score({ coverageCalls: 2, disputed: 0 }), review: { added: [], removed: ['c'], revisions: 0 } }),
+    row(1, { review: { added: ['a', 'b'], removed: [], revisions: 1 } }),
+    row(2, { review: { added: [], removed: ['c'], revisions: 0 } }),
     row(3),
   ]);
-  assert.equal(t.coverageCalls, 10);
-  assert.equal(t.disputed, 1);
   assert.equal(t.reviewed, 2);
   assert.equal(t.reviewerAddedOn, 1);
   assert.equal(t.reviewerAdded, 2);
-  const lines = formatReport([row(1, { score: score({ coverageCalls: 8, disputed: 1 }) })]);
-  assert.ok(lines.some((l) => l.includes('judge agreement: 88% of 8 coverage call(s) (1 split between passes)')));
+  assert.ok(formatReport([row(1, { review: { added: ['a'], removed: [], revisions: 1 } })])
+    .some((l) => l.includes('reviewers added cases after the evaluation on 1/1')));
+});
+
+test('the report no longer claims a judge-agreement figure, which measured self-consistency', () => {
+  assert.ok(!formatReport([row(1)]).some((l) => l.includes('judge agreement')));
 });
 
 const tc = (id: string) => ({ id, scenario: id, precondition: '', steps: [], expected: '', pass: ['happy' as const], blast: 'low' as const });
 const graded = (): EvalRecord => ({
   iid: 5, project: 'p', runId: 'run-1',
-  requirements: ['R1', 'R2', 'R3', 'R4'].map((id) => ({ id, text: id, source: 'ticket' as const, evidence: '' })),
+  requirements: ['AC1', 'AC2', 'AC3', 'AC4'].map((id) => ({ id, text: id })),
   attempts: [{
     n: 0, at: '', lap: 0, salvaged: false, cases: [tc('TC-01'), tc('TC-02')],
-    coverage: { R1: 'TC-01', R2: 'TC-02', R3: null, R4: 'TC-09' }, findings: [], proposedRequirements: [], dropped: [],
+    coverage: { AC1: 'TC-01', AC2: 'TC-02', AC3: null, AC4: 'TC-09' }, findings: [], dropped: [],
     status: 'pass', feedbackSent: null,
   }],
   final: { status: 'pass', chosenAttempt: 0, stopReason: 'passed', unresolved: [] },
@@ -85,24 +87,24 @@ const graded = (): EvalRecord => ({
 
 test('a record is graded against labels for its run: real, missed and coverage calls', () => {
   const gold: GoldLabel = {
-    project: 'p', runId: 'run-1', real: { R1: 'TC-01', R2: null, R3: 'TC-02' }, notReal: ['R4'], missed: ['Sorted by date'],
+    project: 'p', runId: 'run-1', real: { AC1: 'TC-01', AC2: null, AC3: 'TC-02' }, notReal: ['AC4'], missed: ['Sorted by date'],
   };
   const g = gradeAgainstGold(graded(), gold);
   assert.notEqual(typeof g, 'string');
   assert.deepEqual(g, {
-    iid: 5, real: 3, notReal: 1, missed: 1, unlabelled: [], retiredRight: 0, retiredWrong: 0,
-    coverageLabelled: 3, coverageAgree: 1, falseCovered: 1, falseGap: 1, misattributed: 0,
+    iid: 5, real: 3, notReal: 1, missed: 1, unlabelled: [],
+        coverageLabelled: 3, coverageAgree: 1, falseCovered: 1, falseGap: 1, misattributed: 0,
   });
   const lines = formatGold([g as Exclude<typeof g, string>]);
-  assert.ok(lines.some((l) => l.includes('75% of those held are real, 75% of the real ones were listed')));
+  assert.ok(lines.some((l) => l.includes(
+    '75% of those judged against are real requirements, 75% of the real requirements are stated as one')));
   assert.ok(lines.some((l) => l.includes(
     '33% of 3 labelled call(s) agree — 1 falsely covered, 1 falsely missing, 0 on the wrong case')));
-  assert.ok(!lines.some((l) => l.startsWith('retired:')));
 });
 
 test('a judge that covers a requirement with the wrong case is counted apart from overclaiming', () => {
   const g = gradeAgainstGold(graded(), {
-    project: 'p', runId: 'run-1', real: { R1: 'TC-07' }, notReal: [], missed: [],
+    project: 'p', runId: 'run-1', real: { AC1: 'TC-07' }, notReal: [], missed: [],
   }) as Exclude<ReturnType<typeof gradeAgainstGold>, string>;
   assert.equal(g.coverageAgree, 0);
   assert.equal(g.misattributed, 1);
@@ -111,54 +113,30 @@ test('a judge that covers a requirement with the wrong case is counted apart fro
   assert.ok(formatGold([g]).some((l) => l.includes('1 on the wrong case')));
 });
 
-test('a retired requirement is scored apart: credit when not real, a recall loss when real', () => {
-  const withRetired = (): EvalRecord => ({
-    ...graded(),
-    requirements: [{ id: 'R1', text: 'One', source: 'ticket', evidence: 'e' }],
-    retired: [{ id: 'R2', text: 'Two', source: 'ticket', evidence: 'e' }],
-  });
-  const right = gradeAgainstGold(withRetired(), {
-    project: 'p', runId: 'run-1', real: { R1: 'TC-01' }, notReal: ['R2'], missed: [],
-  }) as Exclude<ReturnType<typeof gradeAgainstGold>, string>;
-  assert.equal(right.notReal, 0, 'a withdrawn requirement must not count against precision');
-  assert.equal(right.retiredRight, 1);
-  const lines = formatGold([right]);
-  assert.ok(lines.some((l) => l.includes('100% of those held are real')));
-  assert.ok(lines.some((l) => l.includes('retired: 1 withdrawn rightly, 0 real requirement(s) withdrawn')));
-
-  const wrong = gradeAgainstGold(withRetired(), {
-    project: 'p', runId: 'run-1', real: { R1: 'TC-01', R2: 'TC-02' }, notReal: [], missed: [],
-  }) as Exclude<ReturnType<typeof gradeAgainstGold>, string>;
-  assert.equal(wrong.real, 1, 'a withdrawn requirement is not one the judge still holds');
-  assert.equal(wrong.retiredWrong, 1);
-  assert.equal(wrong.coverageLabelled, 1, 'a withdrawn requirement owes the kept list no coverage');
-  assert.ok(formatGold([wrong]).some((l) => l.includes('50% of the real ones were listed')));
-});
-
 test('labels are refused when the requirement they were written against changed', () => {
   const WORDED = 'Every amount renders with at most two decimals.';
   const record = (): EvalRecord => {
     const r = graded();
     return { ...r, requirements: [{ ...r.requirements[0]!, text: WORDED }, ...r.requirements.slice(1)] };
   };
-  const texts = { project: 'p', runId: 'run-1', real: { R1: 'TC-01' }, notReal: [], missed: [] };
+  const texts = { project: 'p', runId: 'run-1', real: { AC1: 'TC-01' }, notReal: [], missed: [] };
   assert.match(
-    String(gradeAgainstGold(record(), { ...texts, requirements: { R1: 'Something else entirely' } })),
-    /R1 has been reworded/,
+    String(gradeAgainstGold(record(), { ...texts, requirements: { AC1: 'Something else entirely' } })),
+    /AC1 has been reworded/,
   );
   assert.match(
-    String(gradeAgainstGold(record(), { ...texts, requirements: { R9: 'Gone' } })),
-    /R9 was labelled but the record no longer lists it/,
+    String(gradeAgainstGold(record(), { ...texts, requirements: { AC9: 'Gone' } })),
+    /AC9 was labelled but the record no longer holds it/,
   );
   const reflowed = gradeAgainstGold(record(), {
-    ...texts, requirements: { R1: `  ${WORDED.replace(/ /g, '\n   ')}  ` },
+    ...texts, requirements: { AC1: `  ${WORDED.replace(/ /g, '\n   ')}  ` },
   });
   assert.notEqual(typeof reflowed, 'string', 're-wrapping is not a rewording');
 });
 
 test('labels written for another run are refused, and unlabelled ids are named', () => {
   assert.match(String(gradeAgainstGold(graded(), { project: 'p', runId: 'run-0', real: {}, notReal: [], missed: [] })), /run-0/);
-  const g = gradeAgainstGold(graded(), { project: 'p', runId: 'run-1', real: { R1: 'TC-01' }, notReal: [], missed: [] });
-  assert.deepEqual((g as { unlabelled: string[] }).unlabelled, ['R2', 'R3', 'R4']);
+  const g = gradeAgainstGold(graded(), { project: 'p', runId: 'run-1', real: { AC1: 'TC-01' }, notReal: [], missed: [] });
+  assert.deepEqual((g as { unlabelled: string[] }).unlabelled, ['AC2', 'AC3', 'AC4']);
 });
 

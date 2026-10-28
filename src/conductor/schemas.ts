@@ -486,44 +486,31 @@ export const TESTCASES_SCHEMA = phaseSchema({
   ),
 }, ['module', 'lv', 'cases', 'passesEmpty']);
 
-const EVAL_REQUIREMENT = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    id: str('R1, R2, … Stable: a later attempt is judged against these exact ids.'),
-    text: str('What must be true, in one sentence.'),
-    source: {
-      type: 'string',
-      enum: ['ticket', 'bug', 'code'],
-      description: 'ticket: stated in the description or comments. bug: the reported broken behaviour. code: a rule in the changed code.',
-    },
-    evidence: str('A verbatim quote of four or more words from the ticket, or file:line on a line the change touched. Empty string if you have neither.'),
-    criterion: str('The research acceptance criterion it comes from, as AC1, AC2, …; empty string if it comes from none.'),
-  },
-  required: ['id', 'text', 'source', 'evidence', 'criterion'],
-};
-
 /**
  * The on-demand `testcases-eval` judgement of one test-case list against its
- * ticket. The conductor, not this session, decides what a finding costs — see
+ * ticket's acceptance criteria.
+ *
+ * The requirements are GIVEN — research's acceptance criteria, numbered AC1,
+ * AC2, … in the prompt — so this session never lists, proposes or withdraws
+ * one; it maps coverage onto the ids it was handed and reports what is missing.
+ * What "covered" means, and what each severity means, are stated once in
+ * evals/testcases-eval/rubric.md, which the prompt embeds in full: nothing here
+ * restates the rule, because two statements of it drift.
+ *
+ * The conductor, not this session, decides what a finding costs — see
  * src/lib/testcaseseval.ts — so every field here is evidence, not a verdict on
  * the run.
  */
 export const TESTCASES_EVAL_SCHEMA = phaseSchema({
-  requirements: {
-    type: 'array',
-    description: 'First evaluation only: every requirement the ticket establishes. On a re-evaluation, send [].',
-    items: EVAL_REQUIREMENT,
-  },
   coverage: {
     type: 'array',
-    description: 'One entry per requirement id you were given or listed.',
+    description: 'Exactly one entry per requirement id you were given, in order.',
     items: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        requirement: str('Requirement id.'),
-        coveredBy: str('The ONE case id whose precondition, steps and expected result would fail if the software got this requirement wrong, or "none".'),
+        requirement: str('The given requirement id: AC1, AC2, …'),
+        coveredBy: str('The ONE case id that covers it under the rubric in your prompt, or "none".'),
       },
       required: ['requirement', 'coveredBy'],
     },
@@ -541,53 +528,19 @@ export const TESTCASES_EVAL_SCHEMA = phaseSchema({
           enum: ['missing', 'incorrect', 'redundant', 'contradictory'],
           description: 'missing: no case covers it. incorrect: a case expects behaviour the ticket or code contradicts. redundant / contradictory: about the cases named.',
         },
-        requirement: str('The requirement id it concerns, or empty string.'),
+        requirement: str('The given requirement id it concerns, or empty string.'),
         cases: strArr('Case ids the finding is about. Empty for a missing scenario — except an edge under a covered requirement that its covering case stops short of: name that case.'),
         gap: str('What is missing or wrong, in one sentence.'),
-        evidence: str('A verbatim quote from the ticket, or file:line. Empty string if you have none.'),
-        validity: {
-          type: 'string',
-          enum: ['supported', 'unsupported', 'uncertain'],
-          description: 'supported: the evidence establishes it. uncertain: the ticket and code do not establish the expected behaviour.',
-        },
-        relevance: {
-          type: 'string',
-          enum: ['in-scope', 'out-of-scope'],
-          description: 'in-scope: named by the ticket, or on a code path this change touched.',
-        },
-        severity: {
-          type: 'string',
-          enum: ['critical', 'major', 'minor'],
-          description:
-            'critical: an acceptance criterion or the reported bug behaviour has no covering case. ' +
-            'major: an evidenced edge on a changed path (boundary, empty/null, permission, state change) is uncovered, ' +
-            'or a case expects behaviour the ticket contradicts. minor: anything else.',
-        },
+        evidence: str('A verbatim quote from the ticket, or file:line. Empty string if you have none. Checked mechanically — see the rubric.'),
+        validity: { type: 'string', enum: ['supported', 'unsupported', 'uncertain'], description: 'Rated as the rubric defines these.' },
+        relevance: { type: 'string', enum: ['in-scope', 'out-of-scope'], description: 'Rated as the rubric defines these.' },
+        severity: { type: 'string', enum: ['critical', 'major', 'minor'], description: 'Rated as the rubric defines these.' },
         rationale: str('Why this severity, in one line.'),
       },
       required: ['id', 'kind', 'requirement', 'cases', 'gap', 'evidence', 'validity', 'relevance', 'severity', 'rationale'],
     },
   },
-  proposedRequirements: {
-    type: 'array',
-    description: 'Re-evaluation only: a requirement the given list lacks that you have evidence for. Adopted only when another judgement proposes it too. [] otherwise.',
-    items: EVAL_REQUIREMENT,
-  },
-  invalidRequirements: {
-    type: 'array',
-    description: 'Re-evaluation only: a given requirement the ticket or code shows is NOT one. Retired only when another judgement agrees. [] otherwise.',
-    items: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        requirement: str('The requirement id.'),
-        evidence: str('A verbatim quote of four or more words from the ticket, or file:line, that shows it is not a requirement.'),
-        reason: str('Why it is not a requirement, in one sentence.'),
-      },
-      required: ['requirement', 'evidence', 'reason'],
-    },
-  },
-}, ['requirements', 'coverage', 'findings', 'proposedRequirements', 'invalidRequirements']);
+}, ['coverage', 'findings']);
 
 export const IMPLEMENT_SCHEMA = phaseSchema({
   commits: strArr('Short SHAs committed this lap.'),

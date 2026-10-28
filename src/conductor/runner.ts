@@ -99,8 +99,8 @@ import {
   repairDue, routeEvidenceHolds, type DesignEvalRecord, type DesignEvalRound,
 } from '../lib/designeval.js';
 import {
-  EVAL_RECORD, EvalInterrupted, JUDGE_SAMPLES, changedRanges, evalStart, evidenceHolds, judgementFrom, reviewOutcome,
-  runEvalLoop, unresolvedSection, type EvalRecord, type JudgementArtifact, type LineRange,
+  EVAL_RECORD, EvalInterrupted, changedRanges, evalStart, evidenceHolds, judgementFrom, requirementsFrom,
+  reviewOutcome, runEvalLoop, unresolvedSection, type EvalRecord, type JudgementArtifact, type LineRange,
 } from '../lib/testcaseseval.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
@@ -1587,7 +1587,8 @@ export async function runTicket(
       // against it, or a reviewer approved it, the list is pinned.
       if (phase.name === 'testcases' && prior.testcases && lapsOf(iid, 'verify') === 0
         && !j.testcasesApproval?.approved
-        && evalStart(readArtifact<EvalRecord>(iid, EVAL_RECORD), j.testcasesApproval?.feedback?.length ?? 0) === 'resume') {
+        && evalStart(readArtifact<EvalRecord>(iid, EVAL_RECORD), j.testcasesApproval?.feedback?.length ?? 0,
+          researchCriteria().length) === 'resume') {
         await evaluateTestcases(false);
       }
       i += 1;
@@ -3074,9 +3075,20 @@ export async function runTicket(
   }
 
   /**
-   * Judge a freshly written test-case list against the ticket and, while a
-   * retry-worthy gap remains, send it back to `testcases` — up to the retry cap.
-   * src/lib/testcaseseval.ts makes every decision; this only runs the sessions.
+   * Research's acceptance criteria, which are the requirements the test-case
+   * evaluation judges coverage against. The run's own artifact first, the file
+   * on disk when a later conductor picked the ticket up.
+   */
+  function researchCriteria(): string[] {
+    const r = prior.research ?? readArtifact<{ acceptanceCriteria?: string[] }>(iid, 'research.json');
+    return (r as { acceptanceCriteria?: string[] } | null)?.acceptanceCriteria ?? [];
+  }
+
+  /**
+   * Judge a freshly written test-case list against research's acceptance
+   * criteria and, while a retry-worthy gap remains, send it back to `testcases`
+   * — up to the retry cap. src/lib/testcaseseval.ts makes every decision; this
+   * only runs the sessions.
    *
    * Never fails the run. A judge that cannot answer closes the record as an
    * eval error and the list goes on as written; a stop or pause leaves the
@@ -3089,14 +3101,21 @@ export async function runTicket(
     const cfgT = list[idxT];
     if (!cfgE || !cfgT || !isImplemented(cfgE.name)) return;
     const existing = readArtifact<EvalRecord>(iid, EVAL_RECORD);
-    if (evalStart(existing, j.testcasesApproval?.feedback?.length ?? 0) === 'skip') return;
+    const requirements = requirementsFrom(researchCriteria());
+    if (evalStart(existing, j.testcasesApproval?.feedback?.length ?? 0, requirements.length) === 'skip') return;
     const onDisk = readArtifact<Record<string, unknown> & { cases?: TestCase[] }>(iid, 'testcases.json');
     if (!onDisk?.cases?.length) return;
 
     const stopping = (): boolean => Boolean(opts.signal?.aborted) || existsSync(PAUSE) || quotaParked();
-    const record: EvalRecord = existing ?? {
-      iid, project: GITLAB_PROJECT_URL(), runId, requirements: [], attempts: [],
-    };
+    /**
+     * The requirements are research's acceptance criteria, recomputed from
+     * research.json rather than carried in the record: research.json is fixed
+     * for the run, so this is idempotent, and it is the same single source the
+     * judge's prompt derives the ids it answers against from.
+     */
+    const record: EvalRecord = existing
+      ? { ...existing, requirements }
+      : { iid, project: GITLAB_PROJECT_URL(), runId, requirements, attempts: [] };
     const noteEval = (status: NonNullable<RunJournal['testcasesEval']>['status'], feedback: string | null): void => {
       j = updateJournal(iid, { testcasesEval: { attempts: record.attempts.length, status, feedback } }) ?? j;
     };
@@ -3131,19 +3150,15 @@ export async function runTicket(
       return lineCounts.get(full)!;
     };
     const ranges = await changedLines();
-    const criteria = (prior.research ?? readArtifact<{ acceptanceCriteria?: string[] }>(iid, 'research.json'))
-      ?.acceptanceCriteria as string[] | undefined;
 
     let result: Awaited<ReturnType<typeof runEvalLoop>>;
     try {
       result = await runEvalLoop({
         record, cases: onDisk.cases, lap: Math.max(0, lapsOf(iid, 'testcases') - 1), salvaged,
         persist: (r) => writeArtifact(iid, EVAL_RECORD, r),
-        evidenceHolds: (e, claim) => evidenceHolds(e, {
+        evidenceHolds: (e) => evidenceHolds(e, {
           ticketText, lines: linesIn, ...(ranges ? { changed: (p: string) => ranges.get(p) ?? null } : {}),
-        }, claim),
-        criteria: criteria ?? [],
-        samples: JUDGE_SAMPLES,
+        }),
         evaluate: async (cases) => {
           prior.testcases = { ...(prior.testcases ?? {}), cases };
           noteEval('running', null);
@@ -3185,9 +3200,6 @@ export async function runTicket(
     }
     const final = result.record.final!;
     noteEval(final.status, null);
-    if (result.record.attempts.some((a) => a.disputed?.length)) {
-      log.info(`testcases-eval #${iid}: judge passes split on ${result.record.attempts.reduce((n, a) => n + (a.disputed?.length ?? 0), 0)} coverage call(s)`);
-    }
     const coverage = final.score
       ? `, coverage ${final.score.firstCovered}/${final.score.requirements} → ${final.score.keptCovered}/${final.score.requirements}`
       : '';

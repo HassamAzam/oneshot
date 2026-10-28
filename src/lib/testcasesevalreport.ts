@@ -36,8 +36,6 @@ export interface ReportTotals {
   uncertain: number;
   judgeWeighted: number;
   retryWeighted: number;
-  coverageCalls: number;
-  disputed: number;
   reviewed: number;
   reviewerAddedOn: number;
   reviewerAdded: number;
@@ -61,7 +59,7 @@ export function summarise(rows: readonly ReportRow[]): ReportTotals {
   const totals: ReportTotals = {
     tickets: rows.length, byStatus: {}, byStop: {}, requirements: 0, firstCovered: 0, keptCovered: 0,
     passedFirstTime: 0, retried: 0, improved: 0, retries: 0, openCritical: 0, openMajor: 0, uncertain: 0,
-    judgeWeighted: 0, retryWeighted: 0, coverageCalls: 0, disputed: 0, reviewed: 0, reviewerAddedOn: 0, reviewerAdded: 0,
+    judgeWeighted: 0, retryWeighted: 0, reviewed: 0, reviewerAddedOn: 0, reviewerAdded: 0,
   };
   for (const row of rows) {
     bump(totals.byStatus, row.status);
@@ -85,8 +83,6 @@ export function summarise(rows: readonly ReportRow[]): ReportTotals {
     totals.uncertain += s.uncertain;
     totals.judgeWeighted += s.judgeWeighted;
     totals.retryWeighted += s.retryWeighted;
-    totals.coverageCalls += s.coverageCalls ?? 0;
-    totals.disputed += s.disputed ?? 0;
   }
   return totals;
 }
@@ -117,8 +113,6 @@ export function formatReport(rows: readonly ReportRow[]): string[] {
     `passed first time: ${t.passedFirstTime}/${t.tickets}   retried: ${t.retried}   improved by a retry: ${t.improved}/${t.retried}`
       + `   retries in total: ${t.retries}`,
     `still open: ${t.openCritical} critical, ${t.openMajor} major gap(s); ${t.uncertain} uncertain point(s) for a person`,
-    `judge agreement: ${percent(t.coverageCalls - t.disputed, t.coverageCalls)} of ${t.coverageCalls} coverage call(s) `
-      + `(${t.disputed} split between passes)`,
     `review gate: reviewers added cases after the evaluation on ${t.reviewerAddedOn}/${t.reviewed} reviewed ticket(s) `
       + `(${t.reviewerAdded} case(s) — gaps the evaluation missed)`,
     `cost (weighted): judge ${t.judgeWeighted.toFixed(1)}, retries ${t.retryWeighted.toFixed(1)}`,
@@ -128,9 +122,14 @@ export function formatReport(rows: readonly ReportRow[]): string[] {
 
 /**
  * A person's labels for one ticket's evaluation, written against one record
- * (`runId`): which of the judge's requirement ids are real and the case that
- * truly covers each (null when none does), which are not requirements, and
- * the real requirements the judge never listed.
+ * (`runId`), from the ticket and the rubric alone.
+ *
+ * The requirements being judged are research's acceptance criteria, so these
+ * labels grade two things at once: whether each criterion really is a
+ * requirement of this ticket (`real` / `notReal`) and whether the judge's
+ * coverage call on it matches the person's (`real`'s case ids). `missed` is a
+ * real requirement no criterion states — research under-reading the ticket,
+ * which no coverage call can catch.
  */
 export interface GoldLabel {
   project: string;
@@ -140,10 +139,10 @@ export interface GoldLabel {
   missed: string[];
   /**
    * Each labelled id's requirement text as it read when the labels were
-   * written. Requirement ids are positional and re-minted every run, so `R6`
-   * alone proves nothing: with the text stored, a renumbered or reworded
-   * requirement is refused instead of being graded as though it still meant
-   * what the labeller judged. Optional — labels without it grade on the ids.
+   * written. Ids are positional over research's criteria, so `AC6` alone
+   * proves nothing: with the text stored, a renumbered or reworded criterion is
+   * refused instead of being graded as though it still meant what the labeller
+   * judged. Optional — labels without it grade on the ids.
    */
   requirements?: Record<string, string>;
 }
@@ -153,12 +152,8 @@ export interface GoldGrade {
   real: number;
   notReal: number;
   missed: number;
-  /** Judge requirement ids the labels do not mention — labels written before an adoption, say. */
+  /** Requirement ids the labels do not mention. */
   unlabelled: string[];
-  /** Retired a requirement the labels also call not real: a withdrawal the person agrees with. */
-  retiredRight: number;
-  /** Retired a requirement the labels call real: listed it, then withdrew it, so the kept list owes it nothing. */
-  retiredWrong: number;
   coverageLabelled: number;
   coverageAgree: number;
   /** The judge said covered where the person found no covering case. */
@@ -173,38 +168,31 @@ export interface GoldGrade {
 const sameText = (a: string, b: string): boolean => a.trim().replace(/\s+/g, ' ') === b.trim().replace(/\s+/g, ' ');
 
 /**
- * Grade one evaluation against a person's labels: how many of the judge's
- * requirements are real, how many real ones it missed, and how often its
- * coverage call on the kept list matches the person's. A string says why the
- * record cannot be graded against these labels.
- *
- * A retired requirement is one the judge withdrew, so it is scored apart from
- * the ones it still holds: withdrawing what the labels call not real is credit,
- * withdrawing what they call real counts against recall like a miss, and
- * neither lands in the precision denominator.
+ * Grade one evaluation against a person's labels: how many of the criteria it
+ * judged against are real requirements, how many real ones no criterion
+ * states, and how often the judge's coverage call on the kept list matches the
+ * person's. A string says why the record cannot be graded against these labels.
  */
 export function gradeAgainstGold(record: EvalRecord, gold: GoldLabel): GoldGrade | string {
   if (record.runId !== gold.runId) return `labelled against run ${gold.runId}, the record is run ${record.runId}`;
   const kept = record.attempts.find((a) => a.n === record.final?.chosenAttempt) ?? record.attempts.at(-1);
   if (!kept) return 'nothing was evaluated';
-  const all = [...record.requirements, ...(record.retired ?? [])];
-  const listed = all.map((r) => r.id);
+  const held = record.requirements;
   for (const [id, text] of Object.entries(gold.requirements ?? {})) {
-    const held = all.find((r) => r.id === id);
-    if (!held) return `${id} was labelled but the record no longer lists it — re-label`;
-    if (!sameText(held.text, text)) return `${id} has been reworded since labelling — re-label`;
+    const match = held.find((r) => r.id === id);
+    if (!match) return `${id} was labelled but the record no longer holds it — re-label`;
+    if (!sameText(match.text, text)) return `${id} has been reworded since labelling — re-label`;
   }
-  const retired = new Set((record.retired ?? []).map((r) => r.id));
-  const active = new Set(record.requirements.map((r) => r.id));
+  const ids = new Set(held.map((r) => r.id));
   const labelled = new Set([...Object.keys(gold.real), ...gold.notReal]);
-  const covered = coveredIds(record.requirements, kept.coverage, kept.cases);
+  const covered = coveredIds(held, kept.coverage, kept.cases);
   let coverageLabelled = 0;
   let coverageAgree = 0;
   let falseCovered = 0;
   let falseGap = 0;
   let misattributed = 0;
   for (const [id, truth] of Object.entries(gold.real)) {
-    if (!active.has(id)) continue;
+    if (!ids.has(id)) continue;
     const judged = covered.has(id) ? kept.coverage[id]! : null;
     coverageLabelled += 1;
     if (judged === truth) coverageAgree += 1;
@@ -214,12 +202,10 @@ export function gradeAgainstGold(record: EvalRecord, gold: GoldLabel): GoldGrade
   }
   return {
     iid: record.iid,
-    real: Object.keys(gold.real).filter((id) => active.has(id)).length,
-    notReal: gold.notReal.filter((id) => active.has(id)).length,
+    real: Object.keys(gold.real).filter((id) => ids.has(id)).length,
+    notReal: gold.notReal.filter((id) => ids.has(id)).length,
     missed: gold.missed.length,
-    unlabelled: listed.filter((id) => !labelled.has(id)),
-    retiredRight: gold.notReal.filter((id) => retired.has(id)).length,
-    retiredWrong: Object.keys(gold.real).filter((id) => retired.has(id)).length,
+    unlabelled: [...ids].filter((id) => !labelled.has(id)),
     coverageLabelled, coverageAgree, falseCovered, falseGap, misattributed,
   };
 }
@@ -231,8 +217,6 @@ export function formatGold(grades: readonly GoldGrade[]): string[] {
   const notReal = sum((g) => g.notReal);
   const missed = sum((g) => g.missed);
   const labelled = sum((g) => g.coverageLabelled);
-  const retiredRight = sum((g) => g.retiredRight);
-  const retiredWrong = sum((g) => g.retiredWrong);
   return [
     'iid     real  not-real  missed  coverage agree  falsely covered  falsely missing  wrong case',
     ...[...grades].sort((a, b) => a.iid - b.iid).map((g) => [
@@ -242,13 +226,10 @@ export function formatGold(grades: readonly GoldGrade[]): string[] {
       g.unlabelled.length ? `   unlabelled: ${g.unlabelled.join(', ')}` : '',
     ].join('')),
     '',
-    `requirements: ${percent(real, real + notReal)} of those held are real, `
-      + `${percent(real, real + missed + retiredWrong)} of the real ones were listed`,
+    `acceptance criteria: ${percent(real, real + notReal)} of those judged against are real requirements, `
+      + `${percent(real, real + missed)} of the real requirements are stated as one`,
     `coverage: ${percent(sum((g) => g.coverageAgree), labelled)} of ${labelled} labelled call(s) agree — `
       + `${sum((g) => g.falseCovered)} falsely covered, ${sum((g) => g.falseGap)} falsely missing, `
       + `${sum((g) => g.misattributed)} on the wrong case`,
-    ...(retiredRight + retiredWrong
-      ? [`retired: ${retiredRight} withdrawn rightly, ${retiredWrong} real requirement(s) withdrawn`]
-      : []),
   ];
 }

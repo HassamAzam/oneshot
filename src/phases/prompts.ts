@@ -32,7 +32,8 @@ import { DESIGN_DIR, NEW_TOKENS_FILE, TOKENS_FILE } from '../lib/designtokens.js
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import { PRIOR_ART_KINDS } from '../conductor/schemas.js';
-import { COVERAGE_RULE, isFrozen, type EvalRecord } from '../lib/testcaseseval.js';
+import { coverageRubric } from '../lib/rubric.js';
+import { requirementsFrom } from '../lib/testcaseseval.js';
 import {
   GITLAB_PROJECT_URL, countsAsFailure, ticketScopeIds,
   type CaseResult, type DesignArtifact, type Finding, type Screenshot, type TestCase,
@@ -1656,75 +1657,37 @@ Reading is not the deliverable and cannot be salvaged; cases can. So:
   current has already succeeded, whatever happens to its last turn.`,
 
   'testcases-eval': (ctx) => {
-    const record = readArtifact<EvalRecord>(ctx.ticket.iid, 'testcases-eval.json');
-    const frozen = record && isFrozen({ ...record, attempts: record.attempts ?? [] }) ? record.requirements : null;
-    const acceptance = artifact<{ acceptanceCriteria: string[] }>(ctx, 'research').acceptanceCriteria ?? [];
-    const requirementsBlock = frozen
-      ? `## The requirements — frozen on the first evaluation, judge against these ids only
-${frozen.map((r) => `  - ${r.id} [${r.source}${r.criterion ? `, ${r.criterion}` : ''}] ${r.text}\n      evidence: ${r.evidence}`).join('\n') || '  (none were frozen)'}
-
-This is a RE-EVALUATION. Send \`requirements: []\`. Map every id above in \`coverage\`.
-- A requirement you have evidence for that is not above goes in \`proposedRequirements\`. It is
-  adopted only when another judgement proposes it too, so propose only what you can evidence.
-- A requirement above that the ticket or the code shows is NOT one goes in \`invalidRequirements\`
-  with evidence that shows it. It is retired only when another judgement agrees. Do not use this
-  for a requirement that is merely hard to test.`
-      : `## First evaluation — list the requirements
-
-Before judging any case, list in \`requirements\` what this ticket establishes must be true when it is
-done: each acceptance criterion, the reported broken behaviour that must now work (a bug), and any
-rule in the changed code a user can reach. Give each an id R1, R2, … and its evidence — a verbatim
-quote from the ticket above, or \`file:line\` in the diff. A requirement you cannot quote or point at
-is a guess: give it an empty \`evidence\` and it is held as uncertain, not against the list.
-
-Set \`criterion\` to the research criterion (AC1, AC2, …) a requirement comes from. Every criterion
-below should come out as at least one requirement unless the ticket contradicts it: one no
-requirement carries is shown to a person as a disagreement between the two readings. Send
-\`proposedRequirements: []\` and \`invalidRequirements: []\`.`;
-
+    const requirements = requirementsFrom(
+      artifact<{ acceptanceCriteria: string[] }>(ctx, 'research').acceptanceCriteria ?? [],
+    );
     return `${ticketBlock(ctx.ticket)}
 
-## Acceptance criteria as research read them (phase 1)
-${acceptance.map((a, i) => `  - AC${i + 1}: ${a}`).join('\n') || '  (none recorded)'}
+## The requirements — judge against these ids only
+${requirements.map((r) => `  - ${r.id}: ${r.text}`).join('\n') || '  (none recorded)'}
 
-These are another phase's reading of the ticket, a pointer to where to look. Evidence is a quote
-from the ticket itself, or \`file:line\` in the change — never this list. Evidence is checked
-mechanically:
-- A quote goes in double quotes, copied exactly from the ticket (\`…\` may elide words), at least
-  four words long, and shares a word with what it is offered for.
-- A \`file:line\` is a path relative to the repo root, on or within a few lines of a line the
-  change touched.
-Evidence that does not check out is held as uncertain, whatever you rate it.
+These are the acceptance criteria \`research\` read off this ticket, numbered by position. The list is
+FIXED: you do not decide what the ticket requires, and every evaluation of this ticket is judged
+against these exact ids. A requirement above you believe is wrong, and a requirement you believe is
+missing from it, are both FINDINGS — never a change to the list.
 
 ## The test-case list to evaluate
 ${caseList(testCases(ctx), { steps: true })}
 
-${requirementsBlock}
+## The rubric — what "covered" means
+
+${coverageRubric()}
 
 ## Your job
 
-Judge whether this list tests what THIS ticket requires. You do not write or fix cases; the
+Judge whether this list tests what the requirements above demand. You do not write or fix cases; the
 conductor sends your findings back to the phase that does.
 
-1. **Coverage.** For each requirement, in \`coverage\`, ${COVERAGE_RULE} A case id you name must be in
-   the list above.
-2. **Findings.** Report what is missing or wrong, each with its evidence:
-   - \`missing\` — a requirement or an evidenced edge (boundary, empty/null, permission, state change)
-     on a path this change touched has no covering case. When the edge sits under a requirement you
-     mapped to a case, and that case stops short of it, put that case's id in \`cases\` and say in
-     \`gap\` what it does not reach; without that case named, a missing finding against a requirement
-     you mapped as covered is read as contradicting your own coverage.
-   - \`incorrect\` — a case expects behaviour the ticket or the code contradicts. Name the case.
-   - \`redundant\` / \`contradictory\` — name the cases.
-3. **Rate each finding.** \`validity\`: supported only when your evidence establishes it; uncertain
-   when the ticket and code do not settle what the behaviour should be — never invent a business
-   rule to make it supported. \`relevance\`: in-scope only when the ticket names it or the change
-   touched its path. \`severity\`: critical for an uncovered acceptance criterion or bug behaviour;
-   major for an evidenced, uncovered edge on a changed path or a case that expects the wrong thing;
-   minor for anything else.
+1. **Coverage.** One entry in \`coverage\` per requirement id above — the one case that covers it under
+   the rubric, or \`none\`. A case id you name must be in the list above.
+2. **Findings.** What is missing or wrong, each rated and evidenced exactly as the rubric defines.
 
-Do NOT list every theoretically possible edge. A list that covers what the ticket requires and the
-edges its change can plausibly break is complete, and \`findings: []\` is then the right answer.
+Do NOT list every theoretically possible edge. A list that covers what the requirements demand and
+the edges this change can plausibly break is complete, and \`findings: []\` is then the right answer.
 
 The change is on \`${ctx.branch ?? 'the ticket branch'}\` in your worktree: \`git diff origin/${baseBranch()}\`
 shows it. Read only what a requirement or a finding needs. Change nothing — you are read-only.`;
