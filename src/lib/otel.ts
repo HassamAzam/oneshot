@@ -15,7 +15,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, envOr, envFlag } from './config.js';
+import { ROOT, envOr, envFlag, operatorName } from './config.js';
 
 export interface OtelConfig {
   enabled: boolean;
@@ -37,6 +37,27 @@ export interface OtelConfig {
 
 let _cfg: OtelConfig | null = null;
 
+/** Langfuse's own limit on an environment name. */
+const ENVIRONMENT_MAX = 40;
+
+/**
+ * The Langfuse environment a desk's runs land in, made from its operator name.
+ *
+ * Langfuse accepts only `^(?!langfuse)[a-z0-9-_]+$`, at most 40 characters, and
+ * an OS username such as `hassam.azam` already breaks that on the dot. The name
+ * used to be hardcoded in tracked config, so every desk sharing one Langfuse
+ * project reported as the same machine.
+ */
+export function deskEnvironment(operator: string): string {
+  const slug = operator
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '');
+  const named = slug.startsWith('langfuse') ? `desk-${slug}` : slug;
+  return named.slice(0, ENVIRONMENT_MAX).replace(/-+$/, '') || 'oneshot';
+}
+
 export function otelConfig(): OtelConfig {
   if (!_cfg) {
     const raw = JSON.parse(
@@ -55,6 +76,14 @@ export function otelConfig(): OtelConfig {
     if (override === '1' || override.toLowerCase() === 'true') raw.enabled = true;
 
     if (envFlag('ONESHOT_OTEL_ALLOW_REMOTE')) raw.allowRemote = true;
+
+    // Each desk reports under its own name. A deployment.environment set in
+    // config/otel.json still wins, so set one there only when every desk that
+    // pulls the file should share it.
+    raw.resourceAttributes = {
+      'deployment.environment': deskEnvironment(operatorName()),
+      ...raw.resourceAttributes,
+    };
     _cfg = raw;
   }
   return _cfg;
