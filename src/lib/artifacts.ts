@@ -25,6 +25,7 @@ import {
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { STATE, artifactDir, runDir } from './config.js';
+import { oneshotSha } from './version.js';
 import type { MrFeedbackLedger } from '../mrfeedback/types.js';
 
 const RUNS_ARCHIVE = join(STATE, 'runs-archive');
@@ -56,6 +57,16 @@ export interface PhaseRecord {
   weighted?: number;
   sessionId?: string;
   error?: string;
+  /**
+   * The Oneshot commit that ran this phase — `<sha>`, `<sha>-dirty`, or absent
+   * on a record written before this existed or outside a git checkout.
+   *
+   * Per phase rather than per run because a run spans a `git pull`: the commit
+   * that wrote the test cases is routinely not the one that merged, and the
+   * escaped-defect eval attributes a miss to whichever phase should have caught
+   * it. See lib/version.ts for why a dirty tree counts as a different version.
+   */
+  oneshot?: string;
 }
 
 /**
@@ -328,6 +339,13 @@ export interface RunJournal {
   mrIid?: number;
   mrUrl?: string;
   mergedSha?: string;
+  /**
+   * The Oneshot commit that MERGED this ticket, stamped when the merge lands.
+   * `phases[].oneshot` is the authority on what produced each artifact; this is
+   * the cheap key an eval buckets a shipped ticket by, and it differing from an
+   * earlier phase's stamp is the signal that the run straddled an upgrade.
+   */
+  oneshotSha?: string;
   blockedWhy?: string;
   /**
    * The phase the run stopped at, recorded for EVERY terminal status rather
@@ -408,7 +426,11 @@ export function updateJournal(iid: number, patch: Partial<RunJournal>): RunJourn
 export function recordPhase(iid: number, rec: PhaseRecord): void {
   const j = readJournal(iid);
   if (!j) return;
-  j.phases.push(rec);
+  // Stamped HERE, in the single writer, rather than at the eight call sites: a
+  // phase that forgot to pass it would be indistinguishable from one run by an
+  // unknown version, and the eval would silently drop it.
+  const oneshot = rec.oneshot ?? oneshotSha();
+  j.phases.push(oneshot ? { ...rec, oneshot } : rec);
   writeJournal(j);
 }
 

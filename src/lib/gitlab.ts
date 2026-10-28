@@ -453,6 +453,42 @@ export async function deleteIssueNote(iid: number, noteId: number): Promise<Gitl
   return call<null>('DELETE', `/projects/${projectId()}/issues/${iid}/notes/${noteId}`, undefined, true);
 }
 
+/** One label added to or removed from a ticket, with who did it and when. */
+export interface IssueLabelEvent {
+  id: number;
+  action: 'add' | 'remove';
+  created_at?: string | null;
+  label?: { id: number; name: string } | null;
+  user?: { username?: string } | null;
+}
+
+/**
+ * A ticket's label history, oldest first.
+ *
+ * The escaped-defect eval reads its window off this rather than out of QA's
+ * comments: `Merged`, `QA Issues` and `Ready For Deployment` are labels a person
+ * already moves as part of the job, so the signal needs no new reporting
+ * discipline and cannot drift from the real verdict. See lib/escapes.ts.
+ *
+ * Paged to the end rather than taking the first 100. A busy ticket passes 100
+ * label events (erp#8781 took 21 in two weeks, and a Loop ticket with several
+ * board columns moves faster), and a truncated history would silently lose the
+ * sign-off that closes the window — reporting a settled ticket as still open.
+ */
+export async function issueLabelEvents(iid: number): Promise<GitlabResult<IssueLabelEvent[]>> {
+  const all: IssueLabelEvent[] = [];
+  for (let page = 1; page <= 20; page += 1) {
+    const res = await call<IssueLabelEvent[]>(
+      'GET',
+      `/projects/${projectId()}/issues/${iid}/resource_label_events?per_page=100&page=${page}`,
+    );
+    if (!res.ok || !res.data) return all.length ? { ...res, ok: true, kind: 'ok', data: all } : res;
+    all.push(...res.data);
+    if (res.data.length < 100) break;
+  }
+  return { ok: true, kind: 'ok', status: 200, data: all };
+}
+
 export async function addIssueNote(
   iid: number, body: string,
 ): Promise<GitlabResult<{ id: number }>> {

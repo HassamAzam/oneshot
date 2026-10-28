@@ -53,6 +53,7 @@ import { windowUsage, dayUsage, quotaParked } from './lib/quota.js';
 import { budgetConfig } from './lib/config.js';
 import { localTestsFlags, retiredFlagError } from './lib/cliargs.js';
 import { describe, scan } from './conductor/watcher.js';
+import { kickEscapeSweep } from './conductor/escapesweep.js';
 import { refusalIsFinal, runTicket, type RunOutcome } from './conductor/runner.js';
 import { killLiveLocalTests } from './conductor/localtests.js';
 import {
@@ -638,6 +639,13 @@ async function tick(): Promise<void> {
   // Kicked, not awaited, before the Loop's own scan. --watch-only claims
   // nothing, and this mode's first act on a ticket can be a comment.
   if (localTestsOn) kickLocalTests();
+
+  // The escaped-defect sweep rides this clock too, throttled to its own
+  // interval. It reads only: the window it measures (merge to QA sign-off)
+  // outlives the run that opened it, so no phase can watch it — see
+  // conductor/escapesweep.ts. Safe under --watch-only for the same reason, and
+  // kicked rather than awaited so a measurement never delays a claim.
+  kickEscapeSweep();
 
   const result = await scan();
   await noteNetworkHold(result.held);
