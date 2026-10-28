@@ -7,10 +7,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  MAX_VERIFY_EVAL_RETRIES, appendRound, dropOrphans, evalPasses, feedbackNote, formatVerifyEval,
-  gradeVerify, orphanIds, rerunnable, summariseVerifyEval,
+  DRIFT_ID, MAX_ORPHAN_DROP_SHARE, MAX_VERIFY_EVAL_RETRIES, appendRound, dropOrphans, evalPasses,
+  feedbackNote, formatVerifyEval, gradeVerify, orphanIds, reconcileOrphans, rerunnable,
+  summariseVerifyEval,
   type CaseLike, type VerifyEvalIssue, type VerifyEvalRecord, type VerifyEvalRound,
 } from './verifyeval.js';
+
+const cases = (n: number, pad = 2): CaseLike[] => Array.from(
+  { length: n }, (_, i) => ({ id: `TC-${String(i + 1).padStart(pad, '0')}`, result: 'pass' }),
+);
 
 const tc = (...ids: string[]): Set<string> => new Set(ids);
 const never = (): boolean => false;
@@ -93,9 +98,54 @@ test('fail/pass/blocked labels are not required to carry evidence or a screensho
   assert.equal(gradeVerify(results, tc('TC-01', 'TC-02', 'TC-03'), never).length, 0);
 });
 
+test('a minority of unknown ids is salvage — reconcileOrphans drops them', () => {
+  const verdict = reconcileOrphans(cases(10), tc(...cases(10).slice(3).map((c) => c.id as string)));
+  assert.deepEqual(verdict.drop, ['TC-01', 'TC-02', 'TC-03']);
+  assert.equal(verdict.drift, null);
+});
+
+test('an empty testcases list is drift, not a drop of every case', () => {
+  const results = cases(20);
+  const verdict = reconcileOrphans(results, tc());
+  assert.deepEqual(verdict.drop, []);
+  assert.equal(verdict.drift?.kind, 'id-drift');
+  assert.equal(verdict.drift?.id, DRIFT_ID);
+  assert.match(verdict.drift!.detail, /20 of 20/);
+  const issues = gradeVerify(results, tc(), always);
+  assert.deepEqual(issues.map((i) => i.kind), ['id-drift']);
+  assert.ok(!evalPasses(issues));
+});
+
+test('wholesale id drift (TC-1..TC-9 against TC-01..TC-09) keeps the list and flags it once', () => {
+  const results = cases(9, 1);
+  const testcases = tc(...cases(9).map((c) => c.id as string));
+  assert.equal(orphanIds(results, testcases).length, 9);
+  const verdict = reconcileOrphans(results, testcases);
+  assert.deepEqual(verdict.drop, []);
+  assert.equal(verdict.drift?.kind, 'id-drift');
+  assert.deepEqual(gradeVerify(results, testcases, always).map((i) => i.kind), ['id-drift']);
+});
+
+test('the drop floor is a share of the reported list, and the share itself still drops', () => {
+  assert.equal(MAX_ORPHAN_DROP_SHARE, 0.5);
+  const results = cases(10);
+  const half = tc(...cases(10).slice(5).map((c) => c.id as string));
+  assert.equal(reconcileOrphans(results, half).drop.length, 5);
+  const overHalf = tc(...cases(10).slice(6).map((c) => c.id as string));
+  assert.equal(reconcileOrphans(results, overHalf).drop.length, 0);
+  assert.equal(reconcileOrphans(results, overHalf).drift?.kind, 'id-drift');
+});
+
+test('a drift finding is handed to no re-run — nothing to prove and no case to scope to', () => {
+  const issues = gradeVerify(cases(9, 1), tc(...cases(9).map((c) => c.id as string)), always);
+  assert.deepEqual(rerunnable(issues), []);
+  assert.doesNotMatch(feedbackNote(issues), new RegExp(DRIFT_ID.replace(/[()]/g, '\\$&')));
+});
+
 test('rerunnable returns the pre-existing ids and never an orphan', () => {
   const issues: VerifyEvalIssue[] = [
     { id: 'TC-15', kind: 'orphan-id', detail: '' },
+    { id: DRIFT_ID, kind: 'id-drift', detail: '' },
     { id: 'TC-07', kind: 'no-evidence', detail: '' },
     { id: 'TC-07', kind: 'no-screenshot', detail: '' },
     { id: 'TC-09', kind: 'no-screenshot', detail: '' },
@@ -139,6 +189,19 @@ test('summarise reports the last round per ticket, orphans across all rounds', (
   assert.equal(t.orphansDropped, 1);
   assert.equal(t.noScreenshot, 1);
   assert.equal(t.noEvidence, 0);
+  assert.equal(t.idDrift, 0);
+});
+
+test('summarise counts an open drift finding under its own kind', () => {
+  const records: VerifyEvalRecord[] = [{
+    iid: 400,
+    rounds: [round({ pass: false, unresolved: true, issues: [{ id: DRIFT_ID, kind: 'id-drift', detail: '' }] })],
+  }];
+  const t = summariseVerifyEval(records);
+  assert.equal(t.idDrift, 1);
+  assert.equal(t.issuesOpen, 1);
+  assert.equal(t.orphansDropped, 0);
+  assert.ok(formatVerifyEval(records).some((l) => l.includes('UNRESOLVED') && l.includes('id-drift')));
 });
 
 test('format lists a verdict per ticket and never crashes on an empty set', () => {
