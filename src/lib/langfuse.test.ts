@@ -9,7 +9,7 @@ import type { PhaseRecord } from './artifacts.js';
 interface Span {
   spanId: string;
   name: string;
-  attributes: Array<{ key: string; value: { intValue?: string; stringValue?: string } }>;
+  attributes: Array<{ key: string; value: { intValue?: number; stringValue?: string } }>;
 }
 
 const lap = (phase: string, n: number, startedAt: number, endedAt: number, status: PhaseRecord['status'] = 'ok'): PhaseRecord =>
@@ -32,6 +32,17 @@ const inputTokens = (span: Span): number | undefined => {
   const v = span.attributes.find((a) => a.key === 'gen_ai.usage.input_tokens')?.value.intValue;
   return v === undefined ? undefined : Number(v);
 };
+
+test('integer attributes are a bare JSON number, not a string: Langfuse nulls a string-encoded intValue', () => {
+  const spans = runSpans(run([lap('mr', 1, 1000, 2000)]), [usage('mr', 1500, 10)], 'anthropic');
+  for (const span of spans as Span[]) {
+    for (const a of span.attributes) {
+      if ('intValue' in a.value && a.value.intValue !== undefined) {
+        assert.equal(typeof a.value.intValue, 'number', `${a.key} must be a number, got ${typeof a.value.intValue}`);
+      }
+    }
+  }
+});
 
 test('a phase keeps its span id when failed laps before it are pruned from the journal', () => {
   const recall = lap('recall', 0, 100, 200);

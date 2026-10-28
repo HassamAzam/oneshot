@@ -99,8 +99,12 @@ function attrs(pairs: Record<string, AttrValue | undefined>): unknown[] {
     .filter(([, v]) => v !== undefined && v !== '')
     .map(([key, v]) => ({
       key,
+      // intValue is a BARE NUMBER, not a string. The OTLP/JSON spec encodes
+      // int64 as a string, but Langfuse's OTLP ingestion drops a string-encoded
+      // intValue and renders the attribute as the literal "null" — so every
+      // token count, lap and turn count would vanish. A JSON number round-trips.
       value: typeof v === 'number'
-        ? (Number.isInteger(v) ? { intValue: String(v) } : { doubleValue: v })
+        ? (Number.isInteger(v) ? { intValue: v } : { doubleValue: v })
         : typeof v === 'boolean' ? { boolValue: v } : { stringValue: String(v) },
     }));
 }
