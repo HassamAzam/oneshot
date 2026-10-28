@@ -72,9 +72,12 @@ function base(): string { return projectConfig().gitlab.apiUrl; }
  * which GitLab accepts wherever it accepts the number. Using it means the project's
  * identity is exactly one fact — GITLAB_REPO_URL — with no numeric id configured
  * alongside it to go stale. The number, where something genuinely needs it, is
- * asked of GitLab: see resolvedProjectId().
+ * asked of GitLab: see resolvedProjectId(). Where GitLab 404s the encoded path,
+ * ping() resolves the number and every later call is addressed by it.
  */
-function projectId(): string { return encodeURIComponent(projectConfig().gitlab.project); }
+function projectId(): string {
+  return addressById && numericId !== null ? String(numericId) : encodeURIComponent(projectConfig().gitlab.project);
+}
 
 /**
  * Classify a failure. 5xx counts as "network" for circuit-breaker purposes:
@@ -990,6 +993,8 @@ export function mergeRefusal(res: GitlabResult<unknown>): MergeRefusal {
 }
 
 let numericId: number | null = null;
+/** Set once the encoded path has 404ed and the id was found by search instead. */
+let addressById = false;
 
 function remember(res: GitlabResult<{ id: number }>): void {
   if (res.ok && typeof res.data?.id === 'number') numericId = res.data.id;
@@ -1001,7 +1006,24 @@ export async function ping(): Promise<GitlabResult<{ id: number }>> {
   // The probe already carries the numeric id, so the first healthy tick
   // answers resolvedProjectId() for free.
   remember(res);
-  return res;
+  if (res.kind !== 'notfound' || numericId !== null) return res;
+  // Some GitLab front ends decode %2F and redirect /projects/group%2Fproject to
+  // /projects/group/project, which 404s. Find the id by searching for the path
+  // instead; once remembered, projectId() addresses every call by number.
+  await searchProjectId();
+  if (numericId === null) return res;
+  addressById = true;
+  return call<{ id: number }>('GET', `/projects/${numericId}?statistics=false`);
+}
+
+/** Resolve the numeric id from the project list, a route that never carries the encoded path. */
+async function searchProjectId(): Promise<void> {
+  const path = projectConfig().gitlab.project;
+  const res = await call<Array<{ id: number; path_with_namespace: string }>>(
+    'GET', `/projects?search=${encodeURIComponent(path)}&search_namespaces=true&simple=true&per_page=100`,
+  );
+  const hit = res.ok ? res.data?.find((p) => p.path_with_namespace.toLowerCase() === path.toLowerCase()) : undefined;
+  if (hit) numericId = hit.id;
 }
 
 /**
