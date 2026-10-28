@@ -44,8 +44,6 @@
   "_comment_sessionAttribute": "Langfuse groups traces into a session by the 'langfuse.session.id' attribute. Oneshot stamps it with the run id, so every phase of one ticket lands in one session view. UNVERIFIED against a live Langfuse: whether resource-level attributes propagate to spans for session grouping, or whether Langfuse requires it span-level, needs one real run to confirm — see docs/OBSERVABILITY.md.",
   "sessionAttribute": "langfuse.session.id",
 
-  "_comment_resourceAttributes": "Extra static key=value pairs merged into OTEL_RESOURCE_ATTRIBUTES on every span, on top of the per-spawn identity (oneshot.run_id, oneshot.ticket, oneshot.phase, oneshot.lap, oneshot.tier, langfuse.session.id) that src/lib/otel.ts adds. Values are percent-encoded before joining, so a comma or equals sign in one cannot break the variable.",
-  "resourceAttributes": {
-    "deployment.environment": "hassam-mac"
-  }
+  "_comment_resourceAttributes": "Extra static key=value pairs merged into OTEL_RESOURCE_ATTRIBUTES on every span, on top of the per-spawn identity (oneshot.run_id, oneshot.ticket, oneshot.phase, oneshot.lap, oneshot.tier, langfuse.session.id) that src/lib/otel.ts adds. Values are percent-encoded before joining, so a comma or equals sign in one cannot break the variable. deployment.environment is deliberately NOT set here: it defaults to this desk's operator name (ONESHOT_OPERATOR, then BOARD_OPERATOR, then the OS username), made safe for Langfuse by deskEnvironment() in src/lib/otel.ts. This file is tracked, so a name set here is every desk's name — it was 'hassam-mac' once, and every teammate's run reported as that machine.",
+  "resourceAttributes": {}
 }
