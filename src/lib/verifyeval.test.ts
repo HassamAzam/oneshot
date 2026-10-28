@@ -1,48 +1,47 @@
 /**
  * The verify-eval verdict is graded on hand-built case lists so the rules
- * "every reported case is a real case" and "every pre-existing label is proven"
- * cannot drift. The scoped-re-run wiring lives in the runner; these cover the
- * pure logic it stands on.
+ * "every reported case is a real case" and "every reported case carries an
+ * evidence line" cannot drift. The scoped-re-run wiring lives in the runner;
+ * these cover the pure logic it stands on.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DRIFT_ID, MAX_ORPHAN_DROP_SHARE, MAX_VERIFY_EVAL_RETRIES, appendRound, dropOrphans, evalPasses,
-  feedbackNote, formatVerifyEval, gradeVerify, orphanIds, reconcileOrphans, rerunnable,
+  evidenceRubric, feedbackNote, formatVerifyEval, gradeVerify, orphanIds, reconcileOrphans, rerunnable,
   summariseVerifyEval,
   type CaseLike, type VerifyEvalIssue, type VerifyEvalRecord, type VerifyEvalRound,
 } from './verifyeval.js';
 
 const cases = (n: number, pad = 2): CaseLike[] => Array.from(
-  { length: n }, (_, i) => ({ id: `TC-${String(i + 1).padStart(pad, '0')}`, result: 'pass' }),
+  { length: n },
+  (_, i) => ({ id: `TC-${String(i + 1).padStart(pad, '0')}`, result: 'pass', evidence: 'observed' }),
 );
 
 const tc = (...ids: string[]): Set<string> => new Set(ids);
-const never = (): boolean => false;
-const always = (): boolean => true;
 
 const round = (over: Partial<VerifyEvalRound> = {}): VerifyEvalRound => ({
   at: '2026-10-27T00:00:00.000Z', attempt: 0, droppedOrphans: [], issues: [], pass: true, unresolved: false, ...over,
 });
 
-test('a clean run with no pre-existing labels passes', () => {
+test('a run whose every case is real and evidenced passes', () => {
   const results: CaseLike[] = [
-    { id: 'TC-01', result: 'pass' },
+    { id: 'TC-01', result: 'pass', evidence: 'row visible, salary present=true' },
     { id: 'TC-02', result: 'fail', evidence: 'broke', screenshot: 'TC-02-fail.png' },
   ];
-  const issues = gradeVerify(results, tc('TC-01', 'TC-02'), always);
+  const issues = gradeVerify(results, tc('TC-01', 'TC-02'));
   assert.equal(issues.length, 0);
   assert.ok(evalPasses(issues));
 });
 
 test('an id not in testcases is an orphan (the #259 TC-15 shape)', () => {
   const results: CaseLike[] = [
-    { id: 'TC-14', result: 'pass' },
+    { id: 'TC-14', result: 'pass', evidence: 'processed row readable' },
     { id: 'TC-15', result: 'fail', evidence: 'is_increment_processed stayed false', screenshot: 'TC-15-fail.png' },
   ];
   const testcases = tc('TC-14', 'TC-16');
   assert.deepEqual(orphanIds(results, testcases), ['TC-15']);
-  const issues = gradeVerify(results, testcases, always);
+  const issues = gradeVerify(results, testcases);
   assert.equal(issues.filter((i) => i.kind === 'orphan-id').length, 1);
   assert.ok(!evalPasses(issues));
 });
@@ -58,44 +57,68 @@ test('dropOrphans removes exactly the orphan rows and keeps the rest', () => {
 });
 
 test('null testcaseIds disables the orphan check — nothing is dropped or flagged', () => {
-  const results: CaseLike[] = [{ id: 'TC-99', result: 'pass' }];
+  const results: CaseLike[] = [{ id: 'TC-99', result: 'pass', evidence: 'observed' }];
   assert.deepEqual(orphanIds(results, null), []);
   assert.deepEqual(dropOrphans(results, null).map((r) => r.id), ['TC-99']);
-  assert.equal(gradeVerify(results, null, never).length, 0);
+  assert.equal(gradeVerify(results, null).length, 0);
 });
 
-test('a pre-existing label with no evidence is flagged', () => {
-  const results: CaseLike[] = [{ id: 'TC-07', result: 'pre-existing', evidence: '', screenshot: 'TC-07.png' }];
-  const issues = gradeVerify(results, tc('TC-07'), always);
-  assert.deepEqual(issues.map((i) => i.kind), ['no-evidence']);
-});
-
-test('a pre-existing label whose screenshot is missing on disk is flagged', () => {
-  const results: CaseLike[] = [{ id: 'TC-07', result: 'pre-existing', evidence: 'fails on base too', screenshot: 'TC-07.png' }];
-  const onDisk = (f: string): boolean => f === 'present.png';
-  const issues = gradeVerify(results, tc('TC-07'), onDisk);
-  assert.deepEqual(issues.map((i) => i.kind), ['no-screenshot']);
-  assert.match(issues[0]!.detail, /not on disk/);
-});
-
-test('a pre-existing label with an empty screenshot field is flagged', () => {
-  const results: CaseLike[] = [{ id: 'TC-07', result: 'pre-existing', evidence: 'fails on base too', screenshot: '' }];
-  const issues = gradeVerify(results, tc('TC-07'), always);
-  assert.deepEqual(issues.map((i) => i.kind), ['no-screenshot']);
-});
-
-test('a well-proven pre-existing label passes', () => {
-  const results: CaseLike[] = [{ id: 'TC-07', result: 'pre-existing', evidence: 'HTTP 500 on base @ abc1234', screenshot: 'TC-07.png' }];
-  assert.ok(evalPasses(gradeVerify(results, tc('TC-07'), (f) => f === 'TC-07.png')));
-});
-
-test('fail/pass/blocked labels are not required to carry evidence or a screenshot', () => {
+// The rule is the same one for every verdict, so the grader reads the same one
+// rubric the verify prompt showed the session that wrote these results.
+test('every verdict is flagged when it arrives with no evidence', () => {
   const results: CaseLike[] = [
-    { id: 'TC-01', result: 'fail', evidence: '', screenshot: '' },
-    { id: 'TC-02', result: 'blocked', evidence: '', screenshot: '' },
-    { id: 'TC-03', result: 'pass' },
+    { id: 'TC-01', result: 'pass', evidence: '', screenshot: 'TC-01.png' },
+    { id: 'TC-02', result: 'fail', evidence: '   ', screenshot: '' },
+    { id: 'TC-03', result: 'blocked' },
+    { id: 'TC-04', result: 'skipped', evidence: '' },
+    { id: 'TC-05', result: 'pre-existing', evidence: '' },
   ];
-  assert.equal(gradeVerify(results, tc('TC-01', 'TC-02', 'TC-03'), never).length, 0);
+  const issues = gradeVerify(results, tc('TC-01', 'TC-02', 'TC-03', 'TC-04', 'TC-05'));
+  assert.deepEqual(issues.map((i) => i.id), ['TC-01', 'TC-02', 'TC-03', 'TC-04', 'TC-05']);
+  assert.deepEqual([...new Set(issues.map((i) => i.kind))], ['no-evidence']);
+  assert.match(issues[0]!.detail, /reported 'pass' with no evidence/);
+});
+
+test('the detail names the verdict even when the case carries none', () => {
+  const issues = gradeVerify([{ id: 'TC-03', result: 'blocked' }], tc('TC-03'));
+  assert.match(issues[0]!.detail, /reported 'blocked' with no evidence/);
+});
+
+// A screenshot is not asked for here. The verify prompt tells the session to
+// leave `screenshot` empty when the asserted value is not in the viewport — a
+// <title>, an aria value, a header, a redirect — so a grader that demanded one
+// would fail a case for obeying its own instructions.
+test('a case with evidence and no screenshot passes', () => {
+  const results: CaseLike[] = [
+    { id: 'TC-07', result: 'pre-existing', evidence: 'HTTP 500 on base @ abc1234', screenshot: '' },
+    { id: 'TC-08', result: 'pass', evidence: 'title reads "Payroll"', screenshot: '' },
+  ];
+  assert.ok(evalPasses(gradeVerify(results, tc('TC-07', 'TC-08'))));
+});
+
+// An orphan is already leaving verify.json, so asking a session to re-run it
+// would scope the re-run to a case testcases.json does not list.
+test('an orphan being dropped is never also flagged for its missing evidence', () => {
+  const results: CaseLike[] = [
+    { id: 'TC-01', result: 'pass', evidence: 'ok' },
+    { id: 'TC-15', result: 'fail', evidence: '' },
+  ];
+  const issues = gradeVerify(results, tc('TC-01'));
+  assert.deepEqual(issues.map((i) => i.kind), ['orphan-id']);
+  assert.deepEqual(rerunnable(issues), []);
+});
+
+test('the rubric states the rule and anchors it with an example either way', () => {
+  const rubric = evidenceRubric();
+  assert.match(rubric, /Every case you report carries an `evidence` line/);
+  assert.match(rubric, /^Evidence:$/m);
+  assert.match(rubric, /^Not evidence:$/m);
+  assert.match(rubric, /did not work/);
+});
+
+test('the re-run feedback carries the rubric verbatim, not a paraphrase of it', () => {
+  const issues: VerifyEvalIssue[] = [{ id: 'TC-07', kind: 'no-evidence', detail: 'no evidence' }];
+  assert.ok(feedbackNote(issues).includes(evidenceRubric()));
 });
 
 test('a minority of unknown ids is salvage — reconcileOrphans drops them', () => {
@@ -111,7 +134,7 @@ test('an empty testcases list is drift, not a drop of every case', () => {
   assert.equal(verdict.drift?.kind, 'id-drift');
   assert.equal(verdict.drift?.id, DRIFT_ID);
   assert.match(verdict.drift!.detail, /20 of 20/);
-  const issues = gradeVerify(results, tc(), always);
+  const issues = gradeVerify(results, tc());
   assert.deepEqual(issues.map((i) => i.kind), ['id-drift']);
   assert.ok(!evalPasses(issues));
 });
@@ -123,7 +146,7 @@ test('wholesale id drift (TC-1..TC-9 against TC-01..TC-09) keeps the list and fl
   const verdict = reconcileOrphans(results, testcases);
   assert.deepEqual(verdict.drop, []);
   assert.equal(verdict.drift?.kind, 'id-drift');
-  assert.deepEqual(gradeVerify(results, testcases, always).map((i) => i.kind), ['id-drift']);
+  assert.deepEqual(gradeVerify(results, testcases).map((i) => i.kind), ['id-drift']);
 });
 
 test('the drop floor is a share of the reported list, and the share itself still drops', () => {
@@ -137,18 +160,17 @@ test('the drop floor is a share of the reported list, and the share itself still
 });
 
 test('a drift finding is handed to no re-run — nothing to prove and no case to scope to', () => {
-  const issues = gradeVerify(cases(9, 1), tc(...cases(9).map((c) => c.id as string)), always);
+  const issues = gradeVerify(cases(9, 1), tc(...cases(9).map((c) => c.id as string)));
   assert.deepEqual(rerunnable(issues), []);
   assert.doesNotMatch(feedbackNote(issues), new RegExp(DRIFT_ID.replace(/[()]/g, '\\$&')));
 });
 
-test('rerunnable returns the pre-existing ids and never an orphan', () => {
+test('rerunnable returns the no-evidence ids and never an orphan', () => {
   const issues: VerifyEvalIssue[] = [
     { id: 'TC-15', kind: 'orphan-id', detail: '' },
     { id: DRIFT_ID, kind: 'id-drift', detail: '' },
     { id: 'TC-07', kind: 'no-evidence', detail: '' },
-    { id: 'TC-07', kind: 'no-screenshot', detail: '' },
-    { id: 'TC-09', kind: 'no-screenshot', detail: '' },
+    { id: 'TC-09', kind: 'no-evidence', detail: '' },
   ];
   assert.deepEqual(rerunnable(issues), ['TC-07', 'TC-09']);
 });
@@ -177,7 +199,7 @@ test('summarise reports the last round per ticket, orphans across all rounds', (
       iid: 300,
       rounds: [
         round({ attempt: 0, pass: false, issues: [{ id: 'TC-07', kind: 'no-evidence', detail: '' }] }),
-        round({ attempt: 1, pass: false, unresolved: true, issues: [{ id: 'TC-07', kind: 'no-screenshot', detail: '' }] }),
+        round({ attempt: 1, pass: false, unresolved: true, issues: [{ id: 'TC-07', kind: 'no-evidence', detail: '' }] }),
       ],
     },
   ];
@@ -187,8 +209,7 @@ test('summarise reports the last round per ticket, orphans across all rounds', (
   assert.equal(t.passed, 1);
   assert.equal(t.unresolved, 1);
   assert.equal(t.orphansDropped, 1);
-  assert.equal(t.noScreenshot, 1);
-  assert.equal(t.noEvidence, 0);
+  assert.equal(t.noEvidence, 1);
   assert.equal(t.idDrift, 0);
 });
 
