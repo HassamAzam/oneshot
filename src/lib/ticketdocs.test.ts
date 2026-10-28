@@ -1,6 +1,10 @@
+import { createInterface } from 'node:readline';
+import { Readable } from 'node:stream';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { externalDocLinks, isDocument, uploadLinks } from './ticketdocs.js';
+import {
+  externalDocLinks, isDocument, normalizeLineSeparators, uploadLinks,
+} from './ticketdocs.js';
 
 const PROJECT = { url: 'https://gitlab.example.com/acme/erp', id: 42 };
 const SECRET = '275920f75d842b9067ea1e8f0a621a45';
@@ -65,4 +69,36 @@ test('external document links: document hosts only, trailing punctuation trimmed
     'https://docs.google.com/document/d/abc/edit',
     'https://acme.sharepoint.com/sites/x/doc.docx',
   ]);
+});
+
+/** How many lines Node's readline — the SDK's frame reader — sees in one JSON frame. */
+async function framesRead(text: string): Promise<string[]> {
+  const frame = JSON.stringify({ type: 'user', text });
+  const rl = createInterface({ input: Readable.from([`${frame}\n`]) });
+  const lines: string[] = [];
+  for await (const line of rl) if (line.trim()) lines.push(line);
+  return lines;
+}
+
+test('Word line separators become newlines, and nothing else is rewritten', () => {
+  assert.equal(normalizeLineSeparators('a\u2028b'), 'a\nb');
+  assert.equal(normalizeLineSeparators('a\u2029b'), 'a\nb');
+  assert.equal(normalizeLineSeparators('a\u2028\u2028b'), 'a\n\nb');
+  const untouched = 'plain\n\ttabbed\r\nwindows — “quoted” • bulleted\u00a0nbsp';
+  assert.equal(normalizeLineSeparators(untouched), untouched);
+  assert.equal(normalizeLineSeparators(''), '');
+});
+
+test('extracted text survives the SDK frame reader as a single parseable line', async () => {
+  const withSeparator = `${'a'.repeat(4500)}\u2028${'b'.repeat(50)}`;
+
+  // The bug from the other direction: left in, the frame splits mid-string
+  // and the half-frame cannot parse.
+  const split = await framesRead(withSeparator);
+  assert.equal(split.length, 2);
+  assert.throws(() => JSON.parse(split[0]!), /Unterminated string in JSON/);
+
+  const whole = await framesRead(normalizeLineSeparators(withSeparator));
+  assert.equal(whole.length, 1);
+  assert.equal((JSON.parse(whole[0]!) as { text: string }).text.includes('\u2028'), false);
 });

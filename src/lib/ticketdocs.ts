@@ -110,13 +110,45 @@ for i, n in enumerate(slides, 1):
     print("\\n".join(re.findall(r"<a:t>([^<]*)</a:t>", z.read(n).decode("utf8"))))
 `;
 
+/**
+ * Replace U+2028 and U+2029 with a plain newline.
+ *
+ * WHY THIS IS NOT COSMETIC. Word writes a soft line break (Shift+Enter) as
+ * U+2028 LINE SEPARATOR, and `textutil` carries it through into the extracted
+ * text verbatim. Both characters are legal inside a JSON string, so
+ * `JSON.stringify` leaves them RAW — but the agent SDK reads the CLI's stdout
+ * through `readline.createInterface`, and Node's readline treats BOTH as line
+ * terminators. One of them anywhere in a file a phase reads therefore splits
+ * that frame mid-string, and the half-frame fails to parse with
+ * "Unterminated string in JSON at position <n>".
+ *
+ * The phase sees an infrastructure crash at turn 0 with no usable diagnosis,
+ * and because the converted text is cached in the run dir the failure is
+ * deterministic: every retry re-reads the same bytes and dies at the same
+ * offset, so the laps burn with nothing learned. A document is attacker-ish
+ * input in the sense that matters here — nobody writing a policy doc intends
+ * it, and no phase can defend against it.
+ *
+ * A newline is the faithful substitution: U+2028 and U+2029 ARE a line and a
+ * paragraph separator, so the text reads exactly as the author laid it out.
+ * Deliberately narrow — the two characters that break the frame reader and
+ * nothing else. Other invisibles (non-breaking spaces, zero-width joiners)
+ * survive a JSON round-trip intact and are part of the document's content.
+ */
+export function normalizeLineSeparators(text: string): string {
+  return text.replace(/[\u2028\u2029]/g, '\n');
+}
+
 function toText(src: string, ext: string): string {
   const run = (cmd: string, args: string[]): string =>
     execFileSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
-  if (ext === '.xlsx' || ext === '.xlsm') return run('python3', ['-c', XLSX_TO_TEXT, src]);
-  if (ext === '.pptx') return run('python3', ['-c', PPTX_TO_TEXT, src]);
-  // .docx .doc .rtf .odt — macOS's textutil reads all four.
-  return run('textutil', ['-convert', 'txt', '-stdout', src]);
+  const extracted = (): string => {
+    if (ext === '.xlsx' || ext === '.xlsm') return run('python3', ['-c', XLSX_TO_TEXT, src]);
+    if (ext === '.pptx') return run('python3', ['-c', PPTX_TO_TEXT, src]);
+    // .docx .doc .rtf .odt — macOS's textutil reads all four.
+    return run('textutil', ['-convert', 'txt', '-stdout', src]);
+  };
+  return normalizeLineSeparators(extracted());
 }
 
 /**
