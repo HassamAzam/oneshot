@@ -70,13 +70,71 @@ test('a ticket that never merged is excluded, not counted clean', () => {
   assert.equal(r.openedAt, null);
 });
 
-test('defects flagged BEFORE the merge are not escapes from shipped code', () => {
-  const early = [
+/**
+ * The blind spot, found in self-review. GitLab records a label CHANGE, so a
+ * `QA Issues` flag already set when the merge lands fires no new `add` event —
+ * and if QA then find a second defect, nothing in the history shows it. The
+ * first version of this test asserted `clean` here, which encoded the bug: a
+ * silent false negative in the one direction that flatters the pipeline.
+ */
+test('a QA Issues flag still set at the merge, never cleared, is indeterminate — not clean', () => {
+  const sticky = [
     ev('2026-10-10T09:00Z', 'add', 'QA Issues'),
     ev('2026-10-13T15:16Z', 'add', 'Merged', 'usman.nasir'),
     ev('2026-10-15T21:58Z', 'add', 'Ready For Deployment'),
   ];
-  assert.equal(escapeRecord(early).verdict, 'clean');
+  const r = escapeRecord(sticky);
+  assert.equal(r.verdict, 'indeterminate');
+  assert.match(r.why ?? '', /already set when the merge landed/);
+});
+
+test('a pre-merge flag that WAS cleared is genuinely clean — the board could see a new one', () => {
+  // Their board cycles the label: the bot removes `QA Issues` when a fix comes
+  // back for retest, so after a remove a later finding appears as a fresh add.
+  const cleared = [
+    ev('2026-10-10T09:00Z', 'add', 'QA Issues'),
+    ev('2026-10-13T15:16Z', 'add', 'Merged', 'usman.nasir'),
+    ev('2026-10-14T10:00Z', 'remove', 'QA Issues', 'project_304_bot'),
+    ev('2026-10-15T21:58Z', 'add', 'Ready For Deployment'),
+  ];
+  assert.equal(escapeRecord(cleared).verdict, 'clean');
+});
+
+test('a flag cleared before the merge never reaches the window at all', () => {
+  const settledEarlier = [
+    ev('2026-10-10T09:00Z', 'add', 'QA Issues'),
+    ev('2026-10-11T09:00Z', 'remove', 'QA Issues'),
+    ev('2026-10-13T15:16Z', 'add', 'Merged', 'usman.nasir'),
+    ev('2026-10-15T21:58Z', 'add', 'Ready For Deployment'),
+  ];
+  assert.equal(escapeRecord(settledEarlier).verdict, 'clean');
+});
+
+/**
+ * Also found in self-review: the window opened at the FIRST merge, so a ticket
+ * merged, reverted and re-merged charged findings against the abandoned attempt
+ * to the real one, and reported a window far longer than the truth.
+ */
+test('the window opens at the LAST merge, not the first', () => {
+  const r = escapeRecord([
+    ev('2026-10-10T10:00Z', 'add', 'Merged'),
+    ev('2026-10-11T10:00Z', 'remove', 'Merged'),
+    ev('2026-10-14T10:00Z', 'add', 'Merged'),
+    ev('2026-10-15T10:00Z', 'add', 'QA Issues'),
+    ev('2026-10-16T10:00Z', 'add', 'Ready For Deployment'),
+  ]);
+  assert.equal(r.openedAt, t('2026-10-14T10:00Z'));
+  assert.equal(r.verdict, 'escaped');
+  assert.equal(r.rounds.length, 1);
+});
+
+test('a merge the board later undid is not shipped code, whatever the journal said', () => {
+  const r = escapeRecord([
+    ev('2026-10-10T10:00Z', 'add', 'Merged'),
+    ev('2026-10-11T10:00Z', 'remove', 'Merged'),
+  ]);
+  assert.equal(r.verdict, 'not-shipped');
+  assert.match(r.why ?? '', /undone/);
 });
 
 test('defects flagged after sign-off fall outside the window', () => {
@@ -126,4 +184,26 @@ test('the rate is withheld until enough tickets have settled', () => {
   assert.equal(enough.escaped, 3);
   assert.equal(enough.open, 1, 'open tickets are reported but not rated');
   assert.equal(enough.rate, 3 / MIN_FOR_RATE);
+});
+
+/**
+ * A measurement that hides its own blind spots is worse than no measurement, so
+ * every category the rate excludes is counted and returned for a caller to
+ * report beside it.
+ */
+test('everything the rate excludes is still counted, never silently dropped', () => {
+  const rec = (verdict: EscapeRecord['verdict']): EscapeRecord =>
+    ({ verdict, openedAt: 1, closedAt: 2, rounds: [], signOffWithdrawn: false });
+  const r = escapeRate([
+    rec('clean'), rec('escaped'),
+    rec('open'), rec('open'),
+    rec('indeterminate'),
+    rec('not-shipped'), rec('not-shipped'), rec('not-shipped'),
+  ]);
+  assert.equal(r.settled, 2);
+  assert.equal(r.escaped, 1);
+  assert.equal(r.open, 2);
+  assert.equal(r.indeterminate, 1, 'the board-cannot-say case must be visible');
+  assert.equal(r.notShipped, 3, 'shipped per the journal but no merge on the board must be visible');
+  assert.equal(r.rate, null);
 });

@@ -60,20 +60,51 @@ export interface Pool {
 const verdictOf = (r: SweepRow): EscapeVerdict | 'unreadable' => r.record?.verdict ?? 'unreadable';
 
 /**
+ * How settled a copy is. Higher wins — the whole ordering is "which copy knows
+ * the most".
+ *
+ * A row the desk could not read knows nothing. `open` and `indeterminate` are
+ * both provisional: `open` means the window had not closed WHEN THAT DESK SWEPT,
+ * and another desk sweeping an hour later may have watched it close. `clean` and
+ * `escaped` are final.
+ */
+function knowledge(r: SweepRow): number {
+  if (!r.record) return 0;
+  switch (r.record.verdict) {
+    case 'clean': case 'escaped': return 3;
+    case 'indeterminate': return 2;
+    case 'open': case 'not-shipped': return 1;
+    default: return 1;
+  }
+}
+
+/**
  * Which of two copies of the same ticket to keep.
  *
- * A readable row always beats an unreadable one. Between two readable copies
- * the later merge wins: a ticket re-claimed on another desk was shipped by that
- * later run, so its `oneshotSha` is the version that actually produced what QA
- * then tested. Attributing the escape to the earlier, abandoned attempt would
- * credit the wrong pipeline version.
+ * Settledness FIRST, and this is the fix for a real defect: the earlier version
+ * compared `openedAt`, which is the merge time — identical on two copies of the
+ * same ticket, so neither could ever beat the other and whichever desk happened
+ * to be read first won. A desk that swept before sign-off therefore contributed
+ * `open`, and a ticket that had in fact settled was dropped from the rate
+ * entirely. Silently shrinking the denominator is the exact failure mode this
+ * eval exists to avoid, so the more settled copy now wins outright.
+ *
+ * Only then the later merge: a ticket re-claimed on another desk was shipped by
+ * that later run, so its `oneshotSha` is the version that produced what QA
+ * tested, and crediting the earlier abandoned attempt would blame the wrong
+ * pipeline version. `sweptAt` breaks a remaining tie — fresher is better.
  */
-function prefer(a: PooledRow, b: SweepRow, bDesk: string): PooledRow {
-  const keepB = (!a.record && !!b.record)
-    || (!!a.record && !!b.record && (b.record.openedAt ?? 0) > (a.record.openedAt ?? 0));
-  const winner = keepB ? { ...b, desk: bDesk, alsoOn: [...a.alsoOn, a.desk] } : a;
-  if (!keepB) winner.alsoOn = [...a.alsoOn, bDesk];
-  return winner;
+function prefer(a: PooledRow, aSweptAt: number, b: SweepRow, bDesk: string, bSweptAt: number): PooledRow {
+  const ka = knowledge(a);
+  const kb = knowledge(b);
+  const keepB = kb !== ka
+    ? kb > ka
+    : (b.record?.openedAt ?? 0) !== (a.record?.openedAt ?? 0)
+      ? (b.record?.openedAt ?? 0) > (a.record?.openedAt ?? 0)
+      : bSweptAt > aSweptAt;
+  return keepB
+    ? { ...b, desk: bDesk, alsoOn: [...a.alsoOn, a.desk] }
+    : { ...a, alsoOn: [...a.alsoOn, bDesk] };
 }
 
 export function poolReports(reports: readonly DeskReport[]): Pool {
@@ -86,6 +117,7 @@ export function poolReports(reports: readonly DeskReport[]): Pool {
   }
 
   const byIid = new Map<number, PooledRow>();
+  const sweptAtOf = new Map<number, number>();
   const seenVerdicts = new Map<number, Array<{ desk: string; verdict: EscapeVerdict | 'unreadable' }>>();
 
   for (const rep of reports) {
@@ -95,18 +127,28 @@ export function poolReports(reports: readonly DeskReport[]): Pool {
       seenVerdicts.set(row.iid, log);
 
       const held = byIid.get(row.iid);
-      byIid.set(row.iid, held ? prefer(held, row, rep.desk) : { ...row, desk: rep.desk, alsoOn: [] });
+      const winner = held
+        ? prefer(held, sweptAtOf.get(row.iid) ?? 0, row, rep.desk, rep.sweptAt)
+        : { ...row, desk: rep.desk, alsoOn: [] };
+      byIid.set(row.iid, winner);
+      if (!held || winner.desk === rep.desk) sweptAtOf.set(row.iid, rep.sweptAt);
     }
   }
 
   const rows = [...byIid.values()].sort((a, b) => a.iid - b.iid);
   const readable = rows.filter((r) => r.record).map((r) => r.record!);
 
-  // A disagreement between two READABLE copies is the interesting case: the
-  // label history is the same ticket, so it should not happen, and if it does
-  // one desk's sweep is stale. An unreadable copy disagreeing is routine.
+  // Only a disagreement between two FINAL verdicts is a conflict. Two desks
+  // reading the same label history cannot honestly reach both `clean` and
+  // `escaped`, so one sweep is wrong and a person needs to look.
+  //
+  // `open` or `indeterminate` against a final verdict is NOT a conflict — it is
+  // one desk having swept before the window closed, which `prefer` resolves on
+  // its own. Flagging that would fill the report with noise on every ticket any
+  // desk happened to sweep early, and noise is how a real conflict gets missed.
+  const FINAL = new Set<EscapeVerdict | 'unreadable'>(['clean', 'escaped']);
   const conflicts = [...seenVerdicts.entries()]
-    .filter(([, vs]) => new Set(vs.filter((v) => v.verdict !== 'unreadable').map((v) => v.verdict)).size > 1)
+    .filter(([, vs]) => new Set(vs.filter((v) => FINAL.has(v.verdict)).map((v) => v.verdict)).size > 1)
     .map(([iid, verdicts]) => ({ iid, verdicts }));
 
   const buckets = new Map<string, { settled: number; escaped: number }>();

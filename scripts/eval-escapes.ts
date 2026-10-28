@@ -20,7 +20,7 @@ import { readFileSync } from 'node:fs';
 import { operatorName } from '../src/lib/config.js';
 import { currentProjectKey } from '../src/lib/journalproject.js';
 import { escapeRate } from '../src/lib/escapes.js';
-import { collectEscapes, escapeLine, shippedRuns } from '../src/lib/escapecollect.js';
+import { collectEscapes, escapeLine, escapeWhy, shippedRuns } from '../src/lib/escapecollect.js';
 import { poolReports, type DeskReport } from '../src/lib/escapepool.js';
 import { gitlabLabelEvents } from '../src/conductor/escapesweep.js';
 
@@ -34,6 +34,19 @@ function pct(rate: number | null, settled: number): string {
   return rate === null
     ? `too few settled tickets to rate (need 12, have ${settled})`
     : `${Math.round(rate * 100)}% of settled tickets escaped a defect`;
+}
+
+/**
+ * Everything the rate leaves out, on its own line. A rate printed without these
+ * invites the reader to assume the denominator is every ticket shipped, and the
+ * gap between the two is exactly where a broken measurement hides.
+ */
+function excluded(r: { open: number; indeterminate: number; notShipped: number }): string[] {
+  const out: string[] = [];
+  if (r.open) out.push(`${r.open} still being tested (window open)`);
+  if (r.indeterminate) out.push(`${r.indeterminate} the board cannot answer (QA Issues never cleared)`);
+  if (r.notShipped) out.push(`${r.notShipped} merged per the journal but no merge on the board`);
+  return out;
 }
 
 // ------------------------------------------------------------------ pool mode
@@ -61,13 +74,17 @@ if (poolAt !== -1) {
   console.log(`desks    ${pool.desks.map((d) => `${d.desk}(${d.shipped})`).join('  ')}`);
   console.log('');
   for (const r of pool.rows) {
+    const row = { ...r, dir: '', archived: r.archived };
     const also = r.alsoOn.length ? `  [also on ${r.alsoOn.join(', ')}]` : '';
-    console.log(`${escapeLine({ ...r, dir: '', archived: r.archived })}  @${r.desk}${also}`);
+    console.log(`${escapeLine(row)}  @${r.desk}${also}`);
+    const why = escapeWhy(row);
+    if (why) console.log(`       ${why}`);
   }
   console.log('');
   console.log(`shipped  ${pool.rows.length}`);
-  console.log(`settled  ${pool.rate.settled}   escaped ${pool.rate.escaped}   open ${pool.rate.open}`);
+  console.log(`settled  ${pool.rate.settled}   escaped ${pool.rate.escaped}`);
   console.log(`rate     ${pct(pool.rate.rate, pool.rate.settled)}`);
+  for (const line of excluded(pool.rate)) console.log(`excluded ${line}`);
 
   if (pool.byVersion.length > 1) {
     console.log('\nby pipeline version:');
@@ -129,6 +146,8 @@ if (asJson) {
 
 for (const r of rows) {
   console.log(escapeLine(r));
+  const why = escapeWhy(r);
+  if (why) console.log(`       ${why}`);
   if (showRounds && r.record?.rounds.length) {
     for (const q of r.record.rounds) {
       console.log(`         QA flagged defects ${new Date(q.at).toISOString().slice(0, 16)} by ${q.by ?? 'unknown'}`);
@@ -141,8 +160,9 @@ const rate = escapeRate(rows.filter((r) => r.record).map((r) => r.record!));
 console.log('');
 console.log(`desk     ${operatorName()}   project ${currentProjectKey() ?? '(none)'}`);
 console.log(`shipped  ${rows.length}`);
-console.log(`settled  ${rate.settled}   escaped ${rate.escaped}   open ${rate.open}`);
+console.log(`settled  ${rate.settled}   escaped ${rate.escaped}`);
 console.log(`rate     ${pct(rate.rate, rate.settled)}`);
+for (const line of excluded(rate)) console.log(`excluded ${line}`);
 console.log('\nthis is one desk only — pool the fleet with --json and --pool for a cohort');
 
 if (unreadable.length) {

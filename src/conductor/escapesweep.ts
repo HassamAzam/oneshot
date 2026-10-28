@@ -64,8 +64,13 @@ export async function sweepEscapes(opts: { force?: boolean } = {}): Promise<Esca
       shipped: rows.length,
       settled: rate.settled,
       escaped: rate.escaped,
-      open: rate.open,
       rate: rate.rate === null ? 'too few to rate' : `${Math.round(rate.rate * 100)}%`,
+      // Every category the rate leaves out, reported with it. A rate whose
+      // denominator silently shrinks is the failure this eval exists to avoid,
+      // so the exclusions travel beside the number rather than behind it.
+      ...(rate.open ? { open: rate.open } : {}),
+      ...(rate.indeterminate ? { indeterminate: rate.indeterminate } : {}),
+      ...(rate.notShipped ? { noMergeOnBoard: rate.notShipped } : {}),
       ...(unreadable.length ? { unreadable: unreadable.length } : {}),
     });
     for (const r of unreadable) log.warn(escapeLine(r));

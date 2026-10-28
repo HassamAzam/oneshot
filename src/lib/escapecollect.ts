@@ -163,6 +163,18 @@ export function escapeLine(row: EscapeRow): string {
   const r = row.record!;
   const rounds = r.rounds.length ? `  rounds=${r.rounds.length}` : '';
   const withdrawn = r.signOffWithdrawn ? '  (sign-off withdrawn)' : '';
-  return `#${row.iid}  ${r.verdict.padEnd(12)} merged=${when(r.openedAt)} `
+  return `#${row.iid}  ${r.verdict.padEnd(13)} merged=${when(r.openedAt)} `
     + `signoff=${when(r.closedAt)}${rounds}  by=${row.oneshotSha || 'unknown'}${withdrawn}`;
+}
+
+/**
+ * The reason a verdict is not a measurement, for the line under it, or null.
+ *
+ * Separate from `escapeLine` so a caller can append its own suffix (which desk
+ * a pooled row came from) before the reason rather than after it. An
+ * `indeterminate` or `not-shipped` row without this tells a reader nothing they
+ * can act on, and those are the rows that most need acting on.
+ */
+export function escapeWhy(row: EscapeRow): string | null {
+  return row.record?.why ?? null;
 }

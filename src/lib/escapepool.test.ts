@@ -131,3 +131,57 @@ test('versions are bucketed across the whole pool, which is the comparison', () 
 test('pooling nothing is an error, not an empty perfect score', () => {
   assert.throws(() => poolReports([]), /no desk reports/);
 });
+
+/**
+ * Found in self-review, and the worst of the pooling bugs. `prefer` compared
+ * `openedAt` — the merge time, identical on two copies of the SAME ticket — so
+ * neither could ever beat the other and whichever desk happened to be read
+ * first won. A desk that swept before sign-off therefore contributed `open`,
+ * and a ticket that had in fact settled vanished from the rate.
+ */
+test('a desk that swept before sign-off does not beat one that swept after', () => {
+  const openRec = {
+    verdict: 'open' as const, openedAt: 1_000, closedAt: null, rounds: [], signOffWithdrawn: false,
+  };
+  const early = desk('swept-early', [row(20, { record: openRec })]);
+  const late = desk('swept-late', [row(20)]);
+
+  // Both orderings, because the bug was that whichever came first won.
+  for (const reports of [[early, late], [late, early]]) {
+    const p = poolReports(reports);
+    assert.equal(p.rows[0]!.record?.verdict, 'clean', 'the stale sweep won');
+    assert.equal(p.rate.settled, 1);
+    assert.equal(p.rate.open, 0);
+    assert.deepEqual(p.conflicts, [], 'staleness is not a conflict');
+  }
+});
+
+test('an indeterminate copy beats open but loses to a final verdict', () => {
+  const mk = (v: 'open' | 'indeterminate' | 'clean') => row(21, {
+    record: { verdict: v, openedAt: 1_000, closedAt: v === 'open' ? null : 2_000, rounds: [], signOffWithdrawn: false },
+  });
+  assert.equal(poolReports([desk('a', [mk('open')]), desk('b', [mk('indeterminate')])])
+    .rows[0]!.record?.verdict, 'indeterminate');
+  assert.equal(poolReports([desk('a', [mk('indeterminate')]), desk('b', [mk('clean')])])
+    .rows[0]!.record?.verdict, 'clean');
+});
+
+test('only two FINAL verdicts disagreeing is a conflict worth a person looking', () => {
+  // clean vs escaped on the same label history means one sweep is wrong.
+  const real = poolReports([desk('a', [escaped(22)]), desk('b', [row(22)])]);
+  assert.equal(real.conflicts.length, 1);
+
+  // open vs clean is just one desk being early — resolved, not reported.
+  const stale = poolReports([
+    desk('a', [row(23, { record: { verdict: 'open', openedAt: 1, closedAt: null, rounds: [], signOffWithdrawn: false } })]),
+    desk('b', [row(23)]),
+  ]);
+  assert.deepEqual(stale.conflicts, []);
+});
+
+test('when two desks are equally settled the fresher sweep wins', () => {
+  const a = { desk: 'a', project: ERP, sweptAt: 100, rows: [row(24, { oneshotSha: 'older' })] };
+  const b = { desk: 'b', project: ERP, sweptAt: 900, rows: [row(24, { oneshotSha: 'newer' })] };
+  assert.equal(poolReports([a, b]).rows[0]!.oneshotSha, 'newer');
+  assert.equal(poolReports([b, a]).rows[0]!.oneshotSha, 'newer');
+});
