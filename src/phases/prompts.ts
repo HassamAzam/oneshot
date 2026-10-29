@@ -29,7 +29,6 @@ import { join } from 'node:path';
 import { approvalCovers, readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
 import { planFilePaths } from '../lib/planfiles.js';
 import { DESIGN_DIR, NEW_TOKENS_FILE, TOKENS_FILE } from '../lib/designtokens.js';
-import { evidenceRubric } from '../lib/verifyeval.js';
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import { PRIOR_ART_KINDS } from '../conductor/schemas.js';
@@ -2037,17 +2036,8 @@ above, under the run directory — nothing else.`;
     // No code changed since the last lap — every other case keeps its verdict.
     const rescope = ctx.journal.verifyRescopeCases ?? [];
     const scopedCases = rescope.length ? cases.filter((c) => rescope.includes(c.id)) : cases;
-    const evalFeedback = ctx.journal.verifyEvalFeedback;
     const scopeBlock = rescope.length
-      ? evalFeedback
-        ? `## Scoped re-run — ONLY ${rescope.join(', ')}
-
-${evalFeedback}
-
-**No code has changed** since the last lap. Run ONLY the case(s) listed here and output a result
-for each. Do NOT run or re-report any other case: their verdicts stand.
-`
-        : `## Scoped re-run — ONLY ${rescope.join(', ')}
+      ? `## Scoped re-run — ONLY ${rescope.join(', ')}
 
 A QA reviewer said ${rescope.length === 1 ? 'this case was' : 'these cases were'} failing because the
 steps were incomplete, and supplied corrected steps — already written into the list below. **No code
@@ -2194,10 +2184,8 @@ ${caseList(scopedCases, { steps: true })}
 Report one result per case, using the case's own id. A case you did not run is 'skipped' with
 the reason in \`evidence\` — never a silent omission, and never a 'pass'.
 
-${evidenceRubric()}
-
-The conductor checks that much mechanically after you report: a case that comes back with an empty
-\`evidence\` is sent straight back to you to run again.
+\`evidence\` for a fail is ACTUAL vs EXPECTED, in that order, in one line. "Did not work" is not
+evidence and the next \`implement\` lap cannot act on it.
 
 ## A failure this change did not cause is 'pre-existing', not 'fail'
 
