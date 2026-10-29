@@ -12,6 +12,7 @@ import { createRequire } from 'node:module';
 import { createServer, type Server } from 'node:http';
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, utimesSync,
+  symlinkSync, realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +30,8 @@ const harness = require(
     wt: string, port: number, pid: number, budgetMs: number, startedAt?: number,
   ) => Promise<boolean>;
   bundleState: (wt: string, opts?: { since?: number; log?: string }) => BundleState;
+  runDir: () => string;
+  servesWorktree: (existing: { worktree?: string } | null, wt: string) => boolean;
   assertBundleReachable: (bePort: number) => Promise<string>;
   settle: (session: unknown, selector: string, opts?: Budget) => Promise<Settled>;
   overlap: (session: unknown, a: string, b: string, opts?: Budget) => Promise<Overlap>;
@@ -617,4 +620,130 @@ test('a hidden overlay reports outsideViewport from its box, not a fixed false',
   }), POPPER, FIELD, FAST);
   assert.equal(r.intersects, false);
   assert.equal(r.outsideViewport, true);
+});
+
+/* ------------------------------------------------------ run directory identity */
+
+/**
+ * The harness reads its run directory from the environment on every call, so a test
+ * that wants to ask what a given environment resolves to has to set it for the
+ * duration of the call and put back whatever was there.
+ */
+function inEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
+  const prev: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(vars)) {
+    prev[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try { return fn(); } finally {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+/** An environment with no ticket and no pinned run directory: a hand-driven bring-up. */
+const adhoc = (wt: string) => ({
+  ONESHOT_RUN_DIR: undefined, ONESHOT_IID: undefined, ONESHOT_WORKTREE: wt,
+});
+
+test('two worktrees brought up without a ticket get a run directory each', () => {
+  // Both used to resolve to state/runs/adhoc, so the second session read the first's
+  // servers.json and app-env.json: it verified its ticket against the other
+  // worktree's code, and on a good day only saw a port drift error instead.
+  const a = mkdtempSync(join(tmpdir(), 'harness-wt-a-'));
+  const b = mkdtempSync(join(tmpdir(), 'harness-wt-b-'));
+  const dirA = inEnv(adhoc(a), () => harness.runDir());
+  const dirB = inEnv(adhoc(b), () => harness.runDir());
+  assert.notEqual(dirA, dirB);
+  for (const d of [dirA, dirB]) assert.match(d, /state\/runs\/adhoc\//);
+});
+
+test('one worktree gets the same run directory on every call, so its app is reused', () => {
+  // The whole point of keeping a shared directory: a second hand-driven session on the
+  // same checkout must find the app the first one left running.
+  const wt = mkdtempSync(join(tmpdir(), 'harness-wt-stable-'));
+  assert.equal(inEnv(adhoc(wt), () => harness.runDir()), inEnv(adhoc(wt), () => harness.runDir()));
+});
+
+test('a worktree named through a symlink resolves to the one run directory', () => {
+  // /tmp is a symlink to /private/tmp on macOS, and app.cjs passes a realpath while a
+  // hand-typed cd does not. Keying on the spelling would split one app into two.
+  const wt = mkdtempSync(join(tmpdir(), 'harness-wt-real-'));
+  const link = join(mkdtempSync(join(tmpdir(), 'harness-wt-link-')), 'wt');
+  symlinkSync(wt, link);
+  assert.equal(inEnv(adhoc(link), () => harness.runDir()), inEnv(adhoc(wt), () => harness.runDir()));
+});
+
+test('a ticket still owns state/runs/<iid>, and a pinned run directory still wins', () => {
+  // Every phase and localtests.cjs addresses the harness one of these two ways. The
+  // worktree keying is the fallback's business and must not reach either.
+  assert.match(
+    inEnv({ ONESHOT_RUN_DIR: undefined, ONESHOT_IID: '8877' }, () => harness.runDir()),
+    /state\/runs\/8877$/,
+  );
+  assert.equal(
+    inEnv({ ONESHOT_RUN_DIR: '/tmp/pinned-run', ONESHOT_IID: '8877' }, () => harness.runDir()),
+    '/tmp/pinned-run',
+  );
+});
+
+/* ------------------------------------------------------------- reusing an app */
+
+test('servers.json recorded against another worktree is not reused', () => {
+  // up() checked that the pids were alive and the port answered 200, never that the
+  // app answering was built from this worktree's code.
+  const a = mkdtempSync(join(tmpdir(), 'harness-serves-a-'));
+  const b = mkdtempSync(join(tmpdir(), 'harness-serves-b-'));
+  assert.equal(harness.servesWorktree({ worktree: a }, b), false);
+});
+
+test('servers.json for this worktree is reused however its path is spelled', () => {
+  const wt = mkdtempSync(join(tmpdir(), 'harness-serves-real-'));
+  const link = join(mkdtempSync(join(tmpdir(), 'harness-serves-link-')), 'wt');
+  symlinkSync(wt, link);
+  assert.equal(harness.servesWorktree({ worktree: link }, wt), true);
+  assert.equal(harness.servesWorktree({ worktree: realpathSync(wt) }, wt), true);
+});
+
+test('servers.json with no worktree recorded is not reused', () => {
+  // Written before the field existed, or by something else. A cold start is always
+  // safe; adopting an app whose code cannot be identified is not, and if that app
+  // holds the port, assertPortFreeOrOurs says so by name.
+  const wt = mkdtempSync(join(tmpdir(), 'harness-serves-none-'));
+  assert.equal(harness.servesWorktree({}, wt), false);
+  assert.equal(harness.servesWorktree(null, wt), false);
+});
+
+/* -------------------------------------------------------------- port drift */
+
+test('a served-from line from an earlier build in the same log is not port drift', async () => {
+  // app.cjs joins a bring-up it did not start and waits on a log it did not truncate.
+  // The first matching line won, so the port an earlier build of this worktree was
+  // served on came back as drift against the port we hold now.
+  const stale = `ℹ ｢wds｣: webpack output is served from http://localhost:9999/`;
+  const f = bundleFixture(`${stale}\nCompiled successfully!\n${BOOT}\nCompiled successfully!\n`, {
+    [ENTRYPOINTS]: { body: MANIFEST, mtimeMs: afterStart },
+  });
+  assert.equal(harness.bundleState(f.wt, { since: started, log: f.log }).state, 'ready');
+  assert.equal(await inRun(f.run, () => harness.waitWebpack(f.wt, FE_PORT, process.pid, 5000, started)), true);
+});
+
+test('a served-from line after the last start marker that disagrees is still port drift', async () => {
+  // The check itself has to keep working: a webpack the environment put somewhere we
+  // did not ask for leaves localPaths.js pointing at a bundle nobody is serving.
+  const f = bundleFixture(
+    `${BOOT.replace(String(FE_PORT), '9999')}\nCompiled successfully!\n`,
+    { [ENTRYPOINTS]: { body: MANIFEST, mtimeMs: afterStart } },
+  );
+  await assert.rejects(
+    () => inRun(f.run, () => harness.waitWebpack(f.wt, FE_PORT, process.pid, 5000, started)),
+    (e: { code: string; message: string }) => {
+      assert.equal(e.code, 'E_PORT_DRIFT');
+      assert.match(e.message, /9999/);
+      return true;
+    },
+  );
 });
