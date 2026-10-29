@@ -29,7 +29,6 @@ import { join } from 'node:path';
 import { approvalCovers, readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
 import { planFilePaths } from '../lib/planfiles.js';
 import { DESIGN_DIR, NEW_TOKENS_FILE, TOKENS_FILE } from '../lib/designtokens.js';
-import { evidenceRubric } from '../lib/verifyeval.js';
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import { PRIOR_ART_KINDS } from '../conductor/schemas.js';
@@ -717,30 +716,6 @@ const ORACLE =
  * only the first, with "rather than new ones", told plan and implement to avoid
  * exactly the values the reviewer was shown as additions.
  */
-/**
- * The design is missing files or screens its approval request needs, found
- * before the request was posted. This run produces those only; the rest of the
- * design was already checked and stays as it is.
- */
-export function designHtmlRepairBlock(ctx: PromptCtx): string {
-  const repair = ctx.journal.designHtmlRepair;
-  if (!repair?.pending || !repair.missing.length) return '';
-  return `
-## Missing design files — repair run
-Your design was checked before its approval request was posted, and it is missing:
-${repair.missing.map((f) => `- ${f}`).join('\n')}
-
-Produce each one as described below. A file path is produced at exactly that artifact-relative
-path and reported in the same field it was named in: a \`before\` is a capture of the running app,
-a screenshot is a 1280x800 render of its mockup, an \`.html\` is the mockup itself. "A screen for
-route X" is a new screen for that research \`uiSurfaces\` entry, with \`route\` set to X and its
-own mockup, render and \`before\`. "A before capture for route X" is that page captured from the
-running app today and set as the \`before\` of the screen whose \`route\` is X. Keep every other screen, file,
-decision and question as it already is. The request is posted only after this run, so nothing
-here has been shown to a reviewer yet.
-`;
-}
-
 function approvedDesignBlock(ctx: PromptCtx): string {
   const d = artifact<DesignArtifact>(ctx, 'design');
   if (!d.screens || d.applicable === false) return '';
@@ -1212,11 +1187,6 @@ Work out what this ticket actually requires, and trace the code that implements 
   the only source they are given is the diff — which for a logic-layer fix contains none of
   it, so each of them re-excavates the screen from scratch. Set \`reachable\` false and leave
   the rest empty when the change genuinely has no UI surface.
-- Fill \`uiSurfaces\`: every screen this ticket changes or adds, one entry per route. For a
-  screen in the app today set \`exists\` true and give the repo-relative \`file:line\` where its
-  route is defined — this is checked against the code, so cite the line that names the route. For
-  a screen the ticket adds, \`exists\` false and empty \`evidence\`. The design phase must draw
-  every entry, and capture a \`before\` of every existing one. Empty when nothing is reachable.
 - List what you could NOT determine. An explicit unknown is worth more than a confident
   guess — the plan phase can work around a stated gap and cannot work around a wrong claim.
 - LAND THE PLANE at ~${landAt} turns — about 70% of your ${turns}. Keep a rough count of your
@@ -1231,7 +1201,6 @@ Do not write or modify any code.`;
 
   design: (ctx) => `${ticketBlock(ctx.ticket)}
 ${reviewGateFeedbackBlock(ctx.journal.designApproval?.feedback, 'Reviewer feedback on an earlier design', 'Design')}
-${designHtmlRepairBlock(ctx)}
 ## Research (phase 1)
 ${JSON.stringify(ctx.prior.research ?? {}, null, 2)}
 
@@ -1276,9 +1245,6 @@ is "that's a nice generic dashboard". So, in order:
    capture is the \`before\` on each screen, and it is also where you read the real shell — nav,
    header, density, spacing — which every mockup then reproduces.
 3. Use research's \`uiPath\` to find those screens rather than hunting for them.
-4. Research's \`uiSurfaces\` lists every screen to draw. Draw at least one screen per entry and set
-   its \`route\` to that entry's route, copied exactly. Every entry with \`exists\` true needs a
-   \`before\` capture. Both are checked once the request is on the ticket.
 
 ## What to draw
 
@@ -2037,17 +2003,8 @@ above, under the run directory — nothing else.`;
     // No code changed since the last lap — every other case keeps its verdict.
     const rescope = ctx.journal.verifyRescopeCases ?? [];
     const scopedCases = rescope.length ? cases.filter((c) => rescope.includes(c.id)) : cases;
-    const evalFeedback = ctx.journal.verifyEvalFeedback;
     const scopeBlock = rescope.length
-      ? evalFeedback
-        ? `## Scoped re-run — ONLY ${rescope.join(', ')}
-
-${evalFeedback}
-
-**No code has changed** since the last lap. Run ONLY the case(s) listed here and output a result
-for each. Do NOT run or re-report any other case: their verdicts stand.
-`
-        : `## Scoped re-run — ONLY ${rescope.join(', ')}
+      ? `## Scoped re-run — ONLY ${rescope.join(', ')}
 
 A QA reviewer said ${rescope.length === 1 ? 'this case was' : 'these cases were'} failing because the
 steps were incomplete, and supplied corrected steps — already written into the list below. **No code
@@ -2194,10 +2151,8 @@ ${caseList(scopedCases, { steps: true })}
 Report one result per case, using the case's own id. A case you did not run is 'skipped' with
 the reason in \`evidence\` — never a silent omission, and never a 'pass'.
 
-${evidenceRubric()}
-
-The conductor checks that much mechanically after you report: a case that comes back with an empty
-\`evidence\` is sent straight back to you to run again.
+\`evidence\` for a fail is ACTUAL vs EXPECTED, in that order, in one line. "Did not work" is not
+evidence and the next \`implement\` lap cannot act on it.
 
 ## A failure this change did not cause is 'pre-existing', not 'fail'
 

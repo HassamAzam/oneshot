@@ -194,12 +194,6 @@ export function approvedDigestFor(state: ReviewGateState, subject: unknown): str
   return state.requestedDigest ?? gateSubjectDigest(subject);
 }
 
-export interface DesignHtmlRepair {
-  attempts: number;
-  missing: string[];
-  pending: boolean;
-}
-
 export interface RunJournal {
   runId: string;
   iid: number;
@@ -250,12 +244,6 @@ export interface RunJournal {
    * whatever the code-review posture happens to be.
    */
   designApproval?: ReviewGateState;
-  /**
-   * What the design request is missing, found before it was posted. `pending`
-   * while the run is back in `design` producing it; cleared once the request
-   * is posted, so the next request gets its own repair.
-   */
-  designHtmlRepair?: DesignHtmlRepair;
   planApproval?: ReviewGateState;
   /** Test-case approval gate state (Review label, between `testcases` and `review`). */
   testcasesApproval?: ReviewGateState;
@@ -318,13 +306,6 @@ export interface RunJournal {
    * code changed), and the rest keep their prior results.
    */
   verifyRescopeCases?: string[];
-  /**
-   * The verify-eval finding handed to a scoped re-run as feedback, set and
-   * cleared alongside `verifyRescopeCases`. When present the scoped verify
-   * prompt explains the re-run in the eval's words (a `pre-existing` label
-   * missing its proof) rather than QA's "corrected steps".
-   */
-  verifyEvalFeedback?: string;
   /**
    * When the `merge` phase last asked GitLab whether a human has merged the
    * MR. A Review-labelled ticket is never merged by Oneshot, so this phase is

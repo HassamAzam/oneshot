@@ -47,11 +47,11 @@
  * continues from the phase remediation says to resume at.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { existsSync, rmSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, artifactDir, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
+  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -67,7 +67,7 @@ import {
 import {
   approvalCovers, archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
   phaseSucceeded, phaseSettled, readArtifact,
-  readJournal, recordPhase, recordRemediation, reapScratch, requestCovers, updateJournal, writeArtifact,
+  readJournal, recordPhase, recordRemediation, reapScratch, updateJournal, writeArtifact,
   writeJournal,
   type PhaseRecord, type Remediation, type RunJournal,
 } from '../lib/artifacts.js';
@@ -94,19 +94,10 @@ import {
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
-import {
-  DESIGN_EVAL_RECORD, appendRound, checkBeforePosting, gradeRequest, missingItems, needsGrading, nextRepair,
-  repairDue, routeEvidenceHolds, type DesignEvalRecord, type DesignEvalRound,
-} from '../lib/designeval.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
-import {
-  MAX_VERIFY_EVAL_RETRIES, VERIFY_EVAL_RECORD, appendRound as appendVerifyEvalRound, dropOrphans,
-  feedbackNote, gradeVerify, reconcileOrphans, rerunnable,
-  type VerifyEvalRecord, type VerifyEvalRound,
-} from '../lib/verifyeval.js';
 import { schemaFor } from './schemas.js';
 import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
@@ -123,8 +114,7 @@ import {
 } from './zoneguard.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import {
-  countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type DesignArtifact, type Ticket, type TestCase,
-  type UiSurface,
+  countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type Ticket, type TestCase,
 } from '../phases/types.js';
 import {
   activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
@@ -1607,18 +1597,6 @@ export async function runTicket(
         log.warn(`design.json changed since its approval on #${iid} — re-arming the design gate`);
         j = rearmGate(iid, 'design') ?? j;
       }
-      const designIdx = list.findIndex((p) => p.name === 'design');
-      const evalCtx: DesignEvalCtx = {
-        surfaces: researchSurfaces(prior.research ?? null),
-        repoDir: worktree ?? WORK_REPO,
-      };
-      const approval = j.designApproval;
-      const asking = approval?.requestNoteId == null || !requestCovers(approval, design);
-      if (asking && designIdx !== -1 && sendDesignBackForMissing(iid, j, design, evalCtx)) {
-        forced.add('design');
-        i = designIdx;
-        continue;
-      }
       const gate = await checkApprovalGate({
         iid,
         gate: 'design',
@@ -1628,11 +1606,6 @@ export async function runTicket(
         onApproved: async () => { await addIssueNote(iid, designApprovedRecordBody(design)); },
       });
       j = readJournal(iid) ?? j;
-      const postedNoteId = j.designApproval?.requestNoteId;
-      if (asking && postedNoteId != null && j.designHtmlRepair) {
-        j = updateJournal(iid, { designHtmlRepair: undefined }) ?? j;
-      }
-      await gradeDesignRequest(iid, postedNoteId, design, evalCtx);
       if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
       if (gate.verdict === 'pending') {
         return finish(j, 'parked',
@@ -1640,6 +1613,7 @@ export async function runTicket(
           + 'or comments there what to change to have the design redrawn');
       }
       if (gate.verdict === 'feedback') {
+        const designIdx = list.findIndex((p) => p.name === 'design');
         if (designIdx !== -1) {
           forced.add('design');
           i = designIdx;
@@ -2056,83 +2030,6 @@ export async function runTicket(
             if (applied.rejected.length) {
               log.warn(`base-check did not confirm ${applied.rejected.join(', ')} — scored as fail`);
             }
-          }
-        }
-      }
-
-      // verify-eval: verify.json must be internally honest before the run
-      // carries it to the MR. Every case it reports is a real case from the
-      // pinned testcases.json, and every case carries the evidence line
-      // evidenceRubric() asks of it. That rubric is stated once, in
-      // lib/verifyeval.ts, and the verify prompt shows the session that writes
-      // the results the same text the grader scores them by. Run AFTER
-      // applyBaseCheck above, so it grades the results the gate will read.
-      //
-      // Two findings, two resolutions. An ORPHAN id (reported but not in
-      // testcases.json) is #259's TC-15: a case the plan descoped that verify
-      // kept failing, blocking the merge on retired work. It cannot be re-run,
-      // so it is dropped here, by the conductor, with no model lap — up to the
-      // floor in reconcileOrphans(), past which the two lists disagree wholesale
-      // and the whole list is KEPT and flagged, because emptying verify.json
-      // leaves the merge gate nothing to fail on. A case with no evidence IS a
-      // real case, so it is handed to ONE scoped re-run with the rubric as
-      // feedback. Whatever still stands after that is recorded with a warning
-      // and the run continues: this eval never blocks, never cycles to
-      // implement, never retries a second time.
-      if (r.cfg.name === 'verify' && r.out.ok && !overruled.has(r)) {
-        const tcCases = readArtifact<{ cases?: Array<{ id?: unknown }> }>(iid, 'testcases.json')?.cases;
-        const tcIds = Array.isArray(tcCases)
-          ? new Set(tcCases.map((c) => (typeof c.id === 'string' ? c.id : '')).filter(Boolean))
-          : null;
-        let record = readArtifact<VerifyEvalRecord>(iid, VERIFY_EVAL_RECORD);
-        const writeRound = (round: VerifyEvalRound): void => {
-          record = appendVerifyEvalRound(record, iid, round);
-          writeArtifact(iid, VERIFY_EVAL_RECORD, record);
-        };
-
-        let results = (r.out.data?.results ?? []) as CaseResult[];
-        const { drop: dropped, drift } = reconcileOrphans(results, tcIds);
-        if (dropped.length) {
-          results = dropOrphans(results, tcIds);
-          r.out.data = { ...r.out.data, results };
-          writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
-          log.warn(`verify-eval dropped ${dropped.length} case(s) not in testcases.json: ${dropped.join(', ')}`);
-        }
-        if (drift) log.warn(`verify-eval kept every case on #${iid} — ${drift.detail}`);
-        let issues = gradeVerify(results, tcIds);
-
-        // Drift suspends the re-run too: when the lists disagree about which
-        // cases exist, a session scoped to ids out of that list has nothing to
-        // prove. The finding carries no case a re-run could act on, so round 0
-        // closes it as unresolved and the run continues.
-        const toRerun = drift ? [] : rerunnable(issues);
-        writeRound({
-          at: new Date().toISOString(), attempt: 0, droppedOrphans: dropped, issues,
-          pass: issues.length === 0, unresolved: issues.length > 0 && toRerun.length === 0,
-        });
-
-        if (toRerun.length) {
-          log.phase(`verify-eval re-running ${toRerun.length} case(s) reported with no evidence: ${toRerun.join(', ')}`, { iid });
-          const merged = await runScopedVerifyForEval(r.cfg, toRerun, feedbackNote(issues), results);
-          // Written back on every outcome, not just a merge. By the time the
-          // re-run returns, the scoped session has already overwritten
-          // verify.json with its own short list — phase.ts writes the artifact
-          // whenever the session produced data, `ok` or not, and a session that
-          // returns `{blocked: ..., results: []}` produced data. So on a merge
-          // this stores the folded list, and on a re-run that blocked or died it
-          // puts `results` back exactly as it stood, which is the baseline.
-          // Leaving the scoped list on disk would hand the MR note an empty
-          // verify section, the next lap's prompt no cases, and a resumed run's
-          // qualityGate a list whose real failures are gone.
-          if (merged) results = dropOrphans(merged, tcIds);
-          r.out.data = { ...r.out.data, results };
-          writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
-          issues = gradeVerify(results, tcIds);
-          const unresolved = issues.length > 0;
-          writeRound({ at: new Date().toISOString(), attempt: 1, droppedOrphans: [], issues, pass: !unresolved, unresolved });
-          if (unresolved) {
-            log.warn(`verify-eval unresolved after ${MAX_VERIFY_EVAL_RETRIES} scoped re-run — continuing to the next `
-              + `phase for #${iid}: ${issues.map((i) => i.detail).join('; ')}`);
           }
         }
       }
@@ -3144,69 +3041,6 @@ export async function runTicket(
    * park would otherwise be refused by checkQuota() as 'unavailable', which
    * spends the verify lap this exists to save.
    */
-  /**
-   * One scoped verify re-run for the verify-eval, folded back over the full
-   * list. Mirrors the QA `missing-steps` rescope and `runBaseCheck`'s inline
-   * dispatch: snapshot the baseline to verify-prescope.json (the scoped session
-   * overwrites verify.json with only its cases), run verify scoped to `scope`
-   * with `feedback` in the prompt, then merge its fresh results back.
-   *
-   * Recorded as its own phase row so the cost is visible, but a death is marked
-   * 'infra', never 'failed', so this re-run can never spend the implement↔verify
-   * cycle budget (`failedLapsOf` ignores 'infra'). Returns the merged results,
-   * or null when it could not run or the session did not finish — the caller
-   * records the finding as unresolved, restores verify.json from the baseline it
-   * passed in, and carries on. Never blocks.
-   */
-  async function runScopedVerifyForEval(
-    cfgV: PhaseConfig, scope: string[], feedback: string, baseline: CaseResult[],
-  ): Promise<CaseResult[] | null> {
-    if (!isImplemented(cfgV.name)) return null;
-    if (Boolean(opts.signal?.aborted) || existsSync(PAUSE) || quotaParked()) {
-      log.warn('verify-eval re-run skipped — the run is stopped or paused');
-      return null;
-    }
-    const leaseError = ensureLeases(cfgV);
-    if (leaseError) { log.warn(`verify-eval re-run skipped — ${leaseError}`); return null; }
-    const lap = lapsOf(iid, cfgV.name);
-    const quota = checkQuota(runId, cfgV.name, lap);
-    if (!quota.allowed) { log.warn(`verify-eval re-run skipped — quota: ${quota.reason}`); return null; }
-
-    writeArtifact(iid, 'verify-prescope.json', { results: baseline });
-    j = updateJournal(iid, { verifyRescopeCases: scope, verifyEvalFeedback: feedback }) ?? j;
-    const clear = (): void => {
-      j = updateJournal(iid, { verifyRescopeCases: [], verifyEvalFeedback: undefined }) ?? readJournal(iid) ?? j;
-    };
-
-    const startedAt = Date.now();
-    await updateCard(j.slackTs ?? '', cardState(j, [cfgV.name]));
-    updateRun(runId, { phase: cfgV.name, status: 'running', owner_seen_at: Date.now() });
-    const ctx: PromptCtx = { ticket, runId, lap, branch, worktree, port, prior, journal: j };
-    const rowId = phaseStart(runId, cfgV.name, lap, modelFor(cfgV));
-    const out = await runPhase({
-      iid, runId, lap, cfg: cfgV,
-      prompt: promptFor(cfgV, ctx), systemPrompt: systemPromptFor(cfgV, ctx),
-      worktree, port, branch, signal: opts.signal,
-    });
-    const status = out.ok ? 'ok' : 'infra';
-    phaseEnd(rowId, status, {
-      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
-      detail: out.error ?? out.blocked ?? undefined,
-    });
-    recordPhase(iid, {
-      phase: cfgV.name, lap, status, startedAt, endedAt: Date.now(), model: modelFor(cfgV),
-      turns: out.turns, weighted: out.weighted, sessionId: out.sessionId,
-      error: out.accountAction ?? out.error ?? out.blocked ?? undefined,
-    });
-    clear();
-    if (!out.ok) {
-      log.warn(`verify-eval re-run did not finish (${out.error ?? out.blocked ?? 'no output'}) — recording unresolved`);
-      return null;
-    }
-    const fresh = (out.data?.results ?? []) as CaseResult[];
-    return mergeScopedVerify(baseline, fresh, new Set(scope));
-  }
-
   async function runBaseCheck(): Promise<
     | { kind: 'answered'; data: BaseCheck }
     | { kind: 'unavailable'; why: string }
@@ -3771,98 +3605,4 @@ function milestoneText(p: PhaseConfig, data: Record<string, unknown> | null, iid
       `${empty.length ? `\nempty passes: ${empty.join(', ')}` : ''}`;
   }
   return `*#${iid} ${p.name}* — ${data.summary ?? 'done'}`;
-}
-
-/** What the design eval reads besides the design: research's screen list and the repo its evidence cites. */
-interface DesignEvalCtx {
-  surfaces: UiSurface[];
-  repoDir: string;
-}
-
-function researchSurfaces(research: Record<string, unknown> | null): UiSurface[] {
-  const list = research?.uiSurfaces;
-  return Array.isArray(list) ? (list as UiSurface[]) : [];
-}
-
-/** A repo file's text, or null when it is missing or the path leaves the repo. */
-function readRepoFile(repoDir: string, rel: string): string | null {
-  const full = resolve(repoDir, rel);
-  if (!full.startsWith(resolve(repoDir) + sep)) return null;
-  try {
-    return readFileSync(full, 'utf8');
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Before the design request is posted: check every file the design names is
- * on disk and every research screen is covered. When something is missing and
- * the cap allows, record a repair and return true so the caller re-runs
- * `design` — nobody has been pinged yet, so nothing on the ticket changes
- * under a reviewer. A dry run posts nothing, so it is never sent back.
- */
-function sendDesignBackForMissing(
-  iid: number, j: RunJournal, design: Record<string, unknown> | null, ctx: DesignEvalCtx,
-): boolean {
-  if (DRY_RUN) return false;
-  const files = checkBeforePosting(
-    design as Partial<DesignArtifact> | null,
-    (f) => existsSync(join(artifactDir(iid), f)),
-    ctx.surfaces,
-    (evidence, route) => routeEvidenceHolds(evidence, route, (rel) => readRepoFile(ctx.repoDir, rel)),
-  );
-  const missing = missingItems(files);
-  if (repairDue(j.designHtmlRepair, files)) {
-    const next = nextRepair(j.designHtmlRepair, files);
-    updateJournal(iid, { designHtmlRepair: next });
-    log.warn(`design-eval #${iid}: back to design before posting, ${missing.length} item(s) missing`, {
-      iid, attempt: next.attempts, missing,
-    });
-    return true;
-  }
-  if (missing.length) {
-    log.warn(`design-eval #${iid}: repair cap reached — posting the request without ${missing.length} item(s)`, {
-      iid, missing,
-    });
-  }
-  if (j.designHtmlRepair?.pending) updateJournal(iid, { designHtmlRepair: { ...j.designHtmlRepair, pending: false } });
-  return false;
-}
-
-/**
- * Read the design request just posted back from GitLab and record whether it
- * links every design file. Log only: the comment is never edited, because a
- * reply on it is a verdict on what it showed. Once per comment; a dry run
- * posts nothing to read.
- */
-async function gradeDesignRequest(
-  iid: number, noteId: number | null | undefined, design: Record<string, unknown> | null, ctx: DesignEvalCtx,
-): Promise<void> {
-  if (DRY_RUN || noteId == null) return;
-  const record = readArtifact<DesignEvalRecord>(iid, DESIGN_EVAL_RECORD);
-  if (!needsGrading(record, noteId)) return;
-  const round: DesignEvalRound = await gradeRequest({
-    iid,
-    noteId,
-    design: design as Partial<DesignArtifact> | null,
-    artifactDir: artifactDir(iid),
-    surfaces: ctx.surfaces,
-    evidenceHolds: (evidence, route) => routeEvidenceHolds(evidence, route, (rel) => readRepoFile(ctx.repoDir, rel)),
-    readNote: async (id) => {
-      const res = await getIssueNote(iid, id);
-      return res.ok && res.data ? res.data.body : null;
-    },
-  });
-  writeArtifact(iid, DESIGN_EVAL_RECORD, appendRound(record, iid, round));
-  if (round.pass) {
-    log.ok(`design-eval #${iid}: all ${round.files.length} checks passed on note ${noteId}`);
-  } else if (!round.readBack) {
-    log.warn(`design-eval #${iid}: could not read note ${noteId} back`, { iid });
-  } else {
-    const missing = missingItems(round.files);
-    log.warn(`design-eval #${iid}: ${missing.length}/${round.files.length} checks failed on note ${noteId}`, {
-      iid, note: noteId, missing,
-    });
-  }
 }
