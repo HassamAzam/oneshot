@@ -47,11 +47,11 @@
  * continues from the phase remediation says to resume at.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { existsSync, rmSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, artifactDir, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
+  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -67,7 +67,7 @@ import {
 import {
   approvalCovers, archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
   phaseSucceeded, phaseSettled, readArtifact,
-  readJournal, recordPhase, recordRemediation, reapScratch, requestCovers, updateJournal, writeArtifact,
+  readJournal, recordPhase, recordRemediation, reapScratch, updateJournal, writeArtifact,
   writeJournal,
   type PhaseRecord, type Remediation, type RunJournal,
 } from '../lib/artifacts.js';
@@ -94,10 +94,6 @@ import {
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
-import {
-  DESIGN_EVAL_RECORD, appendRound, checkBeforePosting, gradeRequest, missingItems, needsGrading, nextRepair,
-  repairDue, routeEvidenceHolds, type DesignEvalRecord, type DesignEvalRound,
-} from '../lib/designeval.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
@@ -118,8 +114,7 @@ import {
 } from './zoneguard.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import {
-  countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type DesignArtifact, type Ticket, type TestCase,
-  type UiSurface,
+  countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type Ticket, type TestCase,
 } from '../phases/types.js';
 import {
   activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
@@ -1602,18 +1597,6 @@ export async function runTicket(
         log.warn(`design.json changed since its approval on #${iid} — re-arming the design gate`);
         j = rearmGate(iid, 'design') ?? j;
       }
-      const designIdx = list.findIndex((p) => p.name === 'design');
-      const evalCtx: DesignEvalCtx = {
-        surfaces: researchSurfaces(prior.research ?? null),
-        repoDir: worktree ?? WORK_REPO,
-      };
-      const approval = j.designApproval;
-      const asking = approval?.requestNoteId == null || !requestCovers(approval, design);
-      if (asking && designIdx !== -1 && sendDesignBackForMissing(iid, j, design, evalCtx)) {
-        forced.add('design');
-        i = designIdx;
-        continue;
-      }
       const gate = await checkApprovalGate({
         iid,
         gate: 'design',
@@ -1623,11 +1606,6 @@ export async function runTicket(
         onApproved: async () => { await addIssueNote(iid, designApprovedRecordBody(design)); },
       });
       j = readJournal(iid) ?? j;
-      const postedNoteId = j.designApproval?.requestNoteId;
-      if (asking && postedNoteId != null && j.designHtmlRepair) {
-        j = updateJournal(iid, { designHtmlRepair: undefined }) ?? j;
-      }
-      await gradeDesignRequest(iid, postedNoteId, design, evalCtx);
       if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
       if (gate.verdict === 'pending') {
         return finish(j, 'parked',
@@ -1635,6 +1613,7 @@ export async function runTicket(
           + 'or comments there what to change to have the design redrawn');
       }
       if (gate.verdict === 'feedback') {
+        const designIdx = list.findIndex((p) => p.name === 'design');
         if (designIdx !== -1) {
           forced.add('design');
           i = designIdx;
@@ -3626,98 +3605,4 @@ function milestoneText(p: PhaseConfig, data: Record<string, unknown> | null, iid
       `${empty.length ? `\nempty passes: ${empty.join(', ')}` : ''}`;
   }
   return `*#${iid} ${p.name}* — ${data.summary ?? 'done'}`;
-}
-
-/** What the design eval reads besides the design: research's screen list and the repo its evidence cites. */
-interface DesignEvalCtx {
-  surfaces: UiSurface[];
-  repoDir: string;
-}
-
-function researchSurfaces(research: Record<string, unknown> | null): UiSurface[] {
-  const list = research?.uiSurfaces;
-  return Array.isArray(list) ? (list as UiSurface[]) : [];
-}
-
-/** A repo file's text, or null when it is missing or the path leaves the repo. */
-function readRepoFile(repoDir: string, rel: string): string | null {
-  const full = resolve(repoDir, rel);
-  if (!full.startsWith(resolve(repoDir) + sep)) return null;
-  try {
-    return readFileSync(full, 'utf8');
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Before the design request is posted: check every file the design names is
- * on disk and every research screen is covered. When something is missing and
- * the cap allows, record a repair and return true so the caller re-runs
- * `design` — nobody has been pinged yet, so nothing on the ticket changes
- * under a reviewer. A dry run posts nothing, so it is never sent back.
- */
-function sendDesignBackForMissing(
-  iid: number, j: RunJournal, design: Record<string, unknown> | null, ctx: DesignEvalCtx,
-): boolean {
-  if (DRY_RUN) return false;
-  const files = checkBeforePosting(
-    design as Partial<DesignArtifact> | null,
-    (f) => existsSync(join(artifactDir(iid), f)),
-    ctx.surfaces,
-    (evidence, route) => routeEvidenceHolds(evidence, route, (rel) => readRepoFile(ctx.repoDir, rel)),
-  );
-  const missing = missingItems(files);
-  if (repairDue(j.designHtmlRepair, files)) {
-    const next = nextRepair(j.designHtmlRepair, files);
-    updateJournal(iid, { designHtmlRepair: next });
-    log.warn(`design-eval #${iid}: back to design before posting, ${missing.length} item(s) missing`, {
-      iid, attempt: next.attempts, missing,
-    });
-    return true;
-  }
-  if (missing.length) {
-    log.warn(`design-eval #${iid}: repair cap reached — posting the request without ${missing.length} item(s)`, {
-      iid, missing,
-    });
-  }
-  if (j.designHtmlRepair?.pending) updateJournal(iid, { designHtmlRepair: { ...j.designHtmlRepair, pending: false } });
-  return false;
-}
-
-/**
- * Read the design request just posted back from GitLab and record whether it
- * links every design file. Log only: the comment is never edited, because a
- * reply on it is a verdict on what it showed. Once per comment; a dry run
- * posts nothing to read.
- */
-async function gradeDesignRequest(
-  iid: number, noteId: number | null | undefined, design: Record<string, unknown> | null, ctx: DesignEvalCtx,
-): Promise<void> {
-  if (DRY_RUN || noteId == null) return;
-  const record = readArtifact<DesignEvalRecord>(iid, DESIGN_EVAL_RECORD);
-  if (!needsGrading(record, noteId)) return;
-  const round: DesignEvalRound = await gradeRequest({
-    iid,
-    noteId,
-    design: design as Partial<DesignArtifact> | null,
-    artifactDir: artifactDir(iid),
-    surfaces: ctx.surfaces,
-    evidenceHolds: (evidence, route) => routeEvidenceHolds(evidence, route, (rel) => readRepoFile(ctx.repoDir, rel)),
-    readNote: async (id) => {
-      const res = await getIssueNote(iid, id);
-      return res.ok && res.data ? res.data.body : null;
-    },
-  });
-  writeArtifact(iid, DESIGN_EVAL_RECORD, appendRound(record, iid, round));
-  if (round.pass) {
-    log.ok(`design-eval #${iid}: all ${round.files.length} checks passed on note ${noteId}`);
-  } else if (!round.readBack) {
-    log.warn(`design-eval #${iid}: could not read note ${noteId} back`, { iid });
-  } else {
-    const missing = missingItems(round.files);
-    log.warn(`design-eval #${iid}: ${missing.length}/${round.files.length} checks failed on note ${noteId}`, {
-      iid, note: noteId, missing,
-    });
-  }
 }

@@ -5,7 +5,6 @@ import {
   designDeliverableRefusal, designGateApplies,
 } from './reviewgate.js';
 import { artifactDir, designFlowOwedFile, phases } from '../lib/config.js';
-import { gradeDesignNote, roundPasses } from '../lib/designeval.js';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -346,24 +345,4 @@ test('nothing to deliver is not a refusal — applicable:false and an empty list
     TMP_IID, { ...design, screens: [], flowChange: false, prototype: null },
   ), null);
   assert.equal(designDeliverableRefusal(TMP_IID, null), null);
-});
-
-test('what the gate attaches passes the live design eval: every before, screenshot and html is linked', () => {
-  const dir = artifactDir(TMP_IID);
-  try {
-    const files = [screen.mockupHtml, screen.screenshot, screen.before, design.prototype.entry, design.prototype.video];
-    for (const f of files) {
-      mkdirSync(dirname(join(dir, f)), { recursive: true });
-      writeFileSync(join(dir, f), 'x');
-    }
-    const body = designAttachments(TMP_IID, design)
-      .map((a) => `[${a.name}](/uploads/0123abcd/${a.name})`)
-      .join('\n\n');
-    const graded = gradeDesignNote(design, body, () => true);
-    assert.deepEqual(graded.map((g) => g.file),
-      [screen.before, screen.screenshot, screen.mockupHtml, design.prototype.entry]);
-    assert.equal(roundPasses(graded), true);
-  } finally {
-    rmSync(join(dir, '..'), { recursive: true, force: true });
-  }
 });
