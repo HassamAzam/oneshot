@@ -32,6 +32,8 @@ import { DESIGN_DIR, NEW_TOKENS_FILE, TOKENS_FILE } from '../lib/designtokens.js
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import { PRIOR_ART_KINDS } from '../conductor/schemas.js';
+import { blameFailureModes, blameOf, type TestcasesArtifact, type VerifyArtifact } from '../lib/verifyblame.js';
+import { formatFailureModes, rankFailureModes } from '../lib/failuremodes.js';
 import {
   GITLAB_PROJECT_URL, countsAsFailure, ticketScopeIds,
   type CaseResult, type DesignArtifact, type Finding, type Screenshot, type TestCase,
@@ -628,6 +630,31 @@ function findingsOf(ctx: PromptCtx): Finding[] {
 function verifyFailuresOf(ctx: PromptCtx): CaseResult[] {
   const a = readArtifact<{ results?: CaseResult[] }>(ctx.ticket.iid, 'verify.json');
   return (a?.results ?? []).filter(countsAsFailure);
+}
+
+/**
+ * The gold-free part of the eval:causes diagnosis, run live on this ticket's own
+ * verify.json so `implement` cycles back with the same ranked failure modes the
+ * eval reports offline — not just the flat fail list. Each mode flags a failing
+ * case that may not be implement's to fix (pre-existing fail blamed on the diff,
+ * a stale/orphaned case), which is the recurring reason a lap gets spent and the
+ * run still blocks. Empty when nothing in the list matches a mode.
+ */
+function verifyDiagnosisBlock(ctx: PromptCtx): string {
+  const verify = readArtifact<VerifyArtifact>(ctx.ticket.iid, 'verify.json');
+  const testcases = readArtifact<TestcasesArtifact>(ctx.ticket.iid, 'testcases.json');
+  const modes = rankFailureModes(blameFailureModes(blameOf(verify, testcases), `#${ctx.ticket.iid}`));
+  const lines = formatFailureModes(modes);
+  if (!lines.length) return '';
+  return `
+Diagnosis of the failing list, read from verify's own evidence. A case flagged
+\`blamed-elsewhere\` or \`orphaned-fail\` may be a pre-existing defect or a stale case rather than
+something this change broke — confirm it against the base branch and the diff before spending a
+lap on it, and if it is not yours to fix, say so in \`summary\` instead of forcing it to pass.
+\`own-case-dismissed\` is the opposite: the ticket's own acceptance case was waved off and the
+defect is real — it must pass.
+${lines.join('\n')}
+`;
 }
 
 
@@ -1684,7 +1711,7 @@ argue with the verdict. Commits from the lap verify tested may already be on the
 \`git log --oneline origin/${baseBranch()}..HEAD\` and read the diff before writing anything.
 
 ${verifyFailures.map((c) => `- ${c.id}: ${c.evidence}`).join('\n')}
-`
+${verifyDiagnosisBlock(ctx)}`
       : '';
 
     const reviewBlock = findings.length
