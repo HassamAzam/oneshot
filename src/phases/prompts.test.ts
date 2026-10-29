@@ -1,7 +1,9 @@
 import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { labelledLayers, mrOpenNote, promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
+import {
+  designHtmlRepairBlock, labelledLayers, mrOpenNote, promptFor, systemPromptFor, type PromptCtx,
+} from './prompts.js';
 import { gateSubjectDigest } from '../lib/artifacts.js';
 import {
   ROOT, localTestsConfig, localTestsPatchFile, localTestsWorktree, phaseByName, phases, runDir, type PhaseConfig,
@@ -1447,4 +1449,15 @@ test('the journal\'s old Loop gate state no longer reaches the prompt', () => {
   const journal = { localSpecsApproval: { feedback: ['disapproved:\n- stale Loop feedback'] } };
   const p = scopePrompt({ journal: journal as unknown as PromptCtx['journal'] });
   assert.doesNotMatch(p, /stale Loop feedback/);
+});
+
+test('a pending repair tells design which files to produce and to change nothing else', () => {
+  const repair = { attempts: 1, missing: ['design/a.html', 'design/flow.html'], pending: true };
+  const c = { ...ctx(ticket()), journal: { designHtmlRepair: repair } } as unknown as PromptCtx;
+  const block = designHtmlRepairBlock(c);
+  assert.ok(block.includes('- design/a.html') && block.includes('- design/flow.html'));
+  assert.match(block, /checked before its approval request was posted/);
+  assert.doesNotMatch(block, /edited in place/);
+  assert.equal(designHtmlRepairBlock({ ...c, journal: { designHtmlRepair: { ...repair, pending: false } } } as unknown as PromptCtx), '');
+  assert.equal(designHtmlRepairBlock(ctx(ticket())), '');
 });
