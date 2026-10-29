@@ -29,6 +29,7 @@ import {
 import {
   artifactsDirFor, readArtifact, readJournal, updateJournal, writeArtifact, type RunJournal,
 } from '../lib/artifacts.js';
+import { oneshotSha } from '../lib/version.js';
 import { logEvent, updateRun } from '../lib/db.js';
 import { writeMemory } from '../lib/memory.js';
 import { log } from '../lib/log.js';
@@ -1060,7 +1061,12 @@ export async function mergePhase(
     // fast-forward — where the merged commit IS the merge request's head.
     const mergedSha = drive.mr.merge_commit_sha ?? drive.mr.squash_commit_sha ?? drive.mr.sha;
     rec.mergedSha = mergedSha;
-    if (mergedSha) updateJournal(ctx.iid, { mergedSha });
+    // `oneshotSha` beside it, because the escaped-defect eval buckets a shipped
+    // ticket by the pipeline that shipped it and cannot work that out later:
+    // once the conductor has moved on, which commit shipped a ticket three
+    // weeks ago is unknowable. Written on the same call so a merge can never
+    // land recorded as product-merged but pipeline-unknown.
+    if (mergedSha) updateJournal(ctx.iid, { mergedSha, oneshotSha: oneshotSha() });
 
     const tip = await getBranch(base);
     rec.baseTipAfterMerge = tip.ok && tip.data ? tip.data.commit.id : null;
