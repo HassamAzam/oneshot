@@ -3,14 +3,19 @@
  * made: each screen's `before` capture, its rendered screenshot and its mockup
  * HTML, plus the prototype's entry on a flow change.
  *
- * Deterministic: no judge, and it runs twice. Before the request is posted,
- * every file must be on disk and every research screen covered; a failure
- * sends the run back to `design` before any reviewer is pinged, so nobody can
- * reply to a request that is about to change. After it is posted, the comment
- * is read back from GitLab and every file must be linked as an upload — an
- * upload that failed, or an attachment list that stopped including a kind of
- * file, shows up there. The read-back only records and logs: the comment is
- * never edited, because a reply on it is a verdict on what it showed.
+ * Deterministic: no judge, and it grades the comment the gate has PREPARED,
+ * before that comment is posted. Every file the design names must be on disk
+ * and carried by the prepared comment, and every research screen must be
+ * covered; a failure sends the run back to `design` before any reviewer is
+ * pinged, so nobody can reply to a request that is about to change. It runs
+ * ahead of every request comment, including the fresh one a rejected design
+ * earns once it has been redrawn.
+ *
+ * Grading what is about to be posted is the whole check. Reading the comment
+ * back afterwards could only name an upload the run is no longer allowed to do
+ * anything about — the comment is never edited, because a reply on it is a
+ * verdict on what it showed — so the attachment list the gate is holding is
+ * both the earlier and the more actionable evidence.
  *
  * Research's `uiSurfaces` is the independent list of screens the ticket
  * touches. Every entry must have a design screen on its route, and every entry
@@ -19,16 +24,14 @@
  * a screen research does not list, or cannot prove, is left alone.
  *
  * The record belongs to the ticket, at state/runs/<iid>/design-eval.json, with
- * one read-back round per request comment, so a redraw after feedback is
- * checked again.
+ * one round per prepared comment, so a redraw after feedback is checked again.
  *
- * A failed check before posting costs at most MAX_HTML_REPAIRS design re-runs
- * per request, because each is a design session; past that the request posts
- * as it is and the read-back records what is missing.
+ * A failed check costs at most MAX_HTML_REPAIRS design re-runs per request,
+ * because each one is a design session; past that the request posts as it
+ * stands and the round records what is missing.
  */
 
-import { existsSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename } from 'node:path';
 import type { DesignHtmlRepair } from './artifacts.js';
 import type { DesignArtifact, UiSurface } from '../phases/types.js';
 
@@ -38,12 +41,12 @@ export const DESIGN_EVAL_RECORD = 'design-eval.json';
 export const MAX_HTML_REPAIRS = 1;
 
 export type HtmlStatus =
-  | 'linked' | 'on-disk' | 'missing-on-disk' | 'not-linked'
+  | 'attached' | 'not-attached' | 'missing-on-disk'
   | 'covered' | 'screen-missing' | 'before-missing';
 
 export type DesignFileKind = 'before' | 'screenshot' | 'html' | 'screen';
 
-const PASSING: ReadonlySet<HtmlStatus> = new Set(['linked', 'on-disk', 'covered']);
+const PASSING: ReadonlySet<HtmlStatus> = new Set(['attached', 'covered']);
 
 export interface HtmlCheck {
   /** Artifact-relative path the design named, or the route for a `screen` / missing `before`. */
@@ -61,10 +64,9 @@ export interface ExpectedFile {
 }
 
 export interface DesignEvalRound {
-  noteId: number;
   at: string;
-  /** False when the comment could not be read back; `files` is then empty. */
-  readBack: boolean;
+  /** Design repairs already spent on this request when the comment was graded. */
+  attempt: number;
   files: HtmlCheck[];
   pass: boolean;
 }
@@ -95,46 +97,18 @@ export function expectedFiles(design: Partial<DesignArtifact> | null): ExpectedF
   return out;
 }
 
-/** The last path segment of every `/uploads/<secret>/<name>` link in a note, decoded. */
-export function uploadedNames(body: string): Set<string> {
-  const names = new Set<string>();
-  for (const m of body.matchAll(/\]\(([^)\s]*\/uploads\/[^)\s]+)\)/g)) {
-    const last = (m[1] ?? '').split('/').pop() ?? '';
-    try {
-      names.add(decodeURIComponent(last));
-    } catch {
-      names.add(last);
-    }
-  }
-  return names;
-}
-
 /** GitLab rewrites an upload's filename to word characters, dots and dashes. */
 const gitlabSafe = (name: string): string => name.replace(/[^\w.-]/g, '_');
 
 /**
- * The names the gate may have uploaded a file under: its basename, or its
+ * The names the gate may have attached a file under: its basename, or its
  * path with slashes turned to dashes when two files share a basename.
  */
 function candidateNames(file: string): string[] {
   return [basename(file), file.replace(/\//g, '-')].map(gitlabSafe);
 }
 
-/** Pure: grade one request comment against the design that produced it. */
-export function gradeDesignNote(
-  design: Partial<DesignArtifact> | null,
-  noteBody: string,
-  onDisk: (file: string) => boolean,
-): HtmlCheck[] {
-  const linked = uploadedNames(noteBody);
-  return expectedFiles(design).map(({ file, owner, kind }) => {
-    if (!onDisk(file)) return { file, owner, kind, status: 'missing-on-disk' };
-    const hit = candidateNames(file).some((n) => linked.has(n));
-    return { file, owner, kind, status: hit ? 'linked' : 'not-linked' };
-  });
-}
-
-/** A round passes when the design named at least one file and every one is linked. */
+/** A round passes when the design named at least one file and every check is good. */
 export function roundPasses(files: readonly HtmlCheck[]): boolean {
   return files.length > 0 && files.every((f) => PASSING.has(f.status));
 }
@@ -190,51 +164,35 @@ export function gradeSurfaces(
   });
 }
 
-/**
- * Pure: what a request would be missing if posted now — every file the design
- * names must be on disk, and every research surface covered.
- */
-export function checkBeforePosting(
-  design: Partial<DesignArtifact> | null,
-  onDisk: (file: string) => boolean,
-  surfaces: readonly UiSurface[],
-  evidenceHolds: (evidence: string, route: string) => boolean,
-): HtmlCheck[] {
-  return [
-    ...expectedFiles(design).map(({ file, owner, kind }): HtmlCheck => (
-      { file, owner, kind, status: onDisk(file) ? 'on-disk' : 'missing-on-disk' })),
-    ...gradeSurfaces(surfaces, design, evidenceHolds),
-  ];
-}
-
-/** Whether this request comment still needs grading. */
-export function needsGrading(record: DesignEvalRecord | null, noteId: number | null | undefined): noteId is number {
-  if (noteId == null) return false;
-  return !record?.rounds.some((r) => r.noteId === noteId);
-}
-
-export interface GradeRequestDeps {
-  iid: number;
-  noteId: number;
+export interface BeforePostingCheck {
   design: Partial<DesignArtifact> | null;
-  artifactDir: string;
-  /** Research's list; absent on runs researched before it existed, which skips the screen checks. */
-  surfaces?: readonly UiSurface[];
-  evidenceHolds?: (evidence: string, route: string) => boolean;
-  readNote: (noteId: number) => Promise<string | null>;
-  now?: () => string;
+  /** The names the prepared comment will upload under, as the gate labelled them. */
+  attached: readonly string[];
+  onDisk: (file: string) => boolean;
+  /** Research's list; empty on runs researched before it existed, which skips the screen checks. */
+  surfaces: readonly UiSurface[];
+  evidenceHolds: (evidence: string, route: string) => boolean;
 }
 
-/** Read the posted request back and grade it. Never throws on a failed read. */
-export async function gradeRequest(deps: GradeRequestDeps): Promise<DesignEvalRound> {
-  const at = (deps.now ?? (() => new Date().toISOString()))();
-  const body = await deps.readNote(deps.noteId);
-  if (body == null) return { noteId: deps.noteId, at, readBack: false, files: [], pass: false };
-  const files = [
-    ...gradeDesignNote(deps.design, body, (f) => existsSync(join(deps.artifactDir, f))),
-    ...gradeSurfaces(deps.surfaces ?? [], deps.design, deps.evidenceHolds ?? (() => false)),
+/**
+ * Pure: what the prepared request comment is missing — every file the design
+ * names must be on disk and carried by that comment, and every research
+ * surface must be covered.
+ *
+ * On disk but not carried is kept apart from never written: one is a file the
+ * gate dropped as too large to attach, the other a render the design never
+ * made, and `design` is sent back to do different work for each.
+ */
+export function checkBeforePosting(check: BeforePostingCheck): HtmlCheck[] {
+  const attached = new Set(check.attached.map(gitlabSafe));
+  return [
+    ...expectedFiles(check.design).map(({ file, owner, kind }): HtmlCheck => {
+      if (!check.onDisk(file)) return { file, owner, kind, status: 'missing-on-disk' };
+      const carried = candidateNames(file).some((n) => attached.has(n));
+      return { file, owner, kind, status: carried ? 'attached' : 'not-attached' };
+    }),
+    ...gradeSurfaces(check.surfaces, check.design, check.evidenceHolds),
   ];
-  return { noteId: deps.noteId, at, readBack: true, files, pass: roundPasses(files) };
 }
 
 export function appendRound(record: DesignEvalRecord | null, iid: number, round: DesignEvalRound): DesignEvalRecord {
@@ -245,10 +203,9 @@ export interface DesignEvalTotals {
   tickets: number;
   rounds: number;
   passed: number;
-  unread: number;
   files: number;
-  linked: number;
-  notLinked: number;
+  attached: number;
+  notAttached: number;
   missingOnDisk: number;
   screensMissing: number;
   beforesMissing: number;
@@ -262,10 +219,9 @@ export function summariseDesignEval(records: readonly DesignEvalRecord[]): Desig
     tickets: records.length,
     rounds: rounds.length,
     passed: rounds.filter((r) => r.pass).length,
-    unread: rounds.filter((r) => !r.readBack).length,
     files: files.length,
-    linked: count('linked'),
-    notLinked: count('not-linked'),
+    attached: count('attached'),
+    notAttached: count('not-attached'),
     missingOnDisk: count('missing-on-disk'),
     screensMissing: count('screen-missing'),
     beforesMissing: count('before-missing'),
@@ -276,16 +232,16 @@ export function formatDesignEval(records: readonly DesignEvalRecord[]): string[]
   if (!records.length) return ['no design-eval records'];
   const lines = records.flatMap((rec) => rec.rounds.map((r) => {
     const failed = r.files.filter((f) => !PASSING.has(f.status)).map((f) => `${f.file} (${f.status})`);
-    const verdict = !r.readBack ? 'UNREAD' : r.pass ? 'PASS' : 'FAIL';
-    return `#${rec.iid} note ${r.noteId}  ${verdict}  ${r.files.length - failed.length}/${r.files.length} checks ok`
+    return `#${rec.iid} attempt ${r.attempt}  ${r.pass ? 'PASS' : 'FAIL'}  `
+      + `${r.files.length - failed.length}/${r.files.length} checks ok`
       + (failed.length ? `  — ${failed.join(', ')}` : '');
   }));
   const t = summariseDesignEval(records);
   return [
     ...lines,
     '',
-    `tickets ${t.tickets}  rounds ${t.rounds}  passed ${t.passed}/${t.rounds}  unread ${t.unread}`,
-    `checks ${t.files}: linked ${t.linked}, not linked ${t.notLinked}, missing on disk ${t.missingOnDisk}, `
+    `tickets ${t.tickets}  rounds ${t.rounds}  passed ${t.passed}/${t.rounds}`,
+    `checks ${t.files}: attached ${t.attached}, not attached ${t.notAttached}, missing on disk ${t.missingOnDisk}, `
       + `screens missing ${t.screensMissing}, befores missing ${t.beforesMissing}`,
   ];
 }

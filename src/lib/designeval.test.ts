@@ -1,17 +1,15 @@
 /**
- * The design-eval verdict is graded on hand-built notes, so the rule
- * "every mockup HTML the design named is linked on the request" cannot drift.
+ * The design-eval verdict is graded on hand-built attachment lists, so the
+ * rule "every before, screenshot and mockup HTML the design named is carried
+ * by the comment about to be posted" cannot drift.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { DesignArtifact, DesignScreen, UiSurface } from '../phases/types.js';
 import {
-  MAX_HTML_REPAIRS, appendRound, expectedFiles, formatDesignEval, gradeDesignNote, gradeRequest, needsGrading,
-  gradeSurfaces, checkBeforePosting, missingItems, nextRepair, repairDue, roundPasses, routeEvidenceHolds, summariseDesignEval,
-  uploadedNames, type DesignEvalRecord, type DesignEvalRound, type HtmlCheck,
+  MAX_HTML_REPAIRS, appendRound, checkBeforePosting, expectedFiles, formatDesignEval, gradeSurfaces,
+  missingItems, nextRepair, repairDue, roundPasses, routeEvidenceHolds, summariseDesignEval,
+  type BeforePostingCheck, type HtmlCheck,
 } from './designeval.js';
 
 const screen = (id: string, over: Partial<DesignScreen> = {}): DesignScreen => ({
@@ -21,9 +19,15 @@ const screen = (id: string, over: Partial<DesignScreen> = {}): DesignScreen => (
 const design = (screens: DesignScreen[], prototype: DesignArtifact['prototype'] = null): Partial<DesignArtifact> => ({
   applicable: true, screens, prototype,
 });
-const upload = (name: string, secret = 'abc123'): string => `[${name}](/uploads/${secret}/${name})`;
-const image = (name: string): string => `![${name}](/uploads/def456/${name})`;
 const always = (): boolean => true;
+
+/** What the gate attaches for whole screens: `designAttachments` names each file by its basename. */
+const attachedFor = (...ids: string[]): string[] =>
+  ids.flatMap((id) => [`${id}-before.png`, `${id}.png`, `${id}.html`]);
+
+const check = (over: Partial<BeforePostingCheck>): HtmlCheck[] => checkBeforePosting({
+  design: null, attached: [], onDisk: always, surfaces: [], evidenceHolds: () => false, ...over,
+});
 
 test('each screen expects its before, screenshot and html, and the prototype entry comes last', () => {
   const d = design([screen('a'), screen('b', { before: '' })], { entry: 'design/prototype/index.html', video: 'design/walk.webm' });
@@ -38,57 +42,53 @@ test('each screen expects its before, screenshot and html, and the prototype ent
   assert.deepEqual(expectedFiles(null), []);
 });
 
-test('upload links are read from both file and image markdown, decoded', () => {
-  const names = uploadedNames(`${image('a.png')}\n\n${upload('a.html')}\n[x](/uploads/z/my%20file.html)\n[y](https://e.com/a.html)`);
-  assert.deepEqual([...names].sort(), ['a.html', 'a.png', 'my file.html']);
-});
-
-const everything = (...ids: string[]): string => ids
-  .map((id) => `${image(`${id}-before.png`)}\n\n${image(`${id}.png`)}\n\n${upload(`${id}.html`)}`).join('\n\n');
-
-test('a note linking every file of every screen passes', () => {
-  const d = design([screen('a'), screen('b')]);
-  const body = `request\n\n${everything('a', 'b')}`;
-  const files = gradeDesignNote(d, body, always);
-  assert.ok(files.every((f) => f.status === 'linked'));
+test('a prepared comment carrying every file of every screen passes', () => {
+  const files = check({ design: design([screen('a'), screen('b')]), attached: attachedFor('a', 'b') });
+  assert.ok(files.every((f) => f.status === 'attached'));
   assert.equal(roundPasses(files), true);
 });
 
-test('a note carrying only the images fails on every html', () => {
-  const d = design([screen('a'), screen('b')]);
-  const body = [image('a-before.png'), image('a.png'), image('b-before.png'), image('b.png')].join('\n\n');
-  const files = gradeDesignNote(d, body, always);
-  assert.deepEqual(files.filter((f) => f.status !== 'linked').map((f) => [f.file, f.kind]),
-    [['design/a.html', 'html'], ['design/b.html', 'html']]);
+test('a prepared comment carrying only the images fails on every html', () => {
+  const files = check({
+    design: design([screen('a'), screen('b')]),
+    attached: ['a-before.png', 'a.png', 'b-before.png', 'b.png'],
+  });
+  assert.deepEqual(files.filter((f) => f.status !== 'attached').map((f) => [f.file, f.kind, f.status]),
+    [['design/a.html', 'html', 'not-attached'], ['design/b.html', 'html', 'not-attached']]);
   assert.equal(roundPasses(files), false);
 });
 
-test('a screenshot whose upload failed fails the round and is named', () => {
-  const d = design([screen('login'), screen('wrong-password')]);
-  const body = [everything('login'), image('wrong-password-before.png'), upload('wrong-password.html')].join('\n\n');
-  const files = gradeDesignNote(d, body, always);
-  assert.deepEqual(files.filter((f) => f.status !== 'linked').map((f) => [f.file, f.kind, f.status]),
-    [['design/wrong-password.png', 'screenshot', 'not-linked']]);
+test('a screenshot on disk the comment dropped fails the round and is named', () => {
+  const files = check({
+    design: design([screen('login'), screen('wrong-password')]),
+    attached: [...attachedFor('login'), 'wrong-password-before.png', 'wrong-password.html'],
+  });
+  assert.deepEqual(files.filter((f) => f.status !== 'attached').map((f) => [f.file, f.kind, f.status]),
+    [['design/wrong-password.png', 'screenshot', 'not-attached']]);
   assert.equal(roundPasses(files), false);
+  assert.deepEqual(missingItems(files), ['design/wrong-password.png']);
 });
 
 test('an empty before is not expected, so a new screen passes without one', () => {
-  const d = design([screen('a', { before: '' })]);
-  assert.equal(roundPasses(gradeDesignNote(d, `${image('a.png')}\n\n${upload('a.html')}`, always)), true);
+  const files = check({ design: design([screen('a', { before: '' })]), attached: ['a.png', 'a.html'] });
+  assert.equal(roundPasses(files), true);
 });
 
-test('a file the design named but never wrote is reported as missing on disk', () => {
-  const d = design([screen('a'), screen('b')]);
-  const files = gradeDesignNote(d, everything('a', 'b'), (f) => f !== 'design/b.png');
-  assert.deepEqual(files.filter((f) => f.status !== 'linked').map((f) => [f.file, f.status]),
+test('a file the design named but never wrote is reported as missing on disk, not as dropped', () => {
+  const files = check({
+    design: design([screen('a'), screen('b')]),
+    attached: attachedFor('a', 'b'),
+    onDisk: (f) => f !== 'design/b.png',
+  });
+  assert.deepEqual(files.filter((f) => f.status !== 'attached').map((f) => [f.file, f.status]),
     [['design/b.png', 'missing-on-disk']]);
   assert.equal(roundPasses(files), false);
 });
 
-test('a missing prototype entry fails a flow change even when every screen is linked', () => {
+test('a missing prototype entry fails a flow change even when every screen is carried', () => {
   const d = design([screen('a')], { entry: 'design/prototype/index.html', video: '' });
-  const files = gradeDesignNote(d, everything('a'), always);
-  assert.deepEqual(files.filter((f) => f.status !== 'linked').map((f) => [f.owner, f.kind]), [['prototype', 'html']]);
+  const files = check({ design: d, attached: attachedFor('a') });
+  assert.deepEqual(files.filter((f) => f.status !== 'attached').map((f) => [f.owner, f.kind]), [['prototype', 'html']]);
 });
 
 test('a file renamed to its dashed path for a basename clash still counts', () => {
@@ -96,62 +96,28 @@ test('a file renamed to its dashed path for a basename clash still counts', () =
     screen('a', { mockupHtml: 'design/x/index.html', before: '' }),
     screen('b', { mockupHtml: 'design/y/index.html', before: '' }),
   ]);
-  const body = [image('a.png'), image('b.png'), upload('index.html'), upload('design-y-index.html')].join('\n');
-  assert.equal(roundPasses(gradeDesignNote(d, body, always)), true);
+  const files = check({ design: d, attached: ['a.png', 'b.png', 'index.html', 'design-y-index.html'] });
+  assert.equal(roundPasses(files), true);
 });
 
-test('a design with no html cannot pass', () => {
+test('a design with no files cannot pass', () => {
   assert.equal(roundPasses([]), false);
 });
 
-test('each request comment is graded exactly once', () => {
-  assert.equal(needsGrading(null, null), false);
-  assert.equal(needsGrading(null, 7), true);
-  const rec: DesignEvalRecord = { iid: 1, rounds: [{ noteId: 7, at: 't', readBack: true, files: [], pass: false }] };
-  assert.equal(needsGrading(rec, 7), false);
-  assert.equal(needsGrading(rec, 8), true);
-});
-
-test('gradeRequest reads the posted note back and checks files on disk', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'design-eval-'));
-  mkdirSync(join(dir, 'design'));
-  writeFileSync(join(dir, 'design', 'a.html'), '<html></html>');
-  const d = design([screen('a', { before: '', screenshot: '' }), screen('b', { before: '', screenshot: '' })]);
-  const round = await gradeRequest({
-    iid: 1, noteId: 9, design: d, artifactDir: dir, now: () => 'T',
-    readNote: async () => upload('a.html'),
-  });
-  assert.deepEqual(round, {
-    noteId: 9, at: 'T', readBack: true, pass: false,
-    files: [
-      { file: 'design/a.html', owner: 'a', kind: 'html', status: 'linked' },
-      { file: 'design/b.html', owner: 'b', kind: 'html', status: 'missing-on-disk' },
-    ],
-  });
-});
-
-test('an unreadable note is recorded as unread, not as a pass', async () => {
-  const round = await gradeRequest({
-    iid: 1, noteId: 9, design: design([screen('a')]), artifactDir: '/nowhere', now: () => 'T',
-    readNote: async () => null,
-  });
-  assert.deepEqual(round, { noteId: 9, at: 'T', readBack: false, files: [], pass: false });
-});
-
 test('rounds accumulate and the report totals them', () => {
-  const pass = { noteId: 1, at: 't', readBack: true, pass: true,
-    files: [{ file: 'design/a.html', owner: 'a', kind: 'html' as const, status: 'linked' as const }] };
-  const fail = { noteId: 2, at: 't', readBack: true, pass: false,
-    files: [{ file: 'design/a.html', owner: 'a', kind: 'html' as const, status: 'not-linked' as const }] };
+  const pass = { at: 't', attempt: 0, pass: true,
+    files: [{ file: 'design/a.html', owner: 'a', kind: 'html' as const, status: 'attached' as const }] };
+  const fail = { at: 't', attempt: 1, pass: false,
+    files: [{ file: 'design/a.html', owner: 'a', kind: 'html' as const, status: 'not-attached' as const }] };
   const rec = appendRound(appendRound(null, 5, pass), 5, fail);
   assert.equal(rec.rounds.length, 2);
   assert.deepEqual(summariseDesignEval([rec]), {
-    tickets: 1, rounds: 2, passed: 1, unread: 0, files: 2, linked: 1, notLinked: 1, missingOnDisk: 0,
+    tickets: 1, rounds: 2, passed: 1, files: 2, attached: 1, notAttached: 1, missingOnDisk: 0,
     screensMissing: 0, beforesMissing: 0,
   });
   const lines = formatDesignEval([rec]);
-  assert.match(lines[0] ?? '', /#5 note 1 {2}PASS {2}1\/1 checks ok/);
-  assert.match(lines[1] ?? '', /#5 note 2 {2}FAIL {2}0\/1 checks ok {2}— design\/a\.html \(not-linked\)/);
+  assert.match(lines[0] ?? '', /#5 attempt 0 {2}PASS {2}1\/1 checks ok/);
+  assert.match(lines[1] ?? '', /#5 attempt 1 {2}FAIL {2}0\/1 checks ok {2}— design\/a\.html \(not-attached\)/);
 });
 
 const missingOnDisk = (files = ['design/a.html']): HtmlCheck[] =>
@@ -166,28 +132,35 @@ test('a failed check before posting sends the run back to design once per reques
 });
 
 test('a passing or empty check never re-routes', () => {
-  const ok: HtmlCheck[] = [{ file: 'design/a.html', owner: 'a', kind: 'html', status: 'on-disk' }];
+  const ok: HtmlCheck[] = [{ file: 'design/a.html', owner: 'a', kind: 'html', status: 'attached' }];
   assert.equal(repairDue(undefined, ok), false);
   assert.equal(repairDue(undefined, []), false);
 });
 
 test('before posting, a file the design named but never wrote fails and the rest pass', () => {
   const d = design([screen('a')]);
-  const files = checkBeforePosting(d, (f) => f !== 'design/a.html', [], () => false);
+  const files = check({ design: d, attached: attachedFor('a'), onDisk: (f) => f !== 'design/a.html' });
   assert.deepEqual(files.map((f) => [f.file, f.status]), [
-    ['design/a-before.png', 'on-disk'], ['design/a.png', 'on-disk'], ['design/a.html', 'missing-on-disk'],
+    ['design/a-before.png', 'attached'], ['design/a.png', 'attached'], ['design/a.html', 'missing-on-disk'],
   ]);
   assert.equal(roundPasses(files), false);
   assert.deepEqual(missingItems(files), ['design/a.html']);
-  assert.equal(roundPasses(checkBeforePosting(d, () => true, [], () => false)), true);
+  assert.equal(roundPasses(check({ design: d, attached: attachedFor('a') })), true);
 });
 
 test('before posting, every research screen must be drawn and every proven one needs a before', () => {
-  const d = design([screen('login', { route: '/login', before: '' })]);
-  const files = checkBeforePosting(d, () => true,
-    [surface('/login', true, 'frontend/src/routes.js:3'), surface('/login/locked', false)],
-    (e, r) => routeEvidenceHolds(e, r, repo));
+  const files = check({
+    design: design([screen('login', { route: '/login', before: '' })]),
+    attached: ['login.png', 'login.html'],
+    surfaces: [surface('/login', true, 'frontend/src/routes.js:3'), surface('/login/locked', false)],
+    evidenceHolds: (e, r) => routeEvidenceHolds(e, r, repo),
+  });
   assert.deepEqual(missingItems(files), ['a before capture for route /login', 'a screen for route /login/locked']);
+});
+
+test('before posting, the screen checks are skipped when research listed no surfaces', () => {
+  const d = design([screen('login', { route: '/login', before: '', screenshot: '', mockupHtml: '' })]);
+  assert.deepEqual(check({ design: d, attached: [] }), []);
 });
 
 const routes = `const ROUTES = [
@@ -268,7 +241,7 @@ test('one before among several screens on the same route is enough', () => {
 
 test('the repair prompt is told which screens and befores are missing', () => {
   const files: HtmlCheck[] = [
-      { file: 'design/a.png', owner: 'a', kind: 'screenshot', status: 'not-linked' },
+      { file: 'design/a.png', owner: 'a', kind: 'screenshot', status: 'not-attached' },
       { file: '/login/locked', owner: '/login/locked', kind: 'screen', status: 'screen-missing' },
       { file: '/login', owner: 'login', kind: 'before', status: 'before-missing' },
       { file: '/login', owner: 'login', kind: 'screen', status: 'covered' },
@@ -276,18 +249,4 @@ test('the repair prompt is told which screens and befores are missing', () => {
   assert.deepEqual(missingItems(files), [
     'design/a.png', 'a screen for route /login/locked', 'a before capture for route /login',
   ]);
-});
-
-test('gradeRequest adds the screen checks when research listed surfaces', async () => {
-  const d = design([screen('login', { route: '/login', before: '', screenshot: '', mockupHtml: '' })]);
-  const round = await gradeRequest({
-    iid: 1, noteId: 3, design: d, artifactDir: '/nowhere', now: () => 'T',
-    surfaces: [surface('/login', true, 'frontend/src/routes.js:3'), surface('/login/locked', false)],
-    evidenceHolds: (e, r) => routeEvidenceHolds(e, r, repo),
-    readNote: async () => 'request',
-  });
-  assert.deepEqual(round.files.map((f) => [f.file, f.status]), [
-    ['/login', 'covered'], ['/login', 'before-missing'], ['/login/locked', 'screen-missing'],
-  ]);
-  assert.equal(round.pass, false);
 });

@@ -95,8 +95,8 @@ import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
 import {
-  DESIGN_EVAL_RECORD, appendRound, checkBeforePosting, gradeRequest, missingItems, needsGrading, nextRepair,
-  repairDue, routeEvidenceHolds, type DesignEvalRecord, type DesignEvalRound,
+  DESIGN_EVAL_RECORD, appendRound, checkBeforePosting, missingItems, nextRepair, repairDue,
+  roundPasses, routeEvidenceHolds, type DesignEvalRecord, type DesignEvalRound,
 } from '../lib/designeval.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
@@ -108,6 +108,7 @@ import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
   MAX_CONFIRMATIONS, rearmGate,
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
+  type GateAttachment,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
   gateAsked, type GateTrigger,
@@ -1608,8 +1609,15 @@ export async function runTicket(
         repoDir: worktree ?? WORK_REPO,
       };
       const approval = j.designApproval;
+      // `asking` is "the gate is about to post a request comment": it has none
+      // standing, or the design has been rewritten under the one it has — which
+      // is the state a rejected-and-redrawn design arrives in, since feedback
+      // clears requestNoteId. Every one of those comments is graded first, and
+      // the attachment list graded here is the SAME array the gate uploads, so
+      // what was checked is what the reviewer gets.
       const asking = approval?.requestNoteId == null || !requestCovers(approval, design);
-      if (asking && designIdx !== -1 && sendDesignBackForMissing(iid, j, design, evalCtx)) {
+      const attachments = designAttachments(iid, design);
+      if (asking && designIdx !== -1 && validateDesignRequest(iid, j, design, evalCtx, attachments)) {
         forced.add('design');
         i = designIdx;
         continue;
@@ -1619,15 +1627,13 @@ export async function runTicket(
         gate: 'design',
         requestBody: designApprovalRequestBody(iid, design),
         subject: design,
-        attachments: designAttachments(iid, design),
+        attachments,
         onApproved: async () => { await addIssueNote(iid, designApprovedRecordBody(design)); },
       });
       j = readJournal(iid) ?? j;
-      const postedNoteId = j.designApproval?.requestNoteId;
-      if (asking && postedNoteId != null && j.designHtmlRepair) {
+      if (asking && j.designApproval?.requestNoteId != null && j.designHtmlRepair) {
         j = updateJournal(iid, { designHtmlRepair: undefined }) ?? j;
       }
-      await gradeDesignRequest(iid, postedNoteId, design, evalCtx);
       if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
       if (gate.verdict === 'pending') {
         return finish(j, 'parked',
@@ -3651,23 +3657,39 @@ function readRepoFile(repoDir: string, rel: string): string | null {
 }
 
 /**
- * Before the design request is posted: check every file the design names is
- * on disk and every research screen is covered. When something is missing and
- * the cap allows, record a repair and return true so the caller re-runs
- * `design` — nobody has been pinged yet, so nothing on the ticket changes
- * under a reviewer. A dry run posts nothing, so it is never sent back.
+ * Grade the request comment the gate has PREPARED, before it is posted: every
+ * file the design names must be on disk and carried by that comment, and every
+ * research screen must be covered. The round is recorded whatever the verdict,
+ * so a request that went out short of a file says so on the ticket's own eval
+ * record.
+ *
+ * When something is missing and the cap allows, record a repair and return
+ * true so the caller re-runs `design` — nobody has been pinged yet, so nothing
+ * on the ticket changes under a reviewer. A dry run posts nothing, so it has no
+ * prepared comment to grade and is never sent back.
  */
-function sendDesignBackForMissing(
-  iid: number, j: RunJournal, design: Record<string, unknown> | null, ctx: DesignEvalCtx,
+function validateDesignRequest(
+  iid: number, j: RunJournal, design: Record<string, unknown> | null,
+  ctx: DesignEvalCtx, attachments: readonly GateAttachment[],
 ): boolean {
   if (DRY_RUN) return false;
-  const files = checkBeforePosting(
-    design as Partial<DesignArtifact> | null,
-    (f) => existsSync(join(artifactDir(iid), f)),
-    ctx.surfaces,
-    (evidence, route) => routeEvidenceHolds(evidence, route, (rel) => readRepoFile(ctx.repoDir, rel)),
-  );
+  const files = checkBeforePosting({
+    design: design as Partial<DesignArtifact> | null,
+    attached: attachments.map((a) => a.name),
+    onDisk: (f) => existsSync(join(artifactDir(iid), f)),
+    surfaces: ctx.surfaces,
+    evidenceHolds: (evidence, route) => routeEvidenceHolds(evidence, route, (rel) => readRepoFile(ctx.repoDir, rel)),
+  });
+  const round: DesignEvalRound = {
+    at: new Date().toISOString(),
+    attempt: j.designHtmlRepair?.attempts ?? 0,
+    files,
+    pass: roundPasses(files),
+  };
+  const record = readArtifact<DesignEvalRecord>(iid, DESIGN_EVAL_RECORD);
+  writeArtifact(iid, DESIGN_EVAL_RECORD, appendRound(record, iid, round));
   const missing = missingItems(files);
+  if (round.pass) log.ok(`design-eval #${iid}: all ${files.length} checks passed on the prepared request`);
   if (repairDue(j.designHtmlRepair, files)) {
     const next = nextRepair(j.designHtmlRepair, files);
     updateJournal(iid, { designHtmlRepair: next });
@@ -3683,41 +3705,4 @@ function sendDesignBackForMissing(
   }
   if (j.designHtmlRepair?.pending) updateJournal(iid, { designHtmlRepair: { ...j.designHtmlRepair, pending: false } });
   return false;
-}
-
-/**
- * Read the design request just posted back from GitLab and record whether it
- * links every design file. Log only: the comment is never edited, because a
- * reply on it is a verdict on what it showed. Once per comment; a dry run
- * posts nothing to read.
- */
-async function gradeDesignRequest(
-  iid: number, noteId: number | null | undefined, design: Record<string, unknown> | null, ctx: DesignEvalCtx,
-): Promise<void> {
-  if (DRY_RUN || noteId == null) return;
-  const record = readArtifact<DesignEvalRecord>(iid, DESIGN_EVAL_RECORD);
-  if (!needsGrading(record, noteId)) return;
-  const round: DesignEvalRound = await gradeRequest({
-    iid,
-    noteId,
-    design: design as Partial<DesignArtifact> | null,
-    artifactDir: artifactDir(iid),
-    surfaces: ctx.surfaces,
-    evidenceHolds: (evidence, route) => routeEvidenceHolds(evidence, route, (rel) => readRepoFile(ctx.repoDir, rel)),
-    readNote: async (id) => {
-      const res = await getIssueNote(iid, id);
-      return res.ok && res.data ? res.data.body : null;
-    },
-  });
-  writeArtifact(iid, DESIGN_EVAL_RECORD, appendRound(record, iid, round));
-  if (round.pass) {
-    log.ok(`design-eval #${iid}: all ${round.files.length} checks passed on note ${noteId}`);
-  } else if (!round.readBack) {
-    log.warn(`design-eval #${iid}: could not read note ${noteId} back`, { iid });
-  } else {
-    const missing = missingItems(round.files);
-    log.warn(`design-eval #${iid}: ${missing.length}/${round.files.length} checks failed on note ${noteId}`, {
-      iid, note: noteId, missing,
-    });
-  }
 }
