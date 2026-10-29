@@ -21,6 +21,7 @@
     "eval": "DRY_RUN=1 tsx scripts/eval-phase.ts",
     "eval:design": "tsx scripts/eval-design.ts",
     "memory:backfill": "tsx scripts/backfill-memory.ts",
+    "eval:verify": "tsx scripts/eval-verify.ts",
     "hooks:verify": "bash scripts/verify-hooks.sh",
     "verify": "npm run deps:verify && npm run hooks:verify && npm run doctor",
     "check": "tsc --noEmit && for f in hooks/*.cjs; do node --check \"$f\" || exit 1; done && echo 'check clean'",
