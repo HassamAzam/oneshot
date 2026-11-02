@@ -34,7 +34,7 @@
  * precisely the thing nobody can reason about after an incident.
  */
 import {
-  existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync,
+  existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, statSync, symlinkSync, unlinkSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, SKILLS_ROOT } from './config.js';
@@ -70,6 +70,22 @@ function isSymlink(path: string): boolean {
   try { return lstatSync(path).isSymbolicLink(); } catch { return false; }
 }
 
+/**
+ * Remove a symlink — the link itself, never what it points at.
+ *
+ * `rmSync` is the wrong call for one and gets BOTH of the cases here wrong,
+ * because its directory check follows the link while `lstat` does not. Every
+ * entry this module writes is a symlink to a directory, so: a live one throws
+ * ERR_FS_EISDIR ('Path is a directory') for want of `recursive`, which took out
+ * the whole compose; and a dangling one resolves to nothing, which `force: true`
+ * then swallows as "already gone", leaving the link in place for the harness to
+ * enumerate. `unlinkSync` is unambiguous — it operates on the link, so neither
+ * what the target is nor whether it exists can change the outcome.
+ */
+function unlink(path: string): void {
+  try { unlinkSync(path); } catch { /* raced with another lease composing the same dir */ }
+}
+
 /** Follows symlinks deliberately: a linked skill directory must count as one. */
 function isDirectory(path: string): boolean {
   try { return statSync(path).isDirectory(); } catch { return false; }
@@ -89,7 +105,7 @@ function relink(at: string, target: string): void {
     let current = '';
     try { current = readlinkSync(at); } catch { current = ''; }
     if (current === target && existsSync(at)) return;
-    rmSync(at, { force: true });
+    unlink(at);
   } else if (existsSync(at)) {
     return;
   }
@@ -99,7 +115,7 @@ function relink(at: string, target: string): void {
 function pruneDangling(dir: string): void {
   for (const name of readdirSync(dir)) {
     const entry = join(dir, name);
-    if (isSymlink(entry) && !existsSync(entry)) rmSync(entry, { force: true });
+    if (isSymlink(entry) && !existsSync(entry)) unlink(entry);
   }
 }
 
@@ -118,7 +134,7 @@ function unlinkExcluded(dir: string): void {
   for (const [name, why] of EXCLUDED_SKILLS) {
     const entry = join(dir, name);
     if (!isSymlink(entry)) continue;
-    rmSync(entry, { force: true });
+    unlink(entry);
     log.info(`unlinked excluded skill ${name}`, { why });
   }
 }
