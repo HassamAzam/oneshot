@@ -454,7 +454,8 @@ function psql(pg: LocalTestsConfig['pg'], sql: string): { ok: boolean; out: stri
   ], { encoding: 'utf8', timeout: 15_000, env: { ...process.env, PGCONNECT_TIMEOUT: '5' } });
   if (res.error) {
     const missing = (res.error as NodeJS.ErrnoException).code === 'ENOENT';
-    return { ok: false, out: '', error: missing ? 'psql is not on PATH (brew install libpq)' : res.error.message };
+    const hint = process.platform === 'linux' ? 'sudo apt-get install -y postgresql-client' : 'brew install libpq';
+    return { ok: false, out: '', error: missing ? `psql is not on PATH (${hint})` : res.error.message };
   }
   const error = (res.stderr ?? '').split('\n').map((l) => l.trim()).find(Boolean)?.slice(0, 160) ?? '';
   return { ok: res.status === 0, out: (res.stdout ?? '').trim(), error };

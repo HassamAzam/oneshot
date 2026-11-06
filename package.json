@@ -5,7 +5,7 @@
   "type": "module",
   "description": "One orchestrator, one label: a deterministic conductor that drives GitLab tickets from label to Ready For Deployment through fresh per-phase Claude sessions \u2014 pipelined, with one ticket at a time in the merge\u2192deploy\u2192qa window.",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "start": "tsx src/index.ts",
@@ -14,6 +14,9 @@
     "doctor": "tsx scripts/doctor.ts",
     "preflight": "tsx scripts/preflight.ts",
     "setup": "tsx scripts/setup.ts",
+    "setup:server": "bash scripts/setup-server.sh",
+    "seed:provision": "node scripts/provision-seed.cjs",
+    "prereqs": "node src/lib/appenv.cjs",
     "unblock": "tsx scripts/unblock.ts",
     "mr-feedback:probe": "tsx scripts/mr-feedback-probe.ts",
     "report": "tsx scripts/report.ts",

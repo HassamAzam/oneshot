@@ -1,0 +1,28 @@
+# Oneshot conductor — installed by scripts/setup-server.sh to /etc/systemd/system.
+# Logs: journalctl -u oneshot-conductor -f
+[Unit]
+Description=Oneshot conductor (GitLab ticket pipeline)
+Documentation=file:///srv/oneshot/docs/SERVER-SETUP.md
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=oneshot
+Group=oneshot
+WorkingDirectory=/srv/oneshot
+EnvironmentFile=/etc/oneshot/oneshot.env
+Environment=NO_COLOR=1
+Environment=HOME=/home/oneshot
+ExecStart=/usr/bin/node /srv/oneshot/node_modules/tsx/dist/cli.mjs src/index.ts
+Restart=on-failure
+RestartSec=30
+# A SIGTERM lets in-flight runs reach a journal checkpoint; mixed sends it to the
+# main process only, then SIGKILLs the rest of the cgroup after the timeout.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=2h
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

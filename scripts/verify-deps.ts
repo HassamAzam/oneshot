@@ -15,6 +15,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { BASE_ENV, ROOT, envOr, repoIdentity } from '../src/lib/config.js';
+import { playwrightCaches } from '../src/lib/appenv.cjs';
 
 const G = '\x1b[32m', R = '\x1b[31m', Y = '\x1b[33m', D = '\x1b[2m', X = '\x1b[0m';
 let fails = 0;
@@ -156,10 +157,13 @@ async function main(): Promise<void> {
   const pw = spawnSync('npx', ['playwright', '--version'], { encoding: 'utf8', cwd: ROOT, timeout: 30_000 });
   if (pw.status === 0) {
     pass(pw.stdout.trim());
-    const cache = join(process.env.HOME ?? '', 'Library', 'Caches', 'ms-playwright');
+    const [cache = ''] = playwrightCaches();
+    const hint = process.platform === 'linux'
+      ? 'run `sudo npx playwright install-deps chromium && npx playwright install chromium`'
+      : 'run `npx playwright install chromium` with the VPN OFF';
     existsSync(cache)
       ? pass('browser cache present', cache)
-      : warn('no browser cache', 'run `npx playwright install chromium` with the VPN OFF');
+      : warn('no browser cache', `${cache} is missing — ${hint}`);
   } else {
     warn('playwright not runnable', 'only needed from M3 onward');
   }

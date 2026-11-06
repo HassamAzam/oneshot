@@ -605,10 +605,19 @@ npm install
 npm start                                  # no .env? an interactive wizard runs first
 ```
 
+Node 22 or newer (`engines`). On a Linux server, run `sudo scripts/setup-server.sh --env-file
+/etc/oneshot/oneshot.env` instead — packages, Postgres, Redis, the seed, systemd units — and
+`--check` to see what is missing; [docs/SERVER-SETUP.md](docs/SERVER-SETUP.md) walks through it.
+Headless anywhere: `npm run setup -- --from-env --env-file <file>` (no prompts; fails listing
+every missing required key and writes nothing). `npm run seed:provision` makes the seed clone
+runnable (venv, node_modules, settings, migrations, staticfiles, test login), and `npm run
+prereqs` prints the host checks doctor also runs.
+
 `npm start` with no `.env` hands off to a setup wizard. It asks first for `GITLAB_REPO_URL` — the
 one line that says which GitLab project Oneshot works on — and derives the default clone location
 from it; then it reuses the GitLab token already in `~/.claude.json`, detects your repo clones,
-and warns before configuring a remote telemetry endpoint. Then `npm run verify` (deps → hooks → doctor) is the gate. It checks auth, config coherence, paths, GitLab reachability and
+and warns before configuring a remote telemetry endpoint. It writes `.env` once, at the end,
+atomically — closing it half way leaves nothing behind. Then `npm run verify` (deps → hooks → doctor) is the gate. It checks auth, config coherence, paths, GitLab reachability and
 branch protection, and that every guard script is present and its test suite passes. It exits
 non-zero on anything that would only surface as a confusing failure three phases into a real
 ticket.
@@ -699,20 +708,24 @@ ticket.
   - **Name the virtualenv `venv`.** That README says `virtualenv -p python3.12 my_env`; the phases
     run `source venv/bin/activate` inside the worktree, so a `my_env` is invisible to them and the
     `venv` seed entry stays missing. Create it as `venv`, or `ln -s my_env venv` in the seed clone.
-  - **Both settings files are hand-written** — there is no `.example` to copy. Their contents are in
-    that README (`local_settings.py` under the backend steps, `config.js` under the frontend steps).
+  - **Both settings files can be generated.** `npm run seed:provision` writes
+    `hrdb/local_settings.py` from `config/erp/local_settings.template.py` (DB_*, REDIS_URL,
+    ONESHOT_APP_ALLOWED_HOSTS) — but never over a hand-made one — and composes `config.js` from the
+    repo's tracked `config.example.js`, keeping any value your copy already has.
 
   Reading `doctor`'s two seed-related lines:
 
   | Line | Meaning | Action |
   |---|---|---|
   | `WT_ROOT will be created on first run` | expected — the worktree root is made on the first lease | none |
-  | `no seed repo configured` | `ONESHOT_SEED_FROM` is unset | set it (or re-run `npm run setup`) |
-  | `seed entries missing from the seed repo: …` | the clone exists but is not installed — the list names exactly what to create | install the clone; re-run `doctor` |
+  | `no seed repo configured` (FAIL) | `ONESHOT_SEED_FROM` is unset | set it (or re-run `npm run setup`) |
+  | `seed entries missing from the seed repo: …` (FAIL) | the clone exists but is not installed — the list names exactly what to create | `npm run seed:provision`; re-run `doctor` |
 
-  You are done when `doctor` prints `seed repo <path> (3 linked, 2 copied; …)`. Both warnings are
-  **non-blocking for `doctor` and blocking for the first ticket**: a missing entry does not fail at
-  boot, it fails when `verify` tries to start the dev server, three phases in.
+  You are done when `doctor` prints `seed repo <path> (3 linked, 2 copied; …)`. A missing seed is a
+  **FAIL**: it does not stop boot, but it fails the first ticket when `verify` tries to start the dev
+  server, three phases in, so doctor refuses it up front. The `Host prerequisites` section that
+  follows (the same list `scripts/setup-server.sh --check` prints) adds Postgres reachability with
+  CREATEDB, Redis, Claude and GitLab credentials, Playwright's chromium and the test login.
 
 - A missing `SKILLS_ROOT` also fails `hooks:verify`'s symlink test, so one wrong path reports as
   two failures — fix the path and both clear.

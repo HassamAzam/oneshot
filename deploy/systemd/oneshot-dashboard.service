@@ -1,0 +1,24 @@
+# Oneshot dashboard — installed by scripts/setup-server.sh to /etc/systemd/system.
+# Binds 0.0.0.0:${ONESHOT_DASHBOARD_PORT:-8787}; refuses to start without ONESHOT_DASHBOARD_TOKEN.
+[Unit]
+Description=Oneshot dashboard
+Documentation=file:///srv/oneshot/docs/SERVER-SETUP.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oneshot
+Group=oneshot
+WorkingDirectory=/srv/oneshot
+EnvironmentFile=/etc/oneshot/oneshot.env
+Environment=NO_COLOR=1
+Environment=HOME=/home/oneshot
+Environment=ONESHOT_DASHBOARD_HOST=0.0.0.0
+ExecStartPre=/bin/sh -c 'case "$ONESHOT_DASHBOARD_TOKEN" in ""|*REPLACE_ME*) echo "ONESHOT_DASHBOARD_TOKEN is unset in /etc/oneshot/oneshot.env - refusing to listen on 0.0.0.0" >&2; exit 1;; esac'
+ExecStart=/usr/bin/node /srv/oneshot/node_modules/tsx/dist/cli.mjs scripts/serve.ts
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

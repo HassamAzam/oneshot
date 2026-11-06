@@ -105,9 +105,21 @@ It asks first for `GITLAB_REPO_URL` — it has no default, because it is the one
 the machine cannot guess — and derives the clone location's default from it. The
 later prompts default or can be skipped, but `GITLAB_TOKEN` defaults only when
 `~/.claude.json` already holds a token: skip it otherwise and boot refuses until you
-paste one in. It writes `.env` at mode 600 and
-offers to install the guardrail hooks into `~/.claude/settings.json` — **say yes**. Those hooks
-are what stop a phase pushing to a protected branch or reaching a host it should not.
+paste one in. It builds `.env` in memory and writes it once, at the end, at mode 600 —
+an interrupted wizard leaves no half-written `.env` behind. There is no hook install
+step: the guardrails (pushing to a protected branch, reaching a host a phase should
+not) are passed to the SDK in-process (`src/conductor/hooks.ts`).
+
+No terminal (CI, a server)? `npm run setup -- --from-env [--env-file <path>]` reads the
+same values from the environment and the file, lists every missing required key
+(`GITLAB_REPO_URL`, `ONESHOT_GITLAB_TOKEN`/`GITLAB_TOKEN`, `ONESHOT_TEST_LOGIN`) and
+writes nothing until they are all there. For a whole Linux server, see
+[docs/SERVER-SETUP.md](docs/SERVER-SETUP.md) — `scripts/setup-server.sh` does every step.
+
+Then make the seed runnable: `npm run seed:provision` (`node scripts/provision-seed.cjs`)
+creates the venv, `node_modules`, `hrdb/local_settings.py`, `config.js`, migrations,
+`staticfiles` and the test login in your `WORK_REPO`, skipping whatever is already there
+(`--check` only reports).
 
 Then paste in the values you were sent. If you were handed a whole `.env`, check
 it names the project and that its paths point at **your** home directory — a copied

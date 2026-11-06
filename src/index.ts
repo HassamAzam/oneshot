@@ -726,6 +726,13 @@ async function drain(): Promise<void> {
 
 async function main(): Promise<void> {
   if (!existsSync(join(ROOT, '.env'))) {
+    // Under systemd there is no terminal to answer the wizard, so name the
+    // server path instead of letting the wizard die on a closed stdin.
+    if (!process.stdin.isTTY) {
+      log.error('No .env found and no terminal for the setup wizard. On a server run: '
+        + 'npm run setup -- --from-env --env-file /etc/oneshot/oneshot.env');
+      process.exit(1);
+    }
     log.banner('No .env found — starting first-run setup.');
     const { execFileSync } = await import('node:child_process');
     execFileSync(process.execPath, [join(ROOT, 'node_modules/tsx/dist/cli.mjs'), join(ROOT, 'scripts/setup.ts')], { stdio: 'inherit' });

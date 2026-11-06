@@ -22,6 +22,7 @@ import { foreignJournalFinding } from '../src/lib/journalproject.js';
 import { slackEnabled, userIdForEmail, userIdForHandle } from '../src/lib/slack.js';
 import { checkIdentity } from '../src/lib/identity.js';
 import { otelStatus, promptTextExported } from '../src/lib/otel.js';
+import { checkPrereqs } from '../src/lib/appenv.cjs';
 
 let fails = 0;
 let warns = 0;
@@ -84,7 +85,8 @@ function psql(pg: LocalTestsConfig['pg'], sql: string): { ok: boolean; out: stri
   ], { encoding: 'utf8', timeout: 15_000, env: { ...process.env, PGCONNECT_TIMEOUT: '5' } });
   if (res.error) {
     const missing = (res.error as NodeJS.ErrnoException).code === 'ENOENT';
-    return { ok: false, out: '', error: missing ? 'psql is not on PATH (brew install libpq)' : res.error.message };
+    const hint = process.platform === 'linux' ? 'sudo apt-get install -y postgresql-client' : 'brew install libpq';
+    return { ok: false, out: '', error: missing ? `psql is not on PATH (${hint})` : res.error.message };
   }
   return { ok: res.status === 0, out: (res.stdout ?? '').trim(), error: firstLine(res.stderr) };
 }
@@ -486,16 +488,16 @@ async function main(): Promise<void> {
   // in" this script exists to pull forward.
   const seed = seedFrom();
   if (!seed) {
-    warn('no seed repo configured', 'set ONESHOT_SEED_FROM — without it a leased worktree has '
+    fail('no seed repo configured', 'set ONESHOT_SEED_FROM — without it a leased worktree has '
       + 'no node_modules/venv, so `verify` cannot run the app');
   } else if (!existsSync(seed)) {
-    warn('seed repo does not exist', `${seed} — set ONESHOT_SEED_FROM to a repo that is `
-      + 'already installed (node_modules, venv)');
+    fail('seed repo does not exist', `${seed} — run node scripts/provision-seed.cjs, or set ONESHOT_SEED_FROM `
+      + 'to a repo that is already installed (node_modules, venv)');
   } else {
     const links = envOr('ONESHOT_SEED_LINKS', '').split(',').map((s) => s.trim()).filter(Boolean);
     const copies = envOr('ONESHOT_SEED_COPIES', '').split(',').map((s) => s.trim()).filter(Boolean);
     const missing = [...links, ...copies].filter((rel) => !existsSync(join(seed, rel)));
-    if (missing.length) warn('seed entries missing from the seed repo', missing.join(', '));
+    if (missing.length) fail('seed entries missing from the seed repo', `${missing.join(', ')} — run node scripts/provision-seed.cjs`);
     else pass('seed repo', `${seed} (${links.length} linked, ${copies.length} copied; ${origin('ONESHOT_SEED_FROM')})`);
   }
 
@@ -698,6 +700,17 @@ async function main(): Promise<void> {
           + ' — they will not be @mentioned when a gate waits on them');
       }
     }
+  }
+
+  // ----------------------------------------------------------- host
+  // The same list scripts/setup-server.sh --check prints (src/lib/appenv.cjs).
+  // claude CLI and the seed are checked above with more detail.
+  section('Host prerequisites');
+  for (const r of checkPrereqs({ skip: ['claudeCli', 'seed'] })) {
+    const detail = r.ok ? r.detail : `${r.detail}${r.fix ? ` — fix: ${r.fix}` : ''}`;
+    if (r.ok) pass(r.name, detail);
+    else if (r.required) fail(r.name, detail);
+    else warn(r.name, detail);
   }
 
   checkLocalTests(localTests);
