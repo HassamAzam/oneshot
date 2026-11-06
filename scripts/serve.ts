@@ -1,29 +1,32 @@
 /**
- * `npm run dashboard` — one URL that lists every run and opens any of them.
+ * `npm run dashboard` — the live view of the fleet, and the door to every run.
  *
- * The reports already exist as files, and a file is a fine artifact but a poor
- * front door: it makes you know an iid and a path before you can look at
- * anything. This is the index that answers "which tickets have run?" and turns
- * the answer into a link.
+ * `/` polls `/api/state` (read from state/oneshot.db, read-only) so the active
+ * runs, their phases and the fleet's quota stay current without a reload;
+ * `/runs` is the journal index, archived runs included; `/run/:iid` is the
+ * transcript report with the database's phase timeline above it.
  *
- * Deliberately small. Node's own http module, no dependency, no build step, no
- * websocket and no polling — a page is rendered from the run directory at the
- * moment you ask for it, so a refresh is the whole update mechanism. That is
- * enough because a run takes hours and the interesting moment is when it ends.
- *
- * Nothing here writes to state/. Reports are rendered in memory and served, so
- * opening a page can never race a conductor writing the same file, and a fleet
- * of three conductors can be inspected while they work.
+ * Node's own http module and no build step. Nothing here writes to state/:
+ * reports are rendered in memory, the DB is opened read-only, so opening a page
+ * can never race a conductor, and a fleet can be inspected while it works.
  */
 import { createServer } from 'node:http';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { RUNS, STATE, envOr } from '../src/lib/config.js';
 import { readJournal, type RunJournal } from '../src/lib/artifacts.js';
 import { buildReportModel, renderHtml } from '../src/lib/report.js';
+import { authorise, requireTokenFor } from './dashboard/auth.js';
+import { fleetState, latestRunId, phaseRuns, recentEvents } from './dashboard/db.js';
+import { esc, indexPage, runSection, tailPage } from './dashboard/page.js';
+import { tail } from './dashboard/tail.js';
 
 const PORT = Number(envOr('ONESHOT_DASHBOARD_PORT', '8787'));
+const HOST = envOr('ONESHOT_DASHBOARD_HOST', '127.0.0.1');
+const TOKEN = envOr('ONESHOT_DASHBOARD_TOKEN');
 const ARCHIVE = join(STATE, 'runs-archive');
+// An archive directory name as the conductor writes it: no separators, no dot-dot.
+const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 interface Row {
   iid: number;
@@ -76,9 +79,6 @@ function rows(): Row[] {
   return out.sort((a, b) => b.when - a.when);
 }
 
-const esc = (s: unknown): string => String(s ?? '')
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
 const AGE = (ms: number): string => {
   if (!ms) return '';
   const m = Math.round((Date.now() - ms) / 60000);
@@ -124,7 +124,7 @@ function index(): string {
   .p-running { background: color-mix(in srgb, #2563eb 25%, transparent) }
   .empty { opacity: .6; padding: 2rem 0 }
 </style>
-<h1>Oneshot runs</h1>
+<h1>Oneshot runs <a href="/" style="font-size:.8rem;font-weight:400">live view</a></h1>
 <p class="sub">${list.length} run${list.length === 1 ? '' : 's'} — click a ticket for its phases, agents and transcripts. Refresh for current state.</p>
 ${list.length ? `<table>
   <tr><th>Ticket</th><th>Title</th><th>Status</th><th>Phases</th><th>Started</th><th>Run</th></tr>
@@ -149,9 +149,11 @@ function runPage(iid: number, archived: string | null): { code: number; body: st
       ? { code: 200, body: readFileSync(html, 'utf8') }
       : { code: 200, body: `<!doctype html><meta charset=utf-8><p style="font:14px sans-serif">This run was archived before reports existed. Its journal is at <code>${esc(file)}</code>.</p><p><a href="/">back</a></p>` };
   }
+  const runId = readJournal(iid)?.runId ?? latestRunId(iid);
+  const live = runId ? runSection(iid, phaseRuns(runId), recentEvents(runId)) : '';
   const model = buildReportModel(iid);
-  if (!model) return { code: 404, body: `No run found for #${iid}.` };
-  return { code: 200, body: renderHtml(model) };
+  if (!model) return live ? { code: 200, body: `<!doctype html><meta charset="utf-8"><body>${live}` } : { code: 404, body: `No run found for #${iid}.` };
+  return { code: 200, body: renderHtml(model).replace('<body>\n', `<body>\n${live}`) };
 }
 
 const server = createServer((req, res) => {
@@ -160,42 +162,60 @@ const server = createServer((req, res) => {
     res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' });
     res.end(body);
   };
+  if (!authorise(req, res, url, TOKEN)) return;
 
   try {
-    if (url.pathname === '/') return send(200, index());
+    if (url.pathname === '/') return send(200, indexPage(fleetState()));
+    if (url.pathname === '/api/state') return send(200, JSON.stringify(fleetState()), 'application/json');
+    if (url.pathname === '/runs') return send(200, index());
 
-    const m = url.pathname.match(/^\/run\/(\d+)$/);
+    const m = url.pathname.match(/^\/run\/(\d{1,9})(\/tail)?$/);
     if (m) {
-      const out = runPage(Number(m[1]), url.searchParams.get('archived'));
+      const iid = Number(m[1]);
+      if (m[2]) {
+        const t = tail(iid);
+        return send(200, tailPage(iid, t.file, t.lines));
+      }
+      const archived = url.searchParams.get('archived');
+      if (archived !== null && !SAFE_NAME.test(archived)) return send(400, 'Bad archive name.', 'text/plain');
+      const out = runPage(iid, archived);
       return send(out.code, out.body);
     }
 
-    // Artifacts — screenshots, so a report can link to them.
-    const a = url.pathname.match(/^\/artifacts\/(\d+)\/(.+)$/);
+    // Artifacts — screenshots, so a report can link to them. Resolved and then
+    // checked to still sit under the run's artifacts dir, which a stripped '..'
+    // alone does not guarantee (encoded or absolute segments).
+    const a = url.pathname.match(/^\/artifacts\/(\d{1,9})\/(.+)$/);
     if (a) {
-      const file = join(RUNS, a[1]!, 'artifacts', a[2]!.replace(/\.\./g, ''));
-      if (!existsSync(file) || !statSync(file).isFile()) return send(404, 'Not found', 'text/plain');
+      const root = resolve(RUNS, a[1]!, 'artifacts');
+      const file = resolve(root, decodeURIComponent(a[2]!));
+      if (!file.startsWith(root + sep) || !existsSync(file) || !statSync(file).isFile()) return send(404, 'Not found', 'text/plain');
       const ext = file.split('.').pop()?.toLowerCase() ?? '';
       const type = ext === 'png' ? 'image/png' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg'
-        : ext === 'gif' ? 'image/gif' : ext === 'mp4' ? 'video/mp4' : 'application/octet-stream';
+        : ext === 'gif' ? 'image/gif' : ext === 'mp4' ? 'video/mp4' : ext === 'webm' ? 'video/webm' : 'application/octet-stream';
       res.writeHead(200, { 'content-type': type });
       return res.end(readFileSync(file));
     }
 
-    return send(404, '<p style="font:14px sans-serif">Not found. <a href="/">All runs</a></p>');
+    return send(404, '<p style="font:14px sans-serif">Not found. <a href="/">Live view</a></p>');
   } catch (err) {
     return send(500, `<pre>${esc((err as Error).message)}</pre>`);
   }
 });
 
-// Loopback, explicitly. `listen(PORT)` with no host binds every interface, so
-// the page below was reachable from any machine on the network while the banner
-// promised localhost — and it renders run journals, which carry whatever a
-// failing phase quoted into its own error text. Verified once from a LAN
-// address: 200, with the pinned ONESHOT_TEST_LOGIN password in the body.
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`\n  Oneshot dashboard  →  http://localhost:${PORT}\n`);
-  console.log('  Lists every run. Click a ticket for its phases, the agents each');
-  console.log('  one dispatched, and the transcripts. Refresh for current state.');
+// Loopback by default. `listen(PORT)` with no host binds every interface, and
+// the pages render run journals, which carry whatever a failing phase quoted
+// into its own error text — verified once from a LAN address: 200, with the
+// pinned ONESHOT_TEST_LOGIN password in the body. So any other host must come
+// with a token, and starting without one is refused rather than warned about.
+try {
+  requireTokenFor(HOST, TOKEN);
+} catch (err) {
+  console.error(`\n  Refusing to start: ${(err as Error).message}\n`);
+  process.exit(1);
+}
+server.listen(PORT, HOST, () => {
+  console.log(`\n  Oneshot dashboard  →  http://${HOST.includes(':') ? `[${HOST}]` : HOST}:${PORT}${TOKEN ? '  (token required)' : ''}\n`);
+  console.log('  Live fleet view, refreshing every 10s; /runs lists every journal.');
   console.log('  Ctrl-C to stop.\n');
 });
