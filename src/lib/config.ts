@@ -21,6 +21,7 @@ import {
   repoCheckOverride, resolvePath, resolveTarget, scopedEnvName as scopedEnvNameFor, spellings,
   type GitlabRepo, type ResolvedPath,
 } from './repourl.cjs';
+import { assertDisjoint, parsePortList } from './procprobe.cjs';
 import { parseMrFeedbackConfig } from '../mrfeedback/config.js';
 import type { MrFeedbackConfig } from '../mrfeedback/types.js';
 
@@ -452,9 +453,29 @@ export function projectConfig(): ProjectConfig {
     // now routes by the ERP repo's own .claude/zones.json (see _comment_high_scrutiny).
     const risk = loadJson<{ modules: Array<{ paths?: string[] }> }>('risk-modules.json');
     c.highScrutinyPaths = [...new Set([...(c.highScrutinyPaths ?? []), ...risk.modules.flatMap((m) => m.paths ?? [])])];
+    applyProjectEnvOverrides(c);
     _project = c;
   }
   return _project;
+}
+
+/**
+ * The two project.json values a server sets per machine. ONESHOT_CONCURRENCY replaces
+ * `concurrency` (the file keeps 1 for a desk; a 10-slot server sets 10), and CONTEXT_REPO
+ * replaces `contextRepo.path` — the same variable CONTEXT_REPO below and
+ * hooks/write-scope.cjs already read, so the three cannot disagree.
+ */
+export function applyProjectEnvOverrides(
+  c: Pick<ProjectConfig, 'concurrency' | 'contextRepo'>, env: Record<string, string | undefined> = process.env,
+): void {
+  const raw = readEnv(env, 'ONESHOT_CONCURRENCY');
+  if (raw) {
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1) throw new Error(`ONESHOT_CONCURRENCY=${raw} is not a positive whole number`);
+    c.concurrency = n;
+  }
+  const ctx = readEnv(env, 'CONTEXT_REPO');
+  if (ctx && c.contextRepo) c.contextRepo = { ...c.contextRepo, path: ctx };
 }
 
 /** True unless config/project.json switches bug reproduction off. */
@@ -1098,9 +1119,33 @@ export function localTestsPatchFile(iid: number): string {
   return join(artifactDir(iid), 'local-tests', 'temporary-changes.patch');
 }
 
-export function portPool(): number[] {
-  return envOr('PORT_POOL', '8000,8001,8002')
-    .split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
+/**
+ * The conductor's Django port pool. A list, a range or both: `8000,8001,8002` (the desk
+ * default) or `8100-8109` (a 10-slot server; webpack takes each +1000, 9100-9109).
+ *
+ * Validated against the other pools on first read, which is at boot (src/index.ts logs
+ * the pool size before the first tick): two pools sharing a port — counting each Django
+ * port's webpack twin — would let a run and the app pool or local tests bind the same
+ * socket, which surfaces two minutes into a bring-up as an opaque bind error.
+ */
+export function portPool(env: Record<string, string | undefined> = process.env): number[] {
+  const pool = parsePortList(readEnv(env, 'PORT_POOL', '8000,8001,8002'), 'PORT_POOL');
+  validatePortPools(pool, env);
+  return pool;
+}
+
+export function validatePortPools(pool: number[], env: Record<string, string | undefined> = process.env): void {
+  const appPorts = parsePortList(readEnv(env, 'ONESHOT_APP_PORTS', '8010,8011,8012'), 'ONESHOT_APP_PORTS');
+  const lt = [Number(readEnv(env, 'ONESHOT_LOCAL_TESTS_PORT', '8030')), Number(readEnv(env, 'ONESHOT_LOCAL_TESTS_FE_PORT', '9030'))]
+    .filter((n) => Number.isInteger(n) && n > 0);
+  const plus = (ports: number[]): number[] => ports.map((p) => p + 1000);
+  assertDisjoint([
+    { name: 'PORT_POOL (Django)', ports: pool },
+    { name: 'PORT_POOL webpack (+1000)', ports: plus(pool) },
+    { name: 'ONESHOT_APP_PORTS (Django)', ports: appPorts },
+    { name: 'ONESHOT_APP_PORTS webpack (+1000)', ports: plus(appPorts) },
+    { name: 'local tests (ONESHOT_LOCAL_TESTS_PORT/_FE_PORT)', ports: lt },
+  ]);
 }
 
 // -------------------------------------------------------------- session env

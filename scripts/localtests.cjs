@@ -60,6 +60,7 @@ const { spawn, spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const REPO = require(path.join(ROOT, 'src', 'lib', 'repourl.cjs'));
+const RUNDB = require(path.join(ROOT, 'src', 'lib', 'rundb.cjs'));
 const HARNESS = path.join(ROOT, 'skills', 'local-browser-verify', 'scripts', 'harness.cjs');
 const H = require(HARNESS);
 /**
@@ -769,8 +770,6 @@ function mergeEnv(committed, creds) {
   return { ...(isObj(committed) ? committed : {}), ...(isObj(creds) ? creds : {}) };
 }
 
-const DATABASES_RE = /^DATABASES\s*=\s*\{[\s\S]*?^\}[ \t]*$/m;
-
 /**
  * The seed's local_settings.py with its DATABASES block pointed at the run's copy.
  *
@@ -785,14 +784,21 @@ const DATABASES_RE = /^DATABASES\s*=\s*\{[\s\S]*?^\}[ \t]*$/m;
  * the dev database — so the copy gets its own (LT_BROKER). And settings.py derives the
  * memcached KEY_PREFIX from DATABASE_NAME, so that is set to the copy's name too.
  * assertDbGuard() asks Django for all three before anything runs.
+ *
+ * The block parser and writer are src/lib/rundb.cjs's, shared with the per-run
+ * databases scripts/app.cjs gives ticket worktrees.
  */
 function rewriteLocalSettings(src, db) {
-  const hits = String(src).match(new RegExp(DATABASES_RE.source, 'gm')) || [];
-  if (hits.length !== 1) {
-    throw new LtError('E_LOCAL_SETTINGS',
-      `the seed's hrdb/local_settings.py has ${hits.length} DATABASES blocks, expected exactly 1`,
-      'Its shape changed; the run will not guess which database Django would use.');
+  try {
+    return rewriteLocalSettingsUnchecked(src, db);
+  } catch (err) {
+    if (err instanceof RUNDB.RunDbError) throw new LtError(err.code, err.message, err.hint);
+    throw err;
   }
+}
+
+function rewriteLocalSettingsUnchecked(src, db) {
+  const hit = RUNDB.findDatabasesBlock(src);
   for (const m of String(src).matchAll(/^CELERY_BROKER_URL\s*=\s*['"]([^'"]*)['"]/gm)) {
     if (/^redis:\/\/(localhost|127\.0\.0\.1)(:6379)?\/15\/?$/.test(m[1].trim())) {
       throw new LtError('E_LOCAL_SETTINGS',
@@ -800,28 +806,10 @@ function rewriteLocalSettings(src, db) {
         'Point the seed at another Redis DB; the copy-app must not share a queue with it.');
     }
   }
-  const check = (v, re, what) => {
-    if (!re.test(String(v))) throw new LtError('E_LOCAL_SETTINGS', `${what} ${JSON.stringify(String(v))} cannot be written into local_settings.py`);
-    return String(v);
-  };
-  const name = check(db.name, PG_IDENT_RE, 'database name');
-  const host = check(db.host, /^[A-Za-z0-9_.:/-]+$/, 'host');
-  const port = check(db.port, /^\d{1,5}$/, 'port');
-  const user = check(db.user || '', /^[A-Za-z0-9_.@-]*$/, 'user');
-  const engine = (/['"]ENGINE['"]\s*:\s*['"]([A-Za-z0-9_.]+)['"]/.exec(hits[0]) || [])[1] || 'django.db.backends.postgresql';
-  const block = [
-    'DATABASES = {',
-    "    'default': {",
-    `        'ENGINE': '${engine}',`,
-    `        'NAME': '${name}',`,
-    `        'USER': '${user}',`,
-    "        'PASSWORD': '',",
-    `        'HOST': '${host}',`,
-    `        'PORT': '${port}',`,
-    '    }',
-    '}',
-  ].join('\n');
-  const body = String(src).replace(DATABASES_RE, block).replace(/\s*$/, '\n');
+  const name = RUNDB.checkValue(db.name, PG_IDENT_RE, 'database name');
+  const engine = (/['"]ENGINE['"]\s*:\s*['"]([A-Za-z0-9_.]+)['"]/.exec(hit) || [])[1] || 'django.db.backends.postgresql';
+  const block = RUNDB.buildDatabasesBlock({ engine, name, user: db.user || '', host: db.host, port: db.port });
+  const body = String(src).replace(RUNDB.DATABASES_RE, block).replace(/\s*$/, '\n');
   return `${body}\n# Oneshot local tests: this checkout runs against a throwaway copy (${name}).\n`
     + `DATABASE_NAME = '${name}'\n`
     + `CELERY_BROKER_URL = '${LT_BROKER}'\n`
@@ -1226,12 +1214,17 @@ function removeWorktree(wt, gitDir) {
  * may still be ours, so servers.json is kept for recoverStale and gc and this throws —
  * deleting the only record of it would leave a server on our ports that nothing finds.
  */
+/** A pid's cwd, or null when it cannot be read — including when no probe method exists. */
+function cwdOrUnknown(pid) {
+  try { return H.pidCwd(pid); } catch (err) { if (err && err.code === 'E_NO_PROBE') return null; throw err; }
+}
+
 function stopHarness(dir, roots) {
   const f = path.join(dir, 'harness', 'servers.json');
   const s = readJson(f);
   if (!s) return [];
   const live = [['webpack', s.webpackPid], ['django', s.djangoPid]].filter(([, pid]) => running(pid))
-    .map(([name, pid]) => ({ name, pid, cwd: H.pidCwd(pid) }));
+    .map(([name, pid]) => ({ name, pid, cwd: cwdOrUnknown(pid) }));
   const ours = live.filter((x) => x.cwd && roots.some((r) => inside(x.cwd, r)));
   if (live.length && ours.length === live.length) {
     sh(process.execPath, [HARNESS_CLI, 'down'], { env: childEnv({ ONESHOT_RUN_DIR: dir }), timeout: 30000 });

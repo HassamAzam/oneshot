@@ -30,6 +30,11 @@ import {
 import { db } from './db.js';
 import { retryRefLockRace } from './gitfetch.js';
 import { log } from './log.js';
+import { pidsOnPort, portsListening } from './procprobe.cjs';
+import {
+  RunDbError, dropRunDb, perRunDbMode, pgClient, pgTarget, rewriteRunSettings, runDbName, runFromWorktree,
+  sweepRunDbs, type PgTarget,
+} from './rundb.cjs';
 
 function git(args: string[], cwd = WORK_REPO): string {
   return execFileSync('git', args, {
@@ -97,23 +102,15 @@ const takeFreePort = db.transaction((runId: string, pool: number[], unavailable:
 });
 
 /**
- * PIDs listening on a TCP port — empty when it is free.
+ * PIDs listening on a TCP port — empty when it is free or its owner is invisible.
  *
- * lsof is the probe: it is already on every macOS box this runs on and it tells
- * a LISTEN apart from a client connection. Any spawn error (no lsof, timeout)
- * returns [] — fail OPEN, because a lease that cannot probe must not refuse
- * every port. The cost of failing open is the bug this guards against; the cost
- * of failing closed is a run that can never lease a port at all.
+ * src/lib/procprobe.cjs: lsof, else `ss -ltnp`. This used to swallow every spawn error
+ * and answer [] — fail OPEN — so on a server without lsof every port read as free and a
+ * run leased one something was already serving on. A probe that cannot run now throws
+ * E_NO_PROBE, which leasePortFor() reports instead of handing out a port.
  */
 function portListeners(port: number): number[] {
-  try {
-    const out = execFileSync('lsof', [`-tiTCP:${port}`, '-sTCP:LISTEN'], {
-      encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    return out ? out.split('\n').map(Number).filter(Number.isInteger) : [];
-  } catch {
-    return [];
-  }
+  return pidsOnPort(port);
 }
 
 /**
@@ -131,7 +128,11 @@ function portListeners(port: number): number[] {
 export function reapPortServer(port: number | null | undefined): number {
   if (!port) return 0;
   let killed = 0;
-  for (const pid of portListeners(port)) {
+  let pids: number[] = [];
+  try { pids = portListeners(port); } catch (err) {
+    log.warn(`could not see what listens on port ${port} — its server was not reaped`, { error: (err as Error).message });
+  }
+  for (const pid of pids) {
     try { process.kill(pid, 'SIGTERM'); killed += 1; } catch { /* already gone */ }
   }
   if (killed) log.info(`reaped ${killed} process(es) on port ${port}`);
@@ -159,7 +160,8 @@ export function leasePortFor(runId: string): number | null {
   // driving somebody else's server and reporting on the wrong code. Probe here —
   // outside the SQLite transaction, which must stay synchronous and tiny — and
   // never hand out a port something is already answering on.
-  const occupied = new Set(pool.filter((p) => portListeners(p).length > 0));
+  const busy = portsListening([...pool, ...pool.map((p) => p + 1000)]);
+  const occupied = new Set(pool.filter((p) => busy.has(p) || busy.has(p + 1000)));
   const { port, reaped } = takeFreePort.immediate(runId, pool, occupied);
   if (reaped) log.info(`reclaimed ${reaped} port lease(s) from finished runs`);
   if (occupied.size) {
@@ -271,6 +273,92 @@ export function seedWorktree(worktree: string): void {
   }
 
   addExcludes(worktree, excluded);
+  pointAtRunDb(worktree, from);
+}
+
+// ------------------------------------------------------------ per-run database
+
+/** Where run databases live, from the seed's settings; null when there is no seed file. */
+function runDbTarget(from = seedFrom()): PgTarget | null {
+  const file = from ? join(from, 'hrdb', 'local_settings.py') : '';
+  if (!file || !existsSync(file)) return null;
+  return pgTarget(process.env, readFileSync(file, 'utf8'));
+}
+
+function runDbOn(pg: PgTarget): boolean {
+  return perRunDbMode(process.env, () => pgClient(pg).exists(pg.baseline)).on;
+}
+
+/**
+ * Point a RUN worktree's settings at its own database name the moment it is seeded.
+ *
+ * scripts/app.cjs creates the database (createdb -T <baseline>), adds the Redis DB for
+ * the run's port and migrates it at the first bring-up. This earlier rewrite exists so
+ * that nothing run in the worktree before then — a phase's manage.py, a Django shell —
+ * can reach the seed's database: until the copy exists it fails loudly with "database
+ * does not exist" instead of writing someone's data. Not a run worktree (a replay, the
+ * app-<port> pool), or per-run databases off: nothing changes.
+ */
+function pointAtRunDb(worktree: string, from: string): void {
+  const run = runFromWorktree(worktree);
+  const file = join(worktree, 'hrdb', 'local_settings.py');
+  if (!run || !existsSync(file)) return;
+  try {
+    const pg = runDbTarget(from);
+    if (!pg || !runDbOn(pg)) return;
+    const before = readFileSync(file, 'utf8');
+    const managed = before.includes("DATABASE_NAME = 'oneshot_run_");
+    const after = rewriteRunSettings(before, { name: runDbName(run.iid, run.runId), worktree });
+    // A bring-up already added the Redis line; leave its file alone rather than drop it.
+    if (!managed && after !== before) writeFileSync(file, after);
+  } catch (err) {
+    log.warn('could not point the worktree at its run database — app.cjs will retry at bring-up', {
+      worktree, error: (err as Error).message,
+    });
+  }
+}
+
+/**
+ * Drop a finished run's database. Best-effort and never throws: a database left behind
+ * is what sweepRunDatabases() is for. Only a name derived from the run's own worktree
+ * and run id, and rundb.cjs re-checks the oneshot_run_ prefix before the DROP.
+ */
+export function dropRunDatabase(worktree: string | undefined, runId: string, iid: number): void {
+  if (!worktree || !runFromWorktree(worktree)) return;
+  try {
+    const pg = runDbTarget();
+    if (!pg || !runDbOn(pg)) return;
+    const name = runDbName(iid, runId);
+    dropRunDb(pg, name);
+    log.ok(`dropped run database ${name}`);
+  } catch (err) {
+    log.warn('could not drop the run database — `node scripts/app.cjs rundb sweep --drop` will', {
+      error: (err as Error).message, code: err instanceof RunDbError ? err.code : undefined,
+    });
+  }
+}
+
+/**
+ * Drop every oneshot_run_* database whose run is done, aborted or not in the runs table
+ * at all. Blocked and parked runs keep theirs: both can be resumed.
+ */
+export function sweepRunDatabases(): { dropped: string[]; errors: string[] } {
+  try {
+    const pg = runDbTarget();
+    if (!pg || !runDbOn(pg)) return { dropped: [], errors: [] };
+    const q = db.prepare('SELECT status FROM runs WHERE iid = ? AND run_id LIKE ? ORDER BY started_at DESC LIMIT 1');
+    const statusOf = (iid: number, shortId: string): string | null => {
+      const row = q.get(iid, `%-${shortId}`) as { status: string } | undefined;
+      return row ? row.status : null;
+    };
+    const r = sweepRunDbs(pg, statusOf, { drop: true });
+    if (r.dropped.length) log.info(`dropped ${r.dropped.length} orphan run database(s): ${r.dropped.join(', ')}`);
+    for (const e of r.errors) log.warn(`run database sweep: ${e}`);
+    return { dropped: r.dropped, errors: r.errors };
+  } catch (err) {
+    log.warn('run database sweep did not run', { error: (err as Error).message });
+    return { dropped: [], errors: [(err as Error).message] };
+  }
 }
 
 /**

@@ -74,7 +74,8 @@ import {
 import { branchFor, newRunId, worktreeName } from '../lib/ids.js';
 import { writeDesignTokens } from '../lib/designtokens.js';
 import {
-  leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort, seedWorktree,
+  dropRunDatabase, leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort, seedWorktree,
+  sweepRunDatabases,
 } from '../lib/worktrees.js';
 import {
   addIssueNote, createIssue, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
@@ -3461,6 +3462,13 @@ export async function runTicket(
     reapPortServer(journal.port);
     releasePort(journal.runId);
     releasePromotion(journal.runId);
+    // The run's own database (src/lib/rundb.cjs) goes with a run that is over: done, or
+    // aborted (a resumed one gets a fresh copy and re-migrates). Blocked and parked runs
+    // keep it — both resume. After reapPortServer, so its Django is no longer connected.
+    // The sweep drops whatever earlier runs left behind. Both are no-ops with per-run
+    // databases off, and neither throws.
+    if (status === 'done' || status === 'aborted') dropRunDatabase(journal.worktree, journal.runId, journal.iid);
+    sweepRunDatabases();
 
     await updateCard(journal.slackTs ?? '', cardState(journal));
 

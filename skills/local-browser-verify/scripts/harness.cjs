@@ -52,6 +52,8 @@ const os = require('os');
 const { spawn, spawnSync, execFileSync } = require('child_process');
 
 const ONESHOT_HOME = process.env.ONESHOT_HOME || path.resolve(__dirname, '../../..');
+/** Port and process probes with real fallbacks (lsof, ss, /proc) — never "free" because a tool is missing. */
+const PROBE = require(path.join(__dirname, '../../../src/lib/procprobe.cjs'));
 
 /* ------------------------------------------------------------------ errors */
 
@@ -67,7 +69,7 @@ const CODES = [
   'E_WEBPACK_DEAD', 'E_BUNDLE_UNREACHABLE',
   'E_NO_CREDENTIALS', 'E_LOGIN_FAILED', 'E_LOGIN_2FA', 'E_TRIAL_EXPIRED',
   'E_MODULE_UNKNOWN', 'E_MODULE_TIMEOUT', 'E_NOT_UP', 'E_PLAYWRIGHT_MISSING',
-  'E_SELECTOR_EMPTY',
+  'E_SELECTOR_EMPTY', 'E_NO_PROBE',
 ];
 
 class HarnessError extends Error {
@@ -340,17 +342,17 @@ print("DB_OK")
 
 /* ------------------------------------------------------------------ ports */
 
-/** Who is listening, and is it OURS? A 200 does not prove the server is this checkout. */
+/**
+ * Who is listening, and is it OURS? A 200 does not prove the server is this checkout.
+ * Both go through src/lib/procprobe.cjs, which falls back from lsof to ss and /proc and
+ * throws E_NO_PROBE when nothing can answer, instead of reporting every port as free.
+ */
 function listenerPid(port) {
-  const r = spawnSync('lsof', ['-tiTCP:' + port, '-sTCP:LISTEN'], { encoding: 'utf8' });
-  const pid = String(r.stdout || '').trim().split('\n')[0];
-  return pid ? Number(pid) : null;
+  return PROBE.listenerPid(port);
 }
 
 function pidCwd(pid) {
-  const r = spawnSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8' });
-  const line = String(r.stdout || '').split('\n').find((l) => l.startsWith('n'));
-  return line ? line.slice(1) : null;
+  return PROBE.pidCwd(pid);
 }
 
 /**
@@ -362,7 +364,12 @@ function pidCwd(pid) {
  */
 function assertPortFreeOrOurs(port, wt, what) {
   const pid = listenerPid(port);
-  if (!pid) return null;
+  if (!pid) {
+    if (!PROBE.isPortListening(port)) return null;
+    throw new HarnessError('E_PORT_BUSY_FOREIGN',
+      `port ${port} (${what}) is in use by a process this user cannot see`,
+      'Free the port or lease another. Never drive a server you did not start.');
+  }
   const cwd = pidCwd(pid);
   if (cwd && path.resolve(cwd) === path.resolve(wt)) return pid;
   throw new HarnessError('E_PORT_BUSY_FOREIGN',
@@ -801,9 +808,18 @@ async function assertBundleReachable(bePort) {
 
 /* ------------------------------------------------------------------ up / down */
 
+/** With no port given: the last port of PORT_POOL (8002 with the default pool). */
+function defaultPort() {
+  try {
+    const pool = PROBE.parsePortList(process.env.PORT_POOL || '8000,8001,8002', 'PORT_POOL');
+    return pool[pool.length - 1] || 8002;
+  } catch { return 8002; }
+}
+
+
 async function up(opts = {}) {
   const wt = opts.worktree || process.env.ONESHOT_WORKTREE || process.cwd();
-  const bePort = Number(opts.bePort || process.env.ONESHOT_PORT || 8002);
+  const bePort = Number(opts.bePort || process.env.ONESHOT_PORT || defaultPort());
   const fePort = Number(opts.fePort || process.env.ONESHOT_FE_PORT || bePort + 1000);
   ensure(H()); ensure(ART());
 

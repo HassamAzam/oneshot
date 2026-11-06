@@ -45,6 +45,8 @@ const ONESHOT_HOME = process.env.ONESHOT_HOME || path.resolve(__dirname, '..');
 try { require('dotenv').config({ path: path.join(ONESHOT_HOME, '.env'), override: false }); } catch { /* optional */ }
 
 const H = require(path.join(ONESHOT_HOME, 'skills/local-browser-verify/scripts/harness.cjs'));
+const PROBE = require(path.join(__dirname, '..', 'src', 'lib', 'procprobe.cjs'));
+const RUNDB = require(path.join(__dirname, '..', 'src', 'lib', 'rundb.cjs'));
 
 /* ------------------------------------------------------------------ config */
 
@@ -163,8 +165,29 @@ const BASE_BRANCH = cfg('ONESHOT_BASE_BRANCH', '') || (() => {
 const SEED_LINKS = list('ONESHOT_SEED_LINKS', 'venv,node_modules,staticfiles');
 const SEED_COPIES = list('ONESHOT_SEED_COPIES', 'hrdb/local_settings.py,frontend/src/constants/config.js');
 
-/** Django ports we may lease. The webpack port is always base+1000 (harness convention). */
-const PORT_BASES = list('ONESHOT_APP_PORTS', '8010,8011,8012').map(Number).filter(Number.isInteger);
+/**
+ * Django ports we may lease. The webpack port is always base+1000 (harness convention).
+ * Same syntax as PORT_POOL: a list, a range (`8010-8012`) or both.
+ */
+const PORT_BASES = PROBE.parsePortList(cfg('ONESHOT_APP_PORTS', '8010,8011,8012'), 'ONESHOT_APP_PORTS');
+/** The conductor's run pool, for the Redis slot of a run's worktree (src/lib/config.ts portPool). */
+const RUN_PORTS = (() => {
+  try { return PROBE.parsePortList(cfg('PORT_POOL', '8000,8001,8002'), 'PORT_POOL'); } catch { return []; }
+})();
+
+/**
+ * How many cold starts may compile at once, machine-wide. Each is a webpack build that
+ * takes several cores for minutes; ten at once on one server is a thrash, not a speedup.
+ * A bring-up waits for a slot, never fails for want of one.
+ *
+ * The babel cache stays SHARED on purpose. babel-loader 8 resolves `cacheDirectory: true`
+ * through find-cache-dir 2 (no env override) to <pkg>/node_modules/.cache/babel-loader,
+ * i.e. the seed's symlinked node_modules. Its entries are content-addressed, an unreadable
+ * one is recompiled (cache.js swallows the read error) and same-key writers write the same
+ * bytes, so concurrent builds are safe; and it was 4.6 GB / 395k files on the desk that
+ * measured it, which a per-worktree copy would pay ten times over and start cold.
+ */
+const BRINGUP_PARALLEL = Math.max(1, Number(cfg('ONESHOT_BRINGUP_PARALLEL', '2')) || 2);
 
 const REGISTRY = path.join(ONESHOT_HOME, 'state', 'instances.json');
 
@@ -290,20 +313,45 @@ async function withLock(key, fn, budgetMs = 25 * 60000) {
   try { return await fn(); } finally { fs.rmSync(f, { force: true }); }
 }
 
+/**
+ * One of BRINGUP_PARALLEL machine-wide slots for the duration of `fn` — a counting
+ * semaphore made of the same pid-stamped lock files as withLock. A slot whose holder is
+ * dead is stolen. Waiting is unbounded in count but not in time: a slot held past
+ * `holdMs` is treated as abandoned, which is longer than any bring-up's own budget.
+ */
+async function withBringupSlot(fn, notes, holdMs = 40 * 60000) {
+  const dir = path.join(ONESHOT_HOME, 'state', 'apps', 'locks');
+  fs.mkdirSync(dir, { recursive: true });
+  let waited = false;
+  let file = null;
+  const started = Date.now();
+  while (!file) {
+    for (let i = 0; i < BRINGUP_PARALLEL && !file; i += 1) {
+      const f = path.join(dir, `bringup-slot-${i}.lock`);
+      try {
+        fs.writeFileSync(f, JSON.stringify({ pid: process.pid, at: Date.now(), key: `bringup-${i}` }), { flag: 'wx' });
+        file = f;
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err;
+        const held = readJson(f);
+        if (!held || !H.alive(held.pid) || Date.now() - held.at > holdMs) stealStale(f, holdMs);
+      }
+    }
+    if (!file) { waited = true; await sleep(2000); } // eslint-disable-line no-await-in-loop
+  }
+  if (waited && notes) notes.push(`waited ${Math.round((Date.now() - started) / 1000)}s for one of ${BRINGUP_PARALLEL} bring-up slot(s)`);
+  try { return await fn(); } finally { fs.rmSync(file, { force: true }); }
+}
+
 /* ------------------------------------------------------------------ discovery */
 
-/** Every listening TCP port with its pid, straight from lsof. */
+/**
+ * Every listening TCP port with its pid (null when the owner is invisible), from
+ * src/lib/procprobe.cjs: lsof, else ss. Throws E_NO_PROBE rather than reporting a
+ * machine with no probe tool as one with nothing listening.
+ */
 function listeners() {
-  const r = sh('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN'], { timeout: 15000 });
-  const rows = [];
-  for (const line of r.out.split('\n').slice(1)) {
-    const f = line.trim().split(/\s+/);
-    const name = f[f.length - 2] || '';
-    const port = Number((name.split(':').pop() || '').replace(/\D/g, ''));
-    const pid = Number(f[1]);
-    if (Number.isInteger(pid) && Number.isInteger(port) && port) rows.push({ pid, port });
-  }
-  return rows;
+  return PROBE.listeners();
 }
 
 const ps = (pid) => sh('ps', ['-o', 'command=', '-p', String(pid)], { timeout: 5000 }).out;
@@ -371,7 +419,7 @@ function classify(cmd) {
  */
 async function discover() {
   const byWt = new Map();
-  const boundPort = new Map(listeners().map((l) => [l.pid, l.port]));
+  const boundPort = new Map(listeners().filter((l) => l.pid).map((l) => [l.pid, l.port]));
 
   for (const proc of scanProcesses()) {
     const inst = byWt.get(proc.cwd) || { worktree: proc.cwd, django: null, webpack: null };
@@ -819,7 +867,8 @@ async function ensureIn(wt, opts, notes) {
     }
     be = pinnedBe;
     fe = pinnedFe;
-    envOut = await H.up({ worktree: real(wt), bePort: be, fePort: fe });
+    await provisionRunDb(real(wt), be, notes);
+    envOut = await withBringupSlot(() => H.up({ worktree: real(wt), bePort: be, fePort: fe }), notes);
   } else {
     // Leasing a pool port and BINDING it must be one critical section against
     // `ensure`/`warm`/`cold`, which all lease under 'pool'. This path holds only the
@@ -827,7 +876,8 @@ async function ensureIn(wt, opts, notes) {
     // callers could pick the same free port and collide.
     ({ be, fe, envOut } = await withLock('pool', async () => {
       const leased = leasePorts(await discover());
-      const out = await H.up({ worktree: real(wt), bePort: leased.be, fePort: leased.fe });
+      await provisionRunDb(real(wt), leased.be, notes);
+      const out = await withBringupSlot(() => H.up({ worktree: real(wt), bePort: leased.be, fePort: leased.fe }), notes);
       return { be: leased.be, fe: leased.fe, envOut: out };
     }));
   }
@@ -835,6 +885,148 @@ async function ensureIn(wt, opts, notes) {
   const servers = readJson(path.join(process.env.ONESHOT_RUN_DIR || '', 'harness/servers.json'), {});
   return { worktree: real(wt), bePort: be, fePort: fe, bundleUrl: envOut.bundleUrl,
     djangoPid: servers.djangoPid || H.listenerPid(be), webpackPid: servers.webpackPid || H.listenerPid(fe) };
+}
+
+/* ------------------------------------------------------------------ per-run database */
+
+const SEED_SETTINGS = () => path.join(SEED_FROM, 'hrdb', 'local_settings.py');
+
+/** Where run databases live, read from the seed's settings (never its password). */
+function runDbTarget() {
+  const f = SEED_SETTINGS();
+  return RUNDB.pgTarget(process.env, fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null);
+}
+
+/** On, off, and why — see rundb.cjs perRunDbMode. */
+function runDbMode(pg) {
+  return RUNDB.perRunDbMode(process.env, () => RUNDB.pgClient(pg).exists(pg.baseline));
+}
+
+/**
+ * A port's Redis slot: its place in PORT_POOL, else after it in ONESHOT_APP_PORTS. Two
+ * worktrees on different ports therefore never share a broker DB.
+ */
+function redisSlotOf(port) {
+  const i = RUN_PORTS.indexOf(Number(port));
+  if (i >= 0) return i;
+  const j = PORT_BASES.indexOf(Number(port));
+  if (j >= 0) return RUN_PORTS.length + j;
+  throw new AppError('E_REDIS_SLOT', `port ${port} is in neither PORT_POOL nor ONESHOT_APP_PORTS, so it has no Redis DB`,
+    'lease a pool port, or set ONESHOT_PER_RUN_DB=0');
+}
+
+/** Per-worktree, uncommittable: under the worktree's own git dir. */
+function runDbMarker(wt) {
+  return path.resolve(wt, git(['rev-parse', '--git-path', 'oneshot-rundb.json'], wt));
+}
+
+/**
+ * Ask Django which database, broker and cache prefix this checkout would use, after the
+ * rewrite and before anything migrates. Importing settings does not run django.setup(),
+ * so this touches no database.
+ */
+function assertRunDbGuard(wt, name, redisIndex) {
+  const src = [
+    'import ssl, hashlib, os, json',
+    "os.environ['DJANGO_SETTINGS_MODULE'] = 'hrdb.settings'",
+    'from django.conf import settings as s',
+    "c = (getattr(s, 'CACHES', None) or {}).get('default') or {}",
+    "print('ONESHOT_RUNDB ' + json.dumps({'name': s.DATABASES['default'].get('NAME'),"
+      + " 'broker': str(getattr(s, 'CELERY_BROKER_URL', '')), 'keyPrefix': c.get('KEY_PREFIX')}))",
+  ].join('\n');
+  const r = sh(path.join(wt, 'venv/bin/python'), ['-c', src], { cwd: wt, timeout: 120000,
+    env: { ...process.env, DJANGO_SETTINGS_MODULE: 'hrdb.settings' } });
+  const line = r.out.split('\n').find((l) => l.startsWith('ONESHOT_RUNDB '));
+  let got = null;
+  try { got = line ? JSON.parse(line.slice('ONESHOT_RUNDB '.length)) : null; } catch { got = null; }
+  const problems = !got ? [`settings did not load: ${r.err.split('\n').slice(-2).join(' ')}`] : [
+    got.name !== name && `Django would use database ${JSON.stringify(got.name)}, not ${name}`,
+    !new RegExp(`/${redisIndex}(\\?|$)`).test(got.broker) && `Celery would use another broker, not Redis DB ${redisIndex}`,
+    got.keyPrefix !== name && `the cache prefix is ${JSON.stringify(got.keyPrefix)}, not ${name}`,
+  ].filter(Boolean);
+  if (problems.length) {
+    throw new AppError('E_DB_GUARD', `in ${wt}: ${problems.join('; ')}`, 'refusing to start or migrate against it');
+  }
+}
+
+/**
+ * Give a run's worktree its own database and Redis DB, before its first Django process.
+ *
+ * Only a RUN worktree (t<iid>-r-…, src/lib/ids.ts worktreeName) gets one: the app-<port>
+ * pool and a developer's checkout keep the seed's database, as they always did. Off unless
+ * ONESHOT_PER_RUN_DB=1 or a baseline exists (rundb.cjs perRunDbMode), so a mac desk with
+ * no baseline sees no change. Idempotent: an existing database is reused (a resumed run),
+ * the settings rewrite is byte-stable, and migrate runs once per database — recorded in
+ * the worktree's git dir, so a migrate that failed half-way runs again next time.
+ */
+async function provisionRunDb(wt, port, notes) {
+  const run = RUNDB.runFromWorktree(wt);
+  const lsFile = path.join(wt, 'hrdb', 'local_settings.py');
+  if (!run || !fs.existsSync(lsFile)) return null;
+  const pg = runDbTarget();
+  const mode = runDbMode(pg);
+  if (!mode.on) {
+    notes.push(`per-run database off (${mode.why}): this worktree uses the seed's database`);
+    return null;
+  }
+  const name = RUNDB.runDbName(run.iid, run.runId);
+  const redisIndex = RUNDB.redisIndexForSlot(redisSlotOf(port));
+  try {
+    const before = fs.readFileSync(lsFile, 'utf8');
+    const after = RUNDB.rewriteRunSettings(before, { name, redisIndex, worktree: wt });
+    if (after !== before) fs.writeFileSync(lsFile, after);
+    assertRunDbGuard(wt, name, redisIndex);
+    const { created } = RUNDB.ensureRunDb(pg, name);
+    notes.push(`${created ? 'created' : 'reused'} run database ${name} (from ${pg.baseline}), Redis DB ${redisIndex}`);
+    const marker = runDbMarker(wt);
+    if ((readJson(marker) || {}).migrated !== name) {
+      migrate(wt, notes);
+      writeJson(marker, { migrated: name, at: new Date().toISOString() });
+    }
+    return { name, redisIndex, created };
+  } catch (err) {
+    if (err instanceof RUNDB.RunDbError) throw new AppError(err.code, err.message, err.hint);
+    throw err;
+  }
+}
+
+/** `app.cjs rundb <status|drop|sweep|baseline>` — the operator's handles on the above. */
+async function rundbCommand(sub, opts) {
+  const pg = runDbTarget();
+  const wrap = (fn) => { try { return fn(); } catch (err) { if (err instanceof RUNDB.RunDbError) throw new AppError(err.code, err.message, err.hint); throw err; } };
+  switch (sub) {
+    case 'status': {
+      const c = RUNDB.pgClient(pg);
+      return wrap(() => ({ mode: runDbMode(pg), seed: pg.seed, baseline: pg.baseline,
+        baselineExists: c.exists(pg.baseline), runDbs: c.list() }));
+    }
+    case 'baseline':
+      if (!opts.refresh) return { seed: pg.seed, baseline: pg.baseline, exists: wrap(() => RUNDB.pgClient(pg).exists(pg.baseline)), hint: 'pass --refresh to (re)create it' };
+      return wrap(() => RUNDB.refreshBaseline(pg, { terminate: Boolean(opts.terminate) }));
+    case 'drop': {
+      const run = opts.worktree ? RUNDB.runFromWorktree(opts.worktree) : null;
+      const name = opts.name || (run && RUNDB.runDbName(run.iid, run.runId));
+      if (!name) throw new AppError('E_USAGE', 'rundb drop needs --worktree <run worktree> or --name oneshot_run_<iid>_<id>');
+      return wrap(() => RUNDB.dropRunDb(pg, String(name)));
+    }
+    case 'sweep': {
+      const statusOf = runStatusLookup();
+      return wrap(() => RUNDB.sweepRunDbs(pg, statusOf, { drop: Boolean(opts.drop) }));
+    }
+    default:
+      throw new AppError('E_USAGE', 'rundb status | baseline [--refresh [--terminate]] | drop --worktree <wt>|--name <db> | sweep [--drop]');
+  }
+}
+
+/** iid + short run id -> runs.status, read-only from state/oneshot.db. */
+function runStatusLookup() {
+  // eslint-disable-next-line global-require
+  const Database = require('better-sqlite3');
+  const file = path.join(ONESHOT_HOME, 'state', 'oneshot.db');
+  if (!fs.existsSync(file)) throw new AppError('E_NO_STATE', `${file} does not exist, so no run can be told apart from an orphan`);
+  const sql = new Database(file, { readonly: true, fileMustExist: true });
+  const q = sql.prepare("SELECT status FROM runs WHERE iid = ? AND run_id LIKE ? ORDER BY started_at DESC LIMIT 1");
+  return (iid, shortId) => { const r = q.get(iid, `%-${shortId}`); return r ? r.status : null; };
 }
 
 /** Path 3: nothing usable. Build one. Always called under the 'pool' lock. */
@@ -861,7 +1053,7 @@ async function cold(target, notes) {
   }
   seed(wt, notes);
 
-  const envOut = await H.up({ worktree: wt, bePort: be, fePort: fe });
+  const envOut = await withBringupSlot(() => H.up({ worktree: wt, bePort: be, fePort: fe }), notes);
   const servers = readJson(path.join(process.env.ONESHOT_RUN_DIR || '', 'harness/servers.json'), {});
   return {
     worktree: wt, bePort: be, fePort: fe, bundleUrl: envOut.bundleUrl,
@@ -1118,6 +1310,8 @@ async function main() {
       case 'list': out(await discover().then((f) => f.map(summarize))); break;
       case 'gc': out(await gc(opts)); break;
       case 'down': out(await down(opts)); break;
+      case 'baseline': out(await rundbCommand('baseline', opts)); break;
+      case 'rundb': out(await rundbCommand(opts._[0] || 'status', opts)); break;
       default:
         console.log(`app.cjs — one command for "the app must be up, on this code"
 
@@ -1133,14 +1327,23 @@ async function main() {
   list                 every app instance running on this machine, ours or not
   gc [--all] [--kill]  find orphaned servers; --kill actually stops them (dry-run default)
   down --all | --worktree <path>
+  baseline [--refresh [--terminate]]
+                       (re)create the never-served template run databases are copied
+                       from (ONESHOT_DB_BASELINE, default <seed db>_baseline); --terminate
+                       ends sessions on the seed DB so Postgres can copy it
+  rundb status | drop --worktree <wt> | drop --name <db> | sweep [--drop]
+                       per-run databases (oneshot_run_<iid>_<runid>); sweep finds the ones
+                       whose run is done, aborted or unknown, --drop drops them
 
 Environment: GITLAB_REPO_URL (the project; WORK_REPO and WT_ROOT default from it),
              WORK_REPO, ONESHOT_SEED_FROM, WT_ROOT, ONESHOT_APP_PORTS, ONESHOT_BASE_BRANCH,
              ONESHOT_<NAME>_WORK_REPO|_SEED_FROM|_WT_ROOT  (per-machine, beats the plain var)
-             ONESHOT_SEED_LINKS, ONESHOT_SEED_COPIES, ONESHOT_RUN_DIR|ONESHOT_IID`);
+             ONESHOT_SEED_LINKS, ONESHOT_SEED_COPIES, ONESHOT_RUN_DIR|ONESHOT_IID,
+             ONESHOT_BRINGUP_PARALLEL (2), ONESHOT_PER_RUN_DB (unset: on when the
+             baseline exists), ONESHOT_DB_BASELINE, ONESHOT_RUN_DB_PG_HOST|_PORT|_USER`);
     }
   } catch (err) {
-    out(err instanceof AppError || err instanceof H.HarnessError ? err.toJSON()
+    out(err instanceof AppError || err instanceof H.HarnessError || err instanceof PROBE.ProbeError ? err.toJSON()
       : { code: 'E_UNKNOWN', message: String((err && err.message) || err) });
     process.exitCode = 1;
   }
@@ -1151,7 +1354,7 @@ Environment: GITLAB_REPO_URL (the project; WORK_REPO and WT_ROOT default from it
  * to the TypeScript side: the claim that the two agree is only worth something checked.
  */
 module.exports = {
-  ensure, warm, discover, gc, down, resolveRef, checkoutError, cutFromOurClone,
+  ensure, warm, discover, gc, down, resolveRef, checkoutError, cutFromOurClone, provisionRunDb, redisSlotOf,
   config: { name: TARGET.name, WORK_REPO, SEED_FROM, WT_ROOT, BASE_BRANCH, error: CONFIG_ERROR },
 };
 if (require.main === module) main();
