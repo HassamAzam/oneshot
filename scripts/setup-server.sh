@@ -270,9 +270,17 @@ else
 fi
 
 step "Claude Code CLI"
-if have claude; then ok "claude $(claude --version 2>/dev/null | head -1)"
-elif [ "$CHECK" = 1 ] || ! have npm; then due "claude CLI missing — npm i -g @anthropic-ai/claude-code"
-else npm i -g --no-fund --no-audit @anthropic-ai/claude-code >/dev/null && did "installed $(claude --version | head -1)"
+# Current releases are a Bun-built native binary that dies on a CPU without SSE4.2 — a KVM
+# guest on the default "Common KVM processor" model, for one. 2.0.77 is the last plain-Node
+# cli.js and the version Oneshot's Agent SDK bundles (the SDK runs its own copy, so the
+# conductor is unaffected either way); this CLI is only for /login and the doctor check.
+CLAUDE_PKG=@anthropic-ai/claude-code
+grep -qw sse4_2 /proc/cpuinfo 2>/dev/null || CLAUDE_PKG=@anthropic-ai/claude-code@2.0.77
+if have claude && claude --version >/dev/null 2>&1; then ok "claude $(claude --version 2>/dev/null | head -1)"
+elif [ "$CHECK" = 1 ] || ! have npm; then due "claude CLI missing or not runnable here — npm i -g $CLAUDE_PKG"
+else
+  npm i -g --no-fund --no-audit "$CLAUDE_PKG" >/dev/null && did "installed $(claude --version | head -1)"
+  [ "$CLAUDE_PKG" = @anthropic-ai/claude-code ] || warn "this CPU has no SSE4.2 — pinned $CLAUDE_PKG (plain Node); ask for CPU passthrough to run current releases"
 fi
 
 # ------------------------------------------------------------- user, dirs
