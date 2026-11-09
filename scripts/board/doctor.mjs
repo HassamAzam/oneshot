@@ -12,6 +12,7 @@ import { CFG } from './config.mjs';
 import { resolveOperator } from './identity.mjs';
 import { runDirs, readJournal } from './journal.mjs';
 import { Sink, TABLES } from './sink.mjs';
+import { fallbackId, getProject, gitlabTarget } from './mrmerger.mjs';
 
 const G = '\x1b[32m', R = '\x1b[31m', Y = '\x1b[33m', D = '\x1b[2m', X = '\x1b[0m';
 const ok = (m, d) => console.log(`  ${G}✓${X} ${m}${d ? `  ${D}${d}${X}` : ''}`);
@@ -84,6 +85,22 @@ else {
     bad(`cannot connect to ${host}: ${e.message}`, 'check BOARD_DATABASE_URL and that Postgres is running');
   } finally {
     await sink.close().catch(() => undefined);
+  }
+}
+
+// The merge gate's answerer is asked of GitLab; without it the row ships with a null name.
+{
+  const t = gitlabTarget();
+  if (t.error) warn(`GitLab: ${t.error}`, 'merge answerer will be null');
+  else {
+    try {
+      const res = await getProject(t, '', { timeoutMs: 10_000 });
+      const id = fallbackId(t);
+      if (res.status === 200) ok(`GitLab answers for ${t.project}`, id ? `by id ${id} — the path form is not routed` : undefined);
+      else warn(`GitLab: ${t.project} answered HTTP ${res.status}`, 'merge answerer will be null');
+    } catch (e) {
+      warn(`GitLab: ${t.project} unreachable (${e.name === 'TimeoutError' ? 'no answer in 10 s' : e.message})`, 'merge answerer will be null');
+    }
   }
 }
 

@@ -179,7 +179,16 @@ esac
 APT_LOG=/var/log/oneshot-setup-apt.log
 export DEBIAN_FRONTEND=noninteractive
 apt_get() { apt-get -o Dpkg::Use-Pty=0 "$@" >>"$APT_LOG" 2>&1 || die "apt-get $* failed" "see $APT_LOG"; }
-pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
+# "hold ok installed" counts: a host that pins a package (Redis 6.2 on 172.30.1.64) has it.
+# A versioned Postgres (postgresql-14) satisfies the meta-packages, which would otherwise
+# pull the newest major in beside it as a second cluster.
+pkg_installed() {
+  case "$1" in
+    postgresql|postgresql-client)
+      dpkg-query -W -f='${Package} ${Status}\n' "$1-[0-9]*" 2>/dev/null | grep -qE ' (install|hold) ok installed$' && return 0 ;;
+  esac
+  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -qE '^(install|hold) ok installed$'
+}
 pkg_available() { apt-cache show "$1" >/dev/null 2>&1; }
 # First of the candidates apt knows (24.04 renamed several libs to *t64).
 apt_pick() { local p; for p in "$@"; do if pkg_available "$p"; then echo "$p"; return 0; fi; done; return 1; }

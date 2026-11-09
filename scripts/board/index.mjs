@@ -19,6 +19,7 @@ import { resolveOperator } from './identity.mjs';
 import { journalToRun, readJournal, runDirs, sessionKey, ts } from './journal.mjs';
 import { extractTranscript, parseTranscriptName } from './extract.mjs';
 import { gatesFor } from './gates.mjs';
+import { mergedBy, mergerCache } from './mrmerger.mjs';
 import { loadHookIndex } from './hooks.mjs';
 import { Outbox, atomicWrite } from './outbox.mjs';
 import { Sink } from './sink.mjs';
@@ -60,6 +61,30 @@ if (existsSync(STATE_FILE)) {
 }
 const outbox = new Outbox(CFG.stateDir);
 const operator = resolveOperator();
+const mergers = mergerCache(CFG.stateDir);
+/** run_id → in-flight lookup, so one run is never asked about twice at once. */
+const lookups = new Map();
+/** Runs already asked this process: a null answer (GitLab unreachable) is not retried every scan. */
+const tried = new Set();
+
+/**
+ * Who merged a run's MR, without making scan() wait on GitLab: a miss starts the
+ * lookup in the background and returns null; the scan after it lands ships the name.
+ */
+function mergerOf(j) {
+  // Only a Review run gets a merge row; asking GitLab for any other is wasted.
+  if (!j.reviewMode || !j.mergedSha || !j.mrIid) return null;
+  const known = mergers.get(j.runId);
+  if (known !== undefined && (known !== null || tried.has(j.runId))) return known;
+  if (!lookups.has(j.runId)) {
+    tried.add(j.runId);
+    lookups.set(j.runId, mergedBy(j.mrIid)
+      .then((name) => { mergers.set(j.runId, name); mergers.save(); })
+      .catch(() => undefined)
+      .finally(() => lookups.delete(j.runId)));
+  }
+  return known ?? null;
+}
 /** host:port/db of the board's database — never the user or password. */
 function dbHost(url) {
   try { const u = new URL(url); return `${u.hostname}:${u.port || 5432}${u.pathname}`; } catch { return '(unparseable BOARD_DATABASE_URL)'; }
@@ -76,7 +101,7 @@ function scan() {
     const j = readJournal(dir);
     if (j) {
       outbox.put('runs', journalToRun(j, operator.id, archived));
-      for (const g of gatesFor(j, operator.id)) outbox.put('interventions', g);
+      for (const g of gatesFor(j, operator.id, mergerOf(j))) outbox.put('interventions', g);
     }
     const tdir = join(dir, 'transcripts');
     const files = existsSync(tdir) ? readdirSync(tdir).filter((f) => f.endsWith('.jsonl')) : [];
@@ -202,6 +227,9 @@ log('oneshot-board collector', {
 for (const w of operator.warnings ?? []) log(`identity warning: ${w}`);
 if (!CFG.databaseUrl) log('BOARD_DATABASE_URL is not set in .env — extracting locally, shipping nothing');
 scan();
+// A single pass waits for the merge answerers it just asked for (15 s at most each), then
+// rescans so they ship now rather than on the next --once.
+if (ONCE && lookups.size) { await Promise.all(lookups.values()); scan(); }
 await flush();
 if (ONCE) { await sink?.close().catch(() => undefined); releaseLock(); log('once: done', outbox.counts()); process.exit(0); }
 
