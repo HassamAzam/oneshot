@@ -54,6 +54,41 @@ nothing is uploaded.
 
 ## Setup
 
+There are two ways in. Both give Oneshot one folder and nothing else; pick by
+what your Google Workspace allows.
+
+| | Service account | Your own sign-in (`drive.file`) |
+|---|---|---|
+| Use when | the folder can sit in a Shared Drive and be shared with an outside address | only My Drive, or no sharing outside the domain |
+| What it can see | only the folder shared with it | only files and folders Oneshot itself created |
+| Who owns the files | the Shared Drive | you (they count against your quota) |
+| Credential | a service-account key | a refresh token tied to you; revoke it at myaccount.google.com → Security → Third-party connections |
+
+Neither uses domain-wide delegation.
+
+### Option B — your own sign-in, `drive.file` scope
+
+1. In Google Cloud, enable the **Google Drive API**. On the **OAuth consent
+   screen**, choose user type **Internal** (an External app left in *Testing*
+   status has its refresh tokens expire after 7 days) and add the scope
+   `.../auth/drive.file`. Under **Credentials**, create an **OAuth client ID**
+   of type **Desktop app** and download its JSON.
+2. On a machine with a browser, sign in once:
+
+   ```bash
+   npm run drive:login -- --client ~/Downloads/client_secret.json --out ~/.config/oneshot/gdrive-user.json
+   ```
+
+   It opens Google's consent page, saves the refresh token to `--out` with
+   mode 600, creates a root folder "Oneshot tickets" at the top of your My
+   Drive (`--root-name` to change it), and prints the two `.env` lines. Under
+   `drive.file` Oneshot cannot see a folder you made by hand, which is why the
+   script makes it. Move, rename or share that folder freely afterwards.
+3. Put those two lines in `.env` (on the server, copy the file to
+   `/etc/oneshot/`, mode 600, owner `oneshot`) and continue at step 5 below.
+
+### Option A — service account
+
 1. In a Google Cloud project, enable the **Google Drive API**, create a
    **service account**, and create a **JSON key** for it.
 2. Pick (or create) the root folder **inside a Shared Drive**: a service
@@ -106,8 +141,9 @@ and everything else still uploads.
   verification / review / README markdown, and the PDF page HTML. Tested in
   `drivepack.test.ts`.
 - `src/lib/gdrive.ts` — the Drive REST client: a service-account JWT signed with
-  `node:crypto`, and list / create folder / resumable upload. No `googleapis`
-  dependency.
+  `node:crypto` or a refresh-token grant, chosen by the credential file, and
+  list / create folder / resumable upload. No `googleapis` dependency.
 - `src/lib/drivesync.ts` — the reconcile pass, the PDF build and the
   `journal.drive` ledger.
 - `scripts/drive-sync.ts` — `npm run drive:sync`.
+- `scripts/drive-login.ts` — `npm run drive:login`, the one-time sign-in for option B.

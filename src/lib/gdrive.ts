@@ -10,7 +10,14 @@
  *
  * The credential is a FILE PATH (`ONESHOT_GDRIVE_CREDENTIALS`), read when a
  * token is needed and never logged; errors carry Google's message, which names
- * the problem but not the key.
+ * the problem but not the key. Two kinds are accepted, told apart by the file:
+ *
+ * - a service-account key (`private_key`): the account sees only folders shared
+ *   with it, and the root must sit in a Shared Drive because it has no quota;
+ * - an `authorized_user` file written by `npm run drive:login`: a person's
+ *   refresh token on the `drive.file` scope, for orgs where a Shared Drive or
+ *   sharing with an outside address is not allowed. That scope sees only files
+ *   this app created — so the root folder is one the login script made too.
  */
 import { createSign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -19,11 +26,33 @@ import { GOOGLE_FOLDER } from './drivepack.js';
 const API = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
 const SCOPE = 'https://www.googleapis.com/auth/drive';
+/** A person's login is held to files this app created: nothing else in their Drive is visible. */
+export const USER_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+export const TOKEN_URI = 'https://oauth2.googleapis.com/token';
 /** Any one call is given this long. Drive is reporting, so a hung call must not hold a run. */
 const CALL_MS = 120_000;
 const DRIVE_FLAGS = 'supportsAllDrives=true';
 
 interface ServiceAccount { client_email: string; private_key: string; token_uri?: string }
+export interface AuthorizedUser { type: 'authorized_user'; client_id: string; client_secret: string; refresh_token: string }
+
+/** The grant a credential file is exchanged with, or why it is neither kind. */
+export function tokenRequest(cred: Record<string, unknown>, nowSec: number): URLSearchParams {
+  if (cred.type === 'authorized_user') {
+    const u = cred as unknown as AuthorizedUser;
+    if (!u.client_id || !u.client_secret || !u.refresh_token) throw new DriveError('authorized_user file is missing a field', 0);
+    return new URLSearchParams({
+      grant_type: 'refresh_token', client_id: u.client_id, client_secret: u.client_secret, refresh_token: u.refresh_token,
+    });
+  }
+  const sa = cred as unknown as ServiceAccount;
+  if (!sa.client_email || !sa.private_key) {
+    throw new DriveError('credential file is neither a service-account key nor an authorized_user file', 0);
+  }
+  return new URLSearchParams({
+    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: signJwt(sa, nowSec),
+  });
+}
 
 export class DriveError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -51,15 +80,11 @@ export class Drive {
 
   private async accessToken(): Promise<string> {
     if (this.token && Date.now() < this.token.until) return this.token.value;
-    const sa = JSON.parse(readFileSync(this.credentialsPath, 'utf8')) as ServiceAccount;
-    if (!sa.client_email || !sa.private_key) throw new DriveError('credential file is not a service-account key', 0);
-    const res = await fetch(sa.token_uri ?? 'https://oauth2.googleapis.com/token', {
+    const cred = JSON.parse(readFileSync(this.credentialsPath, 'utf8')) as Record<string, unknown>;
+    const res = await fetch(typeof cred.token_uri === 'string' ? cred.token_uri : TOKEN_URI, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        assertion: signJwt(sa, Math.floor(Date.now() / 1000)),
-      }),
+      body: tokenRequest(cred, Math.floor(Date.now() / 1000)),
       signal: AbortSignal.timeout(CALL_MS),
     });
     const body = await res.json().catch(() => ({})) as { access_token?: string; expires_in?: number; error_description?: string; error?: string };
@@ -101,11 +126,14 @@ export class Drive {
     return (await this.call<DriveFile>(`${API}/files/${id}?fields=id,name,mimeType,webViewLink&${DRIVE_FLAGS}`)).data;
   }
 
-  async createFolder(parent: string, name: string, props: Record<string, string>, description?: string): Promise<DriveFile> {
+  /** `parent` null makes it at the top of the caller's My Drive — only `drive:login` does that. */
+  async createFolder(parent: string | null, name: string, props: Record<string, string>, description?: string): Promise<DriveFile> {
     const { data } = await this.call<DriveFile>(`${API}/files?fields=id,name,mimeType,webViewLink&${DRIVE_FLAGS}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name, mimeType: GOOGLE_FOLDER, parents: [parent], appProperties: props, description }),
+      body: JSON.stringify({
+        name, mimeType: GOOGLE_FOLDER, ...(parent ? { parents: [parent] } : {}), appProperties: props, description,
+      }),
     });
     return data;
   }
@@ -149,4 +177,16 @@ export class Drive {
     });
     return data;
   }
+}
+
+/**
+ * The consent page `drive:login` sends a person to. Offline access and a
+ * forced consent prompt are what make Google return a refresh token every
+ * time; PKCE means a leaked code alone cannot be exchanged.
+ */
+export function consentUrl(clientId: string, redirectUri: string, challenge: string, state: string): string {
+  return `https://accounts.google.com/o/oauth2/v2/auth?${new URLSearchParams({
+    client_id: clientId, redirect_uri: redirectUri, response_type: 'code', scope: USER_SCOPE,
+    access_type: 'offline', prompt: 'consent', code_challenge: challenge, code_challenge_method: 'S256', state,
+  })}`;
 }

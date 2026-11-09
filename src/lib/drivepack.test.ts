@@ -5,7 +5,7 @@ import {
   GOOGLE_DOC, GOOGLE_SHEET, demoPdfHtml, packEntries, renderFindingsMd, renderReadmeMd, renderResearchMd,
   ticketFolderName, type PackInput,
 } from './drivepack.js';
-import { signJwt } from './gdrive.js';
+import { consentUrl, signJwt, tokenRequest } from './gdrive.js';
 
 const ISSUE = 'https://gitlab.arbisoft.com/arbisoft/erp/-/issues/9002';
 
@@ -120,4 +120,23 @@ test('the service-account JWT is RS256-signed over the drive scope', () => {
   assert.equal(claims.scope, 'https://www.googleapis.com/auth/drive');
   assert.equal(claims.exp - claims.iat, 3600);
   assert.ok(createVerify('RSA-SHA256').update(`${h}.${c}`).verify(publicKey, Buffer.from(s!, 'base64url')));
+});
+
+test('a credential file is exchanged by its kind: refresh token, or signed service-account assertion', () => {
+  const user = tokenRequest({ type: 'authorized_user', client_id: 'c', client_secret: 's', refresh_token: 'r' }, 1);
+  assert.equal(user.get('grant_type'), 'refresh_token');
+  assert.equal(user.get('refresh_token'), 'r');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const sa = tokenRequest({ client_email: 'a@b', private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() }, 1);
+  assert.equal(sa.get('grant_type'), 'urn:ietf:params:oauth:grant-type:jwt-bearer');
+  assert.throws(() => tokenRequest({ type: 'authorized_user', client_id: 'c' }, 1), /missing a field/);
+  assert.throws(() => tokenRequest({ foo: 1 }, 1), /neither/);
+});
+
+test('a person\'s sign-in asks only for drive.file, offline, with PKCE', () => {
+  const u = new URL(consentUrl('cid', 'http://127.0.0.1:5555/', 'chal', 'st'));
+  assert.equal(u.searchParams.get('scope'), 'https://www.googleapis.com/auth/drive.file');
+  assert.equal(u.searchParams.get('access_type'), 'offline');
+  assert.equal(u.searchParams.get('code_challenge_method'), 'S256');
+  assert.equal(u.searchParams.get('redirect_uri'), 'http://127.0.0.1:5555/');
 });
