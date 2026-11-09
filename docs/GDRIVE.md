@@ -56,10 +56,22 @@ nothing is uploaded.
 
 1. In a Google Cloud project, enable the **Google Drive API**, create a
    **service account**, and create a **JSON key** for it.
-2. Create a **Shared Drive** (a service account has no storage of its own and
-   cannot own files in My Drive), add the service account's email as
-   **Content manager**, and create the root folder in it. Share that Shared
-   Drive with the people who should read the folders; it holds ticket content.
+2. Pick (or create) the root folder **inside a Shared Drive**: a service
+   account has no storage of its own, so uploads into a folder in someone's My
+   Drive fail with `storageQuotaExceeded`. In a Shared Drive the files belong to
+   the drive, not to the uploader.
+
+   Give the service account access to **that one folder only**, not to the
+   whole drive: open the folder → Share → add the service account's email as
+   **Contributor** (enough to create and replace files). It then sees nothing
+   else in Drive — no domain-wide delegation is used or needed. Two org
+   settings can block this, and both need a Workspace admin:
+   - folder sharing by Content managers may be turned off for the drive, and
+   - the service account's address ends in `iam.gserviceaccount.com`, which is
+     outside your domain, so the drive's external-sharing rule must allow it
+     (or the admin allowlists that address).
+
+   Share the folder with the people who should read it; it holds ticket content.
 3. Put the key on the desk, readable only by the conductor's user:
 
    ```bash
