@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * Oneshot Board collector — ships this desk's telemetry to the shared board.
+ * Oneshot Board collector — writes this desk's telemetry into the board's Postgres.
  *
  *   npm run board          daemon: scan every 5s, ship every 60s
  *   npm run board:once     one scan + one flush, then exit (cron-friendly)
  *   npm run board:dry      extract and queue, never ship
  *   npm run board:stats    print what is waiting in the outbox
  *
- * Configured entirely from Oneshot's own .env: BOARD_URL, BOARD_INGEST_TOKEN and
- * optionally BOARD_OPERATOR. Reads state/runs/<iid>/{run.json,transcripts/*.jsonl}
+ * Configured entirely from Oneshot's own .env: BOARD_DATABASE_URL and optionally
+ * BOARD_OPERATOR. Reads state/runs/<iid>/{run.json,transcripts/*.jsonl}
  * and state/hook-events.jsonl; writes nothing into state/. Its own bookkeeping
  * lives in BOARD_STATE_DIR (default ~/.oneshot-board).
  */
@@ -21,7 +21,7 @@ import { extractTranscript, parseTranscriptName } from './extract.mjs';
 import { gatesFor } from './gates.mjs';
 import { loadHookIndex } from './hooks.mjs';
 import { Outbox, atomicWrite } from './outbox.mjs';
-import { postBatch, postRetention } from './ship.mjs';
+import { Sink } from './sink.mjs';
 
 const args = new Set(process.argv.slice(2));
 const ONCE = args.has('--once');
@@ -60,6 +60,10 @@ if (existsSync(STATE_FILE)) {
 }
 const outbox = new Outbox(CFG.stateDir);
 const operator = resolveOperator();
+/** host:port/db of the board's database — never the user or password. */
+function dbHost(url) {
+  try { const u = new URL(url); return `${u.hostname}:${u.port || 5432}${u.pathname}`; } catch { return '(unparseable BOARD_DATABASE_URL)'; }
+}
 const log = (m, extra) => console.log(`${new Date().toISOString()} ${m}${extra ? ` ${JSON.stringify(extra)}` : ''}`);
 
 function scan() {
@@ -131,35 +135,42 @@ function scan() {
 }
 
 let flushing = false;
+let sink = null;
 async function flush() {
   if (flushing || !outbox.size()) return;
   flushing = true;
   try {
     if (DRY) { log('dry-run: holding rows, not shipping', outbox.counts()); return; }
-    if (!CFG.boardUrl || !CFG.ingestToken) { log('BOARD_URL / BOARD_INGEST_TOKEN unset — rows wait in the outbox', outbox.counts()); return; }
+    if (!CFG.databaseUrl) { log('BOARD_DATABASE_URL unset — rows wait in the outbox', outbox.counts()); return; }
     const batches = outbox.batches(CFG.maxBatchBytes);
-    let shipped = 0;
-    for (const b of batches) {
-      let res;
-      try { res = await postBatch(CFG.boardUrl, CFG.ingestToken, b.payload); }
-      catch (e) { log(`flush: network error — ${e.message}; will retry`, { pending: outbox.size() }); break; }
-      if (!res.ok) { log(`flush: ingest refused HTTP ${res.status} — ${res.text}; will retry`, { pending: outbox.size() }); break; }
-      outbox.ack(b.keys);
-      shipped += b.keys.length;
-    }
+    let wrote = 0;
+    try {
+      if (!sink) {
+        const s = new Sink(CFG.databaseUrl);
+        try { await s.open(); } catch (e) { await s.close().catch(() => undefined); throw e; }
+        sink = s;
+        for (const [t, cols] of Object.entries(sink.droppedColumns())) {
+          log(`schema warning: board's ${t} lacks ${cols.join(', ')} — not written (the whole table if a key is missing)`);
+        }
+      }
+      const waiting = {};
+      for (const b of batches) {
+        const { counts, skipped } = await sink.write(b.payload);
+        // Rows of a table the board lacks stay queued; they ship once it migrates.
+        outbox.ack(skipped.length ? b.keys.filter(([t]) => !skipped.includes(t)) : b.keys);
+        for (const t of skipped) waiting[t] = (waiting[t] ?? 0) + b.payload[t].length;
+        wrote += Object.values(counts).reduce((a, n) => a + n, 0);
+      }
+      const lacking = Object.entries(waiting);
+      if (lacking.length) {
+        log(`board schema lacks: ${lacking.map(([t]) => t).join(', ')} — ${lacking.reduce((a, [, n]) => a + n, 0)} row(s) waiting`);
+      }
+    } catch (e) { log(`flush: database error — ${e.message}; will retry`, { pending: outbox.size() }); }
     outbox.persist();
-    if (shipped) log(`flush: shipped ${shipped} row(s) in ${batches.length} batch(es)`, { remaining: outbox.size() });
+    if (wrote) log(`flush: wrote ${wrote} row(s) in ${batches.length} batch(es)`, { remaining: outbox.size() });
   } finally {
     flushing = false;
   }
-}
-
-async function retention() {
-  if (DRY || !CFG.boardUrl || !CFG.ingestToken) return;
-  try {
-    const r = await postRetention(CFG.boardUrl, CFG.ingestToken);
-    log(r.ok ? `retention: ${r.text}` : `retention: HTTP ${r.status} ${r.text}`);
-  } catch (e) { log(`retention: ${e.message}`); }
 }
 
 if (STATS) {
@@ -170,7 +181,7 @@ if (STATS) {
     notes.push(`no transcripts found under ${CFG.oneshotHome}/state/runs — either this checkout has not run a `
       + 'ticket yet, or ONESHOT_HOME points somewhere else.');
   }
-  if (!CFG.boardUrl || !CFG.ingestToken) notes.push('BOARD_URL / BOARD_INGEST_TOKEN are not both set in .env — nothing will ship.');
+  if (!CFG.databaseUrl) notes.push('BOARD_DATABASE_URL is not set in .env — nothing will ship.');
   if (notes.length) { console.log('\nWarnings:'); for (const n of notes) console.log(`  ! ${n}`); console.log(); }
   process.exit(0);
 }
@@ -184,22 +195,22 @@ if (held) {
 }
 
 log('oneshot-board collector', {
-  oneshot: CFG.oneshotHome, board: CFG.boardUrl || '(unset)',
+  oneshot: CFG.oneshotHome, board: CFG.databaseUrl ? dbHost(CFG.databaseUrl) : '(unset)',
   operator: operator.id, via: operator.github_login ? 'github' : operator.user_email ? 'claude-email' : 'hostname',
   state: CFG.stateDir, dryRun: DRY,
 });
 for (const w of operator.warnings ?? []) log(`identity warning: ${w}`);
-if (!CFG.boardUrl || !CFG.ingestToken) {
-  log('BOARD_URL / BOARD_INGEST_TOKEN are not set in .env — extracting locally, shipping nothing');
-}
+if (!CFG.databaseUrl) log('BOARD_DATABASE_URL is not set in .env — extracting locally, shipping nothing');
 scan();
 await flush();
-if (ONCE) { releaseLock(); log('once: done', outbox.counts()); process.exit(0); }
-await retention();
-setInterval(() => retention(), 24 * 60 * 60_000);
+if (ONCE) { await sink?.close().catch(() => undefined); releaseLock(); log('once: done', outbox.counts()); process.exit(0); }
 
 setInterval(scan, CFG.scanMs);
 setInterval(() => flush().catch((e) => log(`flush error: ${e.message}`)), CFG.flushMs);
-const stop = () => { outbox.persist(); atomicWrite(STATE_FILE, JSON.stringify(state)); releaseLock(); log('stopped', outbox.counts()); process.exit(0); };
+const stop = async () => {
+  outbox.persist(); atomicWrite(STATE_FILE, JSON.stringify(state)); releaseLock();
+  await sink?.close().catch(() => undefined);
+  log('stopped', outbox.counts()); process.exit(0);
+};
 process.on('SIGINT', stop);
 process.on('SIGTERM', stop);

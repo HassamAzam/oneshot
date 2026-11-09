@@ -363,8 +363,8 @@ async function banner(): Promise<void> {
  */
 function ensureCollector(): void {
   if (watchOnly || once || DRY_RUN) return;
-  if (!envOr('BOARD_URL')) {
-    log.info('board      BOARD_URL unset — collector not started');
+  if (!envOr('BOARD_DATABASE_URL')) {
+    log.info('board      BOARD_DATABASE_URL unset — collector not started');
     return;
   }
   const script = join(ROOT, 'scripts', 'board', 'index.mjs');

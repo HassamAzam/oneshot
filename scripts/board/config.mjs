@@ -27,8 +27,8 @@ const flag = (k) => /^(1|true|yes)$/i.test(process.env[k] ?? '');
 
 export const CFG = {
   oneshotHome: env('ONESHOT_HOME', ROOT),
-  boardUrl: env('BOARD_URL', '').replace(/\/+$/, ''),
-  ingestToken: env('BOARD_INGEST_TOKEN', ''),
+  // The board's Postgres — the collector writes to it directly (same server).
+  databaseUrl: env('BOARD_DATABASE_URL', ''),
   operator: env('BOARD_OPERATOR', '').trim(),
   stateDir: env('BOARD_STATE_DIR', join(homedir(), '.oneshot-board')),
   scanMs: num('BOARD_SCAN_INTERVAL_MS', 5_000),

@@ -3,7 +3,7 @@
  * `npm run board:doctor` — why is this desk not on the board?
  *
  * Answers the whole question in one pass: who this desk is, whether Oneshot has
- * produced anything to ship, whether the board is reachable and the token accepted,
+ * produced anything to ship, whether the board's database is reachable and current,
  * and what is queued. Every check prints a verdict and, when it fails, the fix.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { CFG } from './config.mjs';
 import { resolveOperator } from './identity.mjs';
 import { runDirs, readJournal } from './journal.mjs';
+import { Sink, TABLES } from './sink.mjs';
 
 const G = '\x1b[32m', R = '\x1b[31m', Y = '\x1b[33m', D = '\x1b[2m', X = '\x1b[0m';
 const ok = (m, d) => console.log(`  ${G}✓${X} ${m}${d ? `  ${D}${d}${X}` : ''}`);
@@ -54,29 +55,36 @@ if (!existsSync(CFG.oneshotHome)) {
   }
 }
 
-// ---- 3. is the board configured and reachable?
+// ---- 3. is the board's database configured and reachable?
 console.log(`\n${D}Board${X}`);
-if (!CFG.boardUrl) bad('BOARD_URL is not set', 'add BOARD_URL=https://… to .env');
-else if (!CFG.ingestToken) bad('BOARD_INGEST_TOKEN is not set', 'add it to .env — same value as on the deployment');
+if (!CFG.databaseUrl) bad('BOARD_DATABASE_URL is not set', 'add BOARD_DATABASE_URL=postgresql://… to .env — the same value as the board\'s DATABASE_URL');
 else {
-  ok(`configured  ${CFG.boardUrl}`);
+  let host = '(unparseable URL)';
+  try { const u = new URL(CFG.databaseUrl); host = `${u.hostname}:${u.port || 5432}${u.pathname}`; } catch { /* reported below */ }
+  const sink = new Sink(CFG.databaseUrl);
   try {
-    const h = await fetch(`${CFG.boardUrl}/api/health`, { signal: AbortSignal.timeout(20_000) });
-    const j = await h.json().catch(() => ({}));
-    if (j.ok) ok('reachable and healthy', `${j.sessions} sessions on the board`);
-    else bad(`board is up but unhealthy: ${j.error ?? h.status}`, 'the board owner needs to fix DATABASE_URL');
-  } catch (e) { bad(`cannot reach ${CFG.boardUrl}: ${e.message}`, 'check the URL and your network/VPN'); }
-
-  try {
-    const r = await fetch(`${CFG.boardUrl}/api/ingest`, {
-      method: 'POST', headers: { authorization: `Bearer ${CFG.ingestToken}`, 'content-type': 'application/json' },
-      body: '{}', signal: AbortSignal.timeout(20_000),
-    });
-    const j = await r.json().catch(() => ({}));
-    if (r.ok) ok('token accepted');
-    else bad(`token refused (HTTP ${r.status})${j.hint ? `: ${j.hint}` : ''}`,
-             'copy BOARD_INGEST_TOKEN again — it is 64 characters, easy to truncate');
-  } catch (e) { bad(`ingest unreachable: ${e.message}`); }
+    await sink.open();
+    ok(`connects  ${host}`);
+    const { rows } = await sink.pool.query(
+      'select table_name from information_schema.tables where table_schema = current_schema() and table_name = any($1)', [TABLES]);
+    const present = new Set(rows.map((r) => r.table_name));
+    const missing = TABLES.filter((t) => !present.has(t));
+    if (missing.length) bad(`board tables missing: ${missing.join(', ')}`, 'apply the board\'s schema (its db-migrate script) to this database');
+    else ok(`all ${TABLES.length} board tables present`);
+    for (const [t, cols] of Object.entries(sink.droppedColumns())) {
+      if (!missing.includes(t)) warn(`${t} lacks ${cols.join(', ')} — those values are not written`, 'the board\'s schema is older than this collector; migrate it');
+    }
+    if (present.has('operators')) {
+      const r = await sink.pool.query('select max(last_seen) as at from operators');
+      const at = r.rows[0].at;
+      if (at) ok('last row written', `${Math.round((Date.now() - new Date(at).getTime()) / 60000)}m ago`);
+      else warn('nothing shipped yet', 'run `npm run board:once` and read the flush line');
+    }
+  } catch (e) {
+    bad(`cannot connect to ${host}: ${e.message}`, 'check BOARD_DATABASE_URL and that Postgres is running');
+  } finally {
+    await sink.close().catch(() => undefined);
+  }
 }
 
 // ---- 4. is the collector actually running?
