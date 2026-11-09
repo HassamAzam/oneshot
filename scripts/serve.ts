@@ -25,6 +25,7 @@ import { tail } from './dashboard/tail.js';
 const PORT = Number(envOr('ONESHOT_DASHBOARD_PORT', '8787'));
 const HOST = envOr('ONESHOT_DASHBOARD_HOST', '127.0.0.1');
 const TOKEN = envOr('ONESHOT_DASHBOARD_TOKEN');
+const BOARD_URL = envOr('ONESHOT_BOARD_URL');
 const ARCHIVE = join(STATE, 'runs-archive');
 // An archive directory name as the conductor writes it: no separators, no dot-dot.
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -178,7 +179,7 @@ const server = createServer((req, res) => {
   if (!authorise(req, res, url, TOKEN)) return;
 
   try {
-    if (url.pathname === '/') return send(200, indexPage(fleetState(hoursParam(url))));
+    if (url.pathname === '/') return send(200, indexPage(fleetState(hoursParam(url)), BOARD_URL));
     if (url.pathname === '/api/state') return send(200, JSON.stringify(fleetState(hoursParam(url))), 'application/json');
     if (url.pathname === '/runs') return send(200, index());
     if (url.pathname === '/stats') return send(200, statsPage(stats(Number(url.searchParams.get('days') ?? 30))));

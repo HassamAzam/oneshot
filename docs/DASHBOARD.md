@@ -57,6 +57,7 @@ The database is opened read-only, and nothing here imports the modules that open
 | Env | Default | |
 |---|---|---|
 | `ONESHOT_DASHBOARD_PORT` | `8787` | |
+| `ONESHOT_BOARD_URL` | unset | Adds a Telemetry ↗ link in the fleet header pointing at the board. |
 | `ONESHOT_DASHBOARD_HOST` | `127.0.0.1` | Any non-loopback host needs a token, or the server refuses to start. |
 | `ONESHOT_DASHBOARD_TOKEN` | unset | When set, every request needs it: as the Basic-auth password (any username), or once as `?token=…`, which sets a cookie and redirects to the same URL without it. |
 | `ONESHOT_CONCURRENCY` | project.json | The slot count. |

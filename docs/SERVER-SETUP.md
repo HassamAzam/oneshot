@@ -180,6 +180,8 @@ straight to the board's database, so there is no network write path and no inges
 only port the LAN sees is the board's `:3100`, behind its own logins. Postgres stays on
 loopback (Ubuntu's default); the setup script warns if `listen_addresses` is anything else.
 
+Setup also adds `ONESHOT_BOARD_URL` to `oneshot.env`, so the fleet dashboard links to the board.
+
 In `/etc/oneshot/oneshot.env`:
 
 ```sh

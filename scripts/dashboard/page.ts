@@ -216,13 +216,13 @@ const embed = (v: unknown): string => JSON.stringify(v).replace(/</g, '\\u003c')
 
 const HOURS = [[24, 'last 24h'], [72, 'last 3 days'], [168, 'last 7 days'], [720, 'last 30 days']] as const;
 
-export function indexPage(state: FleetState): string {
+export function indexPage(state: FleetState, boardUrl?: string): string {
   const opts = HOURS.map(([h, l]) => `<option value="${h}"${h === state.historyHours ? ' selected' : ''}>${l}</option>`).join('')
     + (HOURS.some(([h]) => h === state.historyHours) ? '' : `<option value="${state.historyHours}" selected>last ${state.historyHours}h</option>`);
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Oneshot fleet</title><style>${STYLE}</style></head>
 <body class="live"><div class="wrap">
-<h1>Oneshot fleet <a class="stamp" href="/stats">stats →</a> ${state.project ? `<a class="stamp" href="${esc(state.project)}" target="_blank" rel="noopener">${esc(state.project.replace(/^https?:\/\//, ''))}</a>` : ''}
+<h1>Oneshot fleet <a class="stamp" href="/stats">stats →</a> ${boardUrl ? `<a class="stamp" href="${esc(boardUrl)}" target="_blank" rel="noopener">Telemetry ↗</a> ` : ''}${state.project ? `<a class="stamp" href="${esc(state.project)}" target="_blank" rel="noopener">${esc(state.project.replace(/^https?:\/\//, ''))}</a>` : ''}
 <span class="stamp" id="stamp"></span></h1>
 <div class="strip" id="strip"></div>
 <h2>In flight <span class="n" id="n-flight"></span></h2><div id="flight"></div>

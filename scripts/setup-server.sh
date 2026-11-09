@@ -608,6 +608,13 @@ ENV
     else install -m 0600 -o "$SVC_USER" -g "$SVC_USER" "$tmp_env" "$BOARD_ENV"; board_restart=1; did "wrote $BOARD_ENV (mode 600)"
     fi
     rm -f "$tmp_env"
+    # The fleet dashboard (same oneshot.env) links to the board when this key is set.
+    if grep -q '^ONESHOT_BOARD_URL=' "$ENV_FILE"; then ok "ONESHOT_BOARD_URL set in $ENV_FILE"
+    elif [ "$CHECK" = 1 ]; then due "ONESHOT_BOARD_URL missing from $ENV_FILE"
+    else
+      printf '\nONESHOT_BOARD_URL=http://%s:%s\n' "${board_ip:-127.0.0.1}" "$BOARD_PORT" >> "$ENV_FILE"
+      did "added ONESHOT_BOARD_URL to $ENV_FILE (the dashboard picks it up on its next restart)"
+    fi
   else due "node missing — $BOARD_ENV not written"
   fi
 
