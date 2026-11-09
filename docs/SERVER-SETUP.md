@@ -106,10 +106,16 @@ comment on the same line as a value: systemd keeps it as part of the value.
     (`--refresh-baseline` forces a rebuild). Per-run databases stay off until this template
     exists.
 14. **Oneshot Board**, only with `ONESHOT_BOARD=1` (see *Oneshot Board* below). It clones the
-    board to `/srv/oneshot-board` and creates `BOARD_DB_NAME` (default `oneshot_board`) in this
-    Postgres, owned by `DB_USER` and empty. It writes `/etc/oneshot/board.env`, runs
-    `npm ci` + `next build` (only when the lock file or the board's commit changed), applies the
-    board's `schema.sql` (idempotent, every pass), and warns while the board has no login.
+    board to `/srv/oneshot-board` on `BOARD_REF` (default `main`). When an existing checkout is
+    on another branch, a normal run fetches `BOARD_REF` and checks it out, and dies if local
+    changes block the checkout; `--check` only reports it. A checkout already on `BOARD_REF` is
+    not pulled (see *To upgrade the board*). `BOARD_REF` must be a branch name, not a tag or a
+    sha: the script compares it with the checkout's branch. It creates `BOARD_MEDIA_DIR`
+    (default `/srv/oneshot-board/media`), and creates `BOARD_DB_NAME` (default `oneshot_board`)
+    in this Postgres, owned by `DB_USER` and empty. It warns when Postgres listens beyond loopback. It writes `/etc/oneshot/board.env`,
+    runs `npm ci` + `next build` (only when the lock file or the board's commit changed), applies
+    the board's `db/schema.sql` (idempotent, every pass), warns while the board has no login, and
+    prints the `ufw allow` line when ufw is active and the board port is closed.
 15. **systemd.** It installs `deploy/systemd/oneshot-conductor.service` and
     `oneshot-dashboard.service`, runs `daemon-reload`, and enables both units. With `--start` it
     also (re)starts them.
@@ -165,43 +171,63 @@ four are set. Re-run `node scripts/provision-seed.cjs --only settings --env-file
 ## Oneshot Board
 
 The telemetry board (github.com/HassamAzam/oneshot-board) can run on this server instead of
-Vercel + Supabase. It shows sessions, agents, skills, tool calls, transcripts, interventions and
-the long-run stats. The board already talks to Postgres with plain `pg` and skips TLS for
-`127.0.0.1`, so only where `DATABASE_URL` points changes. Its data lives in this server's Postgres
-in its own database, which starts empty: the board records from the day it is installed.
+Vercel + Supabase. It shows sessions, agents, skills, tool calls, transcripts, interventions,
+screenshots and videos, and the long-run stats. Its data lives in this server's Postgres in its
+own database, which starts empty: the board records from the day it is installed.
+
+The collector and the board share this machine and this Postgres. The collector writes
+straight to the board's database, so there is no network write path and no ingest token. The
+only port the LAN sees is the board's `:3100`, behind its own logins. Postgres stays on
+loopback (Ubuntu's default); the setup script warns if `listen_addresses` is anything else.
 
 In `/etc/oneshot/oneshot.env`:
 
 ```sh
 ONESHOT_BOARD=1
-BOARD_INGEST_TOKEN=<openssl rand -hex 32>
 BOARD_SESSION_SECRET=<openssl rand -hex 32>
-# optional: BOARD_PORT=3100  BOARD_DB_NAME=oneshot_board  BOARD_RETENTION_DAYS=60  BOARD_OPERATOR=server-1
+BOARD_REF=self-host        # a branch name, not a tag or sha; only while it is unmerged; default main
+# optional: BOARD_PORT=3100  BOARD_DB_NAME=oneshot_board  BOARD_RETENTION_DAYS=90
+#           BOARD_MEDIA_DIR=/srv/oneshot-board/media  BOARD_OPERATOR=server-1
 ```
 
-Re-run `sudo /srv/oneshot/scripts/setup-server.sh --start`, then add a login (the first one is
-the admin; it prompts for the password):
+Re-run the setup script, add a login (the first one is the admin; it prompts for the
+password), and open the port if ufw is on:
 
 ```sh
+sudo /srv/oneshot/scripts/setup-server.sh --start
 sudo -u oneshot -H bash -c 'cd /srv/oneshot-board/web && set -a && . /etc/oneshot/board.env && npm run user:add -- <username>'
+sudo ufw allow 3100/tcp
 ```
 
-Open `http://<server-ip>:3100`. Two units run it:
+Open `http://<server-ip>:3100`. The script writes `/etc/oneshot/board.env` (mode 600) from the
+main env file: `DATABASE_URL` and `BOARD_DATABASE_URL` (the same `127.0.0.1` URL, built from
+`DB_USER`/`DB_PASSWORD`), `SESSION_SECRET`, `RETENTION_DAYS`, `PORT`, `BOARD_MEDIA_DIR`,
+`FLEET_URL` (the fleet dashboard on this host, `:8787`) and `BOARD_OPERATOR`. Edit the main
+file and re-run; never this one. Two units run it:
 
-- `oneshot-board`: `next start` on `0.0.0.0:$BOARD_PORT`.
+- `oneshot-board`: `next start` on `0.0.0.0:$BOARD_PORT`. It prunes old transcript lines and
+  tool bodies once a day (`RETENTION_DAYS`) and serves media from `BOARD_MEDIA_DIR`.
 - `oneshot-board-collector`: `scripts/board/index.mjs` in `/srv/oneshot`. It runs all day, not
-  just inside the run window, and posts `state/` to `http://127.0.0.1:$BOARD_PORT` every 60s.
+  just inside the run window, and writes `state/` to the board's database every 60s.
 
-To upgrade the board, run `git -C /srv/oneshot-board pull`, then the setup script again (it
-rebuilds and restarts). The board's history is the `oneshot_board` database. Back it up with
-`sudo -u postgres pg_dump -Fc oneshot_board > board.dump`.
+To upgrade the board:
+
+```sh
+sudo -u oneshot -H bash -c 'git -C /srv/oneshot-board fetch && git -C /srv/oneshot-board checkout <BOARD_REF> && git -C /srv/oneshot-board pull'
+sudo /srv/oneshot/scripts/setup-server.sh
+```
+
+The script rebuilds, applies the schema and restarts. The board's history is the
+`oneshot_board` database plus the media directory. Back up both:
+
+```sh
+sudo -u postgres pg_dump -Fc oneshot_board > board.dump
+sudo tar -C /srv/oneshot-board -czf board-media.tgz media
+```
 
 If the repo is private, the clone needs credentials. Clone it once as `oneshot` and the script
 uses that checkout:
-`sudo -u oneshot -H git clone <url> /srv/oneshot-board`.
-
-The board's page loads its fonts from Google Fonts. On a machine with no internet it falls back
-to system fonts and still works.
+`sudo -u oneshot -H git clone --branch <BOARD_REF> <url> /srv/oneshot-board`.
 
 ## Disk
 
