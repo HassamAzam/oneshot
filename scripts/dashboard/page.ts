@@ -7,7 +7,7 @@
  * poll and a first paint go through one code path. The run page is rendered on
  * the server and reloads itself while the run is in flight.
  */
-import type { FleetState, RunDetail, PhaseRunRow, EventRow } from './db.js';
+import { STATS_DAYS, type FleetState, type RunDetail, type PhaseRunRow, type EventRow, type Stats } from './db.js';
 import { compact, dur, type BoardStatus } from '../../src/lib/fleetview.js';
 
 export const esc = (s: unknown): string => String(s ?? '')
@@ -83,6 +83,15 @@ export const STYLE = `
   .live details summary { cursor: pointer; color: var(--mute); margin: 1.2rem 0 .5rem; font-size: .8rem; text-transform: uppercase; letter-spacing: .05em }
   .live .runs { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .6rem; font-size: .8rem }
   .live .runs a.on { font-weight: 700; color: var(--text) }
+  .live .chart { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: .6rem .8rem }
+  .live .chart svg { display: block; width: 100%; height: 150px; overflow: visible }
+  .live .chart .col { fill: var(--s-running) } .live .chart g:hover .col { fill: var(--link) }
+  .live .chart .axis { fill: var(--mute); font-size: 11px } .live .chart .grid { stroke: var(--line) }
+  .live .chart .foot { display: flex; justify-content: space-between; font-size: .72rem; color: var(--mute); margin-top: .25rem }
+  .live .periods { display: flex; gap: .35rem; flex-wrap: wrap }
+  .live .periods a { border: 1px solid var(--line); border-radius: 999px; padding: .05rem .6rem; font-size: .78rem; color: var(--text); background: var(--panel) }
+  .live .periods a.on { border-color: var(--link); color: var(--link); font-weight: 600 }
+  .live .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: .9rem }
   @media (max-width: 760px) {
     .live .t.head { display: none }
     .live .t { grid-template-columns: auto minmax(0, 1fr); gap: .2rem .6rem }
@@ -213,7 +222,7 @@ export function indexPage(state: FleetState): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Oneshot fleet</title><style>${STYLE}</style></head>
 <body class="live"><div class="wrap">
-<h1>Oneshot fleet ${state.project ? `<a class="stamp" href="${esc(state.project)}" target="_blank" rel="noopener">${esc(state.project.replace(/^https?:\/\//, ''))}</a>` : ''}
+<h1>Oneshot fleet <a class="stamp" href="/stats">stats →</a> ${state.project ? `<a class="stamp" href="${esc(state.project)}" target="_blank" rel="noopener">${esc(state.project.replace(/^https?:\/\//, ''))}</a>` : ''}
 <span class="stamp" id="stamp"></span></h1>
 <div class="strip" id="strip"></div>
 <h2>In flight <span class="n" id="n-flight"></span></h2><div id="flight"></div>
@@ -290,4 +299,65 @@ export function tailPage(iid: number, file: string | null, lines: string[]): str
 <body class="live"><div class="wrap"><p><a href="/run/${iid}">← run #${iid}</a></p>
 <h1>#${iid} — ${file ? esc(file) : 'no transcript yet'}</h1>
 <pre style="margin-top:.8rem">${lines.length ? lines.map(esc).join('\n') : 'Nothing to show.'}</pre></div></body></html>`;
+}
+
+const pct = (x: number | null): string => (x === null ? '—' : `${Math.round(x * 100)}%`);
+const msOr = (x: number | null): string => (x === null ? '—' : dur(x));
+
+/**
+ * One series of daily bars, as inline SVG: no legend (the heading names the
+ * series), a hover title per day on a hit area taller than the bar, and a
+ * recessive top gridline carrying the scale.
+ */
+function dailyBars(days: Array<{ day: string; v: number; tip: string }>, fmt: (n: number) => string): string {
+  const W = 800, H = 150, top = 14, base = H - 4;
+  const max = Math.max(1, ...days.map((d) => d.v));
+  const step = W / Math.max(1, days.length);
+  const bw = Math.max(2, Math.min(28, step - 2));
+  const bars = days.map((d, i) => {
+    const h = d.v ? Math.max(2, ((base - top) * d.v) / max) : 0;
+    const x = i * step + (step - bw) / 2;
+    return `<g><title>${esc(d.tip)}</title><rect class="hit" x="${(i * step).toFixed(1)}" y="0" width="${step.toFixed(1)}" height="${H}" fill="transparent"/>`
+      + (h ? `<rect class="col" x="${x.toFixed(1)}" y="${(base - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="2"/>` : '')
+      + '</g>';
+  }).join('');
+  const first = days[0]?.day ?? '', last = days[days.length - 1]?.day ?? '';
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="daily bars">
+<line class="grid" x1="0" x2="${W}" y1="${top}" y2="${top}" stroke-dasharray="3 3"/><line class="grid" x1="0" x2="${W}" y1="${base}" y2="${base}"/>
+${bars}</svg><div class="foot"><span>${esc(first)}</span><span>peak ${esc(fmt(Math.max(0, ...days.map((d) => d.v))))}</span><span>${esc(last)}</span></div></div>`;
+}
+
+export function statsPage(st: Stats): string {
+  const o = st.outcomes;
+  const period = st.days ? `the last ${st.days} days` : 'all time';
+  const periods = STATS_DAYS.map((d) => `<a class="${d === st.days ? 'on' : ''}" href="/stats?days=${d}">${d ? `${d} days` : 'all time'}</a>`).join('');
+  const phaseRow = (p: Stats['phases'][number]): string => `<tr><td>${esc(p.phase)}</td><td class="num">${p.runs}</td><td class="num">${p.attempts}</td>
+    <td class="num">${p.lapsPerRun.toFixed(1)}</td><td class="num">${pct(p.firstPass)}</td><td class="num">${p.passed}</td><td class="num">${p.failed}</td>
+    <td class="num">${p.infra}</td><td class="num">${p.parked}</td><td class="num">${msOr(p.medianMs)}</td><td class="num">${compact(p.weighted)}</td></tr>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="300"><title>Oneshot stats</title><style>${STYLE}</style></head>
+<body class="live"><div class="wrap">
+<p style="margin:0 0 .6rem"><a href="/">← fleet</a></p>
+<h1>Oneshot stats <span class="stamp">${esc(period)}${st.firstRunAt ? ` · history from ${esc(new Date(st.firstRunAt).toLocaleDateString('en-GB'))}` : ''}</span></h1>
+<div class="periods" style="margin-top:.6rem">${periods}</div>
+<div class="strip">
+  ${fact('Merged', String(o.done), `${o.tickets} tickets, ${o.started} runs started`)}
+  ${fact('Success rate', pct(st.successRate), 'merged of merged + blocked + aborted')}
+  ${fact('Cycle time', msOr(st.cycle.medianMs), `median, p90 ${msOr(st.cycle.p90Ms)}`)}
+  ${fact('Tokens', compact(st.tokens.weighted), `weighted · ${st.tokens.perDoneMedian === null ? '—' : compact(st.tokens.perDoneMedian)} per merged ticket`)}
+  ${fact('Stopped', `${o.blocked} · ${o.aborted}`, 'blocked · aborted')}
+  ${fact('Waiting', `${o.parked} · ${o.inFlight}`, 'on a gate · in flight')}
+  ${fact('Interventions', String(st.unblocks), `unblocks · ${st.quotaParks} quota parks`)}
+</div>
+<div class="two">
+  <div><h2>Merged per day</h2>${dailyBars(st.daily.map((d) => ({ day: d.day, v: d.done, tip: `${d.day}: ${d.done} merged, ${d.stopped} blocked or aborted` })), String)}</div>
+  <div><h2>Weighted tokens per day</h2>${dailyBars(st.daily.map((d) => ({ day: d.day, v: d.weighted, tip: `${d.day}: ${compact(d.weighted)} weighted tokens` })), compact)}</div>
+</div>
+<h2>Phases</h2>${st.phases.length ? `<div class="scroll"><table><tr><th>Phase</th><th class="num">Runs</th><th class="num">Attempts</th><th class="num">Laps/run</th>
+<th class="num" title="first attempts that passed">First try</th><th class="num">Passed</th><th class="num">Failed</th><th class="num">Infra</th><th class="num">Parked</th>
+<th class="num">Median time</th><th class="num">Weighted</th></tr>${st.phases.map(phaseRow).join('')}</table></div>` : '<p class="dim">No phase runs in this period.</p>'}
+<h2>Where blocked runs stopped</h2>${st.blockedAt.length ? `<div class="scroll"><table><tr><th>Phase</th><th class="num">Runs</th></tr>
+${st.blockedAt.map((b) => `<tr><td>${esc(b.phase)}</td><td class="num">${b.n}</td></tr>`).join('')}</table></div>` : '<p class="dim">Nothing blocked in this period.</p>'}
+<p class="dim" style="font-size:.8rem;margin-top:1.5rem">Read from state/oneshot.db, which keeps every run, phase attempt and token record, so these figures cover all of that history. Refreshes every 5 minutes.</p>
+</div></body></html>`;
 }

@@ -12,6 +12,8 @@ the internet, so it works on a LAN with no outbound access.
 | `/run/:iid` | One run: where it stands and for how long, the MR, a line per phase (laps, time, turns, input/output/cache-read and weighted tokens), the last 25 transcript lines, and every attempt and recent event under a fold. `?run=<runId>` opens an older run of the same ticket. Reloads every 30s while the run is moving. |
 | `/run/:iid/report` | The full transcript report (agents, tool calls). Slow on a long run: it parses every transcript. |
 | `/run/:iid/tail` | The last 80 lines of the newest transcript, as one-liners. |
+| `/stats` | History over the last 7, 30 or 90 days or all time (`?days=7\|30\|90\|0`): tickets merged, success rate, cycle time, tokens, merged and tokens per day, a line per phase (attempts, laps per run, first-try pass rate, failures, parked runs, median time, tokens), and where blocked runs stopped. Refreshes every 5 minutes. |
+| `/api/stats` | The same as JSON, with the same `?days=`. |
 | `/runs` | Every run journal, archived ones included. `/run/:iid?archived=<dir>` opens an archived run's saved report. |
 
 ## The fleet strip
@@ -39,6 +41,16 @@ The runs table only stores claimed / running / parked / blocked / done / aborted
 **For** is how long the ticket has been in its current state: since the open phase started while it runs, or since it stopped while it waits. When a ticket has been run more than once, only its newest run is listed. The issue and MR links are full GitLab URLs, taken from the run journal or built from `GITLAB_REPO_URL`.
 
 The database is opened read-only, and nothing here imports the modules that open it read-write. Every string drawn from it, from a journal or from a transcript goes through the same `redact()` the reports use.
+
+## Stats
+
+`/stats` reads the tables the conductor already keeps: `runs`, `phase_runs`, `quota_usage` and `events`. Nothing on the server prunes them, so the history is kept as long as `state/oneshot.db` is kept, across restarts and redeploys. Nothing is copied or cached elsewhere, so if you delete or replace the database the history goes with it. Back it up with `sqlite3 state/oneshot.db ".backup <file>"` if it matters.
+
+- **Success rate** is merged ÷ (merged + blocked + aborted), over runs started in the period. Parked and in-flight runs aren't counted yet.
+- **Cycle time** is a merged run's start to its end, gates included.
+- **Attempts** leave out `parked` rows, and count a model-less phase (such as `mr-open` or `merge`) repeating the same result for the same run once. Both come from the conductor re-checking a parked run every tick, not from real attempts.
+- **First try** is the share of runs whose first real attempt at the phase passed (`ok`, `warned` or `skipped`).
+- Days are the server's local days. The daily charts show at most the last 90 days.
 
 ## Settings
 

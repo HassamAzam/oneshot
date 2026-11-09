@@ -157,3 +157,101 @@ export function compact(n: number): string {
   if (a >= 1e4) return `${Math.round(n / 1e3)}k`;
   return String(Math.round(n));
 }
+
+// ------------------------------------------------------------------ stats
+
+/** Nearest-rank percentile, p in 0..100; null for no values. */
+export function percentile(values: number[], p: number): number | null {
+  if (!values.length) return null;
+  const s = [...values].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.max(0, Math.ceil((p / 100) * s.length) - 1))]!;
+}
+
+/** Local calendar day, `YYYY-MM-DD` — the server's day, like the run window. */
+export function dayKey(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** Every local day from `from` to `to`, oldest first, both ends included. */
+export function dayKeys(from: number, to: number): string[] {
+  const out: string[] = [];
+  const d = new Date(from);
+  d.setHours(12, 0, 0, 0);
+  for (let i = 0; i < 400 && dayKey(d.getTime()) <= dayKey(to); i++) {
+    out.push(dayKey(d.getTime()));
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
+/** A phase attempt that let the run go on — warned and skipped included. */
+export const PASSED: ReadonlySet<string> = new Set(['ok', 'warned', 'skipped']);
+
+export interface PhaseStat {
+  phase: string;
+  attempts: number;
+  runs: number;
+  passed: number;
+  failed: number;
+  infra: number;
+  /** Runs that parked at this phase — waits, not attempts. */
+  parked: number;
+  /** Share of runs whose first attempt passed, of those whose first attempt finished. */
+  firstPass: number | null;
+  lapsPerRun: number;
+  medianMs: number | null;
+  weighted: number;
+}
+
+type StatRow = PhaseRow & { run_id: string };
+
+/**
+ * The rows that were real attempts. A parked wait is re-checked every tick and
+ * each re-check writes a row (8652 had 1521 of them), as does a model-less
+ * phase like mr-open re-confirming what it found. So `parked` rows are waits,
+ * and a model-less row repeating its predecessor's outcome for the same run is
+ * the same attempt seen again.
+ */
+function attemptsOf(rows: StatRow[]): StatRow[] {
+  const last = new Map<string, string>();
+  return [...rows].sort((a, b) => a.started_at - b.started_at).filter((r) => {
+    if (r.status === 'parked') return false;
+    const key = `${r.run_id}\u0000${r.phase}`;
+    const repeat = !r.turns && last.get(key) === r.status;
+    last.set(key, r.status);
+    return !repeat;
+  });
+}
+
+/** Per-phase outcome counts over phase_runs rows (run_id included), busiest first. */
+export function phaseStats(rows: StatRow[], now: number): PhaseStat[] {
+  const by = new Map<string, StatRow[]>();
+  for (const r of rows) by.set(r.phase, [...(by.get(r.phase) ?? []), r]);
+  return [...by.entries()].map(([phase, all]) => {
+    const rs = attemptsOf(all);
+    const runs = new Set(all.map((r) => r.run_id)).size;
+    const firstByRun = new Map<string, StatRow>();
+    for (const r of rs) if (!firstByRun.has(r.run_id)) firstByRun.set(r.run_id, r);
+    const first = [...firstByRun.values()].filter((r) => r.status !== 'running');
+    return {
+      phase,
+      attempts: rs.length,
+      runs,
+      passed: rs.filter((r) => PASSED.has(r.status)).length,
+      failed: rs.filter((r) => r.status === 'failed' || r.status === 'refused').length,
+      infra: rs.filter((r) => r.status === 'infra').length,
+      parked: new Set(all.filter((r) => r.status === 'parked').map((r) => r.run_id)).size,
+      firstPass: first.length ? first.filter((r) => PASSED.has(r.status)).length / first.length : null,
+      lapsPerRun: runs ? rs.length / runs : 0,
+      medianMs: percentile(rs.filter((r) => r.ended_at !== null).map((r) => r.ended_at! - r.started_at), 50),
+      weighted: all.reduce((n, r) => n + (r.weighted ?? 0), 0),
+    };
+  }).sort((a, b) => b.runs - a.runs || b.attempts - a.attempts);
+}
+
+/** The phase a stop reason names — `review: …` → `review` — or `other`. */
+export function stopPhase(why: string | null): string {
+  const m = /^([a-z][a-z-]*):/.exec(why ?? '');
+  return m ? m[1]! : 'other';
+}

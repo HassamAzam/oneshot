@@ -14,7 +14,7 @@ import { DB_PATH, PAUSE_QUOTA, STATE, envOr, projectConfig, repoIdentity } from 
 import { readJournal } from '../../src/lib/artifacts.js';
 import { redact } from '../../src/lib/report.js';
 import {
-  IN_FLIGHT, boardStatus, inWindow, issueUrl, mergeRequestUrl, nextWindowChange, parseWindow, rollupPhases, sinceFor,
+  IN_FLIGHT, boardStatus, dayKey, dayKeys, percentile, phaseStats, stopPhase, type PhaseStat, inWindow, issueUrl, mergeRequestUrl, nextWindowChange, parseWindow, rollupPhases, sinceFor,
   type BoardStatus, type PhaseRollup,
 } from '../../src/lib/fleetview.js';
 
@@ -287,4 +287,97 @@ export function runDetail(iid: number, runId: string | null): RunDetail | null {
   const [run] = views([row], context(now, new Set(liveConductors(now).map((c) => c.id))));
   const phases = phaseRuns(id);
   return { run: run!, runs, phases, rollup: rollupPhases(phases, now), tokens: phaseTokens(id), events: recentEvents(id) };
+}
+
+// ------------------------------------------------------------------ stats
+//
+// Computed from the same tables on every request, nothing cached or copied:
+// runs, phase_runs, quota_usage and events are append-only on the server, so
+// the history these figures describe is as durable as state/oneshot.db itself.
+
+export const STATS_DAYS = [7, 30, 90, 0] as const;
+const TREND_MAX_DAYS = 90;
+
+export interface Stats {
+  now: number;
+  /** 0 = all time. */
+  days: number;
+  since: number;
+  firstRunAt: number | null;
+  outcomes: { started: number; tickets: number; done: number; blocked: number; aborted: number; parked: number; inFlight: number };
+  /** done / (done + blocked + aborted), of runs started in the period. */
+  successRate: number | null;
+  cycle: { n: number; medianMs: number | null; p90Ms: number | null };
+  tokens: { weighted: number; perDoneMedian: number | null };
+  phases: PhaseStat[];
+  /** Where blocked runs stopped, by the phase their reason names. */
+  blockedAt: Array<{ phase: string; n: number }>;
+  daily: Array<{ day: string; done: number; stopped: number; weighted: number }>;
+  quotaParks: number;
+  unblocks: number;
+}
+
+export function stats(days: number): Stats {
+  const now = Date.now();
+  const d = (STATS_DAYS as readonly number[]).includes(days) ? days : 30;
+  const firstRunAt = all<{ t: number | null }>('SELECT MIN(started_at) t FROM runs')[0]?.t ?? null;
+  const since = d ? now - d * 86_400_000 : firstRunAt ?? now;
+
+  const runs = all<RunRow>('SELECT * FROM runs WHERE started_at >= ?', since);
+  const count = (st: string): number => runs.filter((r) => r.status === st).length;
+  const done = runs.filter((r) => r.status === 'done' && r.ended_at);
+  const outcomes = {
+    started: runs.length, tickets: new Set(runs.map((r) => r.iid)).size,
+    done: count('done'), blocked: count('blocked'), aborted: count('aborted'), parked: count('parked'),
+    inFlight: count('claimed') + count('running'),
+  };
+  const settled = outcomes.done + outcomes.blocked + outcomes.aborted;
+
+  const spentByRun = new Map(all<{ run_id: string; w: number }>(
+    'SELECT run_id, SUM(weighted) w FROM quota_usage WHERE run_id IS NOT NULL GROUP BY run_id',
+  ).map((q) => [q.run_id, q.w ?? 0]));
+
+  const blockedAt = new Map<string, number>();
+  for (const r of runs.filter((x) => x.status === 'blocked')) {
+    const ph = stopPhase(r.blocked_why);
+    blockedAt.set(ph, (blockedAt.get(ph) ?? 0) + 1);
+  }
+
+  // The trend is by the day a run finished; capped so "all time" stays readable.
+  const trendFrom = Math.max(since, now - TREND_MAX_DAYS * 86_400_000);
+  const daily = new Map(dayKeys(trendFrom, now).map((k) => [k, { day: k, done: 0, stopped: 0, weighted: 0 }]));
+  for (const r of all<{ status: string; ended_at: number }>(
+    "SELECT status, ended_at FROM runs WHERE ended_at >= ? AND status IN ('done','blocked','aborted')", trendFrom,
+  )) {
+    const b = daily.get(dayKey(r.ended_at));
+    if (b) r.status === 'done' ? b.done++ : b.stopped++;
+  }
+  for (const q of all<{ ts: number; weighted: number }>('SELECT ts, weighted FROM quota_usage WHERE ts >= ?', trendFrom)) {
+    const b = daily.get(dayKey(q.ts));
+    if (b) b.weighted += q.weighted ?? 0;
+  }
+
+  const eventCount = (kind: string): number =>
+    all<{ n: number }>('SELECT COUNT(*) n FROM events WHERE kind = ? AND ts >= ?', kind, since)[0]?.n ?? 0;
+
+  return {
+    now, days: d, since, firstRunAt, outcomes,
+    successRate: settled ? outcomes.done / settled : null,
+    cycle: {
+      n: done.length,
+      medianMs: percentile(done.map((r) => r.ended_at! - r.started_at), 50),
+      p90Ms: percentile(done.map((r) => r.ended_at! - r.started_at), 90),
+    },
+    tokens: {
+      weighted: all<{ w: number | null }>('SELECT SUM(weighted) w FROM quota_usage WHERE ts >= ?', since)[0]?.w ?? 0,
+      perDoneMedian: percentile(done.map((r) => spentByRun.get(r.run_id) ?? 0), 50),
+    },
+    phases: phaseStats(all<PhaseRunRow & { run_id: string }>(
+      'SELECT run_id, id, phase, lap, model, status, started_at, ended_at, turns, weighted, NULL detail FROM phase_runs WHERE started_at >= ?', since,
+    ), now),
+    blockedAt: [...blockedAt.entries()].map(([phase, n]) => ({ phase, n })).sort((a, b) => b.n - a.n),
+    daily: [...daily.values()],
+    quotaParks: eventCount('quota_park'),
+    unblocks: eventCount('unblocked'),
+  };
 }

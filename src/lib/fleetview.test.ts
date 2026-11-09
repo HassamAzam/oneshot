@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  boardStatus, compact, dur, inWindow, issueUrl, mergeRequestUrl, nextWindowChange, parseWindow, rollupPhases, sinceFor,
+  boardStatus, compact, dayKey, dayKeys, dur, inWindow, issueUrl, mergeRequestUrl, nextWindowChange, parseWindow, percentile,
+  phaseStats, rollupPhases, sinceFor, stopPhase,
   type PhaseRow, type StatusInputs,
 } from './fleetview.js';
 
@@ -98,4 +99,53 @@ test('dur and compact format for a glance', () => {
   assert.equal(compact(950), '950');
   assert.equal(compact(12_345), '12k');
   assert.equal(compact(3_450_000), '3.5M');
+});
+
+test('percentile is nearest-rank, and null for nothing', () => {
+  assert.equal(percentile([], 50), null);
+  assert.equal(percentile([5], 90), 5);
+  assert.equal(percentile([4, 1, 3, 2], 50), 2);
+  assert.equal(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 90), 9);
+});
+
+test('dayKeys covers every local day inclusive', () => {
+  assert.equal(dayKey(new Date(2026, 0, 5, 23, 59).getTime()), '2026-01-05');
+  assert.deepEqual(dayKeys(new Date(2026, 9, 30, 23).getTime(), new Date(2026, 10, 2, 1).getTime()),
+    ['2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02']);
+});
+
+test('phaseStats counts outcomes, first-try pass rate and laps per run', () => {
+  const r = (run_id: string, phase: string, lap: number, status: string, ms: number | null) =>
+    ({ run_id, phase, lap, status, started_at: 0, ended_at: ms, turns: 1, weighted: 10 });
+  const [impl, plan] = phaseStats([
+    r('a', 'implement', 0, 'failed', 100), r('a', 'implement', 1, 'ok', 300),
+    r('b', 'implement', 0, 'ok', 200), r('c', 'implement', 0, 'running', null),
+    r('a', 'plan', 0, 'warned', 50),
+  ], 1000);
+  assert.deepEqual([impl!.phase, impl!.attempts, impl!.runs, impl!.passed, impl!.failed], ['implement', 4, 3, 2, 1]);
+  assert.equal(impl!.firstPass, 0.5);
+  assert.equal(impl!.lapsPerRun, 4 / 3);
+  assert.equal(impl!.medianMs, 200);
+  assert.equal(impl!.weighted, 40);
+  assert.equal(plan!.firstPass, 1);
+});
+
+test('stopPhase reads the phase off a stop reason', () => {
+  assert.equal(stopPhase('review: verdict changes-requested'), 'review');
+  assert.equal(stopPhase('mr-open: x'), 'mr-open');
+  assert.equal(stopPhase('awaiting plan approval'), 'other');
+  assert.equal(stopPhase(null), 'other');
+});
+
+test('phaseStats does not count parked re-checks or repeated model-less rows as attempts', () => {
+  const r = (run_id: string, lap: number, status: string, turns: number | null, start: number) =>
+    ({ run_id, phase: 'merge', lap, status, started_at: start, ended_at: start + 1, turns, weighted: 0 });
+  const [merge] = phaseStats([
+    r('a', 0, 'failed', null, 1), r('a', 1, 'failed', null, 2), r('a', 2, 'parked', null, 3), r('a', 3, 'parked', null, 4),
+    r('a', 4, 'ok', null, 5), r('a', 5, 'ok', null, 6),
+    r('b', 0, 'parked', null, 1), r('b', 1, 'ok', 4, 2), r('b', 2, 'ok', 4, 3),
+  ], 100);
+  assert.deepEqual([merge!.attempts, merge!.passed, merge!.failed, merge!.parked, merge!.runs], [4, 3, 1, 2, 2]);
+  // a's first real attempt failed, b's passed.
+  assert.equal(merge!.firstPass, 0.5);
 });
