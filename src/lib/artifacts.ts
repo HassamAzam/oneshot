@@ -107,6 +107,18 @@ export interface ReviewGateState {
   approved: boolean;
   feedback: string[];
   /**
+   * GitLab username of whoever's reply approved the gate, or null when the
+   * reply carried no user. ABSENT on a journal written before this existed.
+   */
+  approvedBy?: string | null;
+  /**
+   * Who wrote each round of `feedback`: `feedbackBy[i]` holds the distinct
+   * usernames of the replies joined into `feedback[i]`, in order. Parallel to
+   * `feedback`; a journal that predates it is padded with `[]` per old round
+   * the next time a round lands, so the indexes keep lining up.
+   */
+  feedbackBy?: string[][];
+  /**
    * Digest of the artifact that was approved, stamped when the sign-off lands.
    *
    * `approved: true` on its own records THAT a human approved, never WHAT. The

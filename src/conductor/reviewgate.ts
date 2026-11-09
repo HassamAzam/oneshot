@@ -411,14 +411,17 @@ function persist(iid: number, gate: Gate, state: ReviewGateState): RunJournal | 
  * stamping a fresh digest on it and making the drift undetectable from then on.
  * The note id has to go with the verdict.
  *
- * Feedback history is kept: the reviewer's earlier rounds still apply to the
- * artifact being redrawn, and dropping them would send the next round in blind.
+ * Feedback history is kept, with who gave each round: the reviewer's earlier
+ * rounds still apply to the artifact being redrawn, and dropping them would send
+ * the next round in blind.
  */
 export function rearmGate(iid: number, gate: Gate): RunJournal | null {
   const j = readJournal(iid);
   const prior = j ? stateOf(j, gate) : blankState();
   return persist(iid, gate, {
     requestTs: null, requestNoteId: null, approved: false, feedback: prior.feedback,
+    // Who gave those rounds goes with them; absent on an old journal, so it stays absent.
+    ...(prior.feedbackBy !== undefined ? { feedbackBy: prior.feedbackBy } : {}),
   });
 }
 
@@ -505,6 +508,39 @@ async function uploadAll(iid: number, attachments: GateAttachment[]): Promise<st
     links.push((up.data as Upload).markdown);
   }
   return links;
+}
+
+/**
+ * Fold a gate's reviewer replies into the journal fields they change.
+ *
+ * Replies BEFORE the sign-off are the round's feedback; an `approved` is never
+ * also feedback, whoever sent it. `state` is null when nothing moved. On
+ * feedback it also resets requestNoteId: the NEXT check re-arms with a fresh
+ * request comment, so the reply that follows the revision is measured from
+ * there rather than from the round that just ended.
+ *
+ * `feedbackBy` stays parallel to `feedback`; a journal without it is padded
+ * with `[]` per earlier round so the indexes keep lining up.
+ */
+export function foldGateReplies(
+  state: ReviewGateState, fromReviewers: GateReply[], approvedAt: number,
+): { feedback: string; state: Partial<ReviewGateState> | null } {
+  const round = (approvedAt === -1 ? fromReviewers : fromReviewers.slice(0, approvedAt))
+    .filter((r) => !isApprovedReply(r.text) && r.text.trim());
+  const feedback = round.map((r) => r.text.trim()).join('\n');
+  const feedbackBy = [...new Set(round.map((r) => r.user).filter((u): u is string => !!u))];
+  const grown = {
+    feedback: [...state.feedback, feedback],
+    feedbackBy: [...(state.feedbackBy ?? state.feedback.map(() => [])), feedbackBy],
+  };
+  if (approvedAt !== -1) {
+    return {
+      feedback,
+      state: { approved: true, approvedBy: fromReviewers[approvedAt]?.user ?? null, ...(feedback ? grown : {}) },
+    };
+  }
+  if (feedback) return { feedback, state: { requestNoteId: null, approved: false, ...grown } };
+  return { feedback, state: null };
 }
 
 /**
@@ -606,13 +642,7 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
 
   const approvedAt = fromReviewers.findIndex((r) => isApprovedReply(r.text));
 
-  // Replies BEFORE the sign-off are the round's feedback; an `approved` is
-  // never also feedback, whoever sent it.
-  const feedback = (approvedAt === -1 ? fromReviewers : fromReviewers.slice(0, approvedAt))
-    .filter((r) => !isApprovedReply(r.text))
-    .map((r) => r.text.trim())
-    .filter(Boolean)
-    .join('\n');
+  const { feedback, state: folded } = foldGateReplies(state, fromReviewers, approvedAt);
 
   if (feedback && onFeedback) await onFeedback(feedback);
 
@@ -620,8 +650,7 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
     const approver = fromReviewers[approvedAt]?.user ?? '(unknown)';
     state = {
       ...state,
-      approved: true,
-      feedback: feedback ? [...state.feedback, feedback] : state.feedback,
+      ...folded,
       ...(subject === undefined ? {} : { approvedDigest: approvedDigestFor(state, subject) }),
     };
     persist(iid, gate, state);
@@ -638,9 +667,7 @@ export async function checkApprovalGate(opts: CheckGateOpts): Promise<GateResult
     // requestNoteId resets to null: the NEXT check re-arms with a fresh
     // request comment, so the reply that follows the revision is measured
     // from there rather than from the round that just ended.
-    state = {
-      ...state, requestNoteId: null, approved: false, feedback: [...state.feedback, feedback],
-    };
+    state = { ...state, ...folded };
     persist(iid, gate, state);
     // Feedback is a verdict too: QA has answered and the ticket is back with
     // the pipeline. The label returns when the next check re-arms the gate
