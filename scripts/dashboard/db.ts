@@ -4,18 +4,28 @@
  * Read-only on purpose: the conductors own this file, and a dashboard that held
  * a write lock — or created an empty database where none exists yet — would be
  * the one thing on the page able to break a run. A missing DB is an empty fleet,
- * not an error.
+ * not an error. For the same reason nothing here imports src/lib/db.ts or
+ * src/lib/quota.ts: both open the database read-write and migrate it on import.
  */
 import Database from 'better-sqlite3';
-import { existsSync, readdirSync } from 'node:fs';
-import { DB_PATH, STATE } from '../../src/lib/config.js';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { basename } from 'node:path';
+import { DB_PATH, PAUSE_QUOTA, STATE, envOr, projectConfig, repoIdentity } from '../../src/lib/config.js';
 import { readJournal } from '../../src/lib/artifacts.js';
 import { redact } from '../../src/lib/report.js';
+import {
+  IN_FLIGHT, boardStatus, inWindow, issueUrl, mergeRequestUrl, nextWindowChange, parseWindow, rollupPhases, sinceFor,
+  type BoardStatus, type PhaseRollup,
+} from '../../src/lib/fleetview.js';
 
 const ALIVE_MS = 60_000;
 const QUOTA_WINDOW_MS = 5 * 3600_000;
 const ACTIVE = ['claimed', 'running', 'parked', 'blocked'];
-const RECENT_FINISHED = 15;
+const FINISHED = ['done', 'aborted'];
+const SIGNAL_MAX_AGE_MS = 90 * 60_000;
+export const HISTORY_HOURS = 24;
+const HISTORY_MAX_HOURS = 24 * 30;
+const HISTORY_LIMIT = 200;
 
 let handle: Database.Database | null = null;
 
@@ -33,6 +43,8 @@ const all = <T>(sql: string, ...args: unknown[]): T[] => {
 };
 
 const R = (s: unknown): string | null => (s === null || s === undefined ? null : redact(String(s)));
+const marks = (xs: readonly unknown[]): string => xs.map(() => '?').join(',') || 'NULL';
+const safeUrl = (u: unknown): string | null => (typeof u === 'string' && /^https?:\/\//.test(u) ? redact(u) : null);
 
 export interface PhaseRunRow {
   id: number; phase: string; lap: number; model: string | null; status: string;
@@ -46,23 +58,46 @@ interface RunRow {
 }
 
 export interface RunView {
-  runId: string; iid: number; title: string; status: string; phase: string | null;
+  runId: string; iid: number; title: string;
+  /** What the runs table says. */
+  status: string;
+  /** What a person should read it as — see src/lib/fleetview.ts. */
+  board: BoardStatus;
+  phase: string | null;
+  /** Since when it has stood in this phase / state. */
+  since: number;
   url: string | null; mrUrl: string | null; mrIid: number | null;
-  startedAt: number; endedAt: number | null; blockedWhy: string | null;
-  owner: string | null; ownerSeenAt: number | null; ownerAlive: boolean;
+  startedAt: number; endedAt: number | null; why: string | null;
+  owner: string | null; ownerAlive: boolean;
   current: Array<{ phase: string; lap: number; startedAt: number }>;
+  /** phase_runs rows: every attempt at every phase. */
+  attempts: number;
+  weighted: number;
 }
 
 export interface FleetState {
   now: number;
   dbFound: boolean;
+  project: string | null;
   conductors: Array<{ id: string; pid: number; argv: string; startedAt: number; heartbeatAt: number }>;
+  slots: { used: number; of: number | null };
+  window: { spec: string; valid: boolean; open: boolean; nextChange: number | null };
+  quota: {
+    /** state/PAUSE-QUOTA in force: the fleet stands down until `until`. */
+    parkedUntil: number | null;
+    lastParkAt: number | null;
+    /** Account 5h utilisation from the status-line harvester, when fresh. */
+    accountPct: number | null;
+    weighted5h: number;
+    weightedToday: number;
+  };
   pauses: string[];
   leases: Array<{ port: number; runId: string; leasedAt: number }>;
-  weighted5h: number;
-  weightedToday: number;
+  /** Claimed / running / parked / blocked, newest run per ticket. */
   active: RunView[];
+  /** Done or aborted inside the last `historyHours`. */
   finished: RunView[];
+  historyHours: number;
 }
 
 function liveConductors(now: number): FleetState['conductors'] {
@@ -74,43 +109,129 @@ function liveConductors(now: number): FleetState['conductors'] {
 const weightedSince = (ts: number): number =>
   all<{ w: number | null }>('SELECT SUM(weighted) w FROM quota_usage WHERE ts >= ?', ts)[0]?.w ?? 0;
 
-function view(r: RunRow, alive: Set<string>): RunView {
-  // The DB has no ticket or MR URL; the journal does. It only describes this run
-  // if its runId matches — an older run of the same ticket has been archived.
-  const j = readJournal(r.iid);
-  const mine = j?.runId === r.run_id ? j : null;
-  const current = all<{ phase: string; lap: number; started_at: number }>(
-    "SELECT phase, lap, started_at FROM phase_runs WHERE run_id = ? AND status = 'running' ORDER BY started_at", r.run_id,
-  ).map((p) => ({ phase: p.phase, lap: p.lap, startedAt: p.started_at }));
+/** The quota park file, read and never removed — quotaParked() owns its expiry. */
+function parkedUntil(now: number): number | null {
+  if (!existsSync(PAUSE_QUOTA)) return null;
+  try {
+    const until = (JSON.parse(readFileSync(PAUSE_QUOTA, 'utf8')) as { until?: unknown }).until;
+    return typeof until === 'number' && until > now ? until : null;
+  } catch {
+    return null;
+  }
+}
+
+function accountPct(now: number): number | null {
+  const path = envOr('ONESHOT_RATELIMIT_SIGNAL', `${process.env.HOME ?? ''}/.claude/state/ratelimit.json`);
+  if (!existsSync(path)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as { captured_at_ms?: number; rate_limits?: { five_hour?: { utilization?: unknown } } };
+    if (now - (raw.captured_at_ms ?? 0) > SIGNAL_MAX_AGE_MS) return null;
+    const u = raw.rate_limits?.five_hour?.utilization;
+    return typeof u === 'number' ? u : null;
+  } catch {
+    return null;
+  }
+}
+
+/** ONESHOT_CONCURRENCY, else project.json's — null if neither can be read. */
+function concurrency(): number | null {
+  const env = Number(envOr('ONESHOT_CONCURRENCY'));
+  if (Number.isInteger(env) && env > 0) return env;
+  try { return projectConfig().concurrency; } catch { return null; }
+}
+
+interface Context { now: number; alive: Set<string>; open: boolean; parked: boolean; webUrl: string | null }
+
+function views(rows: RunRow[], ctx: Context): RunView[] {
+  if (!rows.length) return [];
+  const ids = rows.map((r) => r.run_id);
+  const phases = new Map<string, PhaseRunRow[]>();
+  for (const p of all<PhaseRunRow & { run_id: string }>(
+    `SELECT run_id, id, phase, lap, model, status, started_at, ended_at, turns, weighted, NULL detail FROM phase_runs WHERE run_id IN (${marks(ids)})`, ...ids,
+  )) phases.set(p.run_id, [...(phases.get(p.run_id) ?? []), p]);
+  const spent = new Map(all<{ run_id: string; w: number }>(
+    `SELECT run_id, SUM(weighted) w FROM quota_usage WHERE run_id IN (${marks(ids)}) GROUP BY run_id`, ...ids,
+  ).map((q) => [q.run_id, q.w ?? 0]));
+
+  return rows.map((r) => {
+    const attempts = phases.get(r.run_id) ?? [];
+    const current = attempts.filter((p) => p.ended_at === null && p.status === 'running')
+      .map((p) => ({ phase: p.phase, lap: p.lap, startedAt: p.started_at }));
+    // The journal holds the ticket's real URLs; it describes this run only if
+    // its runId matches — an older run of the same ticket has been archived.
+    const j = readJournal(r.iid);
+    const mine = j?.runId === r.run_id ? j : null;
+    const ownerAlive = !!r.owner && ctx.alive.has(r.owner);
+    return {
+      runId: r.run_id, iid: r.iid, title: R(r.title ?? mine?.title ?? '') ?? '', status: r.status,
+      board: boardStatus({ status: r.status, ownerAlive, phaseRunning: current.length > 0, inWindow: ctx.open, quotaParked: ctx.parked }),
+      phase: r.phase, since: sinceFor(r, attempts),
+      url: safeUrl(mine?.url) ?? (ctx.webUrl ? issueUrl(ctx.webUrl, r.iid) : null),
+      mrUrl: safeUrl(mine?.mrUrl) ?? (ctx.webUrl && r.mr_iid ? mergeRequestUrl(ctx.webUrl, r.mr_iid) : null),
+      mrIid: r.mr_iid, startedAt: r.started_at, endedAt: r.ended_at, why: R(r.blocked_why),
+      owner: r.owner, ownerAlive, current,
+      attempts: attempts.length,
+      weighted: spent.get(r.run_id) ?? attempts.reduce((n, p) => n + (p.weighted ?? 0), 0),
+    };
+  });
+}
+
+function context(now: number, alive: Set<string>): Context & { spec: string; valid: boolean; nextChange: number | null; parkedUntil: number | null } {
+  const spec = envOr('ONESHOT_WINDOW', '10-22');
+  const w = parseWindow(spec);
+  const until = parkedUntil(now);
   return {
-    runId: r.run_id, iid: r.iid, title: r.title ?? mine?.title ?? '', status: r.status, phase: r.phase,
-    url: mine?.url ?? null, mrUrl: mine?.mrUrl ?? null, mrIid: r.mr_iid,
-    startedAt: r.started_at, endedAt: r.ended_at, blockedWhy: R(r.blocked_why),
-    owner: r.owner, ownerSeenAt: r.owner_seen_at, ownerAlive: !!r.owner && alive.has(r.owner), current,
+    now, alive, spec, valid: w !== null,
+    // An unreadable window is treated as open: window.sh refuses it, so the
+    // conductor's own state is the better guide than a guess at the hours.
+    open: w ? inWindow(w, new Date(now)) : true,
+    nextChange: w ? nextWindowChange(w, new Date(now)) : null,
+    parked: until !== null, parkedUntil: until,
+    webUrl: repoIdentity().repo?.webUrl ?? null,
   };
 }
 
-export function fleetState(): FleetState {
+export function fleetState(historyHours = HISTORY_HOURS): FleetState {
   const now = Date.now();
+  const hours = Math.min(HISTORY_MAX_HOURS, Math.max(1, Math.round(historyHours) || HISTORY_HOURS));
   const midnight = new Date(now).setHours(0, 0, 0, 0);
   const conductors = liveConductors(now);
-  const alive = new Set(conductors.map((c) => c.id));
-  const marks = ACTIVE.map(() => '?').join(',');
-  const active = all<RunRow>(`SELECT * FROM runs WHERE status IN (${marks}) ORDER BY started_at DESC`, ...ACTIVE);
-  const finished = all<RunRow>(
-    `SELECT * FROM runs WHERE status NOT IN (${marks}) ORDER BY COALESCE(ended_at, started_at) DESC LIMIT ?`, ...ACTIVE, RECENT_FINISHED,
+  const ctx = context(now, new Set(conductors.map((c) => c.id)));
+
+  // A re-run leaves the ticket's older rows behind; only the newest describes
+  // where the ticket stands now.
+  const active = all<RunRow>(
+    `SELECT * FROM runs r WHERE status IN (${marks(ACTIVE)})
+       AND NOT EXISTS (SELECT 1 FROM runs n WHERE n.iid = r.iid AND n.started_at > r.started_at)
+     ORDER BY started_at DESC`, ...ACTIVE,
   );
+  const finished = all<RunRow>(
+    `SELECT * FROM runs WHERE status IN (${marks(FINISHED)}) AND COALESCE(ended_at, started_at) >= ?
+     ORDER BY COALESCE(ended_at, started_at) DESC LIMIT ?`, ...FINISHED, now - hours * 3600_000, HISTORY_LIMIT,
+  );
+  const activeViews = views(active, ctx);
+
   return {
     now,
     dbFound: open() !== null,
+    project: ctx.webUrl,
     conductors,
-    pauses: existsSync(STATE) ? readdirSync(STATE).filter((f) => /^PAUSE/.test(f)).sort() : [],
+    slots: { used: activeViews.filter((r) => IN_FLIGHT.has(r.board)).length, of: concurrency() },
+    window: { spec: ctx.spec, valid: ctx.valid, open: ctx.open, nextChange: ctx.nextChange },
+    quota: {
+      parkedUntil: ctx.parkedUntil,
+      lastParkAt: all<{ ts: number }>("SELECT MAX(ts) ts FROM events WHERE kind = 'quota_park'")[0]?.ts ?? null,
+      accountPct: accountPct(now),
+      weighted5h: weightedSince(now - QUOTA_WINDOW_MS),
+      weightedToday: weightedSince(midnight),
+    },
+    // PAUSE-QUOTA is the quota park, shown as such; the rest are kill switches.
+    pauses: existsSync(STATE) ? readdirSync(STATE).filter((f) => /^PAUSE/.test(f) && f !== basename(PAUSE_QUOTA)).sort() : [],
     leases: all<{ port: number; run_id: string; leased_at: number }>('SELECT * FROM port_leases ORDER BY port')
       .map((l) => ({ port: l.port, runId: l.run_id, leasedAt: l.leased_at })),
-    weighted5h: weightedSince(now - QUOTA_WINDOW_MS),
-    weightedToday: weightedSince(midnight),
-    active: active.map((r) => view(r, alive)),
-    finished: finished.map((r) => view(r, alive)),
+    active: activeViews,
+    finished: views(finished, ctx),
+    historyHours: hours,
   };
 }
 
@@ -125,8 +246,45 @@ export function phaseRuns(runId: string): PhaseRunRow[] {
   ).map((p) => ({ ...p, detail: R(p.detail) }));
 }
 
-export function recentEvents(runId: string, limit = 40): Array<{ ts: number; kind: string; phase: string | null; detail: string | null }> {
-  return all<{ ts: number; kind: string; phase: string | null; detail: string | null }>(
+export interface EventRow { ts: number; kind: string; phase: string | null; detail: string | null }
+
+export function recentEvents(runId: string, limit = 40): EventRow[] {
+  return all<EventRow>(
     'SELECT ts, kind, phase, detail FROM events WHERE run_id = ? ORDER BY ts DESC LIMIT ?', runId, limit,
   ).map((e) => ({ ...e, detail: R(e.detail) }));
+}
+
+export interface PhaseTokens { phase: string; input: number; output: number; cacheRead: number; cacheCreation: number; weighted: number }
+
+export function phaseTokens(runId: string): PhaseTokens[] {
+  return all<PhaseTokens>(
+    `SELECT COALESCE(phase, '—') phase, SUM(input) input, SUM(output) output, SUM(cache_read) cacheRead,
+            SUM(cache_creation) cacheCreation, SUM(weighted) weighted
+       FROM quota_usage WHERE run_id = ? GROUP BY phase ORDER BY MIN(ts)`, runId,
+  );
+}
+
+export interface RunDetail {
+  run: RunView;
+  /** Every run of the same ticket, newest first, for switching between them. */
+  runs: Array<{ runId: string; status: string; startedAt: number }>;
+  phases: PhaseRunRow[];
+  rollup: PhaseRollup[];
+  tokens: PhaseTokens[];
+  events: EventRow[];
+}
+
+/** One run of a ticket — `runId`, or the newest when null or not this ticket's. */
+export function runDetail(iid: number, runId: string | null): RunDetail | null {
+  const runs = all<{ run_id: string; status: string; started_at: number }>(
+    'SELECT run_id, status, started_at FROM runs WHERE iid = ? ORDER BY started_at DESC', iid,
+  ).map((r) => ({ runId: r.run_id, status: r.status, startedAt: r.started_at }));
+  const id = runs.find((r) => r.runId === runId)?.runId ?? runs[0]?.runId;
+  if (!id) return null;
+  const row = all<RunRow>('SELECT * FROM runs WHERE run_id = ?', id)[0];
+  if (!row) return null;
+  const now = Date.now();
+  const [run] = views([row], context(now, new Set(liveConductors(now).map((c) => c.id))));
+  const phases = phaseRuns(id);
+  return { run: run!, runs, phases, rollup: rollupPhases(phases, now), tokens: phaseTokens(id), events: recentEvents(id) };
 }

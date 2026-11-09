@@ -1,10 +1,11 @@
 /**
  * `npm run dashboard` — the live view of the fleet, and the door to every run.
  *
- * `/` polls `/api/state` (read from state/oneshot.db, read-only) so the active
- * runs, their phases and the fleet's quota stay current without a reload;
- * `/runs` is the journal index, archived runs included; `/run/:iid` is the
- * transcript report with the database's phase timeline above it.
+ * `/` polls `/api/state` (read from state/oneshot.db, read-only) so every
+ * ticket's status, the fleet's slots, run window and quota stay current without
+ * a reload; `/runs` is the journal index, archived runs included; `/run/:iid`
+ * is one run's phases, laps, tokens and transcript tail, and `/run/:iid/report`
+ * its full transcript report.
  *
  * Node's own http module and no build step. Nothing here writes to state/:
  * reports are rendered in memory, the DB is opened read-only, so opening a page
@@ -17,8 +18,8 @@ import { RUNS, STATE, envOr } from '../src/lib/config.js';
 import { readJournal, type RunJournal } from '../src/lib/artifacts.js';
 import { buildReportModel, renderHtml } from '../src/lib/report.js';
 import { authorise, requireTokenFor } from './dashboard/auth.js';
-import { fleetState, latestRunId, phaseRuns, recentEvents } from './dashboard/db.js';
-import { esc, indexPage, runSection, tailPage } from './dashboard/page.js';
+import { HISTORY_HOURS, fleetState, runDetail } from './dashboard/db.js';
+import { esc, indexPage, runPageHtml, tailPage } from './dashboard/page.js';
 import { tail } from './dashboard/tail.js';
 
 const PORT = Number(envOr('ONESHOT_DASHBOARD_PORT', '8787'));
@@ -133,12 +134,11 @@ ${list.length ? `<table>
 }
 
 /**
- * A run's report, rendered on demand.
- *
- * Rendered rather than read from report.html so the page is current even for a
- * run still in flight, and so a conductor writing that file cannot be raced.
+ * A run's page: the database's view of it, rendered on demand so it is current
+ * for a run still in flight — or, for an archived run, the report written at
+ * the time.
  */
-function runPage(iid: number, archived: string | null): { code: number; body: string } {
+function runPage(iid: number, archived: string | null, runId: string | null): { code: number; body: string } {
   if (archived) {
     const file = join(ARCHIVE, archived, 'run.json');
     if (!existsSync(file)) return { code: 404, body: 'No such archived run.' };
@@ -149,12 +149,25 @@ function runPage(iid: number, archived: string | null): { code: number; body: st
       ? { code: 200, body: readFileSync(html, 'utf8') }
       : { code: 200, body: `<!doctype html><meta charset=utf-8><p style="font:14px sans-serif">This run was archived before reports existed. Its journal is at <code>${esc(file)}</code>.</p><p><a href="/">back</a></p>` };
   }
-  const runId = readJournal(iid)?.runId ?? latestRunId(iid);
-  const live = runId ? runSection(iid, phaseRuns(runId), recentEvents(runId)) : '';
-  const model = buildReportModel(iid);
-  if (!model) return live ? { code: 200, body: `<!doctype html><meta charset="utf-8"><body>${live}` } : { code: 404, body: `No run found for #${iid}.` };
-  return { code: 200, body: renderHtml(model).replace('<body>\n', `<body>\n${live}`) };
+  const detail = runDetail(iid, runId);
+  if (!detail) return existsSync(join(RUNS, String(iid))) ? reportPage(iid) : { code: 404, body: `No run found for #${iid}.` };
+  // The journal and its transcripts — so the tail and the report — describe
+  // only the ticket's current run; an older run gets the database's view alone.
+  const current = readJournal(iid)?.runId === detail.run.runId;
+  return { code: 200, body: runPageHtml(detail, current ? tail(iid) : null, current && existsSync(join(RUNS, String(iid)))) };
 }
+
+/**
+ * The transcript report, on its own page: it carries its own stylesheet, and
+ * building it parses every transcript, which on a long run is seconds of work
+ * the run page should not wait on.
+ */
+function reportPage(iid: number): { code: number; body: string } {
+  const model = buildReportModel(iid);
+  return model ? { code: 200, body: renderHtml(model) } : { code: 404, body: `No report for #${iid}.` };
+}
+
+const hoursParam = (url: URL): number => Number(url.searchParams.get('hours')) || HISTORY_HOURS;
 
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
@@ -165,20 +178,24 @@ const server = createServer((req, res) => {
   if (!authorise(req, res, url, TOKEN)) return;
 
   try {
-    if (url.pathname === '/') return send(200, indexPage(fleetState()));
-    if (url.pathname === '/api/state') return send(200, JSON.stringify(fleetState()), 'application/json');
+    if (url.pathname === '/') return send(200, indexPage(fleetState(hoursParam(url))));
+    if (url.pathname === '/api/state') return send(200, JSON.stringify(fleetState(hoursParam(url))), 'application/json');
     if (url.pathname === '/runs') return send(200, index());
 
-    const m = url.pathname.match(/^\/run\/(\d{1,9})(\/tail)?$/);
+    const m = url.pathname.match(/^\/run\/(\d{1,9})(\/tail|\/report)?$/);
     if (m) {
       const iid = Number(m[1]);
+      if (m[2] === '/report') {
+        const out = reportPage(iid);
+        return send(out.code, out.body);
+      }
       if (m[2]) {
         const t = tail(iid);
         return send(200, tailPage(iid, t.file, t.lines));
       }
       const archived = url.searchParams.get('archived');
       if (archived !== null && !SAFE_NAME.test(archived)) return send(400, 'Bad archive name.', 'text/plain');
-      const out = runPage(iid, archived);
+      const out = runPage(iid, archived, url.searchParams.get('run'));
       return send(out.code, out.body);
     }
 
