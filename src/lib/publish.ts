@@ -31,6 +31,7 @@ import {
   addIssueNote, addMergeRequestNote, mergeRequestUrl, projectUrl, uploadFile, type Upload,
 } from './gitlab.js';
 import { log } from './log.js';
+import { syncDrive } from './drivesync.js';
 import { codeSpan, mdText, tableCell } from './gitlabmd.js';
 import { fileChangesSection, renderFileChanges } from './planfiles.js';
 import { flowSection, renderFlowMermaid } from './planflow.js';
@@ -222,7 +223,7 @@ interface TestCase {
   blast: string;
 }
 
-function renderTestcasesCsv(cases: TestCase[]): string {
+export function renderTestcasesCsv(cases: TestCase[]): string {
   const head = ['ID', 'Test Scenario', 'Pre Condition', 'Steps', 'Expected Result', 'Passes', 'Blast']
     .map(csvCell).join(',');
   const rows = cases.map((c) => [
@@ -1086,4 +1087,8 @@ export async function publishPending(ctx: PublishCtx): Promise<void> {
   } catch (err) {
     log.warn('publish pass failed', { error: (err as Error).message.slice(0, 160) });
   }
+  // The ticket's Drive folder rides the same passes: every point that can
+  // publish to GitLab is a point where an artifact may have landed or changed.
+  // A no-op unless ONESHOT_GDRIVE_* is configured, and it never throws.
+  await syncDrive(ctx.iid);
 }
