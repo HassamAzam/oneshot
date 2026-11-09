@@ -1,0 +1,11 @@
+# Applies the run window every hour on the hour, and two minutes after boot.
+[Unit]
+Description=Apply the Oneshot run window hourly
+
+[Timer]
+OnBootSec=2min
+OnCalendar=*-*-* *:00:00
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

@@ -14,6 +14,9 @@ WorkingDirectory=/srv/oneshot
 EnvironmentFile=/etc/oneshot/oneshot.env
 Environment=NO_COLOR=1
 Environment=HOME=/home/oneshot
+# Outside ONESHOT_WINDOW (default 10-22) a start is skipped, not failed; the
+# hourly oneshot-window.timer starts and stops it at the window's edges.
+ExecCondition=/srv/oneshot/scripts/window.sh check
 ExecStart=/usr/bin/node /srv/oneshot/node_modules/tsx/dist/cli.mjs src/index.ts
 Restart=on-failure
 RestartSec=30

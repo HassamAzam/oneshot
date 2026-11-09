@@ -1,0 +1,10 @@
+# Oneshot run window — starts the conductor inside ONESHOT_WINDOW, stops it outside.
+# Fired hourly and at boot by oneshot-window.timer. Installed by scripts/setup-server.sh.
+[Unit]
+Description=Oneshot run window (start/stop the conductor)
+After=postgresql.service redis-server.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/oneshot/oneshot.env
+ExecStart=/srv/oneshot/scripts/window.sh apply

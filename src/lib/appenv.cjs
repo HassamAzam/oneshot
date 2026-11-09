@@ -89,6 +89,12 @@ function appSettings(env = process.env) {
       .split(',').map((s) => s.trim()).filter(Boolean),
     testLogin: login && login.includes(':') ? login : '',
     python: readEnv(env, 'ONESHOT_PYTHON', `python${PYTHON_VERSION}`),
+    odoo: {
+      url: readEnv(env, 'ODOO_URL', ''),
+      db: readEnv(env, 'ODOO_DB', ''),
+      username: readEnv(env, 'ODOO_USERNAME', ''),
+      password: readEnv(env, 'ODOO_PASSWORD', ''),
+    },
   };
 }
 

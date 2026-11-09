@@ -488,7 +488,8 @@ fi
 # ----------------------------------------------------------------- systemd
 
 step "systemd units"
-UNITS=(oneshot-conductor.service oneshot-dashboard.service)
+UNITS=(oneshot-conductor.service oneshot-dashboard.service oneshot-window.service oneshot-window.timer)
+ENABLE=(oneshot-conductor.service oneshot-dashboard.service oneshot-window.timer)
 if ! have systemctl || [ ! -d /run/systemd/system ]; then
   warn "systemd is not running here (container?) — units not installed"
 else
@@ -503,11 +504,11 @@ else
   done
   if [ "$CHECK" = 0 ]; then
     [ "$changed" = 1 ] && systemctl daemon-reload
-    systemctl enable "${UNITS[@]}" >/dev/null 2>&1 && ok "enabled ${UNITS[*]}"
-    if [ "$START" = 1 ]; then systemctl restart "${UNITS[@]}" && did "(re)started ${UNITS[*]}"
-    else ok "not started (pass --start, or: sudo systemctl start ${UNITS[*]})"; fi
+    systemctl enable "${ENABLE[@]}" >/dev/null 2>&1 && ok "enabled ${ENABLE[*]}"
+    if [ "$START" = 1 ]; then systemctl restart "${ENABLE[@]}" && did "(re)started ${ENABLE[*]} (the conductor only inside ONESHOT_WINDOW)"
+    else ok "not started (pass --start, or: sudo systemctl start ${ENABLE[*]})"; fi
   else
-    for u in "${UNITS[@]}"; do
+    for u in "${ENABLE[@]}"; do
       if systemctl is-enabled --quiet "$u" 2>/dev/null; then ok "$u enabled"; else due "$u not enabled"; fi
     done
   fi

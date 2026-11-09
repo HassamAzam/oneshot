@@ -1,6 +1,6 @@
 # ONESHOT-GENERATED hrdb/local_settings.py — written by scripts/provision-seed.cjs
 # from config/erp/local_settings.template.py. Edit the template or the env file
-# (DB_*, REDIS_URL, ONESHOT_APP_ALLOWED_HOSTS) and re-run provision-seed; a hand
+# (DB_*, REDIS_URL, ODOO_*, ONESHOT_APP_ALLOWED_HOSTS) and re-run provision-seed; a hand
 # edit here is overwritten. Delete the first line to make this file yours, and
 # provision-seed will leave it alone from then on.
 #
@@ -37,7 +37,11 @@ EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 SEND_MAIL = False
 MAIL_TO_ALL = False
 
-USE_ODOO = False
+USE_ODOO = {{USE_ODOO}}
+ODOO_URL = {{ODOO_URL}}
+ODOO_DB = {{ODOO_DB}}
+ODOO_USERNAME = {{ODOO_USERNAME}}
+ODOO_PASSWORD = {{ODOO_PASSWORD}}
 USE_HIRESTREAM = False
 USE_GOOGLE = False
 USE_HELPDESK = False

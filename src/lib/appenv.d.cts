@@ -27,6 +27,7 @@ export interface AppSettings {
   allowedHosts: string[];
   testLogin: string;
   python: string;
+  odoo: { url: string; db: string; username: string; password: string };
 }
 
 type Env = Record<string, string | undefined>;

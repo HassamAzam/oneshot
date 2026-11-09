@@ -84,13 +84,15 @@ function writeAtomic(file, content, mode) {
   fs.renameSync(tmp, file);
 }
 
-/** A Python literal for a JS string or string array (JSON's grammar is a subset here). */
-const pyLiteral = (v) => JSON.stringify(v);
+/** A Python literal for a JS boolean, string or string array (JSON's grammar is a subset here). */
+const pyLiteral = (v) => (typeof v === 'boolean' ? (v ? 'True' : 'False') : JSON.stringify(v));
 
 function renderLocalSettings(s) {
   const values = {
     ALLOWED_HOSTS: s.allowedHosts, DB_NAME: s.db.name, DB_USER: s.db.user || os.userInfo().username,
     DB_PASSWORD: s.db.password, DB_HOST: s.db.host, DB_PORT: String(s.db.port), REDIS_URL: s.redisUrl,
+    USE_ODOO: Boolean(s.odoo.url && s.odoo.db && s.odoo.username && s.odoo.password),
+    ODOO_URL: s.odoo.url, ODOO_DB: s.odoo.db, ODOO_USERNAME: s.odoo.username, ODOO_PASSWORD: s.odoo.password,
   };
   return fs.readFileSync(TEMPLATE, 'utf8').replace(/\{\{([A-Z_]+)\}\}/g, (m, key) => {
     if (!(key in values)) throw new StepError(`template placeholder ${m} has no value`, `fix ${TEMPLATE}`);

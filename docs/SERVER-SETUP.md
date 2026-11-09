@@ -141,6 +141,21 @@ literals, which is also what `src/lib/rundb.cjs` needs when it re-points each wo
 its own `oneshot_run_<iid>_<hex>` database and Redis DB. Delete the file's first line
 (`# ONESHOT-GENERATED`) to make it yours, and provision-seed will leave it alone from then on.
 
+## Run window
+
+The conductor runs only inside `ONESHOT_WINDOW` (default `10-22`: from 10:00, stopped at 22:00;
+`always` turns the window off). `oneshot-window.timer` fires every hour and two minutes after boot,
+and `scripts/window.sh apply` starts or stops the conductor to match. A start outside the window
+is skipped by the unit's `ExecCondition`, so a reboot at night does not bring it up. The stop is the
+usual `SIGTERM`: in-flight runs reach a journal checkpoint and resume when the window opens again.
+The dashboard is not windowed.
+
+## Odoo
+
+`ODOO_URL` (the XML-RPC endpoint, e.g. `http://host:8069/xmlrpc/2`), `ODOO_DB`, `ODOO_USERNAME` and
+`ODOO_PASSWORD` go into the generated `hrdb/local_settings.py`. `USE_ODOO` is `True` only when all
+four are set. Re-run `node scripts/provision-seed.cjs --only settings --env-file ...` after changing them.
+
 ## Disk
 
 A blocked or parked run keeps its database copy, about one baseline each, until the run finishes
