@@ -251,12 +251,16 @@ function makeSteps(s, env) {
           ? 'node_modules matches package-lock.json' : null;
       },
       do: () => {
-        const r = sh('npm', ['ci', '--no-audit', '--no-fund'], {
+        // ERP's .gitignore excludes package-lock.json, so a fresh clone has none and
+        // `npm ci` refuses outright (EUSAGE). The first install resolves and writes one;
+        // every later pass is then an exact `npm ci` against it.
+        const verb = fs.existsSync(path.join(seed, 'package-lock.json')) ? 'ci' : 'install';
+        const r = sh('npm', [verb, '--no-audit', '--no-fund'], {
           cwd: seed, inherit: true, timeout: INSTALL_TIMEOUT_MS, env: { ...process.env, HUSKY: '0' },
         });
-        if (!r.ok) throw new StepError('npm ci failed in the seed', 'npm registry reachable? (it is blocked while some VPNs are up)');
+        if (!r.ok) throw new StepError(`npm ${verb} failed in the seed`, 'npm registry reachable? (it is blocked while some VPNs are up)');
         writeAtomic(path.join(seed, NPM_STAMP), `${sha256(path.join(seed, 'package-lock.json'))}\n`);
-        return 'npm ci';
+        return `npm ${verb}`;
       },
       verify: () => fs.existsSync(path.join(seed, 'node_modules/.bin')),
     },
