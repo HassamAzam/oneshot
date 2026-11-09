@@ -117,7 +117,7 @@ else
     is_placeholder "${CFG[$k]:-}" && missing+=("$k")
   done
   if is_placeholder "${CFG[ONESHOT_GITLAB_TOKEN]:-}" && is_placeholder "${CFG[GITLAB_TOKEN]:-}"; then
-    missing+=("ONESHOT_GITLAB_TOKEN (or GITLAB_TOKEN)")
+    due "ONESHOT_GITLAB_TOKEN unset — the install goes on, but .env is not written and the conductor cannot start until it is set"
   fi
   if is_placeholder "${CFG[CLAUDE_CODE_OAUTH_TOKEN]:-}"; then
     warn "CLAUDE_CODE_OAUTH_TOKEN unset — the oneshot user must log in once after install: sudo -u oneshot -H claude, then /login"
@@ -342,10 +342,7 @@ SQL
     fi
     tables="$(pg -d "$DB_NAME" -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'" 2>/dev/null || echo 0)"
     if [ -z "$DB_DUMP" ] && [ "$tables" = 0 ]; then
-      warn "$DB_NAME is empty and ONESHOT_DB_DUMP is unset — ERP's migrations do not apply to an empty"
-      warn "database (a data migration reads a column a later one adds), so the seed's migrate step will fail."
-      warn "Set ONESHOT_DB_DUMP to a pg_dump of a dev/staging database and re-run."
-      MISSING=$((MISSING + 1))
+      ok "$DB_NAME is empty and ONESHOT_DB_DUMP is unset — the seed builds the schema from models.py (no data)"
     fi
     if [ -n "$DB_DUMP" ]; then
       if [ "$tables" != 0 ]; then ok "database $DB_NAME has $tables tables — dump not restored (only into an empty DB)"
@@ -458,7 +455,7 @@ fi
 
 if [ "$CHECK" = 0 ]; then
   step "Oneshot .env (npm run setup --from-env)"
-  as_svc npm run --silent setup -- --from-env --env-file "$ENV_FILE"
+  as_svc npm run --silent setup -- --from-env --env-file "$ENV_FILE" || due ".env not written — set the keys named above, then re-run"
 
   step "Seed ($SEED)"
   as_svc node scripts/provision-seed.cjs --env-file "$ENV_FILE"

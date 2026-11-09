@@ -158,6 +158,28 @@ with transaction.atomic():
 print("ONESHOT_TESTUSER " + json.dumps({"actions": actions}))
 `;
 
+/**
+ * ERP's migrations do not replay on an empty database (a data migration reads a column a later
+ * one adds), so an empty one gets its schema the way hrdb/test_settings.py builds the test DB:
+ * straight from models.py with migrations disabled. The caller then fakes every migration.
+ */
+const SCHEMA_FROM_MODELS = `
+from django.conf import settings
+from django.core.management import call_command
+class _NoMigrations(dict):
+    def __contains__(self, item):
+        return True
+    def __getitem__(self, item):
+        return None
+settings.MIGRATION_MODULES = _NoMigrations()
+call_command("migrate", run_syncdb=True, interactive=False, verbosity=0)
+`;
+
+function publicTableCount(db) {
+  const r = appenv.psql(db, "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'", db.name);
+  return r.ok ? Number(r.out) : -1;
+}
+
 function makeSteps(s, env) {
   const seed = s.seed;
   const py = path.join(seed, 'venv/bin/python');
@@ -314,16 +336,19 @@ from django.core.management import call_command
 call_command("migrate", "--check", verbosity=0)
 `).ok ? 'no unapplied migrations' : null),
       do: () => {
+        if (publicTableCount(s.db) === 0) {
+          const schema = django(SCHEMA_FROM_MODELS, {}, MIGRATE_TIMEOUT_MS);
+          if (!schema.ok) throw new StepError(`schema from models failed: ${tail(schema.err)}`, 'restore a dump instead (ONESHOT_DB_DUMP)');
+          const fake = django('from django.core.management import call_command\ncall_command("migrate", fake=True, interactive=False, verbosity=0)\n',
+            {}, MIGRATE_TIMEOUT_MS);
+          if (!fake.ok) throw new StepError(`marking migrations applied failed: ${tail(fake.err)}`, 'drop the database and re-run');
+          return 'empty database: built the schema from models.py and marked every migration applied (no data-migration rows)';
+        }
         const r = django(`
 from django.core.management import call_command
 call_command("migrate", interactive=False, verbosity=1)
 `, {}, MIGRATE_TIMEOUT_MS);
-        if (!r.ok) {
-          throw new StepError(`migrate failed: ${tail(r.err)}`,
-            'ERP\'s migrations do not apply to an EMPTY database (a data migration reads a column a later one adds): '
-            + 'restore a dump into it (setup-server.sh with ONESHOT_DB_DUMP) and re-run. A dump newer than the clone '
-            + 'needs `git pull` in the seed instead.');
-        }
+        if (!r.ok) throw new StepError(`migrate failed: ${tail(r.err)}`, 'a dump newer than the clone needs `git pull` in the seed');
         return 'applied migrations';
       },
       verify: () => django('from django.core.management import call_command\ncall_command("migrate", "--check", verbosity=0)\n').ok,
