@@ -1,0 +1,6 @@
+{
+  "results": [
+    { "id": "TC-01", "result": "pass", "evidence": "toggle saved", "screenshot": "TC-01-pass.png" },
+    { "id": "TC-02", "result": "pass", "evidence": "no shot", "screenshot": "" }
+  ]
+}

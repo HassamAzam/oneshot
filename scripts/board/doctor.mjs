@@ -6,7 +6,7 @@
  * produced anything to ship, whether the board's database is reachable and current,
  * and what is queued. Every check prints a verdict and, when it fails, the fix.
  */
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync, statfsSync } from 'node:fs';
 import { join } from 'node:path';
 import { CFG } from './config.mjs';
 import { resolveOperator } from './identity.mjs';
@@ -137,6 +137,35 @@ else {
     if (n) warn(`${n} row(s) waiting to ship`, 'run `npm run board:once` and read the flush line');
     else ok('empty (everything shipped)');
   } catch { warn('outbox unreadable'); }
+}
+
+// ---- 6. where screenshots and videos land
+console.log(`\n${D}Media  ${CFG.mediaDir}${X}`);
+if (!existsSync(CFG.mediaDir)) {
+  warn('media dir does not exist yet', `the collector creates it on the first evidence file; to check now: mkdir -p ${CFG.mediaDir}`);
+} else {
+  try { accessSync(CFG.mediaDir, constants.W_OK); ok('writable'); } catch {
+    warn('not writable by this user — evidence files will be skipped', `chown it to this user, or set BOARD_MEDIA_DIR (e.g. mkdir -p ${CFG.mediaDir})`);
+  }
+  try {
+    const fs = statfsSync(CFG.mediaDir);
+    const gb = (n) => `${(n / 1e9).toFixed(1)} GB`;
+    const free = fs.bavail * fs.bsize;
+    (free < 2e9 ? warn : ok)(`${gb(free)} free of ${gb(fs.blocks * fs.bsize)}`);
+  } catch (e) { warn(`free space unknown: ${e.message}`); }
+  const CAP = 50_000;
+  let n = 0;
+  const stack = [CFG.mediaDir];
+  while (stack.length && n < CAP) {
+    const dir = stack.pop();
+    let entries = [];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (e.isDirectory()) stack.push(join(dir, e.name));
+      else if (e.isFile() && ++n >= CAP) break;
+    }
+  }
+  ok(`${n >= CAP ? `${CAP}+` : n} file(s)`);
 }
 
 console.log(failed ? `\n${R}${failed} problem(s) above.${X}\n` : `\n${G}All checks passed — this desk should appear on the board within a minute of the collector running.${X}\n`);

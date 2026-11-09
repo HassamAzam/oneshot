@@ -19,6 +19,7 @@ import { resolveOperator } from './identity.mjs';
 import { journalToRun, readJournal, runDirs, sessionKey, ts } from './journal.mjs';
 import { extractTranscript, parseTranscriptName } from './extract.mjs';
 import { gatesFor } from './gates.mjs';
+import { collectEvidence } from './evidence.mjs';
 import { mergedBy, mergerCache } from './mrmerger.mjs';
 import { loadHookIndex } from './hooks.mjs';
 import { Outbox, atomicWrite } from './outbox.mjs';
@@ -59,6 +60,10 @@ if (existsSync(STATE_FILE)) {
   try { state = JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch { /* start fresh */ }
   state.files ||= {};
 }
+/** sha ids of evidence already queued — a 5 s rescan must not re-hash into a new outbox entry. */
+const evidenceSeen = new Set(Array.isArray(state.evidence) ? state.evidence : []);
+/** Skips already logged this process: an oversized file is reported once, not every scan. */
+const skipsLogged = new Set();
 const outbox = new Outbox(CFG.stateDir);
 const operator = resolveOperator();
 const mergers = mergerCache(CFG.stateDir);
@@ -102,6 +107,16 @@ function scan() {
     if (j) {
       outbox.put('runs', journalToRun(j, operator.id, archived));
       for (const g of gatesFor(j, operator.id, mergerOf(j))) outbox.put('interventions', g);
+      const ev = collectEvidence({
+        runDir: dir, journal: j, operatorId: operator.id,
+        mediaDir: CFG.mediaDir, maxBytes: CFG.maxMediaBytes, seen: evidenceSeen,
+      });
+      for (const r of ev.rows) { outbox.put('evidence', r); evidenceSeen.add(r.id); }
+      for (const s of ev.skipped) {
+        // An unwritable media dir is the same news for every run: say it once.
+        const key = s.startsWith(`${CFG.mediaDir}:`) ? s : `${j.runId}:${s}`;
+        if (!skipsLogged.has(key)) { skipsLogged.add(key); log(`evidence skipped: run ${j.iid} ${s}`); }
+      }
     }
     const tdir = join(dir, 'transcripts');
     const files = existsSync(tdir) ? readdirSync(tdir).filter((f) => f.endsWith('.jsonl')) : [];
@@ -155,6 +170,7 @@ function scan() {
 
   // Outbox first, watermark second: a crash between the two re-parses (idempotent) rather than losing rows.
   outbox.persist();
+  state.evidence = [...evidenceSeen];
   atomicWrite(STATE_FILE, JSON.stringify(state));
   if (parsed) log(`scan: ${parsed} transcript(s) changed`, { pending: outbox.size(), ms: Date.now() - t0 });
 }
