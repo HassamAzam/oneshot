@@ -95,45 +95,66 @@ const str = (v: unknown): string => (v == null ? '' : String(v)).trim();
 const cell = (v: unknown): string => str(v).replace(/\r?\n/g, ' ').replace(/\|/g, '\\|') || '—';
 
 /**
- * The research write-up. Research is the one phase GitLab never sees — it is
- * the conductor's own handoff to the planner — and it is where the "why is it
- * like this" lives, so this is the document a newcomer to the ticket wants first.
+ * How prose and table cells are written for one destination. Drive's markdown
+ * import takes text as it is; a GitLab note goes through its HTML sanitiser,
+ * which eats anything shaped like a tag (`<title> is static`), so the publisher
+ * passes gitlabmd's escapers and asks for the long sections folded.
  */
-export function renderResearchMd(iid: number, title: string, issueUrl: string, r: Record<string, unknown>): string {
-  const out: string[] = [`# Research — ${iid} ${title}`, '', `Ticket: ${issueUrl}`, ''];
-  if (str(r.summary)) out.push('## Summary', str(r.summary), '');
-  if (str(r.understanding)) out.push('## What the ticket is asking', str(r.understanding), '');
-  if (str(r.module)) out.push('## Module', str(r.module), '');
+export interface MdFormat {
+  text: (s: string) => string;
+  cell: (v: unknown) => string;
+  /** Wrap the long, reference-only sections in <details> so the note reads at a glance. */
+  fold: boolean;
+}
+
+const PLAIN: MdFormat = { text: (s) => s, cell, fold: false };
+
+/**
+ * The research write-up. It is the conductor's own handoff to the planner and
+ * where the "why is it like this" lives, so it is the document a newcomer to
+ * the ticket wants first — on the issue and in the Drive folder alike.
+ */
+export function renderResearchMd(
+  iid: number, title: string, issueUrl: string, r: Record<string, unknown>, fmt: MdFormat = PLAIN,
+): string {
+  const t = (v: unknown): string => fmt.text(str(v));
+  const section = (heading: string, body: string[]): string[] => (fmt.fold
+    ? [`<details><summary>${heading}</summary>`, '', ...body, '', '</details>', '']
+    : [`## ${heading}`, ...body, '']);
+  const out: string[] = [`# Research — ${iid} ${fmt.text(title)}`, ''];
+  if (!fmt.fold) out.push(`Ticket: ${issueUrl}`, '');
+  if (str(r.summary)) out.push('## Summary', t(r.summary), '');
+  if (str(r.understanding)) out.push('## What the ticket is asking', t(r.understanding), '');
+  if (str(r.module)) out.push('## Module', t(r.module), '');
   const ac = list(r.acceptanceCriteria).map(str).filter(Boolean);
-  if (ac.length) out.push('## Acceptance criteria', ...ac.map((a) => `- ${a}`), '');
-  const path = list(r.codePath) as Array<Record<string, unknown>>;
-  if (path.length) {
-    out.push('## Code path', '| File | Line | Role |', '|---|---|---|',
-      ...path.map((p) => `| ${cell(p.file)} | ${cell(p.line)} | ${cell(p.role)} |`), '');
-  }
+  if (ac.length) out.push('## Acceptance criteria', ...ac.map((a) => `- ${fmt.text(a)}`), '');
   const blast = list(r.blastRadius).map(str).filter(Boolean);
-  if (blast.length) out.push('## Blast radius', ...blast.map((b) => `- ${b}`), '');
-  const ui = r.uiPath as Record<string, unknown> | undefined;
-  if (ui && typeof ui === 'object') {
-    out.push('## UI path');
-    for (const [k, v] of Object.entries(ui)) {
-      const val = typeof v === 'string' ? v : JSON.stringify(v);
-      if (str(val)) out.push(`- **${k}**: ${str(val)}`);
-    }
-    out.push('');
-  }
+  if (blast.length) out.push('## Blast radius', ...blast.map((b) => `- ${fmt.text(b)}`), '');
+  const unknowns = list(r.unknowns).map(str).filter(Boolean);
+  if (unknowns.length) out.push('## Unknowns', ...unknowns.map((u) => `- ${fmt.text(u)}`), '');
   const repro = r.reproduction as Record<string, unknown> | undefined;
   if (repro && str(repro.verdict) && str(repro.verdict) !== 'not-applicable') {
-    out.push('## Reproduction', `Verdict: **${str(repro.verdict)}**`);
+    out.push('## Reproduction', `Verdict: **${t(repro.verdict)}**`);
     const steps = list(repro.steps).map(str).filter(Boolean);
-    if (steps.length) out.push('', ...steps.map((s, i) => `${i + 1}. ${s}`));
-    if (str(repro.expected)) out.push('', `Expected: ${str(repro.expected)}`);
-    if (str(repro.observed)) out.push('', `Observed: ${str(repro.observed)}`);
-    if (str(repro.reason)) out.push('', `Note: ${str(repro.reason)}`);
+    if (steps.length) out.push('', ...steps.map((x, i) => `${i + 1}. ${fmt.text(x)}`));
+    if (str(repro.expected)) out.push('', `Expected: ${t(repro.expected)}`);
+    if (str(repro.observed)) out.push('', `Observed: ${t(repro.observed)}`);
+    if (str(repro.reason)) out.push('', `Note: ${t(repro.reason)}`);
     out.push('');
   }
-  const unknowns = list(r.unknowns).map(str).filter(Boolean);
-  if (unknowns.length) out.push('## Unknowns', ...unknowns.map((u) => `- ${u}`), '');
+  const path = list(r.codePath) as Array<Record<string, unknown>>;
+  if (path.length) {
+    out.push(...section(`Code path (${path.length} step(s))`, ['| File | Line | Role |', '|---|---|---|',
+      ...path.map((p) => `| ${fmt.cell(p.file)} | ${fmt.cell(p.line)} | ${fmt.cell(p.role)} |`)]));
+  }
+  const ui = r.uiPath as Record<string, unknown> | undefined;
+  if (ui && typeof ui === 'object') {
+    const rows = Object.entries(ui)
+      .map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)] as const)
+      .filter(([, v]) => str(v))
+      .map(([k, v]) => `- **${k}**: ${fmt.text(str(v))}`);
+    if (rows.length) out.push(...section('UI path', rows));
+  }
   return `${out.join('\n').trimEnd()}\n`;
 }
 
