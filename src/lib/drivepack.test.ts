@@ -5,7 +5,7 @@ import {
   GOOGLE_DOC, GOOGLE_SHEET, demoPdfHtml, packEntries, renderFindingsMd, renderReadmeMd, renderResearchMd,
   ticketFolderName, type PackInput,
 } from './drivepack.js';
-import { consentUrl, signJwt, tokenRequest } from './gdrive.js';
+import { codeFromPasted, consentUrl, signJwt, tokenRequest } from './gdrive.js';
 
 const ISSUE = 'https://gitlab.arbisoft.com/arbisoft/erp/-/issues/9002';
 
@@ -139,4 +139,12 @@ test('a person\'s sign-in asks only for drive.file, offline, with PKCE', () => {
   assert.equal(u.searchParams.get('access_type'), 'offline');
   assert.equal(u.searchParams.get('code_challenge_method'), 'S256');
   assert.equal(u.searchParams.get('redirect_uri'), 'http://127.0.0.1:5555/');
+});
+
+test('a pasted-back sign-in yields its code only when it belongs to this attempt', () => {
+  assert.equal(codeFromPasted('http://127.0.0.1:1/?state=st&code=4/abc&scope=x', 'st'), '4/abc');
+  assert.equal(codeFromPasted('  4/abc  ', 'st'), '4/abc');
+  assert.throws(() => codeFromPasted('http://127.0.0.1:1/?state=other&code=4/abc', 'st'), /different sign-in/);
+  assert.throws(() => codeFromPasted('http://127.0.0.1:1/?state=st&error=access_denied', 'st'), /access_denied/);
+  assert.throws(() => codeFromPasted('', 'st'), /nothing/);
 });

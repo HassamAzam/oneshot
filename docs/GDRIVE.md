@@ -84,6 +84,14 @@ Neither uses domain-wide delegation.
    Drive (`--root-name` to change it), and prints the two `.env` lines. Under
    `drive.file` Oneshot cannot see a folder you made by hand, which is why the
    script makes it. Move, rename or share that folder freely afterwards.
+
+   On a server with no browser, add `--no-browser` and run it there as the
+   `oneshot` user with `--out /etc/oneshot/gdrive-user.json`: it prints the
+   sign-in address; open it on your Mac, allow access, and the browser lands on
+   a `127.0.0.1` page that cannot load. That is expected. Copy the whole
+   address from the address bar and paste it back. (Google retired the old
+   copy-a-code page, so this is how every CLI does it now.) Your password only
+   ever goes to Google's own page.
 3. Put those two lines in `.env` (on the server, copy the file to
    `/etc/oneshot/`, mode 600, owner `oneshot`) and continue at step 5 below.
 

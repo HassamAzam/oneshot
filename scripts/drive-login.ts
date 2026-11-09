@@ -1,5 +1,5 @@
 /**
- * `npm run drive:login -- --client <client_secret.json> --out <path> [--root-name <name>]`
+ * `npm run drive:login -- --client <client_secret.json> --out <path> [--root-name <name>] [--no-browser]`
  *
  * One-time sign-in for orgs where the Drive folders cannot live in a Shared
  * Drive shared with a service account. The person running it signs in in their
@@ -9,8 +9,10 @@
  * folder (which, under that scope, has to be one this app made).
  *
  * `--client` is the "Desktop app" OAuth client JSON downloaded from Google
- * Cloud. Run this on a machine with a browser; copy the --out file to the
- * server afterwards. Nothing secret is printed.
+ * Cloud. On a server with no browser pass `--no-browser`: it prints the sign-in
+ * address to open on your own machine and asks for the address the browser
+ * lands on. Your password only ever goes to Google's page. Nothing secret is
+ * printed.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -18,18 +20,38 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { createServer } from 'node:http';
 import { dirname } from 'node:path';
 import { expandPath } from '../src/lib/config.js';
-import { Drive, TOKEN_URI, consentUrl, type AuthorizedUser } from '../src/lib/gdrive.js';
+import { createInterface } from 'node:readline/promises';
+import { Drive, TOKEN_URI, codeFromPasted, consentUrl, type AuthorizedUser } from '../src/lib/gdrive.js';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
+/**
+ * Google retired the copy-this-code page, so the redirect stays a loopback
+ * address. Nothing listens on it: the browser shows "can't connect", and the
+ * address bar then holds the code. Port 1 because a Desktop client accepts any
+ * loopback port and nothing on the person's Mac answers there.
+ */
+async function pasteBack(clientId: string, challenge: string, state: string): Promise<{ code: string; redirect: string }> {
+  const redirect = 'http://127.0.0.1:1/';
+  console.log(`Open this on any machine where you can sign in to Google:\n\n${consentUrl(clientId, redirect, challenge, state)}\n`);
+  console.log('After you allow access the browser shows a page that cannot load. That is expected:');
+  console.log('copy the WHOLE address from its address bar and paste it here.\n');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return { code: codeFromPasted(await rl.question('Address: '), state), redirect };
+  } finally {
+    rl.close();
+  }
+}
+
 async function main(): Promise<void> {
   const clientPath = arg('client');
   const outArg = arg('out');
   if (!clientPath || !outArg) {
-    console.error('usage: npm run drive:login -- --client <client_secret.json> --out <path> [--root-name <name>]');
+    console.error('usage: npm run drive:login -- --client <client_secret.json> --out <path> [--root-name <name>] [--no-browser]');
     process.exit(1);
   }
   const out = expandPath(outArg);
@@ -44,7 +66,11 @@ async function main(): Promise<void> {
   const challenge = createHash('sha256').update(verifier).digest('base64url');
   const state = randomBytes(16).toString('hex');
 
-  const code = await new Promise<{ code: string; redirect: string }>((resolve, reject) => {
+  // On a server there is no browser to come back to: print the address, let the
+  // person open it on their own machine, and take back the address it lands on.
+  const code = process.argv.includes('--no-browser')
+    ? await pasteBack(client.client_id, challenge, state)
+    : await new Promise<{ code: string; redirect: string }>((resolve, reject) => {
     const server = createServer((req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
       if (url.pathname !== '/') { res.writeHead(404).end(); return; }

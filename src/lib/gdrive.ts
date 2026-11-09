@@ -190,3 +190,24 @@ export function consentUrl(clientId: string, redirectUri: string, challenge: str
     access_type: 'offline', prompt: 'consent', code_challenge: challenge, code_challenge_method: 'S256', state,
   })}`;
 }
+
+/**
+ * The authorization code out of what a person pasted back in `--no-browser`
+ * mode: the whole address their browser landed on (the 127.0.0.1 page that
+ * fails to load on their Mac), or the bare code. A pasted address must carry
+ * this sign-in's `state`, so a stale or foreign redirect is refused.
+ */
+export function codeFromPasted(pasted: string, state: string): string {
+  const s = pasted.trim();
+  if (!/^https?:\/\//i.test(s)) {
+    if (!s || /\s/.test(s)) throw new Error('nothing that looks like an address or a code was pasted');
+    return s;
+  }
+  const u = new URL(s);
+  const err = u.searchParams.get('error');
+  if (err) throw new Error(`Google refused the sign-in: ${err}`);
+  if (u.searchParams.get('state') !== state) throw new Error('that address is from a different sign-in attempt — start again');
+  const code = u.searchParams.get('code');
+  if (!code) throw new Error('the pasted address carries no code');
+  return code;
+}
