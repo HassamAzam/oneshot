@@ -54,6 +54,23 @@ export function tokenRequest(cred: Record<string, unknown>, nowSec: number): URL
   });
 }
 
+/**
+ * fetch, retried once after a network-level failure ("fetch failed": a reset or
+ * DNS blip, never an HTTP status). The first live pass from a desk died on
+ * exactly one of those, and a pass that gives up costs a whole phase's wait.
+ * A body that is a Buffer or string is safe to resend; HTTP errors are not
+ * retried here, so nothing Google refused is ever sent twice.
+ */
+async function fetchOnce(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(CALL_MS) });
+  } catch (err) {
+    if (!(err instanceof TypeError)) throw err;
+    await new Promise((r) => setTimeout(r, 2000));
+    return fetch(url, { ...init, signal: AbortSignal.timeout(CALL_MS) });
+  }
+}
+
 export class DriveError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
 }
@@ -81,11 +98,10 @@ export class Drive {
   private async accessToken(): Promise<string> {
     if (this.token && Date.now() < this.token.until) return this.token.value;
     const cred = JSON.parse(readFileSync(this.credentialsPath, 'utf8')) as Record<string, unknown>;
-    const res = await fetch(typeof cred.token_uri === 'string' ? cred.token_uri : TOKEN_URI, {
+    const res = await fetchOnce(typeof cred.token_uri === 'string' ? cred.token_uri : TOKEN_URI, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: tokenRequest(cred, Math.floor(Date.now() / 1000)),
-      signal: AbortSignal.timeout(CALL_MS),
     });
     const body = await res.json().catch(() => ({})) as { access_token?: string; expires_in?: number; error_description?: string; error?: string };
     if (!res.ok || !body.access_token) {
@@ -97,10 +113,9 @@ export class Drive {
   }
 
   private async call<T>(url: string, init: RequestInit = {}): Promise<{ data: T; res: Response }> {
-    const res = await fetch(url, {
+    const res = await fetchOnce(url, {
       ...init,
       headers: { authorization: `Bearer ${await this.accessToken()}`, ...(init.headers ?? {}) },
-      signal: AbortSignal.timeout(CALL_MS),
     });
     const textBody = await res.text();
     if (!res.ok) {
