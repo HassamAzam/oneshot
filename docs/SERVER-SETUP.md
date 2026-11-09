@@ -105,10 +105,15 @@ comment on the same line as a value: systemd keeps it as part of the value.
     template that per-run databases are copied from, and only when it does not exist yet
     (`--refresh-baseline` forces a rebuild). Per-run databases stay off until this template
     exists.
-14. **systemd.** It installs `deploy/systemd/oneshot-conductor.service` and
+14. **Oneshot Board**, only with `ONESHOT_BOARD=1` (see *Oneshot Board* below). It clones the
+    board to `/srv/oneshot-board` and creates `BOARD_DB_NAME` (default `oneshot_board`) in this
+    Postgres, owned by `DB_USER` and empty. It writes `/etc/oneshot/board.env`, runs
+    `npm ci` + `next build` (only when the lock file or the board's commit changed), applies the
+    board's `schema.sql` (idempotent, every pass), and warns while the board has no login.
+15. **systemd.** It installs `deploy/systemd/oneshot-conductor.service` and
     `oneshot-dashboard.service`, runs `daemon-reload`, and enables both units. With `--start` it
     also (re)starts them.
-15. **Verdict.** It runs `node src/lib/appenv.cjs --env-file ...`, the same checks doctor's
+16. **Verdict.** It runs `node src/lib/appenv.cjs --env-file ...`, the same checks doctor's
     *Host prerequisites* section runs. It exits 1 on any FAIL and prints the fix line.
 
 ## The seed: `scripts/provision-seed.cjs`
@@ -157,6 +162,47 @@ The dashboard is not windowed.
 `ODOO_PASSWORD` go into the generated `hrdb/local_settings.py`. `USE_ODOO` is `True` only when all
 four are set. Re-run `node scripts/provision-seed.cjs --only settings --env-file ...` after changing them.
 
+## Oneshot Board
+
+The telemetry board (github.com/HassamAzam/oneshot-board) can run on this server instead of
+Vercel + Supabase. It shows sessions, agents, skills, tool calls, transcripts, interventions and
+the long-run stats. The board already talks to Postgres with plain `pg` and skips TLS for
+`127.0.0.1`, so only where `DATABASE_URL` points changes. Its data lives in this server's Postgres
+in its own database, which starts empty: the board records from the day it is installed.
+
+In `/etc/oneshot/oneshot.env`:
+
+```sh
+ONESHOT_BOARD=1
+BOARD_INGEST_TOKEN=<openssl rand -hex 32>
+BOARD_SESSION_SECRET=<openssl rand -hex 32>
+# optional: BOARD_PORT=3100  BOARD_DB_NAME=oneshot_board  BOARD_RETENTION_DAYS=60  BOARD_OPERATOR=server-1
+```
+
+Re-run `sudo /srv/oneshot/scripts/setup-server.sh --start`, then add a login (the first one is
+the admin; it prompts for the password):
+
+```sh
+sudo -u oneshot -H bash -c 'cd /srv/oneshot-board/web && set -a && . /etc/oneshot/board.env && npm run user:add -- <username>'
+```
+
+Open `http://<server-ip>:3100`. Two units run it:
+
+- `oneshot-board`: `next start` on `0.0.0.0:$BOARD_PORT`.
+- `oneshot-board-collector`: `scripts/board/index.mjs` in `/srv/oneshot`. It runs all day, not
+  just inside the run window, and posts `state/` to `http://127.0.0.1:$BOARD_PORT` every 60s.
+
+To upgrade the board, run `git -C /srv/oneshot-board pull`, then the setup script again (it
+rebuilds and restarts). The board's history is the `oneshot_board` database. Back it up with
+`sudo -u postgres pg_dump -Fc oneshot_board > board.dump`.
+
+If the repo is private, the clone needs credentials. Clone it once as `oneshot` and the script
+uses that checkout:
+`sudo -u oneshot -H git clone <url> /srv/oneshot-board`.
+
+The board's page loads its fonts from Google Fonts. On a machine with no internet it falls back
+to system fonts and still works.
+
 ## Disk
 
 A blocked or parked run keeps its database copy, about one baseline each, until the run finishes
@@ -167,7 +213,7 @@ expect, and prefer a copy-on-write filesystem for `/var/lib/postgresql` (XFS wit
 ## Day two
 
 ```sh
-sudo systemctl status oneshot-conductor oneshot-dashboard
+sudo systemctl status oneshot-conductor oneshot-dashboard oneshot-board oneshot-board-collector
 journalctl -u oneshot-conductor -f
 sudo -u oneshot -H bash -c 'cd /srv/oneshot && npm run doctor'
 sudo -u oneshot -H bash -c 'cd /srv/oneshot && node scripts/app.cjs rundb status'

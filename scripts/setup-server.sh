@@ -143,7 +143,13 @@ DB_HOST="$(cfg DB_HOST 127.0.0.1)"
 DB_BASELINE="$(cfg ONESHOT_DB_BASELINE "${DB_NAME}_baseline")"
 PER_RUN_DB="$(cfg ONESHOT_PER_RUN_DB)"
 REPO_URL="$(cfg GITLAB_REPO_URL)"
-for ident in "$DB_NAME" "$DB_USER" "$DB_BASELINE"; do
+BOARD="$(cfg ONESHOT_BOARD)"
+BOARD_DIR=/srv/oneshot-board
+BOARD_ENV="$(dirname "$ENV_FILE")/board.env"
+BOARD_PORT="$(cfg BOARD_PORT 3100)"
+BOARD_DB="$(cfg BOARD_DB_NAME oneshot_board)"
+BOARD_REPO="$(cfg BOARD_REPO_URL https://github.com/HassamAzam/oneshot-board.git)"
+for ident in "$DB_NAME" "$DB_USER" "$DB_BASELINE" "$BOARD_DB"; do
   [[ "$ident" =~ ^[a-z_][a-z0-9_]*$ ]] || die "DB_NAME/DB_USER '$ident' is not a plain lower-case identifier" "use letters, digits and _"
 done
 for p in "$WORK_REPO" "$SEED" "$WT_ROOT"; do
@@ -488,11 +494,109 @@ else
   fi
 fi
 
+# ------------------------------------------------------------ oneshot board
+
+# The telemetry board, self-hosted: the same Next.js app that ran on Vercel, on this
+# server's Postgres instead of Supabase. Its database starts empty, so it records from
+# the day it is installed. The board talks to Postgres with plain `pg` and skips TLS for
+# 127.0.0.1, so nothing in it changes; only where DATABASE_URL points does.
+board_restart=0
+if [ "$BOARD" = 1 ]; then
+  step "Oneshot Board ($BOARD_DIR, port $BOARD_PORT, database $BOARD_DB)"
+  [[ "$BOARD_PORT" =~ ^[0-9]+$ ]] || die "BOARD_PORT '$BOARD_PORT' is not a port number" "fix it in $ENV_FILE"
+  for k in BOARD_INGEST_TOKEN BOARD_SESSION_SECRET; do
+    if is_placeholder "${CFG[$k]:-}"; then
+      if [ "$CHECK" = 1 ]; then due "$k unset in $ENV_FILE (ONESHOT_BOARD=1)"
+      else die "$k unset in $ENV_FILE (ONESHOT_BOARD=1)" "openssl rand -hex 32, into $ENV_FILE"; fi
+    fi
+  done
+
+  if [ -f "$BOARD_DIR/web/package.json" ]; then ok "$BOARD_DIR checked out ($(git -C "$BOARD_DIR" rev-parse --short HEAD 2>/dev/null || echo '?'))"
+  elif [ "$CHECK" = 1 ]; then due "$BOARD_DIR is not a checkout of $BOARD_REPO"
+  else
+    install -d -m 0755 -o "$SVC_USER" -g "$SVC_USER" "$BOARD_DIR"
+    runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" git clone -q "$BOARD_REPO" "$BOARD_DIR" \
+      || die "could not clone $BOARD_REPO" "private repo? clone it as $SVC_USER with credentials: sudo -u $SVC_USER -H git clone <url> $BOARD_DIR, then re-run"
+    did "cloned $BOARD_REPO"
+  fi
+
+  if [ "$CHECK" = 1 ] && [ "$(id -u)" != 0 ]; then warn "not root: board database not inspected"
+  elif pg -c 'SELECT 1' >/dev/null 2>&1; then
+    if [ "$(pg -c "SELECT 1 FROM pg_database WHERE datname = '$BOARD_DB'")" = 1 ]; then ok "database $BOARD_DB"
+    elif [ "$CHECK" = 1 ]; then due "database $BOARD_DB missing"
+    else pg -c "CREATE DATABASE $BOARD_DB OWNER $DB_USER" >/dev/null && did "created database $BOARD_DB (empty: the board records from now on)"
+    fi
+  else due "Postgres not answering — board database not checked"
+  fi
+
+  # Written here rather than kept in the main env file: DATABASE_URL is composed from
+  # DB_USER/DB_PASSWORD, and the board expects INGEST_TOKEN/SESSION_SECRET by those names.
+  if have node; then
+    # Every character outside [A-Za-z0-9._~-] percent-encoded, so the line reads the same
+    # to systemd's EnvironmentFile and to a shell sourcing it for npm run user:add.
+    urlenc() { node -p 'encodeURIComponent(process.argv[1]).replace(/[!\x27()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())' "$1"; }
+    db_url="postgresql://$(urlenc "$DB_USER"):$(urlenc "$DB_PASSWORD")@127.0.0.1:$DB_PORT/$BOARD_DB"
+    tmp_env="$(mktemp)"
+    cat > "$tmp_env" <<ENV
+# Written by scripts/setup-server.sh from $ENV_FILE — edit that file and re-run, not this one.
+DATABASE_URL="$db_url"
+INGEST_TOKEN=$(cfg BOARD_INGEST_TOKEN)
+SESSION_SECRET=$(cfg BOARD_SESSION_SECRET)
+RETENTION_DAYS=$(cfg BOARD_RETENTION_DAYS 60)
+PORT=$BOARD_PORT
+BOARD_URL=http://127.0.0.1:$BOARD_PORT
+BOARD_INGEST_TOKEN=$(cfg BOARD_INGEST_TOKEN)
+BOARD_OPERATOR=$(cfg BOARD_OPERATOR "$(cfg ONESHOT_OPERATOR "$(hostname -s)")")
+ENV
+    if [ -f "$BOARD_ENV" ] && cmp -s "$tmp_env" "$BOARD_ENV"; then ok "$BOARD_ENV current"
+    elif [ "$CHECK" = 1 ]; then due "$BOARD_ENV missing or out of date"
+    else install -m 0600 -o "$SVC_USER" -g "$SVC_USER" "$tmp_env" "$BOARD_ENV"; board_restart=1; did "wrote $BOARD_ENV (mode 600)"
+    fi
+    rm -f "$tmp_env"
+  else due "node missing — $BOARD_ENV not written"
+  fi
+
+  as_board() { (cd "$BOARD_DIR/web" && runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" PATH="$PATH" NO_COLOR=1 NEXT_TELEMETRY_DISABLED=1 "$@"); }
+  if [ -f "$BOARD_DIR/web/package-lock.json" ]; then
+    stamp="$(sha256sum "$BOARD_DIR/web/package-lock.json" | cut -d' ' -f1) $(git -C "$BOARD_DIR" rev-parse HEAD 2>/dev/null)"
+    if [ -f "$BOARD_DIR/web/.next/.oneshot-build" ] && [ "$(cat "$BOARD_DIR/web/.next/.oneshot-build")" = "$stamp" ]; then
+      ok "board built at $(git -C "$BOARD_DIR" rev-parse --short HEAD)"
+    elif [ "$CHECK" = 1 ]; then due "board not built for $(git -C "$BOARD_DIR" rev-parse --short HEAD 2>/dev/null)"
+    else
+      chown -R "$SVC_USER:$SVC_USER" "$BOARD_DIR"
+      as_board npm ci --no-audit --no-fund >/dev/null
+      as_board npm run build >/dev/null || die "the board's next build failed" "cd $BOARD_DIR/web && sudo -u $SVC_USER npm run build"
+      printf '%s' "$stamp" | as_board tee .next/.oneshot-build >/dev/null
+      board_restart=1
+      did "npm ci + next build"
+    fi
+  fi
+
+  if [ "$CHECK" = 0 ] && [ -f "$BOARD_ENV" ] && [ -d "$BOARD_DIR/web/node_modules/pg" ]; then
+    # Idempotent (CREATE ... IF NOT EXISTS throughout), so it runs on every pass and
+    # picks up whatever the board's schema.sql has gained since.
+    db_url="$(sed -n 's/^DATABASE_URL="\(.*\)"$/\1/p' "$BOARD_ENV")"
+    as_board env DATABASE_URL="$db_url" node scripts/db-migrate.mjs >/dev/null \
+      || die "applying $BOARD_DIR/supabase/schema.sql to $BOARD_DB failed" "cd $BOARD_DIR/web && sudo -u $SVC_USER env DATABASE_URL=… npm run db:migrate"
+    ok "schema applied to $BOARD_DB"
+    users="$(pg -d "$BOARD_DB" -c 'SELECT count(*) FROM users' 2>/dev/null || echo 0)"
+    if [ "$users" = 0 ]; then
+      warn "the board has no login yet — add one (prompts for the password):"
+      warn "  sudo -u $SVC_USER -H bash -c 'cd $BOARD_DIR/web && set -a && . $BOARD_ENV && npm run user:add -- <username>'"
+    else ok "$users board login(s)"
+    fi
+  fi
+fi
+
 # ----------------------------------------------------------------- systemd
 
 step "systemd units"
 UNITS=(oneshot-conductor.service oneshot-dashboard.service oneshot-window.service oneshot-window.timer)
 ENABLE=(oneshot-conductor.service oneshot-dashboard.service oneshot-window.timer)
+if [ "$BOARD" = 1 ]; then
+  UNITS+=(oneshot-board.service oneshot-board-collector.service)
+  ENABLE+=(oneshot-board.service oneshot-board-collector.service)
+fi
 if ! have systemctl || [ ! -d /run/systemd/system ]; then
   warn "systemd is not running here (container?) — units not installed"
 else
@@ -509,7 +613,13 @@ else
     [ "$changed" = 1 ] && systemctl daemon-reload
     systemctl enable "${ENABLE[@]}" >/dev/null 2>&1 && ok "enabled ${ENABLE[*]}"
     if [ "$START" = 1 ]; then systemctl restart "${ENABLE[@]}" && did "(re)started ${ENABLE[*]} (the conductor only inside ONESHOT_WINDOW)"
-    else ok "not started (pass --start, or: sudo systemctl start ${ENABLE[*]})"; fi
+    else
+      ok "not started (pass --start, or: sudo systemctl start ${ENABLE[*]})"
+      # A new build or board.env is not live until the board restarts; only if it is running.
+      if [ "$board_restart" = 1 ] && systemctl is-active --quiet oneshot-board.service; then
+        systemctl restart oneshot-board.service oneshot-board-collector.service && did "restarted the board for its new build/env"
+      fi
+    fi
   else
     for u in "${ENABLE[@]}"; do
       if systemctl is-enabled --quiet "$u" 2>/dev/null; then ok "$u enabled"; else due "$u not enabled"; fi
