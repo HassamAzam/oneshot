@@ -36,8 +36,9 @@ read by systemd (`EnvironmentFile=`), by `npm run setup -- --from-env --env-file
 `/srv/oneshot/.env` from it, and by `scripts/provision-seed.cjs`. Use plain `KEY=value` lines
 with absolute paths: systemd expands neither `~` nor `$VAR`.
 
-Required: `GITLAB_REPO_URL`, `ONESHOT_GITLAB_TOKEN` (or `GITLAB_TOKEN`), `CLAUDE_CODE_OAUTH_TOKEN`
-(from `claude setup-token` on any machine with a browser; never `ANTHROPIC_API_KEY`),
+Required: `GITLAB_REPO_URL`, `ONESHOT_GITLAB_TOKEN` (or `GITLAB_TOKEN`), a Claude subscription credential (either
+`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or a one-time `sudo -u oneshot -H claude` then
+`/login` after install; never `ANTHROPIC_API_KEY`),
 `ONESHOT_TEST_LOGIN` (`email:password`), `DB_NAME`, `DB_USER`, `DB_PASSWORD`, and
 `ONESHOT_DASHBOARD_TOKEN`. A fresh server also needs `ONESHOT_DB_DUMP`, a `pg_dump` of a dev or
 staging database. ERP's migrations do not apply to an empty database (verified: a data migration

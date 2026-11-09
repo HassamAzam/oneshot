@@ -278,7 +278,7 @@ const CHECKS = {
   claudeAuth: () => {
     const src = claudeCredentialSource();
     return check('Claude credentials', Boolean(src), src || 'none found',
-      'run `claude setup-token` and put CLAUDE_CODE_OAUTH_TOKEN in the env file (never ANTHROPIC_API_KEY)');
+      'log in as the service user (sudo -u oneshot -H claude, then /login), or put a `claude setup-token` token in CLAUDE_CODE_OAUTH_TOKEN (never ANTHROPIC_API_KEY)');
   },
   gitlabToken: () => {
     const src = gitlabTokenSource();

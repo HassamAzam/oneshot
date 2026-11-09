@@ -113,11 +113,14 @@ else
   perms="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE")"
   [ "$perms" = 600 ] || [ "$perms" = 400 ] || warn "$ENV_FILE is mode $perms — it holds secrets; chmod 600"
   missing=()
-  for k in GITLAB_REPO_URL CLAUDE_CODE_OAUTH_TOKEN ONESHOT_TEST_LOGIN DB_NAME DB_USER DB_PASSWORD ONESHOT_DASHBOARD_TOKEN; do
+  for k in GITLAB_REPO_URL ONESHOT_TEST_LOGIN DB_NAME DB_USER DB_PASSWORD ONESHOT_DASHBOARD_TOKEN; do
     is_placeholder "${CFG[$k]:-}" && missing+=("$k")
   done
   if is_placeholder "${CFG[ONESHOT_GITLAB_TOKEN]:-}" && is_placeholder "${CFG[GITLAB_TOKEN]:-}"; then
     missing+=("ONESHOT_GITLAB_TOKEN (or GITLAB_TOKEN)")
+  fi
+  if is_placeholder "${CFG[CLAUDE_CODE_OAUTH_TOKEN]:-}"; then
+    warn "CLAUDE_CODE_OAUTH_TOKEN unset — the oneshot user must log in once after install: sudo -u oneshot -H claude, then /login"
   fi
   case "$(cfg ONESHOT_TEST_LOGIN)" in *:*|'') ;; *) missing+=("ONESHOT_TEST_LOGIN must be email:password") ;; esac
   if [ ${#missing[@]} -gt 0 ]; then
