@@ -13,7 +13,8 @@
  * run is skipped, and a ticket whose run died mid-phase is picked up from its
  * journal rather than restarted.
  */
-import { projectConfig } from '../lib/config.js';
+import { gitlabUsername, pickupRule, projectConfig } from '../lib/config.js';
+import { pickupVerdict } from '../lib/pickup.js';
 import { foreignOwner } from '../lib/claims.js';
 import { isClaimed, latestRunStatus, logEvent, seeTicket } from '../lib/db.js';
 import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
@@ -59,10 +60,8 @@ export async function scan(): Promise<WatchResult> {
 }
 
 /**
- * The scan's verdict on each ticket it read: claimable, or skipped with a
- * reason. Assignees play no part: a Loop ticket is claimable whoever it is
- * assigned to, and the token only decides who the work shows as. Split from
- * scan() only so a test can
+ * The scan's verdict on each ticket it read: claimable, skipped with a reason,
+ * or dropped silently (a teammate's). Split from scan() only so a test can
  * hand it tickets without the network and quota gates in front; scan() is
  * those gates, one read, and this.
  */
@@ -82,6 +81,16 @@ export async function triage(issues: Issue[]): Promise<WatchResult> {
       // A human has to look at it and take the label off. Re-claiming it would
       // just reproduce whatever blocked it the first time.
       skipped.push({ iid: issue.iid, why: `carries ${cfg.labels.blocked}` });
+      continue;
+    }
+    // Acting is always the token's user; WHOSE tickets is pickupRule() — the token's
+    // own on a desk, a list of people (or anyone) on a server holding a bot token.
+    const pick = pickupVerdict(issue.assignees.map((a) => a.username), gitlabUsername(), pickupRule());
+    if (!pick.ok) {
+      // A teammate's ticket is not this conductor's board at all: dropped silently
+      // rather than pushed to `skipped`, since one line per teammate's ticket every
+      // tick buried this desk's own tickets in noise.
+      if (!pick.silent) skipped.push({ iid: issue.iid, why: pick.why });
       continue;
     }
     if (isClaimed(issue.iid)) {
