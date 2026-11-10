@@ -6,8 +6,8 @@
  * changes, so adding or removing someone needs no restart.
  */
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { STATE, envOr } from '../../src/lib/config.js';
 
 export const USERS_FILE = envOr('ONESHOT_DASHBOARD_USERS', join(STATE, 'dashboard-users.json'));
@@ -51,6 +51,7 @@ export function loadUsers(file = USERS_FILE): Users {
 
 /** Written to a sibling and renamed, so the server never reads half a file. */
 export function saveUsers(users: Users, file = USERS_FILE): void {
+  mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(users, null, 2)}\n`, { mode: 0o600 });
   chmodSync(tmp, 0o600);
