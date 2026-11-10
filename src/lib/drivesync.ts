@@ -26,7 +26,8 @@ import { DRY_RUN, PROJECT_TARGET, artifactDir, envOr, expandPath } from './confi
 import { readArtifact, readJournal, updateJournal, type RunJournal } from './artifacts.js';
 import { Drive, DriveError } from './gdrive.js';
 import {
-  SHOTS_FOLDER, demoPdfHtml, packEntries, ticketFolderName,
+  GOOGLE_SHEET, INDEX_HEADER, INDEX_NAME, SHOTS_FOLDER, demoPdfHtml, findIndexRow, indexRow, packEntries, sameRow,
+  ticketFolderName,
   type DemoMeta, type DriveEntry, type PackInput, type Shot,
 } from './drivepack.js';
 import { renderPlanMd, renderTestcasesCsv } from './publish.js';
@@ -155,6 +156,42 @@ async function ensureFolder(
   return { id: made.id, url: made.webViewLink, created: true };
 }
 
+/** The index spreadsheet's id, once found or made — it lives at the root, not in any one journal. */
+let indexId: string | undefined;
+
+/** Column letter of the index's last column (12 columns → L). */
+const LAST_COL = String.fromCharCode(64 + INDEX_HEADER.length);
+
+/**
+ * Upsert ticket `j`'s row in the root's index spreadsheet. The sheet is made by
+ * this app (a Drive upload converted to a Sheet), which is what keeps it inside
+ * the `drive.file` scope. A row that already says the same thing is not
+ * rewritten, so a quiet pass reads two ranges and writes nothing.
+ */
+async function updateIndex(drive: Drive, root: string, j: RunJournal, ledger: DriveLedger): Promise<void> {
+  if (!indexId) {
+    const found = await drive.findByProperty(root, 'oneshotKey', 'ticket-index');
+    indexId = found?.id ?? (await drive.upload({
+      parent: root, name: INDEX_NAME, mime: 'text/csv', convertTo: GOOGLE_SHEET,
+      props: { oneshotKey: 'ticket-index' }, content: Buffer.from(`${INDEX_HEADER.join(',')}\n`),
+    })).id;
+  }
+  const row = indexRow({
+    iid: j.iid, title: j.title, issueUrl: j.url, status: j.status, mergedSha: j.mergedSha,
+    stoppedPhase: j.stoppedPhase, phases: j.phases ?? [], createdAt: j.createdAt, stoppedAt: j.stoppedAt,
+    mrUrl: j.mrUrl, folderUrl: ledger.folderUrl, files: ledger.files,
+  });
+  const colA = (await drive.sheetRead(indexId, 'A:A')).map((r) => r[0] ?? '');
+  const at = findIndexRow(colA, j.url);
+  if (at === null) {
+    await drive.sheetAppend(indexId, `A:${LAST_COL}`, [row]);
+    return;
+  }
+  const range = `A${at}:${LAST_COL}${at}`;
+  if (sameRow((await drive.sheetRead(indexId, range))[0], row)) return;
+  await drive.sheetWrite(indexId, range, [row]);
+}
+
 /** Consecutive upload failures after which a pass gives up — a bad credential fails every call alike. */
 const GIVE_UP_AFTER = 3;
 
@@ -227,6 +264,15 @@ export async function syncDrive(iid: number): Promise<string | null> {
       }
     }
     if (uploaded) log.ok(`drive: #${iid} — ${uploaded} file(s) updated`, { folder: ledger.folderUrl });
+    // Its own try: a Sheets refusal (the API not enabled on the client's
+    // project, say) must not read as the folder having failed.
+    try {
+      await updateIndex(drive, cfg.root, j, ledger);
+    } catch (err) {
+      // Deleted by hand: forget it, and the next pass finds or makes another.
+      if (err instanceof DriveError && err.status === 404) indexId = undefined;
+      log.warn('drive: ticket index not updated', { iid, error: (err as Error).message.slice(0, 200) });
+    }
     return ledger.folderUrl ?? null;
   } catch (err) {
     log.warn('drive: sync pass failed', { iid, error: (err as Error).message.slice(0, 200) });

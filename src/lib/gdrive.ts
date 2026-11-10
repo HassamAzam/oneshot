@@ -21,10 +21,17 @@
  */
 import { createSign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { getDefaultAutoSelectFamilyAttemptTimeout, setDefaultAutoSelectFamilyAttemptTimeout } from 'node:net';
 import { GOOGLE_FOLDER } from './drivepack.js';
 
 const API = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
+/**
+ * The Sheets API accepts the `drive.file` scope for a spreadsheet this app
+ * created, so the ticket index needs no wider consent — only the Sheets API
+ * enabled on the OAuth client's project, alongside the Drive API.
+ */
+const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
 const SCOPE = 'https://www.googleapis.com/auth/drive';
 /** A person's login is held to files this app created: nothing else in their Drive is visible. */
 export const USER_SCOPE = 'https://www.googleapis.com/auth/drive.file';
@@ -90,10 +97,22 @@ export function signJwt(sa: ServiceAccount, nowSec: number): string {
 
 export interface DriveFile { id: string; name: string; mimeType: string; webViewLink?: string }
 
+/**
+ * Node 20 races a host's addresses ("happy eyeballs") giving each only 250 ms
+ * to connect. Measured on the office network: Google's IPv4 address connects
+ * in ~270 ms and IPv6 does not route, so every address loses the race and the
+ * call dies as `fetch failed` / UND_ERR_CONNECT_TIMEOUT after ten seconds,
+ * while curl to the same address succeeds. Two seconds per address clears it.
+ * Process-wide, but it only ever makes a connection attempt more patient.
+ */
+const ATTEMPT_MS = 2000;
+
 export class Drive {
   private token: { value: string; until: number } | null = null;
 
-  constructor(private readonly credentialsPath: string) {}
+  constructor(private readonly credentialsPath: string) {
+    if (getDefaultAutoSelectFamilyAttemptTimeout() < ATTEMPT_MS) setDefaultAutoSelectFamilyAttemptTimeout(ATTEMPT_MS);
+  }
 
   private async accessToken(): Promise<string> {
     if (this.token && Date.now() < this.token.until) return this.token.value;
@@ -157,6 +176,32 @@ export class Drive {
     await this.call(`${API}/files/${id}?${DRIVE_FLAGS}`, {
       method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(meta),
     });
+  }
+
+  /**
+   * A range of a spreadsheet as written — formulas, not their results — so a
+   * HYPERLINK cell reads back as the URL it points at. Rows come back with
+   * trailing blanks trimmed.
+   */
+  async sheetRead(id: string, range: string): Promise<string[][]> {
+    const { data } = await this.call<{ values?: string[][] }>(
+      `${SHEETS}/${id}/values/${encodeURIComponent(range)}?valueRenderOption=FORMULA`);
+    return data.values ?? [];
+  }
+
+  /** Write `values` at `range` as if typed, so `=HYPERLINK(...)` becomes a link. */
+  async sheetWrite(id: string, range: string, values: string[][]): Promise<void> {
+    await this.call(`${SHEETS}/${id}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ range, values }),
+    });
+  }
+
+  /** Add rows after the last one with data. */
+  async sheetAppend(id: string, range: string, values: string[][]): Promise<void> {
+    await this.call(
+      `${SHEETS}/${id}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ values }),
+      });
   }
 
   /**

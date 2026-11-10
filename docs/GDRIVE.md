@@ -26,6 +26,29 @@ A file appears once its phase has written its artifact; the README lists what is
 there so far. The run report (`report.html`) and transcripts are not uploaded:
 they hold full session content and stay on the desk.
 
+## The ticket index
+
+Beside the ticket folders, the root holds one spreadsheet, **Oneshot ticket
+index**, with a row per ticket:
+
+| Ticket | Title | Status | Current phase | Last updated | Plan | Research | Test cases | Demo PDF | Demo video | MR | Drive folder |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+
+- **Ticket** links the full GitLab issue URL, with the iid as the text.
+- **Status** is one of running, on a gate (parked waiting on a person),
+  blocked, aborted, merged, or done (finished without a merge).
+- The rest link the Drive files, the MR and the folder.
+
+A ticket's row is found by its issue URL, so a re-run rewrites it rather than
+adding a second one. A pass with nothing new writes nothing. The index is
+updated by the same pass as the folder, in its own `try`: if Sheets refuses,
+the folder still syncs and a `drive: ticket index not updated` warning is
+logged.
+
+The sheet is created by the app, so the `drive.file` sign-in covers it with no
+extra consent. The **Google Sheets API** does need to be enabled on the same
+Cloud project as the Drive API. It is free and needs no billing.
+
 ## How it updates
 
 `src/lib/drivesync.ts` runs at the end of every `publishPending` pass (that is,
@@ -68,7 +91,8 @@ Neither uses domain-wide delegation.
 
 ### Option B — your own sign-in, `drive.file` scope
 
-1. In Google Cloud, enable the **Google Drive API**. On the **OAuth consent
+1. In Google Cloud, enable the **Google Drive API** and the **Google Sheets
+   API** (for the ticket index; both free, no billing). On the **OAuth consent
    screen**, choose user type **Internal** (an External app left in *Testing*
    status has its refresh tokens expire after 7 days) and add the scope
    `.../auth/drive.file`. Under **Credentials**, create an **OAuth client ID**
@@ -97,7 +121,8 @@ Neither uses domain-wide delegation.
 
 ### Option A — service account
 
-1. In a Google Cloud project, enable the **Google Drive API**, create a
+1. In a Google Cloud project, enable the **Google Drive API** and the
+   **Google Sheets API**, create a
    **service account**, and create a **JSON key** for it.
 2. Pick (or create) the root folder **inside a Shared Drive**: a service
    account has no storage of its own, so uploads into a folder in someone's My

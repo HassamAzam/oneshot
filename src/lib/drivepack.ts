@@ -306,3 +306,116 @@ export function packEntries(input: PackInput): DriveEntry[] {
   entries.unshift(md('readme', '00 README', renderReadmeMd(input, contents)));
   return entries;
 }
+
+// ------------------------------------------------------------- ticket index
+
+/**
+ * The one spreadsheet at the root that lists every ticket — the board view of
+ * the shelf. One row per ticket, found again by its issue URL, so a re-run, a
+ * renamed title or a second desk rewrites the row instead of adding one.
+ */
+export const INDEX_NAME = 'Oneshot ticket index';
+export const INDEX_HEADER = [
+  'Ticket', 'Title', 'Status', 'Current phase', 'Last updated',
+  'Plan', 'Research', 'Test cases', 'Demo PDF', 'Demo video', 'MR', 'Drive folder',
+];
+
+export interface IndexInput {
+  iid: number;
+  title: string;
+  issueUrl: string;
+  status?: string;
+  mergedSha?: string;
+  stoppedPhase?: string;
+  phases: PhaseRecord[];
+  createdAt?: number;
+  stoppedAt?: number;
+  mrUrl?: string;
+  folderUrl?: string;
+  /** Drive file id per entry key — `journal.drive.files`. */
+  files: Record<string, { id: string }>;
+}
+
+/**
+ * The status a reader of the index wants, from the journal's. `parked` is a
+ * run waiting on a person (a gate, a human merge); `done` without a merge sha
+ * is a run that finished short of merging (a Review ticket handed over).
+ */
+export function indexStatus(status: string | undefined, mergedSha?: string): string {
+  if (status === 'done') return mergedSha ? 'merged' : 'done';
+  if (status === 'parked') return 'on a gate';
+  return status || 'running';
+}
+
+/** A Sheets formula string literal. */
+const lit = (s: string): string => `"${s.replace(/"/g, '""')}"`;
+const link = (url: string, label: string): string => `=HYPERLINK(${lit(url)},${lit(label)})`;
+/**
+ * A plain cell, forced to text. The apostrophe stops Sheets reading a title
+ * that begins with `=`, `+`, `-` or `@` as a formula (the CSV-injection shape)
+ * and stops it turning "2026-11-10 09:00 UTC" into a date serial — either of
+ * which would also make the row never compare equal to what was written.
+ */
+const text = (s: string): string => (s ? `'${s}` : '');
+
+function stamp(ms: number | undefined): string {
+  return ms ? `${new Date(ms).toISOString().replace('T', ' ').slice(0, 16)} UTC` : '';
+}
+
+/**
+ * One ticket's row. "Last updated" is the run's own last activity, not the
+ * time of the pass — so a pass with nothing new produces the identical row and
+ * costs no write.
+ */
+export function indexRow(input: IndexInput): string[] {
+  const f = input.files;
+  const doc = (k: string): string => (f[k] ? `https://docs.google.com/document/d/${f[k]!.id}/edit` : '');
+  const sheet = (k: string): string => (f[k] ? `https://docs.google.com/spreadsheets/d/${f[k]!.id}/edit` : '');
+  const file = (k: string): string => (f[k] ? `https://drive.google.com/file/d/${f[k]!.id}/view` : '');
+  const cellLink = (url: string, label: string): string => (url ? link(url, label) : '');
+  const last = input.phases[input.phases.length - 1];
+  const latest = Math.max(input.createdAt ?? 0, input.stoppedAt ?? 0, ...input.phases.map((p) => p.endedAt || p.startedAt || 0));
+  return [
+    link(input.issueUrl, String(input.iid)),
+    text(input.title),
+    text(indexStatus(input.status, input.mergedSha)),
+    text(input.stoppedPhase ?? last?.phase ?? ''),
+    text(stamp(latest || undefined)),
+    cellLink(doc('plan'), 'Plan'),
+    cellLink(doc('research'), 'Research'),
+    cellLink(sheet('testcases'), 'Test cases'),
+    cellLink(file('demo-pdf'), 'Demo PDF'),
+    cellLink(file('demo-video'), 'Demo video'),
+    input.mrUrl ? link(input.mrUrl, input.mrUrl) : '',
+    cellLink(input.folderUrl ?? '', 'Folder'),
+  ];
+}
+
+/**
+ * The 1-based sheet row holding `issueUrl`, from column A read with formulas
+ * (row 1 is the header). Matched on the issue URL inside the HYPERLINK, never
+ * on the label alone: two projects can share an iid, and the URL is the
+ * ticket's real identity. Null when the ticket has no row yet.
+ */
+export function findIndexRow(columnA: string[], issueUrl: string): number | null {
+  const want = issueUrl.replace(/\/+$/, '');
+  for (let i = 1; i < columnA.length; i++) {
+    const m = /^=HYPERLINK\("((?:[^"]|"")*)"/i.exec(String(columnA[i] ?? '').trim());
+    if (m && m[1]!.replace(/""/g, '"').replace(/\/+$/, '') === want) return i + 1;
+  }
+  return null;
+}
+
+/**
+ * Whether the row as read back (formulas, trailing blanks trimmed by Sheets)
+ * already says what `row` would write. The text apostrophe is not part of what
+ * Sheets returns, so it is dropped before comparing.
+ */
+export function sameRow(existing: string[] | undefined, row: string[]): boolean {
+  const norm = (r: string[]): string[] => {
+    const out = r.map((c) => String(c ?? '').replace(/^'/, ''));
+    while (out.length && out[out.length - 1] === '') out.pop();
+    return out;
+  };
+  return JSON.stringify(norm(existing ?? [])) === JSON.stringify(norm(row));
+}

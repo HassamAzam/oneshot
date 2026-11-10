@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVerify, generateKeyPairSync } from 'node:crypto';
 import {
-  GOOGLE_DOC, GOOGLE_SHEET, demoPdfHtml, packEntries, renderFindingsMd, renderReadmeMd, renderResearchMd,
+  GOOGLE_DOC, GOOGLE_SHEET, INDEX_HEADER, demoPdfHtml, findIndexRow, indexRow, indexStatus, packEntries,
+  renderFindingsMd, renderReadmeMd, renderResearchMd, sameRow, type IndexInput,
   ticketFolderName, type PackInput,
 } from './drivepack.js';
 import { codeFromPasted, consentUrl, signJwt, tokenRequest } from './gdrive.js';
@@ -147,4 +148,75 @@ test('a pasted-back sign-in yields its code only when it belongs to this attempt
   assert.throws(() => codeFromPasted('http://127.0.0.1:1/?state=other&code=4/abc', 'st'), /different sign-in/);
   assert.throws(() => codeFromPasted('http://127.0.0.1:1/?state=st&error=access_denied', 'st'), /access_denied/);
   assert.throws(() => codeFromPasted('', 'st'), /nothing/);
+});
+
+const ROW_BASE: IndexInput = { iid: 9002, title: 'Page titles', issueUrl: ISSUE, phases: [], files: {} };
+
+test('an index row links the ticket by its full issue URL with the iid as the text', () => {
+  const row = indexRow({ ...ROW_BASE, phases: [] });
+  assert.equal(row.length, INDEX_HEADER.length);
+  assert.equal(row[0], `=HYPERLINK("${ISSUE}","9002")`);
+  assert.equal(row[1], "'Page titles");
+});
+
+test('an index row links every artifact that exists, by the kind of Drive file it is', () => {
+  const row = indexRow({
+    ...ROW_BASE,
+    files: { plan: { id: 'P' }, research: { id: 'R' }, testcases: { id: 'T' }, 'demo-pdf': { id: 'D' }, 'demo-video': { id: 'V' } },
+    mrUrl: 'https://gitlab.arbisoft.com/arbisoft/erp/-/merge_requests/11237',
+    folderUrl: 'https://drive.google.com/drive/folders/F',
+  });
+  const byCol = Object.fromEntries(INDEX_HEADER.map((h, i) => [h, row[i]]));
+  assert.equal(byCol.Plan, '=HYPERLINK("https://docs.google.com/document/d/P/edit","Plan")');
+  assert.equal(byCol.Research, '=HYPERLINK("https://docs.google.com/document/d/R/edit","Research")');
+  assert.equal(byCol['Test cases'], '=HYPERLINK("https://docs.google.com/spreadsheets/d/T/edit","Test cases")');
+  assert.equal(byCol['Demo PDF'], '=HYPERLINK("https://drive.google.com/file/d/D/view","Demo PDF")');
+  assert.equal(byCol['Demo video'], '=HYPERLINK("https://drive.google.com/file/d/V/view","Demo video")');
+  assert.match(byCol.MR!, /merge_requests\/11237","https:\/\/gitlab\.arbisoft\.com\/arbisoft\/erp\/-\/merge_requests\/11237"\)$/);
+  assert.equal(byCol['Drive folder'], '=HYPERLINK("https://drive.google.com/drive/folders/F","Folder")');
+});
+
+test('a missing artifact leaves its cell empty rather than a dead link', () => {
+  const row = indexRow({ ...ROW_BASE, files: { plan: { id: 'P' } } });
+  assert.equal(row[INDEX_HEADER.indexOf('Research')], '');
+  assert.equal(row[INDEX_HEADER.indexOf('MR')], '');
+});
+
+test('status reads as a person would say it, and the phase is where the run is or stopped', () => {
+  assert.equal(indexStatus('done', 'abc'), 'merged');
+  assert.equal(indexStatus('done'), 'done');
+  assert.equal(indexStatus('parked'), 'on a gate');
+  assert.equal(indexStatus('blocked'), 'blocked');
+  assert.equal(indexStatus(undefined), 'running');
+  const phases = [{ phase: 'plan', lap: 1, status: 'ok' as const, startedAt: 1, endedAt: Date.UTC(2026, 9, 29, 17, 59) }];
+  const row = indexRow({ ...ROW_BASE, phases, status: 'running' });
+  assert.equal(row[3], "'plan");
+  assert.equal(row[4], "'2026-10-29 17:59 UTC");
+  assert.equal(indexRow({ ...ROW_BASE, phases, stoppedPhase: 'merge' })[3], "'merge");
+});
+
+test('a title shaped like a formula is written as text, and quotes cannot break out of a link', () => {
+  const row = indexRow({ ...ROW_BASE, title: '=IMPORTXML("http://evil")', issueUrl: 'https://g/x/-/issues/1"),("y' });
+  assert.equal(row[1], `'=IMPORTXML("http://evil")`);
+  assert.equal(row[0], '=HYPERLINK("https://g/x/-/issues/1""),(""y","9002")');
+});
+
+test('the upsert finds the ticket\'s row by its issue URL, not by the iid label', () => {
+  const other = 'https://gitlab.arbisoft.com/arbisoft/other/-/issues/9002';
+  const col = ['Ticket', `=HYPERLINK("${other}","9002")`, '=HYPERLINK("https://x/-/issues/8878","8878")', `=HYPERLINK("${ISSUE}","9002")`];
+  assert.equal(findIndexRow(col, ISSUE), 4);
+  assert.equal(findIndexRow(col, `${ISSUE}/`), 4);
+  assert.equal(findIndexRow(col, 'https://x/-/issues/1'), null);
+  assert.equal(findIndexRow(['Ticket', ISSUE], ISSUE), null, 'the header row and a bare value never match');
+  const quoted = 'https://g/x/-/issues/1"),("y';
+  assert.equal(findIndexRow(['Ticket', indexRow({ ...ROW_BASE, issueUrl: quoted })[0]!], quoted), 2);
+});
+
+test('a row read back as Sheets returns it compares equal to what was written', () => {
+  const row = indexRow({ ...ROW_BASE, files: { plan: { id: 'P' } } });
+  const readBack = row.map((c) => c.replace(/^'/, ''));
+  while (readBack[readBack.length - 1] === '') readBack.pop();
+  assert.ok(sameRow(readBack, row));
+  assert.ok(!sameRow([...readBack.slice(0, 2), 'blocked'], row));
+  assert.ok(!sameRow(undefined, row));
 });
