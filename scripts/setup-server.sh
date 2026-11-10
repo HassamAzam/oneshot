@@ -451,6 +451,23 @@ else
   esac
 fi
 
+# The token stays in $ENV_FILE: the helper reads it from the conductor's own
+# environment at fetch/push time, so nothing secret lands in ~/.gitconfig.
+step "Git credentials for $SVC_USER"
+if [ -z "$REPO_URL" ] || ! printf '%s' "$REPO_URL" | grep -q '^https://'; then ok "origin is not https — no helper needed"
+else
+  git_origin="$(printf '%s' "$REPO_URL" | sed -E 's#^(https://[^/]+).*#\1#')"
+  helper='!f() { test "$1" = get || exit 0; echo username=oauth2; echo "password=${ONESHOT_GITLAB_TOKEN:-$GITLAB_TOKEN}"; }; f'
+  current="$(runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" git config --global --get "credential.$git_origin.helper" 2>/dev/null || true)"
+  if [ "$current" = "$helper" ]; then ok "git reads the GitLab token from the environment for $git_origin"
+  elif [ "$CHECK" = 1 ]; then due "no git credential helper for $git_origin — every 'git fetch origin dev' fails with 'could not read Username'"
+  elif ! id "$SVC_USER" >/dev/null 2>&1; then die "user $SVC_USER missing" "re-run without --check"
+  else
+    runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" git config --global "credential.$git_origin.helper" "$helper"
+    did "git credential helper for $git_origin (token read from the environment, never written to disk)"
+  fi
+fi
+
 # --------------------------------------------------------- as the service user
 
 step "Oneshot install ($ONESHOT_DIR)"
