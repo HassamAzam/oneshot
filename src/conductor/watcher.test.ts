@@ -105,3 +105,19 @@ test('a Loop ticket that also carries the retired Ready For Automation label is 
     f.restore();
   }
 });
+
+test('a Loop ticket assigned to someone else is never a candidate; an unassigned one is', async () => {
+  // On 2026-11-10 a server holding a bot token briefly ran without this rule and
+  // claimed three teammates' tickets out of 43 carrying Loop. The token's user
+  // (empty here: no identity resolved in tests) never matches a teammate.
+  const assigned = (iid: number, to: string[]): Issue => ({ ...issue(iid), assignees: to.map((username) => ({ username })) });
+  const f = stubFetch((url) => (url.includes('/notes') ? [] : undefined));
+  try {
+    const r = await triage([assigned(990601, ['haider.usman']), assigned(990602, [])]);
+    assert.deepEqual(iids(r.candidates), [990602]);
+    assert.ok(!r.skipped.some((s) => s.iid === 990602));
+    assert.ok(!iids(r.candidates).includes(990601));
+  } finally {
+    f.restore();
+  }
+});
