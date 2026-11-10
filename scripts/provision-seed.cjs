@@ -150,9 +150,30 @@ with transaction.atomic():
         if department is None or status is None:
             print("ONESHOT_TESTUSER " + json.dumps({"error": "no Department/Status rows to attach a Person to"}))
             raise SystemExit(0)
+        # Current ERP requires more of a Person than this script names: employment_type
+        # (a pre_save signal reads .type for fuel eligibility), entity, and whatever it
+        # adds next. Required is judged by the TABLE, not the model: a dump from dev can
+        # be ahead of this checkout (entity_id is NOT NULL there while the model says
+        # null=True). Each such foreign key gets an existing row: an ordinary employee
+        # type (1, EMPLOYEE_EMPLOYMENT_TYPE) where there is one, otherwise the first row.
+        from django.db import connection
+        with connection.cursor() as cursor:
+            nullable = {c.name: c.null_ok for c in connection.introspection.get_table_description(cursor, Person._meta.db_table)}
+        given = {"user", "department", "status"}
+        extra = {}
+        for f in Person._meta.concrete_fields:
+            required = not nullable.get(f.column, True) and not f.has_default()
+            if not f.many_to_one or f.name in given or not (required or f.name == "employment_type"):
+                continue
+            rows = f.related_model.objects
+            row = (rows.filter(type=1).first() if f.name == "employment_type" else None) or rows.first()
+            if row is None:
+                print("ONESHOT_TESTUSER " + json.dumps({"error": "no " + f.related_model.__name__ + " rows to attach a Person to"}))
+                raise SystemExit(0)
+            extra[f.name] = row
         Person.objects.create(
             user=user, department=department, status=status, gender="M", full_name="Oneshot Test",
-            joining_date=date.today(), person_id=("ONESHOT-" + str(user.pk))[:20], nic=None,
+            joining_date=date.today(), person_id=("ONESHOT-" + str(user.pk))[:20], nic=None, **extra,
         )
         actions.append("created person")
 print("ONESHOT_TESTUSER " + json.dumps({"actions": actions}))
