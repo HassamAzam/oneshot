@@ -171,10 +171,26 @@ with transaction.atomic():
                 print("ONESHOT_TESTUSER " + json.dumps({"error": "no " + f.related_model.__name__ + " rows to attach a Person to"}))
                 raise SystemExit(0)
             extra[f.name] = row
-        Person.objects.create(
-            user=user, department=department, status=status, gender="M", full_name="Oneshot Test",
-            joining_date=date.today(), person_id=("ONESHOT-" + str(user.pk))[:20], nic=None, **extra,
-        )
+        # ERP's save_person_odoo (post_save on Person) creates an Odoo employee for every new
+        # Person, USE_ODOO or not, and stores the id Odoo returns. A test login needs no
+        # Odoo employee, and an Odoo whose ids lag the dump's (ibrahim-test returned 567,
+        # dev's max is 1725) collides on person.odoo_employee_id. So that one receiver
+        # sits out this one save; Odoo stays on for everything else.
+        from django.db.models.signals import post_save
+        try:
+            from apps.odoo.odoo_payroll.signals import save_person_odoo
+        except ImportError:
+            save_person_odoo = None
+        if save_person_odoo:
+            post_save.disconnect(save_person_odoo, sender=Person)
+        try:
+            Person.objects.create(
+                user=user, department=department, status=status, gender="M", full_name="Oneshot Test",
+                joining_date=date.today(), person_id=("ONESHOT-" + str(user.pk))[:20], nic=None, **extra,
+            )
+        finally:
+            if save_person_odoo:
+                post_save.connect(save_person_odoo, sender=Person)
         actions.append("created person")
 print("ONESHOT_TESTUSER " + json.dumps({"actions": actions}))
 `;
