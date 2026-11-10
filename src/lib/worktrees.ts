@@ -150,10 +150,19 @@ export function reapPortServer(port: number | null | undefined): number {
  * capacity answer the caller can act on, and dressing it as an exception put it
  * in the same catch as a genuinely broken database.
  */
-export function leasePortFor(runId: string): number | null {
+export function leasePortFor(runId: string, prefer?: number): number | null {
   db.exec(`CREATE TABLE IF NOT EXISTS port_leases (
     port INTEGER PRIMARY KEY, run_id TEXT NOT NULL, leased_at INTEGER NOT NULL)`);
-  const pool = portPool();
+  // A run asking twice is asking about the lease it has. Taking a second port
+  // for it would spend one of a pool three or four wide on nothing.
+  const held = portHeldBy(runId);
+  if (held !== null) return held;
+  // `prefer` is the port a resumed run's worktree was already brought up on.
+  // First in line when it is still free; just another taken port when it is not.
+  const configured = portPool();
+  const pool = prefer !== undefined && configured.includes(prefer)
+    ? [prefer, ...configured.filter((p) => p !== prefer)]
+    : configured;
   // A port that is free in the lease table but has a process listening on it is
   // either an orphan from a run that never reaped or a foreign dev server
   // sharing these ports. Leasing it anyway is exactly how a verify phase ends up
@@ -168,6 +177,26 @@ export function leasePortFor(runId: string): number | null {
     log.warn(`skipped occupied port(s) ${[...occupied].join(', ')} — a process is already listening there`);
   }
   return port;
+}
+
+/**
+ * The port this run holds a lease on, or null.
+ *
+ * A journal remembers the port a run was given; the lease table says whether it
+ * still has it. They part company the moment a run parks or stops: `finish()`
+ * releases the lease and the journal keeps the number. Reading the journal alone
+ * is how a parked run, re-entered every tick, reaped the dev server of whichever
+ * run had leased that port since — and how a resumed run went on to use a port
+ * it no longer owned.
+ */
+export function portHeldBy(runId: string): number | null {
+  try {
+    const row = db.prepare('SELECT port FROM port_leases WHERE run_id = ? ORDER BY leased_at DESC LIMIT 1')
+      .get(runId) as { port: number } | undefined;
+    return row ? row.port : null;
+  } catch {
+    return null; // the table does not exist yet, so nobody holds anything
+  }
 }
 
 export function releasePort(runId: string): void {

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyBaseCheck, baseCheckOutcome, codePhaseStatus, decideClaim, doneLabelSwap, failedCases, mergePollWait,
+  applyBaseCheck, baseCheckOutcome, codePhaseStatus, decideClaim, doneLabelSwap, failedCases, isRepark,
+  mergePollWait,
   mergeScopedVerify, nextIndex, refusalIsFinal, remediationFreeze, salvagedReview,
   sharedDatabaseRefusal, statusForFailure, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
   verifyAfterBaseCheckDeath,
@@ -156,6 +157,31 @@ test('the hold is keyed on the CLAIMED status, so a resumed parked run is held',
 test('the run goes through once the poll window is due', () => {
   assert.equal(poll({ now: T0 + MERGE_POLL_MS }), null);
   assert.equal(poll({ now: T0 + MERGE_POLL_MS + 1 }), null);
+});
+
+// A parked run is re-claimed on every tick only to ask whether its wait is
+// over. #9174 logged 62 `run_finished` events, 62 report rewrites and 62 trace
+// exports for four waits, because every "not yet" was recorded as a run ending.
+const GATE = 'awaiting test-case approval — a QA reviewer comments `approved` on the ticket';
+
+test('a parked run put back for the same reason, with no phase run, is a re-park', () => {
+  assert.equal(isRepark({ wasParked: true, parkedWhy: GATE, reason: GATE, phasesAtClaim: 7, phasesNow: 7 }), true);
+});
+
+test('a first park is recorded in full, because the run was not parked when claimed', () => {
+  assert.equal(isRepark({ wasParked: false, parkedWhy: undefined, reason: GATE, phasesAtClaim: 7, phasesNow: 7 }), false);
+});
+
+test('a park after a phase ran is recorded in full, even for the same wait', () => {
+  // The gate was answered with feedback, testcases re-ran, and the revised list waits again.
+  assert.equal(isRepark({ wasParked: true, parkedWhy: GATE, reason: GATE, phasesAtClaim: 7, phasesNow: 8 }), false);
+});
+
+test('a park for a different wait is recorded in full', () => {
+  assert.equal(isRepark({
+    wasParked: true, parkedWhy: GATE, reason: 'verify: awaiting a QA decision', phasesAtClaim: 7, phasesNow: 7,
+  }), false);
+  assert.equal(isRepark({ wasParked: true, parkedWhy: GATE, reason: undefined, phasesAtClaim: 7, phasesNow: 7 }), false);
 });
 
 test('nothing holds a run that is not waiting on a human merge', () => {

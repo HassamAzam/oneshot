@@ -74,8 +74,8 @@ import {
 import { branchFor, newRunId, worktreeName } from '../lib/ids.js';
 import { writeDesignTokens } from '../lib/designtokens.js';
 import {
-  dropRunDatabase, leasePortFor, leaseWorktree, reapPortServer, reapWorktree, releasePort, seedWorktree,
-  sweepRunDatabases,
+  dropRunDatabase, leasePortFor, leaseWorktree, portHeldBy, reapPortServer, reapWorktree, releasePort,
+  seedWorktree, sweepRunDatabases,
 } from '../lib/worktrees.js';
 import {
   addIssueNote, createIssue, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
@@ -559,6 +559,22 @@ export function mergePollWait(o: {
   if (typeof o.lastCheckAt !== 'number') return null;
   const dueIn = o.lastCheckAt + MERGE_POLL_MS - o.now;
   return dueIn > 0 ? dueIn : null;
+}
+
+/**
+ * Whether a run that is parking now is only being put back where it was found.
+ *
+ * True when it was claimed parked, stops parked for the same reason, and no
+ * phase ran in between. Any of the three failing means something happened this
+ * pass — a gate was answered, a phase ran, the wait changed — and the park is
+ * recorded in full.
+ */
+export function isRepark(o: {
+  wasParked: boolean; parkedWhy: string | undefined; reason: string | undefined;
+  phasesAtClaim: number; phasesNow: number;
+}): boolean {
+  return o.wasParked && o.reason !== undefined && o.reason === o.parkedWhy
+    && o.phasesNow === o.phasesAtClaim;
 }
 
 /**
@@ -1183,6 +1199,8 @@ export async function runTicket(
   // Read before the resume below overwrites both: `j` IS decision.journal.
   const wasParked = decision.kind === 'resume' && decision.journal.status === 'parked';
   const parkedWhy = wasParked ? decision.journal.blockedWhy : undefined;
+  /** Phase records on the journal as it was claimed — what tells a re-park from a pass that did something. */
+  const phasesAtClaim = decision.kind === 'resume' ? decision.journal.phases.length : 0;
   const runId = resuming ? decision.journal.runId : newRunId();
 
   // The claim is an OWNERSHIP test on both paths, and that is the whole point.
@@ -1398,7 +1416,13 @@ export async function runTicket(
   // that case. Re-seed here: it is idempotent by construction, and it is the
   // only point on the resume path that sees the worktree before a phase does.
   if (worktree) seedWorktree(worktree);
-  let port: number | undefined = j.port;
+  // The journal remembers the port; the lease table says whether this run still
+  // HAS it. finish() releases the lease on every park and stop, so a resumed run
+  // holds nothing until it leases again — and until it does, the number in the
+  // journal may be another run's. It is kept only as a preference (the worktree
+  // was brought up on it), honoured when the port is still free.
+  const preferredPort = j.port;
+  let port: number | undefined = j.port !== undefined && portHeldBy(runId) === j.port ? j.port : undefined;
   /** One background bring-up per run, whether the worktree was leased now or resumed. */
   let appStarting = false;
   const branch = j.branch ?? branchFor(cfg.branches.prefix, iid, issue.title);
@@ -2461,7 +2485,7 @@ export async function runTicket(
    */
   function bringUpApp(): void {
     if (appStarting || !worktree) return;
-    const leased = port ?? leasePortFor(runId);
+    const leased = port ?? leasePortFor(runId, preferredPort);
     if (leased === null) {
       log.info(`#${iid} — no free port to warm the app on; verify will lease one when it runs`);
       return;
@@ -2501,7 +2525,7 @@ export async function runTicket(
     }
     if (p.cwd === 'worktree') bringUpApp();
     if (p.needsPort && !port) {
-      const leased = leasePortFor(runId);
+      const leased = leasePortFor(runId, preferredPort);
       if (leased === null) {
         return `port: every port in PORT_POOL (${portPool().join(', ')}) is leased — ` +
           'the fleet is at its real capacity, whatever the concurrency setting says';
@@ -3455,6 +3479,11 @@ export async function runTicket(
   async function finish(
     journal: RunJournal, status: 'done' | 'blocked' | 'aborted' | 'parked', reason?: string,
   ): Promise<RunOutcome> {
+    if (status === 'parked' && isRepark({
+      wasParked, parkedWhy, reason, phasesAtClaim, phasesNow: journal.phases.length,
+    })) {
+      return repark(journal, reason!);
+    }
     journal.status = status;
     if (reason) journal.blockedWhy = reason;
     if (status === 'blocked') journal.blockedAt = Date.now();
@@ -3478,7 +3507,12 @@ export async function runTicket(
     // port is still provably this run's and not something a newer run has since
     // leased. Without this a blocked run's server outlives it and the next
     // verify to lease the port drives a stale one.
-    reapPortServer(journal.port);
+    //
+    // Only while the lease is still this run's. The journal keeps the port's
+    // number after the lease is gone, and a run stopping before it has leased
+    // again (a refusal, a gate still pending) would otherwise reap whichever run
+    // holds that port now.
+    if (journal.port !== undefined && portHeldBy(journal.runId) === journal.port) reapPortServer(journal.port);
     releasePort(journal.runId);
     releasePromotion(journal.runId);
     // The run's own database (src/lib/rundb.cjs) goes with a run that is over: done, or
@@ -3593,6 +3627,34 @@ export async function runTicket(
     }
 
     return { runId: journal.runId, iid: journal.iid, status, reason };
+  }
+
+  /**
+   * Put a parked run back exactly as it was found, and say almost nothing.
+   *
+   * A parked run is re-claimed on every conductor tick only to ask whether its
+   * wait is over. When the answer is "not yet", nothing happened — and finish()
+   * used to treat it as a run ending anyway: a `run_finished` event, a card
+   * update, a database sweep, the 2 MB run report rewritten and a Langfuse
+   * export, once a minute for as long as a person took to answer. #9174 logged
+   * 62 of those for four waits. The claim flipped the journal and the run row
+   * to 'running', so those two are restored; `stoppedAt` and `stoppedPhase` are
+   * left as the first park wrote them, because that is still when and where it
+   * stopped. No lease is held on this path (see the port note in runTicket), so
+   * there is no server to reap.
+   */
+  function repark(journal: RunJournal, reason: string): RunOutcome {
+    journal.status = 'parked';
+    journal.blockedWhy = reason;
+    writeJournal(journal);
+    updateRun(journal.runId, {
+      status: 'parked', ended_at: journal.stoppedAt ?? Date.now(), blocked_why: reason,
+      owner_seen_at: Date.now(),
+    });
+    releasePort(journal.runId);
+    releasePromotion(journal.runId);
+    log.info(`#${journal.iid} still parked — ${reason.split('\n')[0]!.slice(0, 110)}`);
+    return { runId: journal.runId, iid: journal.iid, status: 'parked', reason };
   }
 }
 
