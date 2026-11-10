@@ -16,7 +16,6 @@ import { fileURLToPath } from 'node:url';
 import { homedir, userInfo } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
 import { deskUsername } from './identity.js';
-import { parsePickupRule, type PickupRule } from './pickup.js';
 import {
   LEGACY_SELECTOR_KEYS, REPO_URL_VAR, SKIP_REPO_CHECK_VAR, expandPath as expandPathFrom, isTargetName, readEnv,
   repoCheckOverride, resolvePath, resolveTarget, scopedEnvName as scopedEnvNameFor, spellings,
@@ -913,9 +912,6 @@ export const DRY_RUN = envFlag('DRY_RUN');
  */
 export const GITLAB_USERNAME = deskUsername();
 export function gitlabUsername(): string { return deskUsername(); }
-
-/** Whose assigned tickets to pick up: ONESHOT_PICKUP_ASSIGNEES, see src/lib/pickup.ts. */
-export function pickupRule(): PickupRule { return parsePickupRule(envOr('ONESHOT_PICKUP_ASSIGNEES')); }
 
 /**
  * The conductor's own tick cadence — how often `src/index.ts` scans for
