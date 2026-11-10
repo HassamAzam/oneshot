@@ -51,12 +51,13 @@ import { existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
+  DRY_RUN, gitlabUsername, MERGE_POLL_MS, pickupRule, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
   type PhaseConfig,
 } from '../lib/config.js';
+import { pickupVerdict } from '../lib/pickup.js';
 import {
   claimMarker, claimNoteBody, isMachineNote, readOwnership, settleMs,
 } from '../lib/claims.js';
@@ -1141,17 +1142,10 @@ export async function runTicket(
   const list = phases().filter((p) => !p.labelGated || carried.has(p.labelGated.toLowerCase()));
   const owner = opts.conductor;
 
-  if (issue.assignees.length > 0) {
-    const me = gitlabUsername();
-    if (!me) {
-      log.info(`#${iid} — assigned ticket, but this desk has no GitLab identity`);
-      return { runId: '', iid, status: 'refused', reason: 'assigned ticket, but this desk has no GitLab identity (npm run token:set)' };
-    }
-    if (!issue.assignees.some((a) => a.username === me)) {
-      const owners = issue.assignees.map((a) => a.username).join(', ');
-      log.info(`#${iid} — assigned to ${owners}, not to ${me}`);
-      return { runId: '', iid, status: 'refused', reason: `assigned to ${owners}` };
-    }
+  const pick = pickupVerdict(issue.assignees.map((a) => a.username), gitlabUsername(), pickupRule());
+  if (!pick.ok) {
+    log.info(`#${iid} — ${pick.why}`);
+    return { runId: '', iid, status: 'refused', reason: pick.why };
   }
 
   // A journal from another project (journalproject.ts) is never resumed, whatever

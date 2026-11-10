@@ -13,7 +13,8 @@
  * run is skipped, and a ticket whose run died mid-phase is picked up from its
  * journal rather than restarted.
  */
-import { gitlabUsername, projectConfig } from '../lib/config.js';
+import { gitlabUsername, pickupRule, projectConfig } from '../lib/config.js';
+import { pickupVerdict } from '../lib/pickup.js';
 import { foreignOwner } from '../lib/claims.js';
 import { isClaimed, latestRunStatus, logEvent, seeTicket } from '../lib/db.js';
 import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
@@ -82,21 +83,15 @@ export async function triage(issues: Issue[]): Promise<WatchResult> {
       skipped.push({ iid: issue.iid, why: `carries ${cfg.labels.blocked}` });
       continue;
     }
-    if (issue.assignees.length > 0) {
-      // Resolved at boot from this desk's own token, so the account that claims
-      // the ticket is the same account that will comment, push and merge on it.
-      const me = gitlabUsername();
-      if (!me) {
-        skipped.push({ iid: issue.iid, why: 'assigned ticket, but this desk has no GitLab identity (npm run token:set)' });
-        continue;
-      }
-      if (!issue.assignees.some((a) => a.username === me)) {
-        // Assigned to a teammate — not this desk's board at all. It is neither
-        // claimable here nor a skip worth reporting, so it is dropped silently
-        // rather than pushed to `skipped`: one line per teammate's ticket every
-        // tick buried this desk's own tickets in noise.
-        continue;
-      }
+    // Acting is always the token's user; WHOSE tickets is pickupRule() — the token's
+    // own on a desk, a list of people (or anyone) on a server holding a bot token.
+    const pick = pickupVerdict(issue.assignees.map((a) => a.username), gitlabUsername(), pickupRule());
+    if (!pick.ok) {
+      // A teammate's ticket is not this conductor's board at all: dropped silently
+      // rather than pushed to `skipped`, since one line per teammate's ticket every
+      // tick buried this desk's own tickets in noise.
+      if (!pick.silent) skipped.push({ iid: issue.iid, why: pick.why });
+      continue;
     }
     if (isClaimed(issue.iid)) {
       skipped.push({ iid: issue.iid, why: 'run already in flight' });

@@ -66,6 +66,20 @@ ONESHOT_DB_BASELINE=hrdb_baseline
 Webpack takes each Django port + 1000 (9100-9109), so keep that range free too. Never put a `#`
 comment on the same line as a value: systemd keeps it as part of the value.
 
+### GitLab identity and whose tickets
+
+Everything Oneshot does on GitLab shows as the owner of `ONESHOT_GITLAB_TOKEN`. On a server,
+use a **project access token** (arbisoft/erp → Settings → Access tokens; role Developer, or
+Maintainer if Oneshot must merge into a protected `dev` that Developers cannot merge to;
+scopes `api`, `read_repository`, `write_repository`), so its work shows as a bot rather than
+as a person.
+
+A desk picks up the tickets assigned to its token's own user. A bot is never anyone's
+assignee, so a server with a bot token must say whose tickets it works:
+`ONESHOT_PICKUP_ASSIGNEES=hassam.azam,someone.else` (or `*` for every `Loop` ticket).
+Unassigned `Loop` tickets are picked up either way, and claim notes keep a server and a desk
+from driving the same ticket.
+
 ## What the script does, in order
 
 1. **Env file.** If it is missing, the script writes the template and stops. It also checks
