@@ -222,6 +222,37 @@ export function crashIsInfra(
 }
 
 /**
+ * What an error thrown by the session stream means once a result frame has
+ * ALREADY settled the phase: nothing about the outcome, and only the infra flag
+ * of a session that had not succeeded.
+ *
+ * The CLI (2.0.77) exits 1 after a finished session whenever a background task
+ * outlives the final answer: the task's completion notice is queued as a
+ * non-prompt command, streaming mode rejects it ("only prompt commands are
+ * supported in streaming mode"), a second `error_during_execution` frame is
+ * emitted and the process dies. The SDK then throws "Claude Code process exited
+ * with code 1" from the iterator. Letting that text replace `out.error` hid what
+ * each session had really reported: on #9174 fifteen sessions carried it, among
+ * them an implement lap that had run out of structured-output tries and a
+ * ui-evidence that had run out of turns, and both were filed as a process that
+ * crashed. A verify that failed one case was journalled with it too, in place
+ * of the case.
+ *
+ * So the settled result stands, error text included. A session that had NOT
+ * succeeded still gets the same infra reading it always did, from the frame
+ * that settled it.
+ */
+export function throwAfterSettle(
+  out: Pick<PhaseOutput, 'ok' | 'data' | 'infra'>,
+  message: string, streamMessages: number, settledSubtype: string | null,
+): void {
+  if (out.ok) return;
+  if (crashIsInfra(message, streamMessages, { data: out.data, resultSubtype: settledSubtype })) {
+    out.infra = true;
+  }
+}
+
+/**
  * How often a long phase says it is still alive.
  *
  * A session phase is otherwise silent for up to its whole timeout — two hours
@@ -687,7 +718,15 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     }
   } catch (err) {
     const m = (err as Error).message ?? String(err);
-    if (stalled) {
+    if (settled) {
+      // Ahead of every other branch: a result frame is the session's own account
+      // of itself, and nothing thrown after it — the CLI's exit code, an abort
+      // or a watchdog that fired while the stream was closing — is a second one.
+      log.warn(`${cfg.name}: the session stream failed after its result frame — the settled result stands`, {
+        subtype: settledSubtype, error: m.slice(0, 160),
+      });
+      throwAfterSettle(out, m, sawActivity, settledSubtype);
+    } else if (stalled) {
       // Not a verdict and not a budget problem: the connection to the model
       // went quiet mid-session. Kept out of limitSignals — it says nothing
       // about the account.
