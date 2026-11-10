@@ -1200,6 +1200,8 @@ function defaultSessionPath(): string {
   return parts.join(':');
 }
 
+const STRUCTURED_OUTPUT_RETRIES = 10;
+
 function buildBaseEnv(): Record<string, string> {
   const env: Record<string, string> = {
     PATH: envOr('ONESHOT_SESSION_PATH', defaultSessionPath()),
@@ -1232,6 +1234,11 @@ function buildBaseEnv(): Record<string, string> {
   // subscription allowance remains — that is a real charge, unlike everything
   // else here.
   if (!envFlag('ONESHOT_ALLOW_1M_CONTEXT')) env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1';
+
+  // The SDK gives a session this many tries to return output that matches the
+  // phase schema, then discards the whole lap. Its default of 5 threw away a
+  // finished review that kept dropping one required field.
+  env.MAX_STRUCTURED_OUTPUT_RETRIES = envOr('MAX_STRUCTURED_OUTPUT_RETRIES', String(STRUCTURED_OUTPUT_RETRIES));
 
   // Only for a headless box with no interactive login. Subscription credential.
   const oauth = process.env.CLAUDE_CODE_OAUTH_TOKEN;
