@@ -1,5 +1,8 @@
 /**
- * Run ONE phase: one fresh Agent SDK session, never resumed, never continued.
+ * Run ONE phase: one fresh Agent SDK session, never continued into another
+ * phase. The single resume is inside the phase itself: a session that ran out
+ * of tries at its structured output is resumed once, only to hand back the
+ * result it already reached (repairStructuredOutput).
  *
  * That is the context discipline the whole design rests on. A phase receives
  * the ticket, the prior-art brief and the ARTIFACTS of earlier phases — never
@@ -10,7 +13,7 @@
  * requested in a prompt. A phase physically cannot end with prose where the
  * next phase expects a field.
  */
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, type Options } from '@anthropic-ai/claude-agent-sdk';
 import { appendFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -25,7 +28,7 @@ import { artifactPath, transcriptPath, writeArtifact } from '../lib/artifacts.js
 import { logEvent } from '../lib/db.js';
 import { log } from '../lib/log.js';
 import { accountActionRequired } from '../lib/accountgate.js';
-import { schemaFor } from './schemas.js';
+import { schemaFor, type JsonSchema } from './schemas.js';
 import { hooksFor } from './hooks.js';
 
 export interface PhaseInput {
@@ -73,6 +76,97 @@ export const NO_STRUCTURED_OUTPUT = 'session produced no structured output despi
  * literal that drifted would quietly start charging every shutdown.
  */
 export const CANCELLED_BY_CONDUCTOR = 'cancelled by the conductor';
+
+/** The SDK's result subtype for a session that ran out of tries at schema-valid output. */
+export const STRUCTURED_RETRIES_EXHAUSTED = 'error_max_structured_output_retries';
+
+const REPAIR_MAX_TURNS = 4;
+const REPAIR_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * What a session is told when it is resumed after running out of tries at its
+ * structured output: its work is done, only the hand-back failed, so resend the
+ * conclusions it already reached with every required field present. Observed
+ * on #9174: a finished review dropped `verdict` on every try, then `findings`
+ * too, and the SDK discarded the whole lap.
+ */
+export function structuredRepairPrompt(schema: JsonSchema): string {
+  const required = Array.isArray(schema.required) ? schema.required.map(String) : [];
+  return [
+    'Your StructuredOutput calls were rejected: they did not match the required schema.',
+    'Your work is already done. Do not investigate, edit or run anything further.',
+    `Call StructuredOutput exactly once, with every required top-level field present: ${required.join(', ')}.`,
+    'Reuse the conclusions you already reached, and do not drop a field to make the output shorter.',
+  ].join('\n');
+}
+
+interface RepairResult {
+  structured: Record<string, unknown> | null;
+  turns: number;
+  usage: { input: number; output: number; cache_creation: number; cache_read: number } | null;
+}
+
+/**
+ * Resumes a session that ran out of tries at its structured output, with a
+ * fresh retry budget and a few turns, and returns what it hands back. Bounded
+ * by its own deadline: a resumed CLI can wedge like any other.
+ */
+export async function repairStructuredOutput(
+  schema: JsonSchema, sessionId: string, options: Options, tee: string,
+): Promise<RepairResult> {
+  const result: RepairResult = { structured: null, turns: 0, usage: null };
+  const ac = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no answer within ${REPAIR_TIMEOUT_MS / 60_000}m`)), REPAIR_TIMEOUT_MS);
+  });
+  deadline.catch(() => { /* raced below; an unraced rejection is not an error */ });
+  try {
+    const q = query({
+      prompt: structuredRepairPrompt(schema),
+      options: { ...options, resume: sessionId, maxTurns: REPAIR_MAX_TURNS, abortController: ac },
+    });
+    const iterator = q[Symbol.asyncIterator]();
+    for (;;) {
+      const nextFrame = iterator.next();
+      nextFrame.catch(() => { /* abandoned if the deadline wins */ });
+      const step = await Promise.race([nextFrame, deadline]);
+      if (step.done === true) break;
+      const msg = step.value;
+      try { appendFileSync(tee, `${JSON.stringify(msg)}\n`); } catch { /* best effort */ }
+      if (msg.type !== 'result') continue;
+      result.turns = msg.num_turns;
+      const u = msg.usage as Record<string, number> | undefined;
+      if (u) {
+        result.usage = {
+          input: u.input_tokens ?? 0,
+          output: u.output_tokens ?? 0,
+          cache_creation: u.cache_creation_input_tokens ?? 0,
+          cache_read: u.cache_read_input_tokens ?? 0,
+        };
+      }
+      const structured = msg.subtype === 'success' ? msg.structured_output : undefined;
+      if (structured && typeof structured === 'object') result.structured = structured as Record<string, unknown>;
+      break;
+    }
+  } catch (err) {
+    log.warn(`structured output repair failed: ${(err as Error).message}`);
+  } finally {
+    clearTimeout(timer);
+    ac.abort();
+  }
+  return result;
+}
+
+/** Copies a schema-valid result onto the phase's output. */
+function applyStructured(out: PhaseOutput, structured: Record<string, unknown>): void {
+  out.data = structured;
+  out.summary = String(structured.summary ?? '');
+  const b = structured.blocked;
+  out.blocked = typeof b === 'string' && b.trim() ? b : null;
+  out.ok = out.blocked === null;
+  delete out.error;
+}
 
 export interface PhaseOutput {
   ok: boolean;
@@ -432,43 +526,41 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
   // accounting note right after the try/catch/finally below.
   const seenUsage = { input: 0, output: 0, cache_creation: 0, cache_read: 0 };
 
+  const schema = schemaFor(cfg.name);
+  const sessionOptions: Options = {
+    model,
+    maxTurns: cfg.maxTurns ?? DEFAULT_MAX_TURNS,
+    cwd,
+    // Coding phases get the full Claude Code harness on top of ours; the
+    // rest get a plain (cheaper) system prompt.
+    systemPrompt: cfg.coding
+      ? { type: 'preset' as const, preset: 'claude_code' as const, append: input.systemPrompt }
+      : input.systemPrompt,
+    // 'project' ONLY — it loads CLAUDE.md and the symlinked .claude/skills
+    // in the worktree, which is all a phase needs. 'user' is deliberately
+    // absent: it drags in the operator's whole personal config, and on this
+    // machine that includes a `npx ccusage` statusLine that hangs behind the
+    // VPN and wedged every phase before its first turn. Guards come from the
+    // `hooks` option below instead, so they travel with the repo.
+    settingSources: ['project'],
+    hooks: hooksFor(env) as never,
+    mcpServers: sessionMcpServers(input) as never,
+    disallowedTools: toolPolicy(cfg).disallowedTools,
+    permissionMode: 'bypassPermissions',
+    // Required alongside bypassPermissions in SDK 0.1.77. The hook layer,
+    // not the permission prompt, is the real gate here.
+    allowDangerouslySkipPermissions: true,
+    ...(schema ? { outputFormat: { type: 'json_schema' as const, schema } } : {}),
+    env,
+    stderr: (d: string) => {
+      try { appendFileSync(tee, `${JSON.stringify({ type: 'cli-stderr', text: d })}\n`); } catch { /* best effort */ }
+      if (stderrHead.length < STDERR_KEEP) stderrHead += d;
+      stderrTail = (stderrTail + d).slice(-STDERR_KEEP);
+    },
+  };
+
   try {
-    const schema = schemaFor(cfg.name);
-    const q = query({
-      prompt: input.prompt,
-      options: {
-        model,
-        maxTurns: cfg.maxTurns ?? DEFAULT_MAX_TURNS,
-        cwd,
-        // Coding phases get the full Claude Code harness on top of ours; the
-        // rest get a plain (cheaper) system prompt.
-        systemPrompt: cfg.coding
-          ? { type: 'preset' as const, preset: 'claude_code' as const, append: input.systemPrompt }
-          : input.systemPrompt,
-        // 'project' ONLY — it loads CLAUDE.md and the symlinked .claude/skills
-        // in the worktree, which is all a phase needs. 'user' is deliberately
-        // absent: it drags in the operator's whole personal config, and on this
-        // machine that includes a `npx ccusage` statusLine that hangs behind the
-        // VPN and wedged every phase before its first turn. Guards come from the
-        // `hooks` option below instead, so they travel with the repo.
-        settingSources: ['project'],
-        hooks: hooksFor(env) as never,
-        mcpServers: sessionMcpServers(input) as never,
-        disallowedTools: toolPolicy(cfg).disallowedTools,
-        permissionMode: 'bypassPermissions',
-        // Required alongside bypassPermissions in SDK 0.1.77. The hook layer,
-        // not the permission prompt, is the real gate here.
-        allowDangerouslySkipPermissions: true,
-        ...(schema ? { outputFormat: { type: 'json_schema' as const, schema } } : {}),
-        env,
-        abortController: ac,
-        stderr: (d: string) => {
-          try { appendFileSync(tee, `${JSON.stringify({ type: 'cli-stderr', text: d })}\n`); } catch { /* best effort */ }
-          if (stderrHead.length < STDERR_KEEP) stderrHead += d;
-          stderrTail = (stderrTail + d).slice(-STDERR_KEEP);
-        },
-      },
-    });
+    const q = query({ prompt: input.prompt, options: { ...sessionOptions, abortController: ac } });
 
     // Manual iteration, not `for await`, so each pull can be raced against the
     // hard deadline: a wedged CLI leaves `next()` pending forever, and only a
@@ -579,11 +671,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
         if (msg.subtype === 'success') {
           const structured = msg.structured_output as Record<string, unknown> | undefined;
           if (structured && typeof structured === 'object') {
-            out.data = structured;
-            out.summary = String(structured.summary ?? '');
-            const b = structured.blocked;
-            out.blocked = typeof b === 'string' && b.trim() ? b : null;
-            out.ok = out.blocked === null;
+            applyStructured(out, structured);
           } else if (!schema) {
             out.summary = msg.result.slice(0, 400);
             out.ok = true;
@@ -655,6 +743,19 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
     if (watchdog) clearInterval(watchdog);
     if (forceTimer) clearTimeout(forceTimer);
     input.signal?.removeEventListener('abort', cancel);
+  }
+
+  if (schema && out.sessionId && !out.data && settledSubtype === STRUCTURED_RETRIES_EXHAUSTED
+    && !timedOut && !stalled && !ac.signal.aborted) {
+    log.warn(`${cfg.name}: structured output ran out of tries — resuming the session once to hand it back`);
+    const repair = await repairStructuredOutput(schema, out.sessionId, sessionOptions, tee);
+    out.turns += repair.turns;
+    if (repair.usage) out.weighted += recordUsage(repair.usage, { runId, phase: cfg.name, model });
+    if (repair.structured) {
+      applyStructured(out, repair.structured);
+      delete out.infra;
+    }
+    logEvent('structured_repair', { phase: cfg.name, lap, recovered: repair.structured !== null }, { runId, phase: cfg.name });
   }
 
   // A phase that never reached a settling `result` frame (cancelled, timed
