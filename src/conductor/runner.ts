@@ -51,13 +51,12 @@ import { existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, pickupRule, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
+  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
   type PhaseConfig,
 } from '../lib/config.js';
-import { pickupVerdict } from '../lib/pickup.js';
 import {
   claimMarker, claimNoteBody, isMachineNote, readOwnership, settleMs,
 } from '../lib/claims.js';
@@ -1141,12 +1140,6 @@ export async function runTicket(
   const carried = new Set(issue.labels.map((l) => l.toLowerCase()));
   const list = phases().filter((p) => !p.labelGated || carried.has(p.labelGated.toLowerCase()));
   const owner = opts.conductor;
-
-  const pick = pickupVerdict(issue.assignees.map((a) => a.username), gitlabUsername(), pickupRule());
-  if (!pick.ok) {
-    log.info(`#${iid} — ${pick.why}`);
-    return { runId: '', iid, status: 'refused', reason: pick.why };
-  }
 
   // A journal from another project (journalproject.ts) is never resumed, whatever
   // its status: it is archived after the claim below and the ticket starts fresh.

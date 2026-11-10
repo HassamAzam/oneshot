@@ -105,3 +105,15 @@ test('a Loop ticket that also carries the retired Ready For Automation label is 
     f.restore();
   }
 });
+
+test('assignees play no part: a Loop ticket assigned to anyone, or to nobody, is claimable', async () => {
+  const assigned = (iid: number, to: string[]): Issue => ({ ...issue(iid), assignees: to.map((username) => ({ username })) });
+  const f = stubFetch((url) => (url.includes('/notes') ? [] : undefined));
+  try {
+    const r = await triage([assigned(990501, ['someone.else']), assigned(990502, []), assigned(990503, ['hassam.azam', 'bob'])]);
+    assert.deepEqual(iids(r.candidates).sort(), [990501, 990502, 990503]);
+    assert.deepEqual(r.skipped, []);
+  } finally {
+    f.restore();
+  }
+});
