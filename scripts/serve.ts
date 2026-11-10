@@ -17,10 +17,12 @@ import { join, resolve, sep } from 'node:path';
 import { RUNS, STATE, envOr } from '../src/lib/config.js';
 import { readJournal, type RunJournal } from '../src/lib/artifacts.js';
 import { buildReportModel, renderHtml } from '../src/lib/report.js';
-import { authorise, requireTokenFor } from './dashboard/auth.js';
+import { authorise, requireTokenFor, sessionUser } from './dashboard/auth.js';
 import { HISTORY_HOURS, fleetState, runDetail, stats } from './dashboard/db.js';
+import { handleLogin } from './dashboard/login.js';
 import { esc, indexPage, runPageHtml, statsPage, tailPage } from './dashboard/page.js';
 import { tail } from './dashboard/tail.js';
+import { loadUsers } from './dashboard/users.js';
 
 const PORT = Number(envOr('ONESHOT_DASHBOARD_PORT', '8787'));
 const HOST = envOr('ONESHOT_DASHBOARD_HOST', '127.0.0.1');
@@ -170,16 +172,19 @@ function reportPage(iid: number): { code: number; body: string } {
 
 const hoursParam = (url: URL): number => Number(url.searchParams.get('hours')) || HISTORY_HOURS;
 
-const server = createServer((req, res) => {
+const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
   const send = (code: number, body: string, type = 'text/html; charset=utf-8'): void => {
     res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' });
     res.end(body);
   };
-  if (!authorise(req, res, url, TOKEN)) return;
 
   try {
-    if (url.pathname === '/') return send(200, indexPage(fleetState(hoursParam(url)), BOARD_URL));
+    if (TOKEN && (await handleLogin(req, res, url, TOKEN))) return;
+    const users = loadUsers();
+    if (!authorise(req, res, url, TOKEN, users)) return;
+
+    if (url.pathname === '/') return send(200, indexPage(fleetState(hoursParam(url)), BOARD_URL, sessionUser(req, TOKEN, users)));
     if (url.pathname === '/api/state') return send(200, JSON.stringify(fleetState(hoursParam(url))), 'application/json');
     if (url.pathname === '/runs') return send(200, index());
     if (url.pathname === '/stats') return send(200, statsPage(stats(Number(url.searchParams.get('days') ?? 30))));
@@ -219,6 +224,7 @@ const server = createServer((req, res) => {
 
     return send(404, '<p style="font:14px sans-serif">Not found. <a href="/">Live view</a></p>');
   } catch (err) {
+    if (res.headersSent) return res.end();
     return send(500, `<pre>${esc((err as Error).message)}</pre>`);
   }
 });
@@ -235,7 +241,7 @@ try {
   process.exit(1);
 }
 server.listen(PORT, HOST, () => {
-  console.log(`\n  Oneshot dashboard  →  http://${HOST.includes(':') ? `[${HOST}]` : HOST}:${PORT}${TOKEN ? '  (token required)' : ''}\n`);
+  console.log(`\n  Oneshot dashboard  →  http://${HOST.includes(':') ? `[${HOST}]` : HOST}:${PORT}${TOKEN ? '  (sign-in required)' : ''}\n`);
   console.log('  Live fleet view, refreshing every 10s; /runs lists every journal.');
   console.log('  Ctrl-C to stop.\n');
 });

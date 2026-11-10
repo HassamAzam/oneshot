@@ -216,14 +216,14 @@ const embed = (v: unknown): string => JSON.stringify(v).replace(/</g, '\\u003c')
 
 const HOURS = [[24, 'last 24h'], [72, 'last 3 days'], [168, 'last 7 days'], [720, 'last 30 days']] as const;
 
-export function indexPage(state: FleetState, boardUrl?: string): string {
+export function indexPage(state: FleetState, boardUrl?: string, user?: string | null): string {
   const opts = HOURS.map(([h, l]) => `<option value="${h}"${h === state.historyHours ? ' selected' : ''}>${l}</option>`).join('')
     + (HOURS.some(([h]) => h === state.historyHours) ? '' : `<option value="${state.historyHours}" selected>last ${state.historyHours}h</option>`);
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Oneshot fleet</title><style>${STYLE}</style></head>
 <body class="live"><div class="wrap">
 <h1>Oneshot fleet <a class="stamp" href="/stats">stats →</a> ${boardUrl ? `<a class="stamp" href="${esc(boardUrl)}" target="_blank" rel="noopener">Telemetry ↗</a> ` : ''}${state.project ? `<a class="stamp" href="${esc(state.project)}" target="_blank" rel="noopener">${esc(state.project.replace(/^https?:\/\//, ''))}</a>` : ''}
-<span class="stamp" id="stamp"></span></h1>
+<span class="stamp" id="stamp"></span>${user ? `<span class="stamp">${esc(user)} · <a href="/logout">Sign out</a></span>` : ''}</h1>
 <div class="strip" id="strip"></div>
 <h2>In flight <span class="n" id="n-flight"></span></h2><div id="flight"></div>
 <h2>Waiting on a person <span class="n" id="n-person"></span></h2><div id="person"></div>
@@ -233,6 +233,34 @@ export function indexPage(state: FleetState, boardUrl?: string): string {
 <script type="application/json" id="initial">${embed(state)}</script>
 <script>${CLIENT}</script>
 </body></html>`;
+}
+
+const LOGIN_STYLE = `
+  .live .login { max-width: 22rem; margin: 12vh auto 0; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 1.5rem }
+  .live .login h1 { margin-bottom: 1rem }
+  .live .login label { display: block; font-size: .8rem; color: var(--mute); margin: .75rem 0 .25rem }
+  .live .login input { width: 100%; font: inherit; padding: .5rem .6rem; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--text) }
+  .live .login button { width: 100%; margin-top: 1.25rem; font: inherit; font-weight: 600; padding: .55rem;
+    border: 0; border-radius: 8px; background: var(--link); color: var(--panel); cursor: pointer }
+  .live .login .err { color: var(--s-blocked); font-size: .85rem; margin: 0 0 .5rem }
+  .live .login .dim { font-size: .78rem; margin: 1rem 0 0 }`;
+
+export function loginPage(next: string, error = '', username = ''): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Oneshot sign in</title><style>${STYLE}${LOGIN_STYLE}</style></head>
+<body class="live"><form class="login" method="post" action="/login">
+<h1>Oneshot fleet</h1>
+${error ? `<p class="err" role="alert">${esc(error)}</p>` : ''}
+<input type="hidden" name="next" value="${esc(next)}">
+<label for="username">Username</label>
+<input id="username" name="username" autocomplete="username" autocapitalize="none" required value="${esc(username)}"${username ? '' : ' autofocus'}>
+<label for="password">Password</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required${username ? ' autofocus' : ''}>
+<button type="submit">Sign in</button>
+<p class="dim">No account? Ask whoever runs this server to add you.</p>
+</form></body></html>`;
 }
 
 const pillFor = (status: string, label = status): string => `<span class="pill" style="--c:var(--s-${esc(status)})">${esc(label)}</span>`;

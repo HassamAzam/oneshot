@@ -253,3 +253,18 @@ The conductor unit stops with `SIGTERM`, `KillMode=mixed` and `TimeoutStopSec=2h
 lets in-flight runs reach a journal checkpoint first. Runs resume from their journals at the next
 boot. The dashboard listens on `0.0.0.0:${ONESHOT_DASHBOARD_PORT:-8787}` and refuses to start
 without `ONESHOT_DASHBOARD_TOKEN`. Put it behind the firewall or a reverse proxy with TLS.
+
+People sign in at `/login`. There is no signup: add each account on the server, which asks for the
+password twice without echoing it. Adding a name that exists resets its password, and removing one
+ends that person's session on their next request.
+
+```bash
+sudo -u oneshot -H bash -c 'cd /srv/oneshot && npm run --silent dashboard-user -- add <username>'
+sudo -u oneshot -H bash -c 'cd /srv/oneshot && npm run --silent dashboard-user -- remove <username>'
+sudo -u oneshot -H bash -c 'cd /srv/oneshot && npm run --silent dashboard-user -- list'
+```
+
+Accounts live in `state/dashboard-users.json` (scrypt hashes, mode 0600). Sessions last 12 hours and
+are signed with `ONESHOT_DASHBOARD_TOKEN`, so changing the token signs everyone out. Five wrong
+passwords from one address lock it out for 15 minutes. Scripts can still pass the token as a
+Basic-auth password.

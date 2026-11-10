@@ -30,6 +30,7 @@
     "deps:verify": "tsx scripts/verify-deps.ts",
     "langfuse": "tsx scripts/langfuse-export.ts",
     "dashboard": "tsx scripts/serve.ts",
+    "dashboard-user": "tsx scripts/dashboard-user.ts",
     "board": "node scripts/board/index.mjs",
     "board:once": "node scripts/board/index.mjs --once",
     "board:dry": "node scripts/board/index.mjs --once --dry-run",
