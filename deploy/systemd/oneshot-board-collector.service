@@ -1,0 +1,28 @@
+# Oneshot Board collector — scans /srv/oneshot/state every 5s and writes to the board's
+# database (BOARD_DATABASE_URL in /etc/oneshot/board.env) every 60s, copying screenshots
+# and videos into BOARD_MEDIA_DIR. Installed with oneshot-board.service.
+# Runs all day, not only inside ONESHOT_WINDOW, so gates answered overnight still land.
+# Logs: journalctl -u oneshot-board-collector -f
+[Unit]
+Description=Oneshot Board collector
+Documentation=file:///srv/oneshot/docs/SERVER-SETUP.md
+After=postgresql.service oneshot-board.service
+Wants=postgresql.service oneshot-board.service
+
+[Service]
+Type=simple
+User=oneshot
+Group=oneshot
+WorkingDirectory=/srv/oneshot
+EnvironmentFile=/etc/oneshot/oneshot.env
+# Second, so BOARD_DATABASE_URL (the board's database on this host) and BOARD_MEDIA_DIR
+# win over any value in the first.
+EnvironmentFile=/etc/oneshot/board.env
+Environment=NO_COLOR=1
+Environment=HOME=/home/oneshot
+ExecStart=/usr/bin/node /srv/oneshot/scripts/board/index.mjs
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

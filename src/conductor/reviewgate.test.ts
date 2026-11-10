@@ -2,7 +2,7 @@ import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  declaredFiles, gateAsked, gateTrigger, gatesApply, parseCorrectedSteps, parseVerifyDirectives,
+  declaredFiles, foldGateReplies, gateAsked, gateTrigger, gatesApply, parseCorrectedSteps, parseVerifyDirectives,
   planApprovalRequestBody, repliesAfter, reviewAllRuns, testcasesApprovalRequestBody, testcasesApprovedRecordBody,
   verifyCasesRequestBody, verifyOurStepsBody,
 } from './reviewgate.js';
@@ -677,4 +677,51 @@ test('the our-steps comment shows the steps followed and asks for a numbered rep
 
 test('the request body lists the missing-steps option', () => {
   assert.match(verifyCasesRequestBody([{ id: 'TC-14' }]), /missing steps/i);
+});
+
+const reply = (id: number, text: string, user: string | null) => ({ id, text, user, at: null });
+const baseState = { requestTs: null, requestNoteId: 5, approved: false, feedback: [] as string[] };
+
+test('approval stores approvedBy from the approving reply', () => {
+  const rs = [reply(6, 'approved', 'ali')];
+  const out = foldGateReplies(baseState, rs, 0);
+  assert.equal(out.state?.approved, true);
+  assert.equal(out.state?.approvedBy, 'ali');
+});
+
+test('approval with no known user stores null, never the string (unknown)', () => {
+  const out = foldGateReplies(baseState, [reply(6, 'approved', null)], 0);
+  assert.equal(out.state?.approvedBy, null);
+});
+
+test('feedback round stores the distinct reviewer usernames', () => {
+  const rs = [reply(6, 'fix the title', 'sara'), reply(7, 'and the footer', 'ali'), reply(8, 'also', 'sara')];
+  const out = foldGateReplies(baseState, rs, -1);
+  assert.equal(out.feedback, 'fix the title\nand the footer\nalso');
+  assert.deepEqual(out.state?.feedbackBy, [['sara', 'ali']]);
+  assert.equal(out.state?.requestNoteId, null);
+});
+
+test('feedback before an approval is recorded alongside approvedBy', () => {
+  const rs = [reply(6, 'tweak', 'sara'), reply(7, 'approved', 'ali'), reply(8, 'late', 'bo')];
+  const out = foldGateReplies(baseState, rs, 1);
+  assert.deepEqual(out.state?.feedback, ['tweak']);
+  assert.deepEqual(out.state?.feedbackBy, [['sara']]);
+  assert.equal(out.state?.approvedBy, 'ali');
+});
+
+test('approval with no feedback leaves feedbackBy untouched', () => {
+  const out = foldGateReplies(baseState, [reply(6, 'approved', 'ali')], 0);
+  assert.equal(out.state?.feedbackBy, undefined);
+});
+
+test('old journal without feedbackBy keeps parsing and stays index-aligned', () => {
+  const old = { ...baseState, feedback: ['round one', 'round two'] };
+  const out = foldGateReplies(old, [reply(6, 'more', 'sara')], -1);
+  assert.deepEqual(out.state?.feedback, ['round one', 'round two', 'more']);
+  assert.deepEqual(out.state?.feedbackBy, [[], [], ['sara']]);
+});
+
+test('no replies from reviewers changes nothing', () => {
+  assert.equal(foldGateReplies(baseState, [], -1).state, null);
 });

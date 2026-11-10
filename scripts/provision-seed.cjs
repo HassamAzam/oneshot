@@ -150,10 +150,47 @@ with transaction.atomic():
         if department is None or status is None:
             print("ONESHOT_TESTUSER " + json.dumps({"error": "no Department/Status rows to attach a Person to"}))
             raise SystemExit(0)
-        Person.objects.create(
-            user=user, department=department, status=status, gender="M", full_name="Oneshot Test",
-            joining_date=date.today(), person_id=("ONESHOT-" + str(user.pk))[:20], nic=None,
-        )
+        # Current ERP requires more of a Person than this script names: employment_type
+        # (a pre_save signal reads .type for fuel eligibility), entity, and whatever it
+        # adds next. Required is judged by the TABLE, not the model: a dump from dev can
+        # be ahead of this checkout (entity_id is NOT NULL there while the model says
+        # null=True). Each such foreign key gets an existing row: an ordinary employee
+        # type (1, EMPLOYEE_EMPLOYMENT_TYPE) where there is one, otherwise the first row.
+        from django.db import connection
+        with connection.cursor() as cursor:
+            nullable = {c.name: c.null_ok for c in connection.introspection.get_table_description(cursor, Person._meta.db_table)}
+        given = {"user", "department", "status"}
+        extra = {}
+        for f in Person._meta.concrete_fields:
+            required = not nullable.get(f.column, True) and not f.has_default()
+            if not f.many_to_one or f.name in given or not (required or f.name == "employment_type"):
+                continue
+            rows = f.related_model.objects
+            row = (rows.filter(type=1).first() if f.name == "employment_type" else None) or rows.first()
+            if row is None:
+                print("ONESHOT_TESTUSER " + json.dumps({"error": "no " + f.related_model.__name__ + " rows to attach a Person to"}))
+                raise SystemExit(0)
+            extra[f.name] = row
+        # ERP's save_person_odoo (post_save on Person) creates an Odoo employee for every new
+        # Person, USE_ODOO or not, and stores the id Odoo returns. A test login needs no
+        # Odoo employee, and an Odoo whose ids lag the dump's (ibrahim-test returned 567,
+        # dev's max is 1725) collides on person.odoo_employee_id. So that one receiver
+        # sits out this one save; Odoo stays on for everything else.
+        from django.db.models.signals import post_save
+        try:
+            from apps.odoo.odoo_payroll.signals import save_person_odoo
+        except ImportError:
+            save_person_odoo = None
+        if save_person_odoo:
+            post_save.disconnect(save_person_odoo, sender=Person)
+        try:
+            Person.objects.create(
+                user=user, department=department, status=status, gender="M", full_name="Oneshot Test",
+                joining_date=date.today(), person_id=("ONESHOT-" + str(user.pk))[:20], nic=None, **extra,
+            )
+        finally:
+            if save_person_odoo:
+                post_save.connect(save_person_odoo, sender=Person)
         actions.append("created person")
 print("ONESHOT_TESTUSER " + json.dumps({"actions": actions}))
 `;
@@ -273,12 +310,16 @@ function makeSteps(s, env) {
           ? 'node_modules matches package-lock.json' : null;
       },
       do: () => {
-        const r = sh('npm', ['ci', '--no-audit', '--no-fund'], {
+        // ERP's .gitignore excludes package-lock.json, so a fresh clone has none and
+        // `npm ci` refuses outright (EUSAGE). The first install resolves and writes one;
+        // every later pass is then an exact `npm ci` against it.
+        const verb = fs.existsSync(path.join(seed, 'package-lock.json')) ? 'ci' : 'install';
+        const r = sh('npm', [verb, '--no-audit', '--no-fund'], {
           cwd: seed, inherit: true, timeout: INSTALL_TIMEOUT_MS, env: { ...process.env, HUSKY: '0' },
         });
-        if (!r.ok) throw new StepError('npm ci failed in the seed', 'npm registry reachable? (it is blocked while some VPNs are up)');
+        if (!r.ok) throw new StepError(`npm ${verb} failed in the seed`, 'npm registry reachable? (it is blocked while some VPNs are up)');
         writeAtomic(path.join(seed, NPM_STAMP), `${sha256(path.join(seed, 'package-lock.json'))}\n`);
-        return 'npm ci';
+        return `npm ${verb}`;
       },
       verify: () => fs.existsSync(path.join(seed, 'node_modules/.bin')),
     },

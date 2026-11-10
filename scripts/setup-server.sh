@@ -143,10 +143,18 @@ DB_HOST="$(cfg DB_HOST 127.0.0.1)"
 DB_BASELINE="$(cfg ONESHOT_DB_BASELINE "${DB_NAME}_baseline")"
 PER_RUN_DB="$(cfg ONESHOT_PER_RUN_DB)"
 REPO_URL="$(cfg GITLAB_REPO_URL)"
-for ident in "$DB_NAME" "$DB_USER" "$DB_BASELINE"; do
+BOARD="$(cfg ONESHOT_BOARD)"
+BOARD_DIR=/srv/oneshot-board
+BOARD_ENV="$(dirname "$ENV_FILE")/board.env"
+BOARD_PORT="$(cfg BOARD_PORT 3100)"
+BOARD_DB="$(cfg BOARD_DB_NAME oneshot_board)"
+BOARD_REPO="$(cfg BOARD_REPO_URL https://github.com/HassamAzam/oneshot-board.git)"
+BOARD_REF="$(cfg BOARD_REF main)"
+BOARD_MEDIA_DIR="$(cfg BOARD_MEDIA_DIR /srv/oneshot-board/media)"
+for ident in "$DB_NAME" "$DB_USER" "$DB_BASELINE" "$BOARD_DB"; do
   [[ "$ident" =~ ^[a-z_][a-z0-9_]*$ ]] || die "DB_NAME/DB_USER '$ident' is not a plain lower-case identifier" "use letters, digits and _"
 done
-for p in "$WORK_REPO" "$SEED" "$WT_ROOT"; do
+for p in "$WORK_REPO" "$SEED" "$WT_ROOT" "$BOARD_MEDIA_DIR"; do
   case "$p" in /*) ;; *) die "path '$p' is not absolute (systemd does not expand ~)" "use absolute paths in $ENV_FILE" ;; esac
 done
 
@@ -173,7 +181,16 @@ esac
 APT_LOG=/var/log/oneshot-setup-apt.log
 export DEBIAN_FRONTEND=noninteractive
 apt_get() { apt-get -o Dpkg::Use-Pty=0 "$@" >>"$APT_LOG" 2>&1 || die "apt-get $* failed" "see $APT_LOG"; }
-pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
+# "hold ok installed" counts: a host that pins a package (Redis 6.2 on 172.30.1.64) has it.
+# A versioned Postgres (postgresql-14) satisfies the meta-packages, which would otherwise
+# pull the newest major in beside it as a second cluster.
+pkg_installed() {
+  case "$1" in
+    postgresql|postgresql-client)
+      dpkg-query -W -f='${Package} ${Status}\n' "$1-[0-9]*" 2>/dev/null | grep -qE ' (install|hold) ok installed$' && return 0 ;;
+  esac
+  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -qE '^(install|hold) ok installed$'
+}
 pkg_available() { apt-cache show "$1" >/dev/null 2>&1; }
 # First of the candidates apt knows (24.04 renamed several libs to *t64).
 apt_pick() { local p; for p in "$@"; do if pkg_available "$p"; then echo "$p"; return 0; fi; done; return 1; }
@@ -264,9 +281,17 @@ else
 fi
 
 step "Claude Code CLI"
-if have claude; then ok "claude $(claude --version 2>/dev/null | head -1)"
-elif [ "$CHECK" = 1 ] || ! have npm; then due "claude CLI missing — npm i -g @anthropic-ai/claude-code"
-else npm i -g --no-fund --no-audit @anthropic-ai/claude-code >/dev/null && did "installed $(claude --version | head -1)"
+# Current releases are a Bun-built native binary that dies on a CPU without SSE4.2 — a KVM
+# guest on the default "Common KVM processor" model, for one. 2.0.77 is the last plain-Node
+# cli.js and the version Oneshot's Agent SDK bundles (the SDK runs its own copy, so the
+# conductor is unaffected either way); this CLI is only for /login and the doctor check.
+CLAUDE_PKG=@anthropic-ai/claude-code
+grep -qw sse4_2 /proc/cpuinfo 2>/dev/null || CLAUDE_PKG=@anthropic-ai/claude-code@2.0.77
+if have claude && claude --version >/dev/null 2>&1; then ok "claude $(claude --version 2>/dev/null | head -1)"
+elif [ "$CHECK" = 1 ] || ! have npm; then due "claude CLI missing or not runnable here — npm i -g $CLAUDE_PKG"
+else
+  npm i -g --no-fund --no-audit "$CLAUDE_PKG" >/dev/null && did "installed $(claude --version | head -1)"
+  [ "$CLAUDE_PKG" = @anthropic-ai/claude-code ] || warn "this CPU has no SSE4.2 — pinned $CLAUDE_PKG (plain Node); ask for CPU passthrough to run current releases"
 fi
 
 # ------------------------------------------------------------- user, dirs
@@ -485,11 +510,158 @@ else
   fi
 fi
 
+# ------------------------------------------------------------ oneshot board
+
+# The telemetry board, self-hosted: the same Next.js app that ran on Vercel, on this
+# server's Postgres instead of Supabase. Its database starts empty, so it records from
+# the day it is installed. The board talks to Postgres with plain `pg` and skips TLS for
+# 127.0.0.1, so nothing in it changes; only where DATABASE_URL points does. The collector
+# writes to that same database directly, so the board's port has no telemetry write path
+# and there is no ingest token: Postgres stays on loopback, and the board's logins guard :3100.
+board_restart=0
+if [ "$BOARD" = 1 ]; then
+  step "Oneshot Board ($BOARD_DIR, port $BOARD_PORT, database $BOARD_DB)"
+  [[ "$BOARD_PORT" =~ ^[0-9]+$ ]] || die "BOARD_PORT '$BOARD_PORT' is not a port number" "fix it in $ENV_FILE"
+  if is_placeholder "${CFG[BOARD_SESSION_SECRET]:-}"; then
+    if [ "$CHECK" = 1 ]; then due "BOARD_SESSION_SECRET unset in $ENV_FILE (ONESHOT_BOARD=1)"
+    else die "BOARD_SESSION_SECRET unset in $ENV_FILE (ONESHOT_BOARD=1)" "openssl rand -hex 32, into $ENV_FILE"; fi
+  fi
+
+  # As the checkout's owner: git refuses a repo owned by another user (safe.directory), so
+  # root's own `git -C` would read nothing here.
+  board_git() {
+    if [ "$(id -u)" = 0 ]; then runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" git -C "$BOARD_DIR" "$@"
+    else git -C "$BOARD_DIR" "$@"; fi
+  }
+  if [ -f "$BOARD_DIR/web/package.json" ]; then
+    board_branch="$(board_git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+    if [ "$board_branch" = "$BOARD_REF" ]; then ok "$BOARD_DIR on $BOARD_REF ($(board_git rev-parse --short HEAD 2>/dev/null || echo '?'))"
+    elif [ "$board_branch" = '?' ] && [ "$(id -u)" != 0 ]; then warn "not root: board checkout branch not inspected"
+    elif [ "$CHECK" = 1 ]; then due "$BOARD_DIR is on $board_branch, BOARD_REF=$BOARD_REF — git -C $BOARD_DIR checkout $BOARD_REF"
+    else
+      { board_git fetch -q origin "$BOARD_REF" && board_git checkout -q "$BOARD_REF"; } \
+        || die "could not switch $BOARD_DIR from $board_branch to $BOARD_REF" "local changes? sudo -u $SVC_USER -H git -C $BOARD_DIR status"
+      did "switched $BOARD_DIR from $board_branch to $BOARD_REF ($(board_git rev-parse --short HEAD))"
+    fi
+  elif [ "$CHECK" = 1 ]; then due "$BOARD_DIR is not a checkout of $BOARD_REPO"
+  else
+    install -d -m 0755 -o "$SVC_USER" -g "$SVC_USER" "$BOARD_DIR"
+    runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" git clone -q --branch "$BOARD_REF" "$BOARD_REPO" "$BOARD_DIR" \
+      || die "could not clone $BOARD_REPO at $BOARD_REF" "private repo? clone it as $SVC_USER with credentials: sudo -u $SVC_USER -H git clone --branch $BOARD_REF <url> $BOARD_DIR, then re-run"
+    did "cloned $BOARD_REPO at $BOARD_REF"
+  fi
+
+  # Screenshots and videos the collector copies in and the board serves at /media/.
+  # After the clone: git will not clone into a directory that already has files.
+  if [ -d "$BOARD_MEDIA_DIR" ]; then ok "media dir $BOARD_MEDIA_DIR"
+  elif [ "$CHECK" = 1 ]; then due "media dir $BOARD_MEDIA_DIR missing"
+  else install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$BOARD_MEDIA_DIR"; did "created $BOARD_MEDIA_DIR (mode 750)"
+  fi
+
+  if [ "$CHECK" = 1 ] && [ "$(id -u)" != 0 ]; then warn "not root: board database not inspected"
+  elif pg -c 'SELECT 1' >/dev/null 2>&1; then
+    if [ "$(pg -c "SELECT 1 FROM pg_database WHERE datname = '$BOARD_DB'")" = 1 ]; then ok "database $BOARD_DB"
+    elif [ "$CHECK" = 1 ]; then due "database $BOARD_DB missing"
+    else pg -c "CREATE DATABASE $BOARD_DB OWNER $DB_USER" >/dev/null && did "created database $BOARD_DB (empty: the board records from now on)"
+    fi
+    # With no ingest token, loopback-only Postgres is what keeps the board's data off the LAN.
+    listen="$(pg -c 'show listen_addresses' 2>/dev/null || echo '?')"
+    off_box=0
+    IFS=',' read -ra listen_addrs <<<"$listen"
+    for a in "${listen_addrs[@]}"; do
+      case "${a// /}" in localhost|127.0.0.1|::1) ;; *) off_box=1 ;; esac
+    done
+    if [ "$off_box" = 0 ]; then ok "Postgres listens on loopback only ($listen)"
+    else warn "Postgres listens on $listen — the board database is reachable off-box; set listen_addresses = 'localhost' in postgresql.conf"
+    fi
+  else due "Postgres not answering — board database not checked"
+  fi
+
+  # Written here rather than kept in the main env file: DATABASE_URL is composed from
+  # DB_USER/DB_PASSWORD, and the board expects SESSION_SECRET by that name. The collector
+  # reads the same URL as BOARD_DATABASE_URL from here, never from oneshot.env: the
+  # conductor starts a collector of its own when it sees that key, and this one has a unit.
+  if have node; then
+    # Every character outside [A-Za-z0-9._~-] percent-encoded, so the line reads the same
+    # to systemd's EnvironmentFile and to a shell sourcing it for npm run user:add.
+    urlenc() { node -p 'encodeURIComponent(process.argv[1]).replace(/[!\x27()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())' "$1"; }
+    db_url="postgresql://$(urlenc "$DB_USER"):$(urlenc "$DB_PASSWORD")@127.0.0.1:$DB_PORT/$BOARD_DB"
+    # The board links back to the fleet dashboard on this host's first address.
+    board_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    tmp_env="$(mktemp)"
+    cat > "$tmp_env" <<ENV
+# Written by scripts/setup-server.sh from $ENV_FILE — edit that file and re-run, not this one.
+DATABASE_URL="$db_url"
+SESSION_SECRET=$(cfg BOARD_SESSION_SECRET)
+RETENTION_DAYS=$(cfg BOARD_RETENTION_DAYS 90)
+PORT=$BOARD_PORT
+BOARD_MEDIA_DIR=$BOARD_MEDIA_DIR
+FLEET_URL=http://${board_ip:-127.0.0.1}:$(cfg ONESHOT_DASHBOARD_PORT 8787)
+BOARD_DATABASE_URL="$db_url"
+BOARD_OPERATOR=$(cfg BOARD_OPERATOR "$(cfg ONESHOT_OPERATOR "$(hostname -s)")")
+ENV
+    if [ -f "$BOARD_ENV" ] && cmp -s "$tmp_env" "$BOARD_ENV"; then ok "$BOARD_ENV current"
+    elif [ "$CHECK" = 1 ]; then due "$BOARD_ENV missing or out of date"
+    else install -m 0600 -o "$SVC_USER" -g "$SVC_USER" "$tmp_env" "$BOARD_ENV"; board_restart=1; did "wrote $BOARD_ENV (mode 600)"
+    fi
+    rm -f "$tmp_env"
+    # The fleet dashboard (same oneshot.env) links to the board when this key is set.
+    if grep -q '^ONESHOT_BOARD_URL=' "$ENV_FILE"; then ok "ONESHOT_BOARD_URL set in $ENV_FILE"
+    elif [ "$CHECK" = 1 ]; then due "ONESHOT_BOARD_URL missing from $ENV_FILE"
+    else
+      printf '\nONESHOT_BOARD_URL=http://%s:%s\n' "${board_ip:-127.0.0.1}" "$BOARD_PORT" >> "$ENV_FILE"
+      did "added ONESHOT_BOARD_URL to $ENV_FILE (the dashboard picks it up on its next restart)"
+    fi
+  else due "node missing — $BOARD_ENV not written"
+  fi
+
+  as_board() { (cd "$BOARD_DIR/web" && runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" PATH="$PATH" NO_COLOR=1 NEXT_TELEMETRY_DISABLED=1 "$@"); }
+  if [ -f "$BOARD_DIR/web/package-lock.json" ]; then
+    stamp="$(sha256sum "$BOARD_DIR/web/package-lock.json" | cut -d' ' -f1) $(board_git rev-parse HEAD 2>/dev/null)"
+    if [ -f "$BOARD_DIR/web/.next/.oneshot-build" ] && [ "$(cat "$BOARD_DIR/web/.next/.oneshot-build")" = "$stamp" ]; then
+      ok "board built at $(board_git rev-parse --short HEAD)"
+    elif [ "$CHECK" = 1 ]; then due "board not built for $(board_git rev-parse --short HEAD 2>/dev/null)"
+    else
+      chown -R "$SVC_USER:$SVC_USER" "$BOARD_DIR"
+      as_board npm ci --no-audit --no-fund >/dev/null
+      as_board npm run build >/dev/null || die "the board's next build failed" "cd $BOARD_DIR/web && sudo -u $SVC_USER npm run build"
+      printf '%s' "$stamp" | as_board tee .next/.oneshot-build >/dev/null
+      board_restart=1
+      did "npm ci + next build"
+    fi
+  fi
+
+  if [ "$CHECK" = 0 ] && [ -f "$BOARD_ENV" ] && [ -d "$BOARD_DIR/web/node_modules/pg" ]; then
+    # Idempotent (CREATE ... IF NOT EXISTS throughout), so it runs on every pass and
+    # picks up whatever the board's schema.sql has gained since.
+    db_url="$(sed -n 's/^DATABASE_URL="\(.*\)"$/\1/p' "$BOARD_ENV")"
+    as_board env DATABASE_URL="$db_url" node scripts/db-migrate.mjs >/dev/null \
+      || die "applying $BOARD_DIR/db/schema.sql to $BOARD_DB failed" "cd $BOARD_DIR/web && sudo -u $SVC_USER env DATABASE_URL=… npm run db:migrate"
+    ok "schema applied to $BOARD_DB"
+    users="$(pg -d "$BOARD_DB" -c 'SELECT count(*) FROM users' 2>/dev/null || echo 0)"
+    if [ "$users" = 0 ]; then
+      warn "the board has no login yet — add one (prompts for the password):"
+      warn "  sudo -u $SVC_USER -H bash -c 'cd $BOARD_DIR/web && set -a && . $BOARD_ENV && npm run user:add -- <username>'"
+    else ok "$users board login(s)"
+    fi
+  fi
+
+  if have ufw && ufw_status="$(ufw status 2>/dev/null)" && grep -q '^Status: active' <<<"$ufw_status"; then
+    if grep -Eq "^$BOARD_PORT(/tcp)?[[:space:]]" <<<"$ufw_status"; then ok "ufw allows $BOARD_PORT/tcp"
+    else warn "open the board port: ufw allow $BOARD_PORT/tcp"
+    fi
+  fi
+fi
+
 # ----------------------------------------------------------------- systemd
 
 step "systemd units"
 UNITS=(oneshot-conductor.service oneshot-dashboard.service oneshot-window.service oneshot-window.timer)
 ENABLE=(oneshot-conductor.service oneshot-dashboard.service oneshot-window.timer)
+if [ "$BOARD" = 1 ]; then
+  UNITS+=(oneshot-board.service oneshot-board-collector.service)
+  ENABLE+=(oneshot-board.service oneshot-board-collector.service)
+fi
 if ! have systemctl || [ ! -d /run/systemd/system ]; then
   warn "systemd is not running here (container?) — units not installed"
 else
@@ -506,7 +678,13 @@ else
     [ "$changed" = 1 ] && systemctl daemon-reload
     systemctl enable "${ENABLE[@]}" >/dev/null 2>&1 && ok "enabled ${ENABLE[*]}"
     if [ "$START" = 1 ]; then systemctl restart "${ENABLE[@]}" && did "(re)started ${ENABLE[*]} (the conductor only inside ONESHOT_WINDOW)"
-    else ok "not started (pass --start, or: sudo systemctl start ${ENABLE[*]})"; fi
+    else
+      ok "not started (pass --start, or: sudo systemctl start ${ENABLE[*]})"
+      # A new build or board.env is not live until the board restarts; only if it is running.
+      if [ "$board_restart" = 1 ] && systemctl is-active --quiet oneshot-board.service; then
+        systemctl restart oneshot-board.service oneshot-board-collector.service && did "restarted the board for its new build/env"
+      fi
+    fi
   else
     for u in "${ENABLE[@]}"; do
       if systemctl is-enabled --quiet "$u" 2>/dev/null; then ok "$u enabled"; else due "$u not enabled"; fi

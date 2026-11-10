@@ -134,6 +134,18 @@ test('re-arming clears the request note so the next entry asks again', () => {
   assert.equal(readJournal(9006)?.verifyCasesApproval?.requestNoteId, null);
 });
 
+test('rearmGate keeps who gave the earlier feedback', () => {
+  journal(9008, {
+    planApproval: { requestTs: null, requestNoteId: 300345, approved: false, feedback: ['tighten step 2'], feedbackBy: [['sara', 'ali']] },
+  });
+  const after = rearmGate(9008, 'plan');
+  assert.deepEqual(after?.planApproval?.feedbackBy, [['sara', 'ali']]);
+  assert.deepEqual(readJournal(9008)?.planApproval?.feedbackBy, [['sara', 'ali']]);
+  // An old journal without feedbackBy stays without it, byte for byte.
+  journal(9009, { planApproval: { requestTs: 1, requestNoteId: 7, approved: false, feedback: ['x'] } });
+  assert.equal('feedbackBy' in (rearmGate(9009, 'plan')?.planApproval ?? {}), false);
+});
+
 test('re-arming a gate that was never armed is harmless', () => {
   journal(9007);
   const after = rearmGate(9007, 'verifyCases');

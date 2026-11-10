@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path';
 
 /** Shipping order — parents before children, so a batch never references a row a later batch inserts. */
-export const TABLES = ['operators', 'runs', 'interventions', 'sessions', 'agent_calls', 'skill_calls', 'tool_calls', 'transcript_lines'];
+export const TABLES = ['operators', 'runs', 'interventions', 'sessions', 'agent_calls', 'skill_calls', 'tool_calls', 'transcript_lines', 'evidence'];
 const PK = {
   operators: (r) => r.id,
   runs: (r) => r.run_id,
@@ -12,6 +12,7 @@ const PK = {
   skill_calls: (r) => r.tool_use_id,
   tool_calls: (r) => r.tool_use_id,
   transcript_lines: (r) => `${r.session_id}:${r.line_no}`,
+  evidence: (r) => r.id,
 };
 
 export function atomicWrite(file, data) {

@@ -1,0 +1,5 @@
+{
+  "screenshots": [
+    { "file": "settings-after.png", "caption": "Settings page with the new toggle", "caseId": "TC-01" }
+  ]
+}

@@ -42,11 +42,11 @@ Never commit these; they belong in `.env` and nowhere else.
 | Value | What it is |
 |---|---|
 | `GITLAB_TOKEN` | project access token — reads tickets, opens and merges MRs |
-| `BOARD_INGEST_TOKEN` | 64 hex characters; the telemetry board's write credential |
+| `BOARD_DATABASE_URL` | optional — leave unset on a desk; set it only to a Postgres of your own for board development |
 | `GITLAB_REPO_URL` | which GitLab project Oneshot works on — the one line that decides it; today `https://gitlab.arbisoft.com/arbisoft/erp` |
 | `WORK_REPO`, `CONTEXT_REPO` | where the repos are on *your* disk, when not at the defaults |
 | `SLACK_BOT_TOKEN` | optional — progress cards. Oneshot runs without it |
-| a board login | separate from the ingest token; ask for one |
+| a board login | for reading the board in a browser; ask for one |
 
 ### 1. Prerequisites
 
@@ -169,12 +169,9 @@ warn while any foreign journals are left, and print the one command that
 moves exactly those aside. Do not move `state/runs/*`: that takes this project's live
 runs with it, and a fresh run cannot lease a branch the old worktree still holds.
 
-Add the board, two lines in the same file:
-
-```
-BOARD_URL=https://oneshot-board.vercel.app
-BOARD_INGEST_TOKEN=<the 64-character token>
-```
+Leave `BOARD_DATABASE_URL` unset on a desk. The collector then extracts locally and
+ships nothing (`npm run board:stats` still works). Set it only to a Postgres of your own
+when developing the board; shipping desk telemetry to the server board is a later decision.
 
 Leave `BOARD_OPERATOR` blank — your identity resolves to your OS username.
 

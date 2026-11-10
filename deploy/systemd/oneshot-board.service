@@ -1,0 +1,25 @@
+# Oneshot Board — the telemetry board (github.com/HassamAzam/oneshot-board), self-hosted on
+# this server's Postgres instead of Supabase/Vercel. Installed by scripts/setup-server.sh
+# when ONESHOT_BOARD=1. Binds 0.0.0.0:${PORT} (BOARD_PORT, default 3100); logins are the
+# board's own users table. /etc/oneshot/board.env is written by the setup script.
+# Logs: journalctl -u oneshot-board -f
+[Unit]
+Description=Oneshot Board (web)
+Documentation=file:///srv/oneshot/docs/SERVER-SETUP.md
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=oneshot
+Group=oneshot
+WorkingDirectory=/srv/oneshot-board/web
+EnvironmentFile=/etc/oneshot/board.env
+Environment=NODE_ENV=production
+Environment=NEXT_TELEMETRY_DISABLED=1
+ExecStart=/usr/bin/node /srv/oneshot-board/web/node_modules/next/dist/bin/next start --hostname 0.0.0.0 --port ${PORT}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

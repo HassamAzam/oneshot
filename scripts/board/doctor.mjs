@@ -3,14 +3,16 @@
  * `npm run board:doctor` — why is this desk not on the board?
  *
  * Answers the whole question in one pass: who this desk is, whether Oneshot has
- * produced anything to ship, whether the board is reachable and the token accepted,
+ * produced anything to ship, whether the board's database is reachable and current,
  * and what is queued. Every check prints a verdict and, when it fails, the fix.
  */
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync, statfsSync } from 'node:fs';
 import { join } from 'node:path';
 import { CFG } from './config.mjs';
 import { resolveOperator } from './identity.mjs';
 import { runDirs, readJournal } from './journal.mjs';
+import { Sink, TABLES } from './sink.mjs';
+import { fallbackId, getProject, gitlabTarget } from './mrmerger.mjs';
 
 const G = '\x1b[32m', R = '\x1b[31m', Y = '\x1b[33m', D = '\x1b[2m', X = '\x1b[0m';
 const ok = (m, d) => console.log(`  ${G}✓${X} ${m}${d ? `  ${D}${d}${X}` : ''}`);
@@ -54,29 +56,52 @@ if (!existsSync(CFG.oneshotHome)) {
   }
 }
 
-// ---- 3. is the board configured and reachable?
+// ---- 3. is the board's database configured and reachable?
 console.log(`\n${D}Board${X}`);
-if (!CFG.boardUrl) bad('BOARD_URL is not set', 'add BOARD_URL=https://… to .env');
-else if (!CFG.ingestToken) bad('BOARD_INGEST_TOKEN is not set', 'add it to .env — same value as on the deployment');
+if (!CFG.databaseUrl) bad('BOARD_DATABASE_URL is not set', 'add BOARD_DATABASE_URL=postgresql://… to .env — the same value as the board\'s DATABASE_URL');
 else {
-  ok(`configured  ${CFG.boardUrl}`);
+  let host = '(unparseable URL)';
+  try { const u = new URL(CFG.databaseUrl); host = `${u.hostname}:${u.port || 5432}${u.pathname}`; } catch { /* reported below */ }
+  const sink = new Sink(CFG.databaseUrl);
   try {
-    const h = await fetch(`${CFG.boardUrl}/api/health`, { signal: AbortSignal.timeout(20_000) });
-    const j = await h.json().catch(() => ({}));
-    if (j.ok) ok('reachable and healthy', `${j.sessions} sessions on the board`);
-    else bad(`board is up but unhealthy: ${j.error ?? h.status}`, 'the board owner needs to fix DATABASE_URL');
-  } catch (e) { bad(`cannot reach ${CFG.boardUrl}: ${e.message}`, 'check the URL and your network/VPN'); }
+    await sink.open();
+    ok(`connects  ${host}`);
+    const { rows } = await sink.pool.query(
+      'select table_name from information_schema.tables where table_schema = current_schema() and table_name = any($1)', [TABLES]);
+    const present = new Set(rows.map((r) => r.table_name));
+    const missing = TABLES.filter((t) => !present.has(t));
+    if (missing.length) bad(`board tables missing: ${missing.join(', ')}`, 'apply the board\'s schema (its db-migrate script) to this database');
+    else ok(`all ${TABLES.length} board tables present`);
+    for (const [t, cols] of Object.entries(sink.droppedColumns())) {
+      if (!missing.includes(t)) warn(`${t} lacks ${cols.join(', ')} — those values are not written`, 'the board\'s schema is older than this collector; migrate it');
+    }
+    if (present.has('operators')) {
+      const r = await sink.pool.query('select max(last_seen) as at from operators');
+      const at = r.rows[0].at;
+      if (at) ok('last row written', `${Math.round((Date.now() - new Date(at).getTime()) / 60000)}m ago`);
+      else warn('nothing shipped yet', 'run `npm run board:once` and read the flush line');
+    }
+  } catch (e) {
+    bad(`cannot connect to ${host}: ${e.message}`, 'check BOARD_DATABASE_URL and that Postgres is running');
+  } finally {
+    await sink.close().catch(() => undefined);
+  }
+}
 
-  try {
-    const r = await fetch(`${CFG.boardUrl}/api/ingest`, {
-      method: 'POST', headers: { authorization: `Bearer ${CFG.ingestToken}`, 'content-type': 'application/json' },
-      body: '{}', signal: AbortSignal.timeout(20_000),
-    });
-    const j = await r.json().catch(() => ({}));
-    if (r.ok) ok('token accepted');
-    else bad(`token refused (HTTP ${r.status})${j.hint ? `: ${j.hint}` : ''}`,
-             'copy BOARD_INGEST_TOKEN again — it is 64 characters, easy to truncate');
-  } catch (e) { bad(`ingest unreachable: ${e.message}`); }
+// The merge gate's answerer is asked of GitLab; without it the row ships with a null name.
+{
+  const t = gitlabTarget();
+  if (t.error) warn(`GitLab: ${t.error}`, 'merge answerer will be null');
+  else {
+    try {
+      const res = await getProject(t, '', { timeoutMs: 10_000 });
+      const id = fallbackId(t);
+      if (res.status === 200) ok(`GitLab answers for ${t.project}`, id ? `by id ${id} — the path form is not routed` : undefined);
+      else warn(`GitLab: ${t.project} answered HTTP ${res.status}`, 'merge answerer will be null');
+    } catch (e) {
+      warn(`GitLab: ${t.project} unreachable (${e.name === 'TimeoutError' ? 'no answer in 10 s' : e.message})`, 'merge answerer will be null');
+    }
+  }
 }
 
 // ---- 4. is the collector actually running?
@@ -112,6 +137,35 @@ else {
     if (n) warn(`${n} row(s) waiting to ship`, 'run `npm run board:once` and read the flush line');
     else ok('empty (everything shipped)');
   } catch { warn('outbox unreadable'); }
+}
+
+// ---- 6. where screenshots and videos land
+console.log(`\n${D}Media  ${CFG.mediaDir}${X}`);
+if (!existsSync(CFG.mediaDir)) {
+  warn('media dir does not exist yet', `the collector creates it on the first evidence file; to check now: mkdir -p ${CFG.mediaDir}`);
+} else {
+  try { accessSync(CFG.mediaDir, constants.W_OK); ok('writable'); } catch {
+    warn('not writable by this user — evidence files will be skipped', `chown it to this user, or set BOARD_MEDIA_DIR (e.g. mkdir -p ${CFG.mediaDir})`);
+  }
+  try {
+    const fs = statfsSync(CFG.mediaDir);
+    const gb = (n) => `${(n / 1e9).toFixed(1)} GB`;
+    const free = fs.bavail * fs.bsize;
+    (free < 2e9 ? warn : ok)(`${gb(free)} free of ${gb(fs.blocks * fs.bsize)}`);
+  } catch (e) { warn(`free space unknown: ${e.message}`); }
+  const CAP = 50_000;
+  let n = 0;
+  const stack = [CFG.mediaDir];
+  while (stack.length && n < CAP) {
+    const dir = stack.pop();
+    let entries = [];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (e.isDirectory()) stack.push(join(dir, e.name));
+      else if (e.isFile() && ++n >= CAP) break;
+    }
+  }
+  ok(`${n >= CAP ? `${CAP}+` : n} file(s)`);
 }
 
 console.log(failed ? `\n${R}${failed} problem(s) above.${X}\n` : `\n${G}All checks passed — this desk should appear on the board within a minute of the collector running.${X}\n`);

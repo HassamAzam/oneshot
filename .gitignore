@@ -23,3 +23,6 @@ logs/
 
 # Planning docs never get committed
 /docs/superpowers/
+
+# SDD scratch (ledger, briefs, mockups)
+/.superpowers/
