@@ -165,6 +165,8 @@ export interface ReviewPromptInput {
   changedFiles: string[] | null;
   /** Every thread of the run, so a re-check can rule on them and a first review does not repeat one. */
   threads: ReviewThread[];
+  /** What the previous attempt at this review said it did not cover, when it was rejected for that. */
+  lastAttempt?: string;
 }
 
 /** What the fixer's prompt is built from. */

@@ -31,7 +31,12 @@ import type {
 /** What one session came back with. `lap` is the phase lap the conductor ran it as. */
 export type Session<T> =
   | { ok: true; lap: number; data: T }
-  | { ok: false; why: string; infra: boolean };
+  /**
+   * `partial`: what a FIRST review had found when it died, or when it said of
+   * itself that it did not cover the change. Its findings are worth posting; it
+   * is not the review, which is still owed.
+   */
+  | { ok: false; why: string; infra: boolean; partial?: T; lap?: number };
 
 export interface LoopDeps {
   runId: string;
@@ -132,7 +137,7 @@ export async function driveReview(d: LoopDeps): Promise<LoopOutcome> {
     if (!live) return { kind: 'retry-later', why: `could not read the discussions on !${d.mrIid}` };
 
     if (l.pending.length) {
-      const flushed = await flush(l, d.api, { live, save: d.save });
+      const flushed = await flush(l, d.api, { live, save: d.save, trusted: d.trusted });
       l = flushed.ledger;
       if (flushed.failed) return { kind: 'retry-later', why: flushed.failed };
       continue; // read the merge request again now that it has changed
@@ -152,7 +157,20 @@ export async function driveReview(d: LoopDeps): Promise<LoopOutcome> {
     if (next.kind === 'review') {
       const changed = next.recheck && l.reviewedSha ? d.changedFiles(l.reviewedSha, head) : null;
       const s = await d.runReviewer(reviewInput(l, { recheck: next.recheck, headSha: head, changedFiles: changed }));
-      if (!s.ok) return { kind: 'session-failed', phase: 'review', why: s.why, infra: s.infra };
+      if (!s.ok) {
+        if (s.partial && !next.recheck) {
+          // Posted, so nothing a dead or half-done review found is lost — but
+          // `reviewedSha` is left alone, so a first review is still what is owed,
+          // and the next attempt is shown these as already open.
+          const kept = applyReview(l, s.partial, {
+            lap: s.lap ?? 0, headSha: head, recheck: false, changedFiles: null, root: d.root, partial: true,
+          });
+          l = kept.ledger;
+          d.save(l);
+          d.info(`review did not finish — ${kept.raised.length} finding(s) it had are kept as threads; the review is still owed`);
+        }
+        return { kind: 'session-failed', phase: 'review', why: s.why, infra: s.infra };
+      }
       const applied = applyReview(l, s.data, {
         lap: s.lap, headSha: head, recheck: next.recheck, changedFiles: changed, root: d.root,
       });

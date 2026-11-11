@@ -1593,7 +1593,7 @@ test('the old loop\'s review prompt keeps its own wording', () => {
 
 test('a re-check is told the next free id, its budget, and loads only its own skill', () => {
   const p = promptFor(cfg('review'), { ...ctx(ticket()), lap: 1, review: RECHECK });
-  assert.match(p, /A NEW finding takes a NEW id, continuing after the highest one below \(the next is\s+F-04\)/);
+  assert.match(p, /A NEW finding takes a NEW id: the next free one is F-04/);
   assert.match(p, /Your budget is \d+ minutes and \d+ turns/);
   const recheckSystem = systemPromptFor(cfg('review'), { ...ctx(ticket()), lap: 1, review: RECHECK });
   const firstSystem = systemPromptFor(cfg('review'), { ...ctx(ticket()), review: FIRST });
@@ -1603,12 +1603,45 @@ test('a re-check is told the next free id, its budget, and loads only its own sk
   assert.match(recheckSystem, /review-threads/);
 });
 
+test('a review retried because the last attempt was incomplete is told what that attempt left out', () => {
+  const p = promptFor(cfg('review'), {
+    ...ctx(ticket()), lap: 1,
+    review: { ...FIRST, threads: [reviewThread()], lastAttempt: 'backend-reviewer-agent NOT REVIEWED (did not land).' },
+  });
+  assert.match(p, /## The previous attempt at this review was NOT accepted/);
+  assert.match(p, /backend-reviewer-agent NOT REVIEWED \(did not land\)\./);
+  assert.match(p, /Cover the part\s+it left out YOURSELF/);
+  // What that attempt did find is not raised a second time.
+  assert.match(p, /Already open on this merge request from an earlier review — do NOT raise these again/);
+  // A first attempt is told nothing of the kind.
+  assert.doesNotMatch(promptFor(cfg('review'), { ...ctx(ticket()), review: FIRST }), /previous attempt/);
+});
+
+test('a re-check is told when a thread is open only because a person replied after the fixer answered', () => {
+  const answered = reviewThread({
+    status: 'open', resolved: false,
+    fixer: { lap: 0, action: 'fixed', reply: 'Restored the test.', commit: 'b2c3d4e5f6a7' },
+    human: [{ noteId: 500, author: 'hassam.azam', body: 'Mark it expectedFailure instead.' }],
+  });
+  const p = promptFor(cfg('review'), { ...ctx(ticket()), lap: 1, review: { ...RECHECK, threads: [answered] } });
+  assert.match(p, /state: open — a person replied after the fixer answered/);
+  assert.match(p, /hassam\.azam\) replied: Mark it expectedFailure instead\./);
+});
+
+test('verify is told where earlier laps left their files, now that git ignores the directory', () => {
+  const p = promptFor(cfg('verify'), { ...ctx(ticket()) });
+  assert.match(p, /They are under\s+`\.verify-scratch\/`, which git ignores/);
+  assert.match(p, /ls -la \.verify-scratch/);
+});
+
 test('the fixer is told to stage by path, stay on its branch and leave nothing uncommitted', () => {
   const p = promptFor(cfg('review-fix'), { ...ctx(ticket()), reviewFix: FIX }).replace(/\s+/g, ' ');
   assert.match(p, /Stage what you changed BY PATH/);
   assert.match(p, /never `git add -A`, `git add \.` or `git commit -a`/);
   assert.match(p, /do not create or switch branches/);
-  assert.match(p, /an edit you leave uncommitted is not a fix/);
+  assert.match(p, /`git status --porcelain` must print nothing/);
+  assert.match(p, /no NEW file of yours left uncommitted/);
+  assert.match(p, /What you leave uncommitted is not a fix/);
 });
 
 test('the thread loop never hands the reviewer the old re-raise-as-blocker protocol', () => {

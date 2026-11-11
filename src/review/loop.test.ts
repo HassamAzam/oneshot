@@ -475,6 +475,83 @@ test('a comment a person writes WHILE the fixer is working is not lost under the
   assert.match(w.fixerInputs[1]!.threads[0]!.human![0]!.body, /mark it expectedFailure/);
 });
 
+test('a comment written while the fixer FIXES the thread keeps it open until a lap has acted on it', async () => {
+  // The ordinary outcome: the fixer answers `fixed`. Its reply used to be posted
+  // and the thread resolved directly under the person's comment, which nothing
+  // ever read again — not the next sync, not the re-check, not mr-feedback.
+  const w = world({
+    reviews: [
+      { findings: [F('F-01', 'major')] },
+      { findings: [], threads: [{ id: 'F-01', ruling: 'accepted', note: '' }] },
+      { findings: [], threads: [{ id: 'F-01', ruling: 'accepted', note: '' }] },
+    ],
+    fixes: [
+      { commit: 'b2', threads: [{ id: 'F-01', action: 'fixed', reply: 'Dropped the test.', commit: 'b2' }] },
+      { commit: 'c3', threads: [{ id: 'F-01', action: 'fixed', reply: 'Marked it expectedFailure, as asked.', commit: 'c3' }] },
+    ],
+  });
+  const fixer = w.deps.runFixer;
+  let first = true;
+  w.deps.runFixer = async (input) => {
+    if (first) { first = false; w.mr.humanReply('d1', 'hassam.azam', 'Do NOT drop the test - mark it expectedFailure.'); }
+    return fixer(input);
+  };
+  assert.deepEqual(await driveReview(w.deps), { kind: 'done', raised: 1, open: 0 });
+  assert.equal(w.fixerInputs.length, 2, 'the reply got a lap');
+  assert.match(w.fixerInputs[1]!.threads[0]!.human![0]!.body, /mark it expectedFailure/);
+  // The first answer is posted but the thread is NOT resolved under the comment;
+  // the second answer, which acted on it, is what resolves it.
+  assert.deepEqual(w.mr.actions('d1'), ['reviewer:raised', 'human:hassam.azam', 'fixer:fixed', 'fixer:fixed']);
+  assert.deepEqual(w.mr.open(), []);
+});
+
+test('a first review that did not finish has its findings posted, and is run again as a FIRST review', async () => {
+  const w = world({
+    reviews: [
+      { ok: false, why: 'error_max_turns — 1 finding kept', infra: false, lap: 0, partial: { findings: [F('F-01', 'major')] } },
+      { findings: [F('F-02', 'minor', { line: 40 })] },
+      { findings: [], threads: [{ id: 'F-01', ruling: 'accepted', note: '' }, { id: 'F-02', ruling: 'accepted', note: '' }] },
+    ],
+    fixes: [{ commit: 'b2', threads: [
+      { id: 'F-01', action: 'fixed', reply: 'ok', commit: 'b2' }, { id: 'F-02', action: 'fixed', reply: 'ok', commit: 'b2' },
+    ] }],
+  });
+  const died = await driveReview(w.deps);
+  assert.equal(died.kind, 'session-failed');
+  assert.equal(w.ledger?.reviewedSha, null, 'the review is still owed');
+  assert.equal(w.ledger?.threads.length, 1, 'but what it found is kept');
+  // The runner retries by entering the loop again.
+  assert.deepEqual(await driveReview(w.deps), { kind: 'done', raised: 2, open: 0 });
+  assert.equal(w.reviewerInputs[1]?.recheck, false, 'a whole review, not a re-check of the fixer\'s diff');
+  assert.deepEqual(w.reviewerInputs[1]?.threads.map((t) => t.id), ['F-01'], 'shown what is already open');
+  assert.equal(w.mr.discussionsList.length, 2);
+});
+
+test('after two dead laps on a person\'s reply, a NEW reply from them still gets a lap', async () => {
+  const dead = { ok: false as const, why: 'error_max_turns', infra: false };
+  const w = world({
+    maxFixLaps: 1,
+    reviews: [
+      { findings: [F('F-05', 'major')] },
+      { findings: [], threads: [{ id: 'F-05', ruling: 'stands', note: 'no' }] },
+      { findings: [], threads: [{ id: 'F-05', ruling: 'accepted', note: '' }] },
+    ],
+    fixes: [
+      { threads: [{ id: 'F-05', action: 'declined', reply: 'no', commit: '' }] }, dead, dead,
+      { commit: 'c3', threads: [{ id: 'F-05', action: 'fixed', reply: 'Marked expectedFailure.', commit: 'c3' }] },
+    ],
+  });
+  assert.equal((await driveReview(w.deps)).kind, 'parked');
+  w.mr.humanReply('d1', 'hassam.azam', 'Rewrite the whole test class.');
+  assert.equal((await driveReview(w.deps)).kind, 'session-failed');
+  assert.equal((await driveReview(w.deps)).kind, 'session-failed');
+  assert.equal((await driveReview(w.deps)).kind, 'parked');
+  // The park note tells them to reply. They do, asking for less.
+  w.mr.humanReply('d1', 'hassam.azam', 'OK - smaller: just mark test_person as expectedFailure.');
+  assert.deepEqual(await driveReview(w.deps), { kind: 'done', raised: 1, open: 0 });
+  assert.equal(w.fixerInputs.length, 4);
+});
+
 test('a fixer that keeps dying on a person\'s reply is not started for it without end', async () => {
   const dead = { ok: false as const, why: 'error_max_turns', infra: false };
   const w = world({

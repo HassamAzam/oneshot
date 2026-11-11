@@ -252,6 +252,88 @@ test('the same id on a different file is a new finding even when the reviewer se
   assert.equal(thread(r.ledger, 'F-02').file, 'apps/teams/admin.py');
 });
 
+test('a finding said again under its own id beside `stands` is that thread, not a second one', () => {
+  // The prompt elicits `stands` for a declined thread; a reviewer that also lists
+  // the finding again must not get a duplicate thread for the same defect.
+  const l = fixedAt([finding('F-04', 'minor'), finding('F-05', 'major')], [
+    { id: 'F-04', action: 'fixed', reply: 'ok', commit: 'b2' },
+    { id: 'F-05', action: 'declined', reply: 'QA approved TC-21.', commit: '' },
+  ]);
+  const r = applyReview(l, {
+    threads: [{ id: 'F-04', ruling: 'accepted', note: '' }, { id: 'F-05', ruling: 'stands', note: '' }],
+    findings: [finding('F-05', 'major', { what: 'the class still has three tests' })],
+  }, { lap: 1, headSha: 'b2', recheck: true, changedFiles: ['apps/teams/tests/admin_test.py'] });
+  assert.deepEqual(r.raised, [], 'no second thread');
+  assert.equal(thread(r.ledger, 'F-05').status, 'disputed');
+  // The ruling had no note of its own, so the finding's words are what is posted.
+  assert.match(thread(r.ledger, 'F-05').reviewerNote ?? '', /the class still has three tests/);
+});
+
+test('a finished thread raised again under its own id is not reopened, not re-graded, and not lost without a trace', () => {
+  // #9174 lap 2: a declined suggestion came back as a blocker.
+  const l = fixedAt([finding('F-03', 'suggestion', { file: 'templates/admin/base.html' })],
+    [{ id: 'F-03', action: 'declined', reply: 'Outside the ticket.', commit: '' }]);
+  assert.equal(thread(l, 'F-03').status, 'closed');
+  const r = applyReview({ ...l, recheckOwed: true }, {
+    findings: [finding('F-03', 'blocker', { file: 'templates/admin/base.html', what: 'reported closed and was not' })],
+  }, { lap: 1, headSha: 'b2', recheck: true, changedFiles: [] });
+  assert.deepEqual(r.raised, []);
+  assert.equal(thread(r.ledger, 'F-03').severity, 'suggestion');
+  assert.equal(thread(r.ledger, 'F-03').resolved, true);
+  assert.match(r.dropped[0]?.reason ?? '', /F-03 is finished \(closed\) and a re-check cannot reopen or re-grade it/);
+});
+
+test('neither session can close a thread over a person\'s reply no fixer lap has been handed', () => {
+  let l = fixedAt([finding('F-05', 'major')], [{ id: 'F-05', action: 'declined', reply: 'Not mine.', commit: '' }]);
+  l = { ...l, threads: l.threads.map((t) => ({ ...t, human: [{ noteId: 2000, author: 'hassam.azam', body: 'Mark it expectedFailure.' }] })) };
+  const r = applyReview(l, { findings: [], threads: [{ id: 'F-05', ruling: 'withdrawn', note: 'The fixer is right.' }] },
+    { lap: 1, headSha: 'b2', recheck: true, changedFiles: [] });
+  const t = thread(r.ledger, 'F-05');
+  assert.equal(t.resolved, false);
+  assert.deepEqual(r.ledger.pending, [], 'no "Withdrawn" is posted and nothing is resolved');
+  assert.deepEqual(fixableThreads(r.ledger).map((x) => x.id), ['F-05'], 'the reply still gets its fixer lap');
+});
+
+test('a fixer lap that leaves a thread out has not dealt with the person\'s reply on it', () => {
+  let l = reviewed([finding('F-02', 'minor')]);
+  l = { ...l, threads: l.threads.map((t) => ({ ...t, human: [{ noteId: 2000, author: 'hassam.azam', body: 'Also cover the empty name.' }] })) };
+  const r = applyFix(l, { threads: [] }, { lap: 0, headBefore: 'a1', headAfter: 'a1', handed: ['F-02'] });
+  const t = thread(r.ledger, 'F-02');
+  assert.deepEqual(r.unanswered, ['F-02']);
+  assert.equal(t.human?.length, 1, 'the reply is still on the thread');
+  assert.equal(t.humanTries, 1);
+  assert.equal(t.lastNoteId ?? 0, l.threads[0]!.lastNoteId ?? 0, 'and it is not marked seen');
+  // So at the cap it parks for the person; it is never closed "not taken up" under their comment.
+  const spent = nextStep({ ...r.ledger, threads: r.ledger.threads.map((x) => ({ ...x, humanTries: MAX_HUMAN_TRIES })) },
+    { head: 'a1', fixLapsUsed: 3, maxFixLaps: 3 });
+  assert.equal(spent.kind, 'park');
+});
+
+test('a reply the ledger has not held before gets tries of its own', () => {
+  let l = reviewed([finding('F-05', 'major')]);
+  l = { ...l, threads: l.threads.map((t) => ({ ...t, lastNoteId: 1000, humanTries: MAX_HUMAN_TRIES,
+    human: [{ noteId: 2000, author: 'hassam.azam', body: 'Rewrite the whole class.' }] })) };
+  const first = note(2000, 'hassam.azam', 'Rewrite the whole class.');
+  const live = (extra: MrNote[]): MrDiscussion[] => [disc('d-F-05', [raisedNote(1000, 'F-05', 'major'), first, ...extra])];
+  // Same reply as before: the count stands.
+  assert.equal(thread(syncLive(l, live([]), TRUST), 'F-05').humanTries, MAX_HUMAN_TRIES);
+  // The person writes again, asking for less: that is a new request.
+  const again = syncLive(l, live([note(2001, 'hassam.azam', 'Smaller: just mark it expectedFailure.')]), TRUST);
+  assert.equal(thread(again, 'F-05').humanTries, undefined);
+  assert.equal(thread(again, 'F-05').human?.length, 2);
+  assert.equal(nextStep(again, { head: 'a1', fixLapsUsed: 3, maxFixLaps: 3 }).kind, 'fix');
+});
+
+test('a review that did not finish keeps its findings as threads, and the review is still owed', () => {
+  const r = applyReview(emptyLedger(RUN, MR), { findings: [finding('F-01', 'major')] },
+    { lap: 0, headSha: 'a1', recheck: false, changedFiles: null, partial: true });
+  assert.deepEqual(r.raised, ['F-01']);
+  assert.equal(r.ledger.reviewedSha, null);
+  const posted = landed(r.ledger);
+  assert.deepEqual(nextStep(posted, { head: 'a1', ...BUDGET }), { kind: 'review', recheck: false },
+    'a FIRST review, not a re-check held to what a fixer changed');
+});
+
 test('"stands" on a thread the fixer FIXED means the finding still stands: it is reopened, not accepted', () => {
   const l = fixedAt([finding('F-01', 'major')], [{ id: 'F-01', action: 'fixed', reply: 'ok', commit: 'b2' }]);
   const r = applyReview(l, { findings: [], threads: [{ id: 'F-01', ruling: 'stands', note: 'The assertion is still a tautology.' }] },
@@ -283,6 +365,12 @@ test('a first review that says part of the change was not reviewed is not a comp
   assert.equal(reviewIsIncomplete({ verdict: 'changes-requested', findings: [finding('F-01', 'major')] }), false);
   assert.equal(reviewIsIncomplete({ verdict: 'approve', findings: [finding('F-01', 'minor')] }), false);
   assert.equal(reviewIsIncomplete({ findings: [] }), false);
+  // Its own words for it, even beside a major: half a review with a finding is still half.
+  assert.equal(reviewIsIncomplete({
+    verdict: 'changes-requested', summary: 'backend-reviewer-agent NOT REVIEWED (did not land).', findings: [finding('F-01', 'major')],
+  }), true);
+  // Told not to raise again what is already open: a blocker thread explains the verdict.
+  assert.equal(reviewIsIncomplete({ verdict: 'changes-requested', findings: [] }, { openBlocking: true }), false);
 });
 
 test('the reviewer\'s own summary is carried into findings.json', () => {

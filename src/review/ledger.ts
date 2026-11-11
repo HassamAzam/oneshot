@@ -212,6 +212,10 @@ function rule(
 ): ThreadWrite | null {
   const ruling = r?.ruling;
   const note = r?.note ?? '';
+  // A person's reply that no fixer lap has been handed keeps the thread open,
+  // whatever the two sessions conclude between themselves: the reviewer can say
+  // the fix failed, but neither of them can close it over that reply.
+  if ((ruling === 'accepted' || ruling === 'withdrawn') && t.human?.length) return null;
   switch (t.status) {
     case 'fixed':
       // `stands` is the word for a declined thread, but on a fixed one it can
@@ -276,7 +280,11 @@ function rule(
  */
 export function applyReview(
   ledger: ReviewLedger, out: ReviewerOutput,
-  o: { lap: number; headSha: string; recheck: boolean; changedFiles: string[] | null; root?: string | null },
+  o: {
+    lap: number; headSha: string; recheck: boolean; changedFiles: string[] | null; root?: string | null;
+    /** The answer is not a whole review (it died, or says it did not cover the change): keep its findings, still owe the review. */
+    partial?: boolean;
+  },
 ): { ledger: ReviewLedger; raised: string[]; dropped: DroppedFinding[] } {
   const l = clone(ledger);
   const writes: ThreadWrite[] = [];
@@ -297,9 +305,28 @@ export function applyReview(
     for (const f of findings) {
       const t = f.id ? l.threads.find((x) => x.id === f.id) : undefined;
       if (!t || t.file !== f.file) continue;
+      // The same id on the same file as a FINISHED thread is that thread raised
+      // again. A thread a person closed, the run closed as declined, or the
+      // reviewer itself withdrew is not the reviewer's to reopen or re-grade —
+      // on #9174 that is how a declined suggestion came back as a blocker. It is
+      // not posted, and it is not lost without a trace either.
+      if (t.status === 'closed' || t.status === 'withdrawn') {
+        dropped.push({
+          lap: o.lap, severity: f.severity, file: f.file, line: f.line, what: f.what,
+          reason: `${t.id} is finished (${t.status}) and a re-check cannot reopen or re-grade it — `
+            + 'a different defect needs an id of its own',
+        });
+        wasRuling.add(f);
+        continue;
+      }
       const said = rulings.get(t.id);
-      if (said && said.ruling !== 'reopen') continue;
-      rulings.set(t.id, { ruling: 'reopen', note: said?.note || [f.what, f.why].filter(Boolean).join(' ') });
+      // Beside a ruling that CLOSES the thread the finding is something else.
+      if (said && (said.ruling === 'accepted' || said.ruling === 'withdrawn')) continue;
+      // Otherwise it is the thread's own finding said again — with no ruling
+      // (read as reopen), or beside `reopen` or `stands`, which already say it.
+      const words = [f.what, f.why].filter(Boolean).join(' ');
+      if (!said) rulings.set(t.id, { ruling: 'reopen', note: words });
+      else if (!said.note) said.note = words;
       wasRuling.add(f);
     }
     for (const t of l.threads) {
@@ -340,8 +367,9 @@ export function applyReview(
 
   l.pending.push(...writes);
   l.dropped.push(...dropped);
-  l.reviewedSha = o.headSha;
   l.reviewLap = o.lap;
+  if (o.partial) return { ledger: l, raised, dropped };
+  l.reviewedSha = o.headSha;
   l.recheckOwed = false;
   const summary = String(out.summary ?? '').replace(/\s+/g, ' ').trim();
   if (summary) l.reviewSummary = summary.slice(0, 1200);
@@ -359,8 +387,14 @@ export function applyReview(
  * counted as the whole review. 'changes-requested' with nothing blocking behind
  * it is that case, and the caller re-attempts the review instead of accepting it.
  */
-export function reviewIsIncomplete(out: ReviewerOutput): boolean {
+export function reviewIsIncomplete(out: ReviewerOutput, o: { openBlocking?: boolean } = {}): boolean {
+  // The reviewer's own words for it (src/phases/prompts.ts tells it to write
+  // exactly this): said beside a blocker it is still half a review.
+  if (/\bNOT REVIEWED\b/.test(String(out.summary ?? ''))) return true;
   if (String(out.verdict ?? '') !== 'changes-requested') return false;
+  // Something blocking explains the verdict: a finding in this answer, or a
+  // thread already open that the reviewer was told not to raise again.
+  if (o.openBlocking) return false;
   return !readFindings(out.findings).some((f) => isBlocking(f.severity));
 }
 
@@ -409,13 +443,20 @@ export function applyFix(
     const t = l.threads.find((x) => x.id === id);
     if (!t || t.resolved) continue;
     const a = answers.get(id);
-    // Whatever a person said on the thread has now been put in front of the fixer once.
+    if (!a) {
+      // Left out of the answer. A person's reply on it has NOT been dealt with,
+      // so it is not marked seen: the thread comes back with the reply still on
+      // it, and the lap counts as one of that reply's tries.
+      if (t.human?.length) t.humanTries = (t.humanTries ?? 0) + 1;
+      unanswered.push(id);
+      continue;
+    }
+    // Answered: whatever a person said on the thread was in front of the fixer when it did.
     if (t.human?.length) {
       t.lastNoteId = Math.max(t.lastNoteId ?? 0, ...t.human.map((h) => h.noteId));
       delete t.human;
       delete t.humanTries;
     }
-    if (!a) { unanswered.push(id); continue; }
 
     const reallyFixed = a.action === 'fixed' && committed;
     const text = a.action === 'fixed' && !committed
@@ -518,17 +559,28 @@ export function syncLive(
     const d = byId.get(t.discussionId);
     if (!d) {
       // Deleted on GitLab. Nothing is left to answer or to hold a merge.
-      t.status = 'closed'; t.resolved = true; delete t.human;
+      t.status = 'closed'; t.resolved = true; delete t.human; delete t.humanTries;
       continue;
     }
     const open = discussionOpen(d);
-    if (!open && !t.resolved) { t.status = 'closed'; t.resolved = true; delete t.human; continue; }
+    if (!open && !t.resolved) {
+      t.status = 'closed'; t.resolved = true; delete t.human; delete t.humanTries;
+      continue;
+    }
     if (open && t.resolved) { t.status = 'open'; t.resolved = false; }
     if (!open) continue;
     const fresh = d.notes.filter((n) => !n.system && !isReviewNote(n.body)
       && n.id > (t.lastNoteId ?? 0) && trusted.has(n.author.username));
-    if (fresh.length) t.human = fresh.map((n) => ({ noteId: n.id, author: n.author.username, body: n.body }));
-    else delete t.human;
+    if (fresh.length) {
+      // A reply the ledger has not held before is a new request, with tries of
+      // its own: the count is of laps that died on what was asked, not on the thread.
+      const known = new Set((t.human ?? []).map((h) => h.noteId));
+      if (fresh.some((n) => !known.has(n.id))) delete t.humanTries;
+      t.human = fresh.map((n) => ({ noteId: n.id, author: n.author.username, body: n.body }));
+    } else {
+      delete t.human;
+      delete t.humanTries;
+    }
   }
 
   if (l.reviewedSha === null && l.threads.length === 0 && o.self) {

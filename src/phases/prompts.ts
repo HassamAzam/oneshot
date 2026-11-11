@@ -244,7 +244,9 @@ function skillsFor(cfg: PhaseConfig, ctx: PromptCtx): string[] {
   // opens by dispatching a fan-out of review agents, which the re-check prompt
   // forbids — and loading them costs turns the lap does not have.
   if (cfg.name === 'review' && ctx.review?.recheck) {
-    return (cfg.skills ?? []).filter((s) => s === 'review-threads');
+    // A skill a LABEL asks for stays: it says what kind of work the ticket is,
+    // and that is as true of the lines a fixer changed as of the first diff.
+    return [...new Set([...(cfg.skills ?? []).filter((s) => s === 'review-threads'), ...labelSkills(cfg, ctx.ticket)])];
   }
   const forecast = ctx.prior.plan ? planForecast(ctx) : null;
   const always = (cfg.skills ?? []).filter((s) => CONDITIONAL_SKILLS[s]?.(forecast) ?? true);
@@ -1208,6 +1210,19 @@ const THREAD_STATE: Record<string, string> = {
 };
 
 /**
+ * A thread's state as a re-check is told it. One case is not its status alone:
+ * a person replied after the fixer answered, so the thread was left open for the
+ * fixer to act on that reply, and no ruling of the reviewer's will close it.
+ */
+function threadState(t: ReviewThread): string {
+  if (t.human?.length && t.fixer && !t.resolved) {
+    return 'open — a person replied after the fixer answered. Rule on the fixer\'s answer as you find it; '
+      + 'the thread stays open until the fixer has acted on that reply';
+  }
+  return THREAD_STATE[t.status] ?? t.status;
+}
+
+/**
  * What a first review is told about where its findings go.
  *
  * The old prompt's lap protocol ("re-raise it with the SAME id at severity
@@ -1223,7 +1238,20 @@ has them:
 ${already.map((t) => `  - ${t.id} [${t.severity}] ${t.file}:${t.line} — ${t.what.split('\n')[0]}`).join('\n')}
 `
     : '';
-  return `
+  const again = r.lastAttempt
+    ? `
+## The previous attempt at this review was NOT accepted
+It said of itself that it did not cover the whole change:
+
+    ${r.lastAttempt.replace(/\s+/g, ' ').trim()}
+
+Whatever it did find is already on the merge request (listed below, if anything). Cover the part
+it left out YOURSELF, in this session, before you wait on any agent — read that part of the diff
+against \`.claude/rules/\` directly. Report a dimension as NOT REVIEWED again only if you could
+not read it at all.
+`
+    : '';
+  return `${again}
 ## Where your findings go
 The conductor posts each finding as its own thread on merge request !${r.mrIid}, pinned to
 \`file:line\` when that line is in the diff. A separate fixer session — not you, and not
@@ -1284,10 +1312,11 @@ Return one entry in \`threads\` for every thread below, with its id and a \`ruli
 
 A thread's severity was set when it was raised. Never return a thread again as a new finding,
 under a new id or at a higher severity — \`reopen\` is how you say a fix failed.
-A NEW finding takes a NEW id, continuing after the highest one below (the next is
-${nextFindingId(r.threads)}). An id that is already a thread's belongs to that thread.
+A NEW finding takes a NEW id: the next free one is ${nextFindingId(r.threads)} (some earlier ids
+belong to threads that are finished and not listed here). An id that is already a thread's
+belongs to that thread.
 
-${shown.map((t) => `${threadEntry(t)}\n    state: ${THREAD_STATE[t.status] ?? t.status}`).join('\n') || '(no thread to rule on)'}
+${shown.map((t) => `${threadEntry(t)}\n    state: ${threadState(t)}`).join('\n') || '(no thread to rule on)'}
 
 ### 2. Read what changed, and nothing else
 \`git diff ${r.sinceSha ?? `origin/${baseBranch()}`}..HEAD\` is your whole reading list. Files it touches:
@@ -2316,9 +2345,10 @@ ${threads.map(threadEntry).join('\n') || '(none — say so in `summary` and retu
   Never amend, rebase or force anything, and never touch a file no thread requires.
 - Stage what you changed BY PATH — \`git add <file> …\` — and never \`git add -A\`, \`git add .\`
   or \`git commit -a\`: the worktree holds files that are not part of the change. Commit on the
-  branch you are on; do not create or switch branches. Before you answer, \`git status\` must
-  show nothing modified: an edit you leave uncommitted is not a fix, and the conductor moves
-  it out of the tree.
+  branch you are on; do not create or switch branches. Before you answer, \`git status
+  --porcelain\` must print nothing: no file modified, staged, renamed or deleted, and no NEW file
+  of yours left uncommitted. What you leave uncommitted is not a fix, and the conductor moves it
+  out of the tree before anyone reads the code again.
 - If you add or change a test, run it. Run the project's linters over the files you touched and
   set \`lintClean\` from what they printed; the pre-commit hook is broken on this machine, so
   \`--no-verify\` is permitted and the linters are what stands in for it.
@@ -2427,7 +2457,9 @@ any of that. Your whole budget is ${mins} minutes; run \`ensure\` FIRST and do y
 while it works.
 
 Previous laps may also have left your own artifacts in the worktree — a Playwright suite, login
-helpers. REUSE them; re-authoring a script that already exists is pure turn burn.
+helpers. REUSE them; re-authoring a script that already exists is pure turn burn. They are under
+\`.verify-scratch/\`, which git ignores, so neither \`git status\` nor a Grep shows them: list
+them with \`ls -la .verify-scratch\`, and keep anything new of yours there too.
 
 ## Known environment trap — SOLVED, do not re-diagnose it
 

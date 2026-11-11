@@ -102,6 +102,7 @@ import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import {
   changedFilesBetween, mergePhase, mrOpenPhase, mrOpenSettled, pushRunBranch, revParse, setAsideUncommitted,
+  untrackedFiles,
 } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
@@ -125,6 +126,7 @@ import {
 } from '../mrfeedback/ledger.js';
 import type { MrFeedbackSignal } from '../mrfeedback/types.js';
 import { fixLapsUsed, reviewArtifact, reviewIsIncomplete, reviewSettled } from '../review/ledger.js';
+import { isBlocking } from '../review/markers.js';
 import { driveReview, type Session } from '../review/loop.js';
 import type { FixerOutput, ReviewerOutput } from '../review/types.js';
 import { leftOutLine, splitUiCases } from './uicases.js';
@@ -1190,6 +1192,9 @@ export function phasesStaleSince(
     return last !== undefined && last.startedAt < fixedAt;
   });
 }
+
+/** How a review lap rejected as incomplete is recorded — and recognised again, to tell the retry what was missing. */
+export const INCOMPLETE_REVIEW = 'the review reports part of the change as not reviewed';
 
 /**
  * How many times in a row a phase has just failed: its `failed` records since
@@ -2997,44 +3002,55 @@ export async function runTicket(
 
     const session = async <T>(cfgS: PhaseConfig, extra: Partial<PromptCtx>): Promise<Session<T>> => {
       const quota = checkQuota(runId, cfgS.name, lapsOf(iid, cfgS.name));
+      // `infra: true` for both refusals: no session ran, so neither is a lap the
+      // loop should count against a thread. What the run does is `halt`.
       if (!quota.allowed) {
         halt = { kind: 'stop', status: 'blocked', reason: `quota: ${quota.reason}` };
-        return { ok: false, why: `quota: ${quota.reason}`, infra: false };
+        return { ok: false, why: `quota: ${quota.reason}`, infra: true };
       }
       const leaseError = ensureLeases(cfgS);
       if (leaseError) {
         halt = { kind: 'stop', status: 'blocked', reason: leaseError };
-        return { ok: false, why: leaseError, infra: false };
+        return { ok: false, why: leaseError, infra: true };
       }
       await updateCard(j.slackTs ?? '', cardState(j, [cfgS.name]));
       updateRun(runId, { phase: cfgS.name, status: 'running', owner_seen_at: Date.now() });
       const r = await runOne(cfgS, index, extra);
 
-      // The bargain a dead review has always had: what it wrote to
-      // review-partial.json before dying is kept if it holds a blocker or a
-      // major. A first review only — a re-check's rulings are not in that file,
-      // and a salvage without them would read every fix as accepted.
-      if (cfgS.name === 'review' && !extra.review?.recheck && !r.out.ok && !r.out.blocked) {
+      /** What a first review that is NOT the review still found: posted as threads, with the review still owed. */
+      let partial: ReviewerOutput | null = null;
+      const firstReview = cfgS.name === 'review' && !extra.review?.recheck;
+
+      // A dead first review keeps what it wrote to review-partial.json if that
+      // holds a blocker or a major — as its findings, not as the review. The old
+      // loop could accept the partial as the lap, because its next lap read the
+      // whole change again; here every later lap is a re-check held to what the
+      // fixer changed, so the part the dead session never reached would never be
+      // read. A first review only: a re-check's rulings are not in that file.
+      if (firstReview && !r.out.ok && !r.out.blocked) {
         const path = artifactPath(iid, 'review-partial.json');
         const fresh = existsSync(path) && statSync(path).mtimeMs >= r.startedAt;
-        const partial = fresh ? readArtifact<{ findings?: unknown }>(iid, 'review-partial.json') : null;
-        const salvaged = salvagedReview(partial?.findings ?? [], r.out.error ?? null);
+        const onDisk = fresh ? readArtifact<{ findings?: unknown }>(iid, 'review-partial.json') : null;
+        const salvaged = salvagedReview(onDisk?.findings ?? [], r.out.error ?? null);
         if (salvaged) {
-          r.out.data = salvaged;
-          r.out.ok = true;
-          log.warn(`review salvaged from partial findings — ${salvaged.findings.length} recorded`);
+          partial = salvaged;
+          r.out.error = `${r.out.error ?? 'the session died'} — the ${salvaged.findings.length} finding(s) it had `
+            + 'recorded are kept as threads; the review itself is still owed';
+          log.warn(`review died with ${salvaged.findings.length} finding(s) on record — kept, and the review is re-attempted`);
         }
       }
 
       // A first review that says of ITSELF that it did not cover the change
-      // (reviewIsIncomplete) is not the review, however well-formed its answer:
-      // it is recorded as a failed lap and attempted again, like one that died.
-      if (cfgS.name === 'review' && !extra.review?.recheck && r.out.ok && r.out.data !== null
-        && reviewIsIncomplete(r.out.data as ReviewerOutput)) {
-        const said = String((r.out.data as ReviewerOutput).summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+      // (reviewIsIncomplete) is not the review either, however well-formed its
+      // answer: its findings are kept, the lap is recorded as failed, and the
+      // next attempt is told what this one left out.
+      if (firstReview && r.out.ok && r.out.data !== null && reviewIsIncomplete(r.out.data as ReviewerOutput, {
+        openBlocking: (extra.review?.threads ?? []).some((t) => !t.resolved && isBlocking(t.severity)),
+      })) {
+        const said = String((r.out.data as ReviewerOutput).summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
+        partial = r.out.data as ReviewerOutput;
         r.out.ok = false;
-        r.out.error = 'the review returned changes-requested with no blocker or major finding — it reports part '
-          + `of the change as not reviewed${said ? `: ${said}` : ''}`;
+        r.out.error = `${INCOMPLETE_REVIEW}${said ? `: ${said}` : ''}`;
         log.warn(`review lap${r.lap} is incomplete by its own account — not accepted as the review`, { said });
       }
 
@@ -3063,8 +3079,25 @@ export async function runTicket(
       } else if (r.out.blocked) {
         halt = { kind: 'stop', status: 'blocked', reason: `${cfgS.name}: ${r.out.blocked}` };
       }
-      return { ok: false, why: r.out.error ?? r.out.blocked ?? 'the session returned no answer', infra: Boolean(r.out.infra) };
+      return {
+        ok: false, why: r.out.error ?? r.out.blocked ?? 'the session returned no answer', infra: Boolean(r.out.infra),
+        ...(partial ? { partial: partial as T, lap: r.lap } : {}),
+      };
     };
+
+    /**
+     * What the last reviewer lap said it left out, when that lap was rejected
+     * for it. A retry is otherwise handed the identical prompt and budget that
+     * produced the half-review, and fails the same way three times.
+     */
+    const lastAttempt = (): string | undefined => {
+      const last = [...(readJournal(iid) ?? j).phases].reverse().find((rec) => rec.phase === p.name);
+      return last?.status === 'failed' && last.error?.startsWith(INCOMPLETE_REVIEW)
+        ? last.error.slice(INCOMPLETE_REVIEW.length).replace(/^:\s*/, '') || 'part of the change (it did not say which)'
+        : undefined;
+    };
+    /** Files the fixer's lap created and left unstaged — see setAsideUncommitted. */
+    let createdByFixer: string[] = [];
 
     const outcome = await driveReview({
       runId, mrIid, mrUrl: j.mrUrl ?? mergeRequestUrl(mrIid),
@@ -3076,8 +3109,16 @@ export async function runTicket(
       head: () => revParse(wt, 'HEAD'),
       changedFiles: (from, to) => changedFilesBetween(wt, from, to),
       fixLapsUsed: () => fixLapsUsed((readJournal(iid) ?? j).phases),
-      runReviewer: (input) => session<ReviewerOutput>(p, { review: input }),
-      runFixer: (input) => session<FixerOutput>(cfgFix, { reviewFix: input }),
+      runReviewer: (input) => {
+        const notCovered = input.recheck ? undefined : lastAttempt();
+        return session<ReviewerOutput>(p, { review: notCovered ? { ...input, lastAttempt: notCovered } : input });
+      },
+      runFixer: async (input) => {
+        const before = new Set(untrackedFiles(wt));
+        const answered = await session<FixerOutput>(cfgFix, { reviewFix: input });
+        createdByFixer = untrackedFiles(wt).filter((f) => !before.has(f));
+        return answered;
+      },
       push: () => {
         const pushed = pushRunBranch(wt, branch);
         if (!pushed.ok) return pushed;
@@ -3085,18 +3126,25 @@ export async function runTicket(
         // branch of its own, a detached HEAD — leaves it with nothing to send,
         // and "pushed" would then stand behind replies that cite a commit the
         // merge request does not have.
+        // Compared with the LOCAL branch — the ref that was just pushed — not
+        // with the remote-tracking one, which a clone with a narrowed fetch
+        // refspec never updates.
         const head = revParse(wt, 'HEAD');
-        if (head !== revParse(wt, `refs/remotes/origin/${branch}`)) {
+        if (head !== revParse(wt, `refs/heads/${branch}`)) {
           return {
             ok: false,
-            error: `${branch} was pushed, but the worktree's HEAD (${String(head).slice(0, 8)}) is not what origin `
-              + 'holds for it — the fixer committed off the run\'s branch',
+            error: `${branch} was pushed, but the worktree's HEAD (${String(head).slice(0, 8)}) is not on it `
+              + '— the fixer committed off the run\'s branch',
           };
         }
         return pushed;
       },
       root: wt,
-      setAside: (label) => setAsideUncommitted(wt, `${runId} ${label}`),
+      setAside: (label) => {
+        const moved = setAsideUncommitted(wt, `${runId} ${label}`, createdByFixer);
+        createdByFixer = [];
+        return moved;
+      },
       stopping: () => Boolean(opts.signal?.aborted) || existsSync(PAUSE),
       announcePark: async (body) => {
         const note = await addIssueNote(iid, body);
@@ -3115,9 +3163,13 @@ export async function runTicket(
     const view = reviewArtifact(ledger, `Code review on !${mrIid}: ${raised} thread(s) raised, ${open} open.`);
     // Only when it says something new: a parked run comes through here every
     // tick, and a rewrite a minute makes the file look freshly graded.
+    // And only once a review has actually completed: before that an empty ledger
+    // would be written up as verdict 'approve' — for a review that is still owed.
     const viewFile = p.artifact ?? 'findings.json';
-    if (JSON.stringify(readArtifact(iid, viewFile)) !== JSON.stringify(view)) writeArtifact(iid, viewFile, view);
-    prior[p.name] = view;
+    if (ledger && ledger.reviewedSha !== null) {
+      if (JSON.stringify(readArtifact(iid, viewFile)) !== JSON.stringify(view)) writeArtifact(iid, viewFile, view);
+      prior[p.name] = view;
+    }
 
     const lastReview = (): PhaseRecord | undefined => [...j.phases].reverse().find((rec) => rec.phase === p.name);
     const mark = (status: PhaseRecord['status'], why: string): void => {

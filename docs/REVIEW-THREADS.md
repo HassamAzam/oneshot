@@ -102,13 +102,13 @@ Added after tracing the first live run before starting it (ticket 9174).
 
 | Situation | What happens |
 |---|---|
-| The first review says part of the change was not reviewed (`changes-requested` with no blocker or major) | Not accepted as the review. Recorded as a failed lap and run again; three in a row block the run with what was not covered. |
-| The fixer edits files and does not commit them | The edits are moved out of the worktree before the re-check or verify reads it, and kept under `refs/oneshot/aside/…` in the work repo. A "fixed" with no commit is posted as not changed. |
+| The first review dies at its cap, or says part of the change was not reviewed (`NOT REVIEWED` in its summary, or `changes-requested` with nothing blocking behind it) | Not accepted as the review. What it did find is posted as threads; the lap is recorded as failed and the review is run again as a whole review, told what the last attempt left out and what is already open. Three in a row block the run. |
+| The fixer edits, stages, renames or deletes files and does not commit — or creates a new file and never adds it | The tree is put back to exactly `HEAD` before the re-check or verify reads it. What was there is kept under `refs/oneshot/aside/…` in the work repo (`git stash apply --index <ref>` brings it back); the shared stash stack is never used. A "fixed" with no commit is posted as not changed. |
 | The fixer's commits cannot be pushed | Retried on the next tick. After three refusals in a row the run blocks (somebody moved the branch, or a pushed commit was rewritten); the fixer's replies stay queued until the branch is reconciled. |
 | The fixer committed, then the run stopped before verify re-ran | On the next pass every phase after `review` that last passed before that commit runs again. Nothing has to be forced by hand. |
 | The fixer committed backend code | The run's app is stopped when the review finishes, so verify starts it on the new code (Django runs `--noreload`). |
-| A person replies on a thread while a session is running | The reply is handed to the fixer on its next lap. A fixer that fails twice on a person's reply is not started a third time; the thread waits for the person. |
-| A re-check numbers a new finding like an existing thread | Same file: read as "the fix did not work" and the thread is reopened. Another file: posted as a new thread under a fresh id. |
+| A person replies on a thread while a session is running | The thread is not resolved over the reply, even if the fixer answered "fixed": the answer is posted, the thread stays open, and the reply is handed to the fixer on its next lap. Neither session can close a thread over a reply no fixer lap has seen. A fixer that fails twice on the same reply is not started a third time; a new reply from the person starts the count again. |
+| A re-check numbers a new finding like an existing thread | Same file: it is that thread said again — reopened, or left as the reviewer ruled it. Another file, or beside a ruling that closes the thread: posted as a new thread under a fresh id. The id and file of a finished thread: not posted and not re-graded, and recorded under `dropped` in the ledger. |
 
 Things an operator should not do while a review is open:
 

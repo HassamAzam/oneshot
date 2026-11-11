@@ -357,6 +357,23 @@ export function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
     'mcp__gitlab__create_milestone',
     'mcp__gitlab__edit_milestone',
     'mcp__gitlab__delete_milestone',
+    'mcp__gitlab__promote_milestone',
+    // Writes a file on THIS machine, at a path the caller picks, with bytes
+    // whoever attached it chose — and write-scope.cjs and artifact-guard.cjs
+    // only ever see Write, Edit and Bash. No phase needs it: the conductor
+    // downloads a ticket's uploads itself and hands sessions local paths.
+    'mcp__gitlab__download_attachment',
+    // Thread and draft-note writes, for EVERY phase, `mr` included. Threads on
+    // the merge request are the review loop's (src/review) and a person's; both
+    // are posted and resolved from conductor code. update_merge_request_note is
+    // the one tool here that resolves a thread, and a session holding it could
+    // close a reviewer's finding the fixer never answered.
+    'mcp__gitlab__create_merge_request_thread',
+    'mcp__gitlab__update_merge_request_note',
+    'mcp__gitlab__create_draft_note',
+    'mcp__gitlab__update_draft_note',
+    'mcp__gitlab__publish_draft_note',
+    'mcp__gitlab__bulk_publish_draft_notes',
   ];
 
   const readOnly = (cfg.writes ?? []).length === 0;
@@ -376,17 +393,12 @@ export function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
       'mcp__gitlab__push_files',
       'mcp__gitlab__create_or_update_file',
       'mcp__gitlab__create_branch',
-      // Thread writes. The review-feedback loop posts and resolves from conductor
-      // code after verification; a session that could do either would answer a
-      // reviewer on the strength of work nobody has checked yet.
-      'mcp__gitlab__create_merge_request_thread',
+      // Note writes. The review-feedback loop posts from conductor code after
+      // verification; a session that could would answer a reviewer on the
+      // strength of work nobody has checked yet. (Thread and draft-note writes
+      // are denied to every phase, above.)
       'mcp__gitlab__create_note',
-      'mcp__gitlab__update_merge_request_note',
       'mcp__gitlab__update_issue_note',
-      'mcp__gitlab__create_draft_note',
-      'mcp__gitlab__update_draft_note',
-      'mcp__gitlab__publish_draft_note',
-      'mcp__gitlab__bulk_publish_draft_notes',
     );
   }
 

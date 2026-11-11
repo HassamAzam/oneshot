@@ -28,7 +28,8 @@
  *     the previous artifact before the new one is written.
  */
 import { execFileSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   DRY_RUN, MERGE_POLL_MS, WORK_REPO, phaseByName, projectConfig,
 } from '../lib/config.js';
@@ -1403,46 +1404,83 @@ export function pushRunBranch(worktree: string, branch: string): { ok: boolean; 
 }
 
 /**
- * Move a worktree's uncommitted edits to tracked files out of the tree, and
- * say which files they were. Empty when there was nothing to move.
+ * The paths `git status --porcelain -z` reports, both sides of a rename or copy.
+ *
+ * `-z` on purpose. The line format quotes any path with a non-ASCII byte and
+ * writes a rename as `old -> new`; read as text, a quoted path is not a path
+ * git knows and a rename yields only its new half. NUL-separated, an entry is
+ * `XY path`, and a rename or copy is followed by its source as the next field.
+ */
+export function porcelainPaths(z: string): string[] {
+  const out: string[] = [];
+  const parts = String(z ?? '').split('\0');
+  for (let i = 0; i < parts.length; i += 1) {
+    const entry = parts[i]!;
+    if (entry.length < 4) continue;
+    out.push(entry.slice(3));
+    if (/[RC]/.test(entry.slice(0, 2)) && parts[i + 1]) { out.push(parts[i + 1]!); i += 1; }
+  }
+  return [...new Set(out)];
+}
+
+/** Files in a worktree that git neither tracks nor ignores, or [] when git cannot say. */
+export function untrackedFiles(worktree: string): string[] {
+  try {
+    return execFileSync('git', ['-C', worktree, 'ls-files', '--others', '--exclude-standard', '-z'], {
+      encoding: 'utf8', stdio: 'pipe', timeout: 60_000,
+    }).split('\0').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Put a worktree back to exactly what HEAD holds, keeping what was in it, and
+ * say which files were moved. Empty when there was nothing to move.
  *
  * For the review loop's fixer (src/review): the conductor counts a fix by its
- * commit, so text a session edited and left uncommitted — it ran out of turns
- * mid-change, or answered "fixed" without committing — is not on the branch.
- * Left in the tree it is still what the next session reads: the re-check would
- * rule on it as the code at HEAD, and verify would test it.
+ * commit, so what a session edited, staged, renamed or deleted and did not
+ * commit — it ran out of turns mid-change, or answered "fixed" without
+ * committing — is not on the branch. Left in the tree it is still what the next
+ * session reads: the re-check would rule on it as the code at HEAD, verify
+ * would test it, and a staged deletion would ride the next lap's commit onto
+ * the merge request.
  *
- * Nothing is thrown away. The edits are stashed for exactly those paths, the
- * stash commit is kept under refs/oneshot/aside/…, and the entry is dropped
- * from the stash stack again — which every worktree of the repo shares, so an
- * entry left there is one another session's `git stash pop` could apply.
- * Untracked files are not touched (the seeded links and a phase's scratch
- * directory are untracked on purpose), nor are files marked skip-worktree,
+ * `alsoUntracked` are files the lap CREATED and never staged; the caller knows
+ * them by comparing untrackedFiles() before and after the session. Everything
+ * else untracked is left alone — the seeded links and a phase's scratch
+ * directory are untracked on purpose — and so is a file marked skip-worktree,
  * which `git status` does not report.
+ *
+ * Nothing is thrown away, and the stash stack is never touched: every worktree
+ * of the repo shares it, so an entry there is one another session's
+ * `git stash pop` could apply. `git stash create` builds the commit without
+ * storing it; it is kept under refs/oneshot/aside/…, and
+ * `git stash apply --index <ref>` brings it back.
  */
-export function setAsideUncommitted(worktree: string, label: string): string[] {
+export function setAsideUncommitted(worktree: string, label: string, alsoUntracked: string[] = []): string[] {
   const git = (args: string[]): string => execFileSync('git', ['-C', worktree, ...args], {
     encoding: 'utf8', stdio: 'pipe', timeout: 60_000,
   });
   try {
-    const files = git(['status', '--porcelain', '--untracked-files=no']).split('\n')
-      .filter(Boolean).map((l) => l.slice(3).split(' -> ').pop()!.replace(/^"|"$/g, ''));
-    if (!files.length) return [];
-    const before = revParse(worktree, 'refs/stash');
-    // An identity of its own: a stash is a commit, and the service user's git may
-    // have none configured (sessions get theirs from the environment).
-    git(['-c', 'user.name=Oneshot', '-c', 'user.email=oneshot@localhost.invalid',
-      'stash', 'push', '--quiet', '-m', `oneshot set aside: ${label}`, '--', ...files]);
-    const stash = revParse(worktree, 'refs/stash');
-    if (stash && stash !== before) {
-      const slug = label.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'edits';
-      git(['update-ref', `refs/oneshot/aside/${slug}-${stash.slice(0, 8)}`, stash]);
-      git(['stash', 'drop', '--quiet']);
-    }
-    return files;
+    const created = alsoUntracked.filter((f) => existsSync(join(worktree, f)));
+    if (created.length) git(['add', '--', ...created]);
+    const paths = porcelainPaths(git(['status', '--porcelain', '-z', '--untracked-files=no']));
+    if (!paths.length) return [];
+    // An identity of its own: the commit needs one, and the service user's git
+    // may have none configured (sessions get theirs from the environment).
+    const sha = git(['-c', 'user.name=Oneshot', '-c', 'user.email=oneshot@localhost.invalid',
+      'stash', 'create', `oneshot set aside: ${label}`]).trim();
+    if (!sha) return [];
+    const slug = label.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'edits';
+    git(['update-ref', `refs/oneshot/aside/${slug}-${sha.slice(0, 8)}`, sha]);
+    // Only once the commit is safely under a ref. Index and tree, for exactly
+    // the paths status named: a staged add leaves both, a deletion comes back.
+    git(['restore', '--source=HEAD', '--staged', '--worktree', '--', ...paths]);
+    return paths;
   } catch (err) {
     log.warn('could not set aside uncommitted edits — the next session will read them as the code', {
-      worktree, error: (err as Error).message.slice(0, 200),
+      worktree, error: (err as Error).message.split('\n').slice(0, 3).join(' | ').slice(0, 300),
     });
     return [];
   }

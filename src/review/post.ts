@@ -9,7 +9,7 @@
  * exists is adopted, a reply that is already there is not posted again.
  */
 import type { MrDiscussion } from '../mrfeedback/types.js';
-import { parseMarker, type ReviewMarker } from './markers.js';
+import { isReviewNote, parseMarker, type ReviewMarker } from './markers.js';
 import { threadBody } from './notes.js';
 import type { ReviewApi, ReviewLedger } from './types.js';
 
@@ -24,10 +24,12 @@ const sameMarker = (a: ReviewMarker | null, b: ReviewMarker): boolean =>
  * write did not land, what stopped it.
  */
 export async function flush(
-  ledger: ReviewLedger, api: ReviewApi, o: { live: MrDiscussion[]; save(l: ReviewLedger): void },
+  ledger: ReviewLedger, api: ReviewApi,
+  o: { live: MrDiscussion[]; save(l: ReviewLedger): void; trusted?: string[] },
 ): Promise<{ ledger: ReviewLedger; failed: string | null }> {
   const l = JSON.parse(JSON.stringify(ledger)) as ReviewLedger;
   const done = (): void => { l.pending.shift(); o.save(l); };
+  const trusted = new Set(o.trusted ?? []);
 
   while (l.pending.length) {
     const w = l.pending[0]!;
@@ -80,6 +82,18 @@ export async function flush(
         done();
         continue;
       }
+    }
+    // Never resolve over a person's reply no fixer lap has been handed. Someone
+    // who comments while a session is still working has written BEFORE the reply
+    // this posts, and a resolved thread is one nothing reads again: not the next
+    // sync, not the re-check, not src/mrfeedback. The answer is posted and the
+    // thread stays open, so the next sync collects the reply and a lap gets it.
+    if (w.then === 'resolve' && discussion?.notes.some((n) => !n.system && !isReviewNote(n.body)
+      && n.id > (t.lastNoteId ?? 0) && trusted.has(n.author.username))) {
+      t.resolved = false;
+      if (['fixed', 'closed', 'accepted', 'withdrawn'].includes(t.status)) t.status = 'open';
+      done();
+      continue;
     }
     if (w.then !== 'none') {
       const r = await api.setResolved(t.discussionId, w.then === 'resolve');
