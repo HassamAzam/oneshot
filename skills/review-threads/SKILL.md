@@ -71,6 +71,12 @@ re-check may reopen a thread, never re-grade it.
 Two symptoms of one cause are one thread. A finding the fix for another will
 necessarily close is not a second finding.
 
+### Every finding is answered
+
+A minor or a suggestion costs what a blocker costs: a thread, a fixer's answer,
+and — if the fixer commits — the whole case list verified again. Raise one only
+when it should change in this merge request. What can wait goes in `summary`.
+
 ### Not a finding
 
 - A problem on the base branch, in a line this change does not touch. Name it in
@@ -112,6 +118,11 @@ finding a correct way and say how.
 
 One commit per thread where practical: `fix(review): <what changed> (F-03)`.
 Run what covers the lines you touched. Touch nothing a thread does not require.
+
+Stage by path (`git add <file>`), never `git add -A` or `git add .`: the worktree
+holds scratch files that are not part of the change. Stay on the branch you are
+on. Leave nothing modified and uncommitted — the conductor counts a fix by its
+commit and moves anything else out of the tree.
 
 ### Decline
 

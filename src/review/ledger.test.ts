@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import type { MrDiscussion, MrNote } from '../mrfeedback/types.js';
 import {
   applyFix, applyReview, closeLeftover, emptyLedger, fixLapsUsed, fixableThreads, liveOpenThreads, nextStep,
-  openBlocking, openThreads, reviewArtifact, reviewSettled, syncLive,
+  openBlocking, openThreads, reviewArtifact, reviewSettled, syncLive, MAX_HUMAN_TRIES, reviewIsIncomplete,
 } from './ledger.js';
 import { parseMarker, renderMarker } from './markers.js';
 import type { ReviewLedger, ReviewThread } from './types.js';
@@ -227,6 +227,71 @@ test('re-raising a thread under its own id is read as reopening it, never as a s
   assert.equal(t.severity, 'suggestion');
 });
 
+test('on a re-check, a new finding numbered like an existing thread is still posted, under a fresh id', () => {
+  // The schema's example id is F-01 and a re-check is tempted to count from it
+  // again. That finding used to vanish: read as "about thread F-01", then
+  // skipped because F-01 already had a ruling. A blocker could go that way.
+  const l = fixedAt([finding('F-01', 'major')], [{ id: 'F-01', action: 'fixed', reply: 'ok', commit: 'b2' }]);
+  const r = applyReview(l, {
+    threads: [{ id: 'F-01', ruling: 'accepted', note: '' }],
+    findings: [finding('F-01', 'blocker', { file: 'apps/teams/admin.py', line: 40, what: 'the fix dropped the permission check' })],
+  }, { lap: 1, headSha: 'b2', recheck: true, changedFiles: ['apps/teams/admin.py'] });
+  assert.equal(thread(r.ledger, 'F-01').status, 'accepted', 'the ruling on the old thread stands');
+  assert.deepEqual(r.raised, ['F-02']);
+  assert.equal(thread(r.ledger, 'F-02').what, 'the fix dropped the permission check');
+  assert.deepEqual(r.dropped, []);
+});
+
+test('the same id on a different file is a new finding even when the reviewer sent no rulings at all', () => {
+  const l = fixedAt([finding('F-01', 'major')], [{ id: 'F-01', action: 'fixed', reply: 'ok', commit: 'b2' }]);
+  const r = applyReview(l, {
+    findings: [finding('F-01', 'major', { file: 'apps/teams/admin.py', what: 'unrelated to the first thread' })],
+  }, { lap: 1, headSha: 'b2', recheck: true, changedFiles: ['apps/teams/admin.py'] });
+  // Not a reopen of the unrelated thread with this text pasted onto it.
+  assert.equal(thread(r.ledger, 'F-01').status, 'accepted');
+  assert.equal(thread(r.ledger, 'F-02').file, 'apps/teams/admin.py');
+});
+
+test('"stands" on a thread the fixer FIXED means the finding still stands: it is reopened, not accepted', () => {
+  const l = fixedAt([finding('F-01', 'major')], [{ id: 'F-01', action: 'fixed', reply: 'ok', commit: 'b2' }]);
+  const r = applyReview(l, { findings: [], threads: [{ id: 'F-01', ruling: 'stands', note: 'The assertion is still a tautology.' }] },
+    { lap: 1, headSha: 'b2', recheck: true, changedFiles: [] });
+  assert.equal(thread(r.ledger, 'F-01').status, 'reopened');
+  assert.equal(thread(r.ledger, 'F-01').reviewerNote, 'The assertion is still a tautology.');
+});
+
+test('a finding\'s file is kept as git names it, whatever form the session returned', () => {
+  const root = '/srv/erp-wt/t9174-r-x';
+  const first = applyReview(emptyLedger(RUN, MR), {
+    findings: [finding('F-01', 'major', { file: `${root}/apps/teams/admin.py` }), finding('F-02', 'minor', { file: './apps/teams/models.py' })],
+  }, { lap: 0, headSha: 'a1', recheck: false, changedFiles: null, root });
+  assert.deepEqual(first.ledger.threads.map((t) => t.file), ['apps/teams/admin.py', 'apps/teams/models.py']);
+  // And on a re-check an absolute path still counts as "a file the fix touched".
+  const l = landed(first.ledger);
+  const again = applyReview({ ...l, recheckOwed: true }, {
+    findings: [finding('F-09', 'major', { file: `${root}/apps/teams/admin.py`, what: 'new defect in the fixed file' })],
+  }, { lap: 1, headSha: 'b2', recheck: true, changedFiles: ['apps/teams/admin.py'], root });
+  assert.equal(again.dropped.length, 0);
+  assert.equal(again.raised.length, 1);
+});
+
+test('a first review that says part of the change was not reviewed is not a complete review', () => {
+  // 'changes-requested' means a blocker/major was found, or a dimension was not
+  // covered. With nothing blocking behind it, only the second reading is left.
+  assert.equal(reviewIsIncomplete({ verdict: 'changes-requested', findings: [finding('F-01', 'minor')] }), true);
+  assert.equal(reviewIsIncomplete({ verdict: 'changes-requested', findings: [] }), true);
+  assert.equal(reviewIsIncomplete({ verdict: 'changes-requested', findings: [finding('F-01', 'major')] }), false);
+  assert.equal(reviewIsIncomplete({ verdict: 'approve', findings: [finding('F-01', 'minor')] }), false);
+  assert.equal(reviewIsIncomplete({ findings: [] }), false);
+});
+
+test('the reviewer\'s own summary is carried into findings.json', () => {
+  const { ledger } = applyReview(emptyLedger(RUN, MR), { summary: 'Backend and tests reviewed;\n frontend not touched.', findings: [] },
+    { lap: 0, headSha: 'a1', recheck: false, changedFiles: null });
+  assert.match(String(reviewArtifact(ledger, 'Code review on !11307: 0 thread(s) raised, 0 open.').summary),
+    /0 open\. Reviewer: Backend and tests reviewed; frontend not touched\./);
+});
+
 test('a re-check may raise a new thread for a blocker, or in a file the fix touched — nothing else', () => {
   const l = fixedAt([finding('F-01', 'major')], [{ id: 'F-01', action: 'fixed', reply: 'ok', commit: 'b2' }]);
   const r = applyReview(l, {
@@ -415,6 +480,23 @@ test('a person\'s reply buys one more fixer lap past the cap, and is not handed 
   assert.equal(thread(syncLive(landed(after.ledger), [disc('d-F-05', [
     raisedNote(1000, 'F-05', 'major', RUN, { resolved: true }), note(1005, 'hassam.azam', 'Do it: restore the test.', { resolved: true }),
   ])], TRUST), 'F-05').human, undefined);
+});
+
+test('a person\'s reply that no fixer lap managed to answer stops starting laps, and is never closed over', () => {
+  // A minor, laps spent, and a person replied on it. Two fixer laps died on it.
+  let l = reviewed([finding('F-01', 'minor')]);
+  l = { ...l, threads: l.threads.map((t) => ({ ...t, human: [{ noteId: 2000, author: 'hassam.azam', body: 'Also cover X.' }] })) };
+  const spent = { head: 'a1', fixLapsUsed: 3, maxFixLaps: 3 };
+  assert.equal(nextStep(l, spent).kind, 'fix', 'a person\'s reply buys a lap past the cap');
+  l = { ...l, threads: l.threads.map((t) => ({ ...t, humanTries: MAX_HUMAN_TRIES })) };
+  const step = nextStep(l, spent);
+  // Not another lap — and not "closed: not taken up" under the person's comment.
+  assert.equal(step.kind, 'park');
+  assert.deepEqual(step.kind === 'park' ? step.threads.map((t) => t.id) : [], ['F-01']);
+  // Answered at last: the count goes with the reply.
+  const answered = applyFix(l, { threads: [{ id: 'F-01', action: 'fixed', reply: 'Covered.', commit: 'b2' }] },
+    { lap: 4, headBefore: 'a1', headAfter: 'b2', handed: ['F-01'] });
+  assert.equal(thread(answered.ledger, 'F-01').humanTries, undefined);
 });
 
 test('a thread deleted on GitLab is closed, not waited on', () => {

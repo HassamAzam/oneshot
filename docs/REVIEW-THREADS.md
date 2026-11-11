@@ -95,3 +95,24 @@ open). A reply you leave inside a reviewer thread while the run waits at merge g
 no merge request at review time, use the old loop as well. A run that the old loop already
 reviewed is not re-reviewed uninvited: `npm run unblock -- <iid> --force-phase review` moves it
 onto the thread loop.
+
+## What the loop does when things go sideways
+
+Added after tracing the first live run before starting it (ticket 9174).
+
+| Situation | What happens |
+|---|---|
+| The first review says part of the change was not reviewed (`changes-requested` with no blocker or major) | Not accepted as the review. Recorded as a failed lap and run again; three in a row block the run with what was not covered. |
+| The fixer edits files and does not commit them | The edits are moved out of the worktree before the re-check or verify reads it, and kept under `refs/oneshot/aside/…` in the work repo. A "fixed" with no commit is posted as not changed. |
+| The fixer's commits cannot be pushed | Retried on the next tick. After three refusals in a row the run blocks (somebody moved the branch, or a pushed commit was rewritten); the fixer's replies stay queued until the branch is reconciled. |
+| The fixer committed, then the run stopped before verify re-ran | On the next pass every phase after `review` that last passed before that commit runs again. Nothing has to be forced by hand. |
+| The fixer committed backend code | The run's app is stopped when the review finishes, so verify starts it on the new code (Django runs `--noreload`). |
+| A person replies on a thread while a session is running | The reply is handed to the fixer on its next lap. A fixer that fails twice on a person's reply is not started a third time; the thread waits for the person. |
+| A re-check numbers a new finding like an existing thread | Same file: read as "the fix did not work" and the thread is reopened. Another file: posted as a new thread under a fresh id. |
+
+Things an operator should not do while a review is open:
+
+- Do not delete `review-threads.json` to "start over": the open threads are adopted back under new ids. Resolve or reply on the threads instead.
+- Do not push to the run's branch by hand while the run is live; the loop never forces a push.
+- `--force-phase review` does not restart a review that already has a ledger; it continues from where the ledger stands.
+

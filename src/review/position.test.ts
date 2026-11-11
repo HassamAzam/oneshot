@@ -4,7 +4,19 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { diffLineFor, shownLines, type DiffFile } from './position.js';
+import { diffLineFor, repoPath, shownLines, type DiffFile } from './position.js';
+
+test('a path a session returned absolute, or with a leading ./, is read as git names it', () => {
+  const root = '/srv/erp-wt/t9174-r-mwadxb6r-cce3f8';
+  assert.equal(repoPath(`${root}/apps/teams/admin.py`, root), 'apps/teams/admin.py');
+  assert.equal(repoPath(`${root}/apps/teams/admin.py`, `${root}/`), 'apps/teams/admin.py');
+  assert.equal(repoPath('./apps/teams/admin.py', root), 'apps/teams/admin.py');
+  assert.equal(repoPath('apps/teams/admin.py', root), 'apps/teams/admin.py');
+  assert.equal(repoPath('  apps/teams/admin.py ', null), 'apps/teams/admin.py');
+  // A sibling directory that merely starts with the same characters is not inside it.
+  assert.equal(repoPath(`${root}-other/x.py`, root), `${root.slice(1)}-other/x.py`);
+  assert.equal(repoPath(undefined, root), '');
+});
 
 const DIFF = [
   '@@ -10,6 +10,8 @@ class AdminTest(TestCase):',

@@ -403,6 +403,95 @@ test('a reply that landed before its resolve failed is not posted again', async 
   assert.deepEqual(w.mr.open(), []);
 });
 
+test('a push refused three ticks running stops the run for a person instead of parking it again', async () => {
+  // Somebody else moved the branch, or the fixer rewrote a pushed commit. No
+  // further tick fixes that, and each one used to park and try again in silence.
+  const w = world({
+    reviews: [{ findings: [F('F-01', 'major')] }],
+    fixes: [{ commit: 'b2', threads: [{ id: 'F-01', action: 'fixed', reply: 'ok', commit: 'b2' }] }],
+  });
+  w.pushFails = 99;
+  assert.equal((await driveReview(w.deps)).kind, 'retry-later');
+  assert.equal((await driveReview(w.deps)).kind, 'retry-later');
+  const third = await driveReview(w.deps);
+  assert.equal(third.kind, 'stuck');
+  assert.match(third.kind === 'stuck' ? third.why : '', /3 attempts in a row/);
+  // Nothing was said on the merge request about a commit it does not have.
+  assert.deepEqual(w.mr.actions('d1'), ['reviewer:raised']);
+  assert.equal(w.fixerInputs.length, 1, 'and no session was spent waiting');
+});
+
+test('one refused push is only a blip: the count starts again once a push lands', async () => {
+  const w = world({
+    reviews: [{ findings: [F('F-01', 'major')] }, { findings: [], threads: [{ id: 'F-01', ruling: 'accepted', note: '' }] }],
+    fixes: [{ commit: 'b2', threads: [{ id: 'F-01', action: 'fixed', reply: 'ok', commit: 'b2' }] }],
+  });
+  w.pushFails = 2;
+  assert.equal((await driveReview(w.deps)).kind, 'retry-later');
+  assert.equal((await driveReview(w.deps)).kind, 'retry-later');
+  assert.equal((await driveReview(w.deps)).kind, 'done');
+  assert.equal(w.ledger?.pushFailures, undefined);
+});
+
+test('edits a fixer left uncommitted are moved out of the tree before anyone reads it again', async () => {
+  const w = world({
+    reviews: [{ findings: [F('F-01', 'major')] }, { findings: [], threads: [{ id: 'F-01', ruling: 'stands', note: 'still wrong' }] }],
+    fixes: [{ threads: [{ id: 'F-01', action: 'fixed', reply: 'Changed the admin.', commit: '' }] }],   // no commit
+  });
+  const order: string[] = [];
+  const said: string[] = [];
+  w.deps.setAside = (label) => { order.push(`aside:${label}`); return ['apps/teams/admin.py']; };
+  w.deps.info = (line) => { said.push(line); };
+  const reviewer = w.deps.runReviewer;
+  w.deps.runReviewer = async (input) => { order.push(input.recheck ? 're-check' : 'review'); return reviewer(input); };
+  await driveReview(w.deps);
+  assert.deepEqual(order, ['review', 'aside:review-fix lap 1', 're-check'], 'set aside BEFORE the re-check opens a file');
+  assert.ok(said.some((l) => /left 1 file\(s\) edited but uncommitted — set aside.*apps\/teams\/admin\.py/.test(l)));
+});
+
+test('a comment a person writes WHILE the fixer is working is not lost under the fixer\'s reply', async () => {
+  // The fixer declines; its reply is posted after the person's comment and so
+  // has the higher note id. Reading "seen up to our own last note" skipped it.
+  const w = world({
+    maxFixLaps: 1,
+    reviews: [
+      { findings: [F('F-05', 'major')] },
+      { findings: [], threads: [{ id: 'F-05', ruling: 'stands', note: 'no' }] },
+      { findings: [], threads: [{ id: 'F-05', ruling: 'accepted', note: '' }] },
+    ],
+    fixes: [
+      { threads: [{ id: 'F-05', action: 'declined', reply: 'Not mine to change.', commit: '' }] },
+      { commit: 'c3', threads: [{ id: 'F-05', action: 'fixed', reply: 'Done as asked.', commit: 'c3' }] },
+    ],
+  });
+  const fixer = w.deps.runFixer;
+  let first = true;
+  w.deps.runFixer = async (input) => {
+    if (first) { first = false; w.mr.humanReply('d1', 'hassam.azam', 'Do it this way: mark it expectedFailure.'); }
+    return fixer(input);
+  };
+  assert.deepEqual(await driveReview(w.deps), { kind: 'done', raised: 1, open: 0 });
+  assert.equal(w.fixerInputs.length, 2);
+  assert.match(w.fixerInputs[1]!.threads[0]!.human![0]!.body, /mark it expectedFailure/);
+});
+
+test('a fixer that keeps dying on a person\'s reply is not started for it without end', async () => {
+  const dead = { ok: false as const, why: 'error_max_turns', infra: false };
+  const w = world({
+    maxFixLaps: 1,
+    reviews: [{ findings: [F('F-05', 'major')] }, { findings: [], threads: [{ id: 'F-05', ruling: 'stands', note: 'no' }] }],
+    fixes: [{ threads: [{ id: 'F-05', action: 'declined', reply: 'no', commit: '' }] }, dead, dead, dead, dead],
+  });
+  assert.equal((await driveReview(w.deps)).kind, 'parked');
+  w.mr.humanReply('d1', 'hassam.azam', 'Rewrite the whole test class.');
+  // The runner retries a failed fixer lap by entering the loop again.
+  assert.equal((await driveReview(w.deps)).kind, 'session-failed');
+  assert.equal((await driveReview(w.deps)).kind, 'session-failed');
+  const after = await driveReview(w.deps);
+  assert.equal(after.kind, 'parked', 'two tries past the cap, then it waits for the person');
+  assert.equal(w.fixerInputs.length, 3);
+});
+
 test('a "Fixed in <sha>" reply never lands ahead of the push that carries the commit', async () => {
   const w = world({
     reviews: [{ findings: [F('F-01', 'major')] }, { findings: [] }],

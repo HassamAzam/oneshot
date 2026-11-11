@@ -239,6 +239,13 @@ function planForecast(ctx: PromptCtx): PlanForecast {
  * this is not that kind of work.
  */
 function skillsFor(cfg: PhaseConfig, ctx: PromptCtx): string[] {
+  // A re-check rules on the fixer's answers and reads the few lines that
+  // changed. The full-review skills are the wrong method for that — one of them
+  // opens by dispatching a fan-out of review agents, which the re-check prompt
+  // forbids — and loading them costs turns the lap does not have.
+  if (cfg.name === 'review' && ctx.review?.recheck) {
+    return (cfg.skills ?? []).filter((s) => s === 'review-threads');
+  }
   const forecast = ctx.prior.plan ? planForecast(ctx) : null;
   const always = (cfg.skills ?? []).filter((s) => CONDITIONAL_SKILLS[s]?.(forecast) ?? true);
   return [...new Set([...always, ...labelSkills(cfg, ctx.ticket)])];
@@ -1166,6 +1173,12 @@ file this repo keeps.`;
 
 const sha8 = (sha: string | null | undefined): string => String(sha ?? '').slice(0, 8) || '(unknown)';
 
+/** The id the next new thread would take: one past the highest a thread already holds. */
+function nextFindingId(threads: ReviewThread[]): string {
+  const top = threads.reduce((m, t) => Math.max(m, Number(String(t.id).replace(/\D+/g, '')) || 0), 0);
+  return `F-${String(top + 1).padStart(2, '0')}`;
+}
+
 /** One thread as a session is shown it: the finding, then everything said on it since. */
 function threadEntry(t: ReviewThread): string {
   const lines = [`- ${t.id} [${t.severity}] ${t.file}:${t.line}`, `    ${t.what}`];
@@ -1220,10 +1233,16 @@ afterwards. So:
 - Write \`what\`, \`why\` and \`fix\` to be read ON THE MERGE REQUEST by a person who has seen
   none of this prompt: each one self-contained, no "lap", no "as above", no other finding
   referred to by number alone.
+- \`file\` is the path from the repository root, exactly as \`git diff --name-only\` prints it
+  (\`apps/teams/admin.py\`) — never an absolute path, even if an agent reported one to you.
 - \`line\` is the line in the file as it is NOW — the new side of the diff.
 - Grade it honestly the first time. A thread's severity is fixed when it is raised: you cannot
   raise it later, and a re-check may only reopen a thread, never re-grade or re-number it.
 - One finding per defect. Two symptoms of one cause are one thread.
+- EVERY finding you return is answered — a minor or a suggestion as much as a blocker. Each is
+  a thread the fixer must fix or decline, and a fix it commits re-runs \`verify\` on the whole
+  case list. So return a minor or a suggestion only when it should change IN THIS merge
+  request; something that can wait belongs in \`summary\` as a follow-up, not in \`findings\`.
 ${carried}`;
 }
 
@@ -1265,6 +1284,8 @@ Return one entry in \`threads\` for every thread below, with its id and a \`ruli
 
 A thread's severity was set when it was raised. Never return a thread again as a new finding,
 under a new id or at a higher severity — \`reopen\` is how you say a fix failed.
+A NEW finding takes a NEW id, continuing after the highest one below (the next is
+${nextFindingId(r.threads)}). An id that is already a thread's belongs to that thread.
 
 ${shown.map((t) => `${threadEntry(t)}\n    state: ${THREAD_STATE[t.status] ?? t.status}`).join('\n') || '(no thread to rule on)'}
 
@@ -1288,6 +1309,10 @@ ${caseList(cases, { steps: false })}
 No sub-agents on a re-check: the diff is a few lines and the standards are in
 \`.claude/rules/\` if you need them.
 
+Your budget is ${budgetMin('review', 30)} minutes and ${budgetTurns('review')} turns, and a session that runs out
+returns nothing — no ruling at all, with the fixer's answers left unjudged. A re-check needs a
+fraction of that: rule, read the diff, answer.
+${djangoTestsBlock(ctx)}
 \`verdict\` is 'changes-requested' if you reopened a thread, let a blocker or major \`stand\`, or
 raised a blocker or major; otherwise 'approve'. Send \`findings: []\` when you raise nothing new.
 
@@ -2175,13 +2200,13 @@ steps:
 ${(p.steps ?? []).map((s) => `  ${s.n}. [${s.layer}] ${s.what} — ${(s.files ?? []).join(', ')}`).join('\n') || '  (none recorded)'}
 
 ## What implement reported (phase 3)
-${changeSummary(ctx)}
-closed from an earlier review: ${(i.addressedFindings ?? []).join(', ') || '(none)'}
+${changeSummary(ctx)}${ctx.review ? '' : `
+closed from an earlier review: ${(i.addressedFindings ?? []).join(', ') || '(none)'}`}
 
 ## The test cases this code has to pass (phase 4)
 Read these as a specification, not as something to run — \`verify\` and \`qa\` execute them.
 ${caseList(cases, { steps: false })}
-${leftOutBlock(ctx)}${betaBlock(ctx, 'review')}
+${leftOutBlock(ctx)}${betaBlock(ctx, 'review')}${djangoTestsBlock(ctx)}
 Review the change on \`${ctx.branch ?? 'the ticket branch'}\` as if it were an MR you must
 approve or send back.
 
@@ -2232,8 +2257,13 @@ and the ticket pays another ${mins} minutes for the same nothing.
 
 \`verdict\` is 'changes-requested' if ANY finding is a blocker or a major, or if a dispatched
 dimension was neither landed nor covered by you (above); otherwise 'approve'.
-Minors and suggestions alone do not send a change back — the run has a lap cap, and spending it
-on style is how a correct change fails to ship.${ctx.lap > 0 ? `\nOn this lap in particular: do not raise a new cosmetic-only finding. If it was acceptable on\nlap 0 it is acceptable now, and raising it costs the ticket a whole lap.` : ''}
+${ctx.review
+    ? `What happens next is decided thread by thread (see "Where your findings go"), not by the verdict —
+with one exception. 'changes-requested' with NO blocker or major finding behind it is read as
+"part of this change was not reviewed", and the whole review is run again. So never return it
+for minors and suggestions alone: those are 'approve' with the findings listed.`
+    : `Minors and suggestions alone do not send a change back — the run has a lap cap, and spending it
+on style is how a correct change fails to ship.`}${ctx.lap > 0 && !ctx.review ? `\nOn this lap in particular: do not raise a new cosmetic-only finding. If it was acceptable on\nlap 0 it is acceptable now, and raising it costs the ticket a whole lap.` : ''}
 
 A defect you found is not a block. 'changes-requested' is your normal negative verdict;
 \`blocked\` is for a diff you could not read at all.
@@ -2284,6 +2314,11 @@ ${threads.map(threadEntry).join('\n') || '(none — say so in `summary` and retu
   word on it before you touch the code again.
 - One commit per thread where that is practical, message \`fix(review): <what changed> (<id>)\`.
   Never amend, rebase or force anything, and never touch a file no thread requires.
+- Stage what you changed BY PATH — \`git add <file> …\` — and never \`git add -A\`, \`git add .\`
+  or \`git commit -a\`: the worktree holds files that are not part of the change. Commit on the
+  branch you are on; do not create or switch branches. Before you answer, \`git status\` must
+  show nothing modified: an edit you leave uncommitted is not a fix, and the conductor moves
+  it out of the tree.
 - If you add or change a test, run it. Run the project's linters over the files you touched and
   set \`lintClean\` from what they printed; the pre-commit hook is broken on this machine, so
   \`--no-verify\` is permitted and the linters are what stands in for it.

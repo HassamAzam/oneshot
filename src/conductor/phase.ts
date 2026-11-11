@@ -322,7 +322,7 @@ export function phasePaths(
  * customer's ticket, and push_files / create_or_update_file / create_branch
  * commit through the API — around both write-scope.cjs and git-guard.cjs.
  */
-function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
+export function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
   const disallowed: string[] = [
     'mcp__gitlab__merge_merge_request',
     'mcp__gitlab__delete_branch',
@@ -330,6 +330,33 @@ function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
     'mcp__gitlab__unprotect_branch',
     'mcp__gitlab__update_project',
     'mcp__gitlab__update_default_branch',
+    // Writes NO phase has a use for, the `mr` session included. The list below
+    // this one grew by naming what a phase might post; these are what the
+    // server offers besides, and until the tools/list fix (src/lib/mcpprobe.ts)
+    // no session on the server held any of them, so nothing had ever tried.
+    // A label is project-wide — renaming or deleting "Loop" does it on every
+    // teammate's ticket — and a pipeline started, retried or cancelled from a
+    // session is CI nobody asked this run for.
+    'mcp__gitlab__delete_issue',
+    'mcp__gitlab__create_label',
+    'mcp__gitlab__update_label',
+    'mcp__gitlab__delete_label',
+    'mcp__gitlab__create_issue_link',
+    'mcp__gitlab__delete_issue_link',
+    'mcp__gitlab__create_pipeline',
+    'mcp__gitlab__retry_pipeline',
+    'mcp__gitlab__cancel_pipeline',
+    'mcp__gitlab__create_repository',
+    'mcp__gitlab__fork_repository',
+    'mcp__gitlab__delete_draft_note',
+    // Not served today (USE_GITLAB_WIKI / USE_MILESTONE are off below); named so
+    // that turning either on does not also hand out its writes.
+    'mcp__gitlab__create_wiki_page',
+    'mcp__gitlab__update_wiki_page',
+    'mcp__gitlab__delete_wiki_page',
+    'mcp__gitlab__create_milestone',
+    'mcp__gitlab__edit_milestone',
+    'mcp__gitlab__delete_milestone',
   ];
 
   const readOnly = (cfg.writes ?? []).length === 0;

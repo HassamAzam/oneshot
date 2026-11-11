@@ -101,7 +101,7 @@ import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import {
-  changedFilesBetween, mergePhase, mrOpenPhase, mrOpenSettled, pushRunBranch, revParse,
+  changedFilesBetween, mergePhase, mrOpenPhase, mrOpenSettled, pushRunBranch, revParse, setAsideUncommitted,
 } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
@@ -124,7 +124,7 @@ import {
   roundsUsed, startRound,
 } from '../mrfeedback/ledger.js';
 import type { MrFeedbackSignal } from '../mrfeedback/types.js';
-import { fixLapsUsed, reviewArtifact, reviewSettled } from '../review/ledger.js';
+import { fixLapsUsed, reviewArtifact, reviewIsIncomplete, reviewSettled } from '../review/ledger.js';
 import { driveReview, type Session } from '../review/loop.js';
 import type { FixerOutput, ReviewerOutput } from '../review/types.js';
 import { leftOutLine, splitUiCases } from './uicases.js';
@@ -1191,6 +1191,24 @@ export function phasesStaleSince(
   });
 }
 
+/**
+ * How many times in a row a phase has just failed: its `failed` records since
+ * its last passing one. Infra deaths and `parked` marks are neither — the phase
+ * never got to answer — so they neither count nor break the streak.
+ */
+export function failuresInARow(
+  phases: Array<Pick<PhaseRecord, 'phase' | 'status'>>, name: string,
+): number {
+  let n = 0;
+  for (let i = phases.length - 1; i >= 0; i -= 1) {
+    const r = phases[i]!;
+    if (r.phase !== name) continue;
+    if (r.status === 'failed') n += 1;
+    else if (r.status === 'ok' || r.status === 'warned' || r.status === 'skipped') break;
+  }
+  return n;
+}
+
 export function nextIndex(
   control: Exclude<Control, { kind: 'stop' }>,
   current: number,
@@ -2180,9 +2198,14 @@ export async function runTicket(
       // artifact says exactly which, because they are recorded 'skipped'
       // rather than quietly dropped.
       if (r.cfg.name === 'verify' && !r.out.ok && !r.out.blocked && !overruled.has(r)) {
-        const partial = readArtifact<{ results?: Array<Record<string, unknown>> }>(
-          iid, `${r.cfg.name}-partial.json`,
-        );
+        // Only a partial THIS lap wrote. The file outlives the lap that wrote
+        // it (an unblock keeps it while verify has any passing record), and a
+        // session that died before its first case would otherwise be "salvaged"
+        // from an earlier lap's rows — results for code it never ran against.
+        const partialPath = artifactPath(iid, `${r.cfg.name}-partial.json`);
+        const partial = existsSync(partialPath) && statSync(partialPath).mtimeMs >= r.startedAt
+          ? readArtifact<{ results?: Array<Record<string, unknown>> }>(iid, `${r.cfg.name}-partial.json`)
+          : null;
         const recorded = partial?.results ?? [];
         const recordedPasses = recorded.filter((x) => String(x.result) === 'pass').length;
         if (recorded.length && recordedPasses > 0) {
@@ -2194,7 +2217,10 @@ export async function runTicket(
               id: c.id, result: 'skipped',
               evidence: 'session died at its turn cap before this case ran', screenshot: '',
             }));
-          const results = [...recorded, ...skipped];
+          // QA's standing rulings hold for salvaged rows as for any other lap's.
+          const results = applyStandingDecisions(
+            [...recorded, ...skipped] as unknown as CaseResult[], j.verifyCaseDecisions,
+          ).results;
           const summary = `Salvaged from ${r.cfg.name}-partial.json: ${recorded.length} case(s) `
             + `recorded before the session died (${r.out.error ?? 'no error text'}); `
             + `${skipped.length} never ran.`;
@@ -2630,7 +2656,29 @@ export async function runTicket(
       const ledger = readReviewLedger(iid);
       if (ledger) return reviewSettled(ledger, worktree ? revParse(worktree, 'HEAD') : null);
     }
+    if (overtakenByFixer(p)) return false;
     return phaseSettled(iid, p.name);
+  }
+
+  /**
+   * Whether a phase after `review` passed BEFORE the review's fixer last
+   * changed the branch, and so checked code that has since moved.
+   *
+   * Asked on every pass, from the ledger's record of that commit — not only in
+   * the pass that ran the fixer. That pass also puts these phases in `forced`,
+   * but `forced` lives in memory: a conductor restart, a pause, a usage limit
+   * or a verify that blocked between the fix and the re-run would otherwise
+   * leave yesterday's passing record standing, and the run would walk to merge
+   * on a verify that never saw the fixer's commits. It is also what lets a
+   * forced verify that FAILED be acted on after a stop: an earlier passing
+   * record no longer hides it from the recorded-verdict check below.
+   */
+  function overtakenByFixer(p: PhaseConfig): boolean {
+    if (p.onDemand || CODE_PHASES[p.name] || p.name === 'testcases') return false;
+    const reviewAt = list.findIndex((q) => q.name === 'review');
+    if (reviewAt === -1 || list.findIndex((q) => q.name === p.name) <= reviewAt) return false;
+    const fixedAt = readReviewLedger(iid)?.fixedAt;
+    return fixedAt !== undefined && phasesStaleSince([p.name], (readJournal(iid) ?? j).phases, fixedAt).length > 0;
   }
 
   /**
@@ -2978,6 +3026,18 @@ export async function runTicket(
         }
       }
 
+      // A first review that says of ITSELF that it did not cover the change
+      // (reviewIsIncomplete) is not the review, however well-formed its answer:
+      // it is recorded as a failed lap and attempted again, like one that died.
+      if (cfgS.name === 'review' && !extra.review?.recheck && r.out.ok && r.out.data !== null
+        && reviewIsIncomplete(r.out.data as ReviewerOutput)) {
+        const said = String((r.out.data as ReviewerOutput).summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        r.out.ok = false;
+        r.out.error = 'the review returned changes-requested with no blocker or major finding — it reports part '
+          + `of the change as not reviewed${said ? `: ${said}` : ''}`;
+        log.warn(`review lap${r.lap} is incomplete by its own account — not accepted as the review`, { said });
+      }
+
       const usable = r.out.ok && r.out.data !== null;
       recordPhase(iid, {
         phase: cfgS.name, lap: r.lap,
@@ -3018,7 +3078,25 @@ export async function runTicket(
       fixLapsUsed: () => fixLapsUsed((readJournal(iid) ?? j).phases),
       runReviewer: (input) => session<ReviewerOutput>(p, { review: input }),
       runFixer: (input) => session<FixerOutput>(cfgFix, { reviewFix: input }),
-      push: () => pushRunBranch(wt, branch),
+      push: () => {
+        const pushed = pushRunBranch(wt, branch);
+        if (!pushed.ok) return pushed;
+        // The push names the BRANCH. A fixer that committed somewhere else — a
+        // branch of its own, a detached HEAD — leaves it with nothing to send,
+        // and "pushed" would then stand behind replies that cite a commit the
+        // merge request does not have.
+        const head = revParse(wt, 'HEAD');
+        if (head !== revParse(wt, `refs/remotes/origin/${branch}`)) {
+          return {
+            ok: false,
+            error: `${branch} was pushed, but the worktree's HEAD (${String(head).slice(0, 8)}) is not what origin `
+              + 'holds for it — the fixer committed off the run\'s branch',
+          };
+        }
+        return pushed;
+      },
+      root: wt,
+      setAside: (label) => setAsideUncommitted(wt, `${runId} ${label}`),
       stopping: () => Boolean(opts.signal?.aborted) || existsSync(PAUSE),
       announcePark: async (body) => {
         const note = await addIssueNote(iid, body);
@@ -3065,7 +3143,19 @@ export async function runTicket(
           j.phases, ledger?.fixedAt,
         );
         for (const name of stale) forced.add(name);
-        if (stale.length) log.warn(`review-fix changed the code — re-running ${stale.join(', ')}`);
+        if (stale.length) {
+          log.warn(`review-fix changed the code — re-running ${stale.join(', ')}`);
+          // Django runs --noreload, and this pass's app was brought up for the
+          // reviewer, before the fixer committed. `app.cjs ensure` reuses a live
+          // instance by worktree, so verify would drive the cases against the
+          // code as it was BEFORE the fix. Stop it; the next lease starts it on
+          // what is checked out now.
+          if (port !== undefined && portHeldBy(runId) === port) {
+            const stopped = reapPortServer(port);
+            appStarting = false;
+            if (stopped) log.info(`app        stopped ${stopped} process(es) on ${port} — restarting on the fixer's code`);
+          }
+        }
         if (isMilestone(p)) await thread(j.slackTs ?? null, milestoneText(p, view, iid));
         return null;
       }
@@ -3080,12 +3170,33 @@ export async function runTicket(
         return existsSync(PAUSE)
           ? { kind: 'stop', status: 'aborted', reason: 'paused mid-phase — resumes when unpaused' }
           : { kind: 'stop', status: 'aborted', reason: 'the conductor asked this run to stop' };
+      case 'stuck':
+        // Not a park: a park is re-entered every tick, and this is the step the
+        // ticks have already failed at. Blocked alerts a person and stops.
+        return { kind: 'stop', status: 'blocked', reason: `review: ${outcome.why}` };
       default: {
         if (halt) return halt;
         if (outcome.phase === 'review') {
-          // A reviewer that died is re-attempted like any phase; one that came
-          // back unusable gets two more tries, not a cycle through implement.
-          return afterFailure({ ...p, onFail: 'retry', maxRetries: 2 }, index, `review: ${outcome.why}`, outcome.infra);
+          // A reviewer that died of infrastructure is re-attempted like any phase.
+          if (outcome.infra) {
+            return afterFailure({ ...p, onFail: 'retry', maxRetries: 2 }, index, `review: ${outcome.why}`, true);
+          }
+          if (existsSync(PAUSE)) {
+            return { kind: 'stop', status: 'aborted', reason: 'paused mid-phase — resumes when unpaused' };
+          }
+          // One that came back unusable gets two more tries — counted IN A ROW.
+          // A first review and every later re-check record as `review`, and a
+          // budget shared across the whole run would let two bad laps early on
+          // leave a re-check, hours later, with a single attempt.
+          const inARow = failuresInARow(j.phases, p.name);
+          if (inARow <= 2) {
+            log.warn('review failed — retrying', { attempt: inARow + 1, of: 3, why: outcome.why.slice(0, 120) });
+            return { kind: 'retry', at: index };
+          }
+          return {
+            kind: 'stop', status: 'blocked',
+            reason: `review: ${outcome.why} — gave up after ${inARow} attempts in a row`,
+          };
         }
         // An infra death of the fixer costs no lap and is re-attempted. Any
         // other failure is a lap spent with no answers: go round again, and the

@@ -1571,6 +1571,46 @@ test('a first review on a merge request is told its findings become threads a fi
   assert.match(p, /Dispatch ALL OF THEM IN ONE MESSAGE/);
 });
 
+test('a thread-mode review is told the truth about what a finding costs, and how to name a file', () => {
+  const p = promptFor(cfg('review'), { ...ctx(ticket()), review: FIRST });
+  // The old loop's promise — true there, false here, where every finding is answered.
+  assert.doesNotMatch(p, /Minors and suggestions alone do not send a change back/);
+  assert.match(p, /EVERY finding you return is answered/);
+  assert.match(p, /re-runs `verify` on the whole\s+case list/);
+  assert.match(p, /exactly as `git diff --name-only` prints it/);
+  // 'changes-requested' with nothing blocking is read as an incomplete review.
+  assert.match(p, /'changes-requested' with NO blocker or major finding behind it is read as/);
+  // Ids of the old loop's findings, whose text is nowhere in this prompt.
+  assert.doesNotMatch(p, /closed from an earlier review/);
+});
+
+test('the old loop\'s review prompt keeps its own wording', () => {
+  const p = promptFor(cfg('review'), { ...ctx(ticket()) });
+  assert.match(p, /Minors and suggestions alone do not send a change back/);
+  assert.match(p, /closed from an earlier review/);
+  assert.doesNotMatch(p, /EVERY finding you return is answered/);
+});
+
+test('a re-check is told the next free id, its budget, and loads only its own skill', () => {
+  const p = promptFor(cfg('review'), { ...ctx(ticket()), lap: 1, review: RECHECK });
+  assert.match(p, /A NEW finding takes a NEW id, continuing after the highest one below \(the next is\s+F-04\)/);
+  assert.match(p, /Your budget is \d+ minutes and \d+ turns/);
+  const recheckSystem = systemPromptFor(cfg('review'), { ...ctx(ticket()), lap: 1, review: RECHECK });
+  const firstSystem = systemPromptFor(cfg('review'), { ...ctx(ticket()), review: FIRST });
+  assert.match(firstSystem, /erp-code-review/);
+  assert.doesNotMatch(recheckSystem, /erp-code-review/);
+  assert.doesNotMatch(recheckSystem, /ponytail-review/);
+  assert.match(recheckSystem, /review-threads/);
+});
+
+test('the fixer is told to stage by path, stay on its branch and leave nothing uncommitted', () => {
+  const p = promptFor(cfg('review-fix'), { ...ctx(ticket()), reviewFix: FIX }).replace(/\s+/g, ' ');
+  assert.match(p, /Stage what you changed BY PATH/);
+  assert.match(p, /never `git add -A`, `git add \.` or `git commit -a`/);
+  assert.match(p, /do not create or switch branches/);
+  assert.match(p, /an edit you leave uncommitted is not a fix/);
+});
+
 test('the thread loop never hands the reviewer the old re-raise-as-blocker protocol', () => {
   const p = promptFor(cfg('review'), { ...ctx(ticket(), OLD_FINDINGS), lap: 2, review: FIRST });
   assert.doesNotMatch(p, /## This is review lap/);

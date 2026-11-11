@@ -261,7 +261,7 @@ export function seedWorktree(worktree: string): void {
     log.warn('no seed repo — the worktree cannot run the app without npm ci / venv setup', {
       fix: 'set ONESHOT_SEED_FROM to an already-installed clone',
     });
-    excluded.push(...seedTestSettings(worktree));
+    excluded.push(...seedTestSettings(worktree), ...SCRATCH_DIRS);
     addExcludes(worktree, excluded);
     return;
   }
@@ -304,10 +304,23 @@ export function seedWorktree(worktree: string): void {
   }
 
   // After the copies: it is written only where hrdb/local_settings.py now exists.
-  excluded.push(...seedTestSettings(worktree));
+  excluded.push(...seedTestSettings(worktree), ...SCRATCH_DIRS);
   addExcludes(worktree, excluded);
   pointAtRunDb(worktree, from);
 }
+
+/**
+ * Directories a phase makes for itself inside the checkout, kept out of
+ * `git status` like everything the seeding step puts there.
+ *
+ * `verify` is told to keep its server log, login helpers and Playwright drivers
+ * under `.verify-scratch/` (src/phases/prompts.ts), and later laps reuse them.
+ * Untracked and not ignored, the directory is one `git add -A` away from a
+ * commit — and since the review loop pushes whatever its fixer committed, from
+ * the merge request. On #9174 it also held the scratch settings files six
+ * verify laps wrote, with a database login in them.
+ */
+const SCRATCH_DIRS = ['.verify-scratch/'];
 
 // --------------------------------------------------------- Django test settings
 

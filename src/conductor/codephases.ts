@@ -1402,6 +1402,52 @@ export function pushRunBranch(worktree: string, branch: string): { ok: boolean; 
   }
 }
 
+/**
+ * Move a worktree's uncommitted edits to tracked files out of the tree, and
+ * say which files they were. Empty when there was nothing to move.
+ *
+ * For the review loop's fixer (src/review): the conductor counts a fix by its
+ * commit, so text a session edited and left uncommitted — it ran out of turns
+ * mid-change, or answered "fixed" without committing — is not on the branch.
+ * Left in the tree it is still what the next session reads: the re-check would
+ * rule on it as the code at HEAD, and verify would test it.
+ *
+ * Nothing is thrown away. The edits are stashed for exactly those paths, the
+ * stash commit is kept under refs/oneshot/aside/…, and the entry is dropped
+ * from the stash stack again — which every worktree of the repo shares, so an
+ * entry left there is one another session's `git stash pop` could apply.
+ * Untracked files are not touched (the seeded links and a phase's scratch
+ * directory are untracked on purpose), nor are files marked skip-worktree,
+ * which `git status` does not report.
+ */
+export function setAsideUncommitted(worktree: string, label: string): string[] {
+  const git = (args: string[]): string => execFileSync('git', ['-C', worktree, ...args], {
+    encoding: 'utf8', stdio: 'pipe', timeout: 60_000,
+  });
+  try {
+    const files = git(['status', '--porcelain', '--untracked-files=no']).split('\n')
+      .filter(Boolean).map((l) => l.slice(3).split(' -> ').pop()!.replace(/^"|"$/g, ''));
+    if (!files.length) return [];
+    const before = revParse(worktree, 'refs/stash');
+    // An identity of its own: a stash is a commit, and the service user's git may
+    // have none configured (sessions get theirs from the environment).
+    git(['-c', 'user.name=Oneshot', '-c', 'user.email=oneshot@localhost.invalid',
+      'stash', 'push', '--quiet', '-m', `oneshot set aside: ${label}`, '--', ...files]);
+    const stash = revParse(worktree, 'refs/stash');
+    if (stash && stash !== before) {
+      const slug = label.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'edits';
+      git(['update-ref', `refs/oneshot/aside/${slug}-${stash.slice(0, 8)}`, stash]);
+      git(['stash', 'drop', '--quiet']);
+    }
+    return files;
+  } catch (err) {
+    log.warn('could not set aside uncommitted edits — the next session will read them as the code', {
+      worktree, error: (err as Error).message.slice(0, 200),
+    });
+    return [];
+  }
+}
+
 /** Files that differ between two commits of `worktree`, or null when git cannot say. */
 export function changedFilesBetween(worktree: string, from: string, to: string): string[] | null {
   try {

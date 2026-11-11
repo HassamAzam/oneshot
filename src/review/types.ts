@@ -58,6 +58,8 @@ export interface ReviewThread {
   reviewerNote?: string;
   /** A trusted person's replies the fixer has not acted on yet. */
   human?: HumanReply[];
+  /** Fixer laps that were handed those replies and ended without an answer. */
+  humanTries?: number;
   /** Highest note id on the thread already accounted for — ours, or a person's the fixer has seen. */
   lastNoteId?: number;
 }
@@ -116,6 +118,10 @@ export interface ReviewLedger {
    * the loop was left and re-entered in between.
    */
   fixedAt?: number;
+  /** Pushes of the fixer's commits refused in a row. Reset by one that lands. */
+  pushFailures?: number;
+  /** What the reviewer last said about the change as a whole, for findings.json. */
+  reviewSummary?: string;
 }
 
 /** A finding as the reviewer session returns it (FINDINGS_SCHEMA). */

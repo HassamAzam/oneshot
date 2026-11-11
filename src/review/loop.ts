@@ -52,8 +52,17 @@ export interface LoopDeps {
   fixLapsUsed(): number;
   runReviewer(input: ReviewPromptInput): Promise<Session<ReviewerOutput>>;
   runFixer(input: FixPromptInput): Promise<Session<FixerOutput>>;
-  /** Push the run's branch. */
+  /** Push the run's branch, and confirm the commit the fixer made is what origin now holds. */
   push(): { ok: boolean; error?: string };
+  /** The run's worktree, so a path a session returned absolute can be made repo-relative. */
+  root?: string;
+  /**
+   * Move whatever tracked files a fixer session left modified but uncommitted
+   * out of the worktree, and name them. The conductor counts a fix by its
+   * commit; text left in the tree is not on the branch, yet the re-check and
+   * verify would both read it as the code.
+   */
+  setAside?(label: string): string[];
   /** The run was asked to stop, or is paused. Checked between steps, never mid-write. */
   stopping(): boolean;
   /**
@@ -70,6 +79,8 @@ export type LoopOutcome =
   /** GitLab or git could not be reached: nothing is lost, the same step is owed next time. */
   | { kind: 'retry-later'; why: string }
   | { kind: 'session-failed'; phase: 'review' | 'review-fix'; why: string; infra: boolean }
+  /** Retrying will not help: the same step failed too many times in a row. A person has to look. */
+  | { kind: 'stuck'; why: string }
   | { kind: 'stopped' };
 
 /**
@@ -79,6 +90,14 @@ export type LoopOutcome =
  * conductor spending sessions in a loop nobody is watching.
  */
 const MAX_STEPS = 40;
+
+/**
+ * Refused pushes in a row before the loop stops asking. A push that fails once
+ * is a network blip; one that fails three ticks running is a branch somebody
+ * else moved or a commit the fixer rewrote, and no further tick changes that —
+ * while each one would park, be re-claimed and try again, saying nothing.
+ */
+const MAX_PUSH_FAILURES = 3;
 
 export async function driveReview(d: LoopDeps): Promise<LoopOutcome> {
   const stored = d.load();
@@ -95,9 +114,17 @@ export async function driveReview(d: LoopDeps): Promise<LoopOutcome> {
     if (l.pushOwed) {
       const pushed = d.push();
       if (!pushed.ok) {
-        return { kind: 'retry-later', why: `could not push the fixer's commits: ${pushed.error ?? 'no reason given'}` };
+        const failures = (l.pushFailures ?? 0) + 1;
+        l = { ...l, pushFailures: failures };
+        d.save(l);
+        const why = `could not push the fixer's commits: ${pushed.error ?? 'no reason given'}`;
+        return failures >= MAX_PUSH_FAILURES
+          ? { kind: 'stuck', why: `${why} — ${failures} attempts in a row, so retrying is not going to fix it. `
+            + 'The fixer\'s replies are queued and not yet posted; reconcile the branch by hand, then unblock' }
+          : { kind: 'retry-later', why };
       }
       l = { ...l, pushOwed: false };
+      delete l.pushFailures;
       d.save(l);
     }
 
@@ -126,7 +153,9 @@ export async function driveReview(d: LoopDeps): Promise<LoopOutcome> {
       const changed = next.recheck && l.reviewedSha ? d.changedFiles(l.reviewedSha, head) : null;
       const s = await d.runReviewer(reviewInput(l, { recheck: next.recheck, headSha: head, changedFiles: changed }));
       if (!s.ok) return { kind: 'session-failed', phase: 'review', why: s.why, infra: s.infra };
-      const applied = applyReview(l, s.data, { lap: s.lap, headSha: head, recheck: next.recheck, changedFiles: changed });
+      const applied = applyReview(l, s.data, {
+        lap: s.lap, headSha: head, recheck: next.recheck, changedFiles: changed, root: d.root,
+      });
       l = applied.ledger;
       d.save(l);
       d.info(`review lap${s.lap} (${next.recheck ? 're-check' : 'first review'}): ${applied.raised.length} thread(s) raised`
@@ -139,13 +168,28 @@ export async function driveReview(d: LoopDeps): Promise<LoopOutcome> {
       const handed = next.threads.map((t) => t.id);
       const s = await d.runFixer(fixInput(l, { threads: next.threads, headSha: head, lap: used + 1, maxLaps: d.maxFixLaps }));
       const after = d.head() ?? head;
+      // Before anything reads the tree again: what the fixer edited and did not
+      // commit is not a fix, and must not be standing in the files the re-check
+      // and verify open.
+      const aside = d.setAside?.(`review-fix lap ${used + 1}`) ?? [];
+      if (aside.length) {
+        d.info(`review-fix left ${aside.length} file(s) edited but uncommitted — set aside, not on the branch: `
+          + aside.slice(0, 6).join(', '));
+      }
       if (!s.ok) {
         // A fixer that died may still have committed. Those commits are on the
         // branch whatever became of its answer, so they are pushed and re-checked.
-        if (after !== head) {
-          l = { ...l, pushOwed: true, recheckOwed: true, fixedAt: Date.now() };
-          d.save(l);
+        if (after !== head) l = { ...l, pushOwed: true, recheckOwed: true, fixedAt: Date.now() };
+        // A person's reply the lap was handed and never answered has now had one
+        // try (nextStep stops starting laps for it after MAX_HUMAN_TRIES).
+        if (!s.infra) {
+          l = {
+            ...l,
+            threads: l.threads.map((t) => (handed.includes(t.id) && t.human?.length
+              ? { ...t, humanTries: (t.humanTries ?? 0) + 1 } : t)),
+          };
         }
+        d.save(l);
         return { kind: 'session-failed', phase: 'review-fix', why: s.why, infra: s.infra };
       }
       const applied = applyFix(l, s.data, { lap: s.lap, headBefore: head, headAfter: after, handed });

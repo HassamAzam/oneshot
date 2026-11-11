@@ -32,6 +32,7 @@ import {
   type ReviewSeverity,
 } from './markers.js';
 import { closedBody, fixerReplyBody, openSummary, rulingBody } from './notes.js';
+import { repoPath } from './position.js';
 import type {
   DroppedFinding, FixPromptInput, FixerOutput, RawFinding, ReviewLedger, ReviewPromptInput, ReviewThread,
   ReviewerOutput, Ruling, ThreadWrite,
@@ -75,6 +76,9 @@ const fid = (n: number): string => `F-${String(n).padStart(2, '0')}`;
 
 // ----------------------------------------------------------------- what is owed
 
+/** Fixer laps a person's reply may start past the lap cap before it is left for the person. */
+export const MAX_HUMAN_TRIES = 2;
+
 export type Step =
   /** Writes are waiting to land on GitLab. Nothing else happens until they do. */
   | { kind: 'flush' }
@@ -102,11 +106,16 @@ export function nextStep(
 
   const fixable = fixableThreads(l);
   if (fixable.length) {
-    const asked = fixable.some((t) => t.human?.length);
+    // Past the cap only for a person's reply, and only so many times: a fixer
+    // that keeps dying on the same reply is not a reason to keep starting one.
+    const asked = fixable.some((t) => t.human?.length && (t.humanTries ?? 0) < MAX_HUMAN_TRIES);
     if (o.fixLapsUsed < o.maxFixLaps || asked) return { kind: 'fix', threads: fixable };
   }
 
-  const blocking = openBlocking(l);
+  // What waits on a person: every open blocker or major, and any open thread a
+  // person replied on that no fixer lap answered — whatever its severity, since
+  // closing it "not taken up" under their comment would be untrue.
+  const blocking = openThreads(l).filter((t) => isBlocking(t.severity) || Boolean(t.human?.length));
   if (blocking.length) {
     const disputed = blocking.filter((t) => t.status === 'disputed').length;
     const why = `${blocking.length} review thread(s) on !${l.mrIid} need a person: ${openSummary(blocking)} — `
@@ -151,7 +160,7 @@ interface Finding {
 }
 
 /** The findings of one reviewer answer that are well-formed enough to post. */
-function readFindings(raw: unknown): Finding[] {
+function readFindings(raw: unknown, root?: string | null): Finding[] {
   if (!Array.isArray(raw)) return [];
   const out: Finding[] = [];
   for (const f of raw as RawFinding[]) {
@@ -163,7 +172,7 @@ function readFindings(raw: unknown): Finding[] {
     out.push({
       id: normaliseFindingId(f.id),
       severity,
-      file: String(f.file ?? '').trim(),
+      file: repoPath(f.file, root),
       line: Number.isFinite(line) && line > 0 ? Math.floor(line) : 1,
       what,
       why: String(f.why ?? '').trim(),
@@ -205,7 +214,9 @@ function rule(
   const note = r?.note ?? '';
   switch (t.status) {
     case 'fixed':
-      if (ruling === 'reopen') {
+      // `stands` is the word for a declined thread, but on a fixed one it can
+      // only mean "the finding still stands": the fix did not close it.
+      if (ruling === 'reopen' || ruling === 'stands') {
         t.status = 'reopened'; t.resolved = false; t.reviewerNote = note;
         return reply(l, t, 'reopened', note, o, 'unresolve');
       }
@@ -265,22 +276,31 @@ function rule(
  */
 export function applyReview(
   ledger: ReviewLedger, out: ReviewerOutput,
-  o: { lap: number; headSha: string; recheck: boolean; changedFiles: string[] | null },
+  o: { lap: number; headSha: string; recheck: boolean; changedFiles: string[] | null; root?: string | null },
 ): { ledger: ReviewLedger; raised: string[]; dropped: DroppedFinding[] } {
   const l = clone(ledger);
   const writes: ThreadWrite[] = [];
   const raised: string[] = [];
   const dropped: DroppedFinding[] = [];
-  const findings = readFindings(out.findings);
+  const findings = readFindings(out.findings, o.root);
+  /** Findings that were a ruling on an existing thread, not something new to post. */
+  const wasRuling = new Set<Finding>();
 
   if (o.recheck) {
     const rulings = readRulings(out.threads);
-    // A finding returned under an existing thread's id is the old way of saying
-    // "this fix did not work". It is read as that ruling, never as a second thread.
+    // A finding returned under an existing thread's id, about that thread's own
+    // file, is the old way of saying "this fix did not work": it is read as a
+    // reopen, never as a second thread. The same id on a DIFFERENT file, or
+    // beside a ruling that closes the thread, is a new finding the reviewer
+    // numbered from F-01 again — and that one must not vanish into the old
+    // thread: it falls through and takes a fresh id below.
     for (const f of findings) {
-      if (f.id && l.threads.some((t) => t.id === f.id) && !rulings.has(f.id)) {
-        rulings.set(f.id, { ruling: 'reopen', note: [f.what, f.why].filter(Boolean).join(' ') });
-      }
+      const t = f.id ? l.threads.find((x) => x.id === f.id) : undefined;
+      if (!t || t.file !== f.file) continue;
+      const said = rulings.get(t.id);
+      if (said && said.ruling !== 'reopen') continue;
+      rulings.set(t.id, { ruling: 'reopen', note: said?.note || [f.what, f.why].filter(Boolean).join(' ') });
+      wasRuling.add(f);
     }
     for (const t of l.threads) {
       const w = rule(l, t, rulings.get(t.id), o);
@@ -288,13 +308,11 @@ export function applyReview(
     }
   }
 
-  const changed = o.changedFiles ? new Set(o.changedFiles) : null;
-  /** Threads that existed before this answer. On a re-check, a finding under one of their ids was a ruling. */
-  const existing = new Set(l.threads.map((t) => t.id));
-  const taken = new Set(existing);
+  const changed = o.changedFiles ? new Set(o.changedFiles.map((f) => repoPath(f, o.root))) : null;
+  const taken = new Set(l.threads.map((t) => t.id));
   let n = nextNumber(l);
   for (const f of findings) {
-    if (o.recheck && f.id && existing.has(f.id)) continue; // read as a ruling above
+    if (wasRuling.has(f)) continue;
     if (o.recheck && f.severity !== 'blocker' && !(changed && changed.has(f.file))) {
       dropped.push({
         lap: o.lap, severity: f.severity, file: f.file, line: f.line, what: f.what,
@@ -325,7 +343,25 @@ export function applyReview(
   l.reviewedSha = o.headSha;
   l.reviewLap = o.lap;
   l.recheckOwed = false;
+  const summary = String(out.summary ?? '').replace(/\s+/g, ' ').trim();
+  if (summary) l.reviewSummary = summary.slice(0, 1200);
   return { ledger: l, raised, dropped };
+}
+
+/**
+ * Whether a FIRST review says of itself that it did not cover the change.
+ *
+ * The reviewer is told to return 'changes-requested' in two cases: it found a
+ * blocker or a major, or a dimension it dispatched neither landed nor was
+ * covered. The loop is built from findings and never needed the verdict for the
+ * first case — which left the second with nothing reading it: a review that
+ * said "backend NOT REVIEWED" and listed two minors was posted, answered and
+ * counted as the whole review. 'changes-requested' with nothing blocking behind
+ * it is that case, and the caller re-attempts the review instead of accepting it.
+ */
+export function reviewIsIncomplete(out: ReviewerOutput): boolean {
+  if (String(out.verdict ?? '') !== 'changes-requested') return false;
+  return !readFindings(out.findings).some((f) => isBlocking(f.severity));
 }
 
 // --------------------------------------------------------------- the fixer's lap
@@ -377,6 +413,7 @@ export function applyFix(
     if (t.human?.length) {
       t.lastNoteId = Math.max(t.lastNoteId ?? 0, ...t.human.map((h) => h.noteId));
       delete t.human;
+      delete t.humanTries;
     }
     if (!a) { unanswered.push(id); continue; }
 
@@ -581,7 +618,7 @@ export function reviewArtifact(l: ReviewLedger | null, summary: string): Record<
   const open = threads.filter((t) => !t.resolved);
   const tally = (status: string): number => threads.filter((t) => t.status === status).length;
   return {
-    summary,
+    summary: l?.reviewSummary ? `${summary} Reviewer: ${l.reviewSummary}` : summary,
     blocked: null,
     verdict: open.some((t) => isBlocking(t.severity)) ? 'changes-requested' : 'approve',
     findings: open.map((t) => ({

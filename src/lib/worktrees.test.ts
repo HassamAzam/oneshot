@@ -149,6 +149,29 @@ test('the generated Django test settings are seeded with the worktree and stay o
   }
 });
 
+test('a phase\'s scratch directory stays out of git status, so `git add -A` cannot commit it', () => {
+  // verify keeps its server log, login helpers and drivers under .verify-scratch/.
+  // On #9174 that directory sat untracked in the worktree the review's fixer
+  // commits from, with scratch settings files in it that held a database login.
+  const main = repoWithCommittedClaude();
+  const linked = join(main, '..', `wt-scratch-${Date.now()}`);
+  try {
+    git(['worktree', 'add', '-q', '--detach', linked], main);
+    seedWorktree(linked);
+    mkdirSync(join(linked, '.verify-scratch'), { recursive: true });
+    writeFileSync(join(linked, '.verify-scratch', 'django.log'), 'log\n');
+    writeFileSync(join(linked, '.verify-scratch', 'test_settings_verify.py'), 'PASSWORD = "x"\n');
+
+    assert.equal(git(['status', '--porcelain'], linked), '');
+    git(['add', '-A'], linked);
+    assert.equal(git(['diff', '--cached', '--name-only'], linked), '');
+  } finally {
+    try { git(['worktree', 'remove', '--force', linked], main); } catch { /* best effort */ }
+    rmSync(main, { recursive: true, force: true });
+    rmSync(linked, { recursive: true, force: true });
+  }
+});
+
 test('a checkout that does not commit .claude is left alone', () => {
   const dir = mkdtempSync(join(tmpdir(), 'oneshot-wt-'));
   try {

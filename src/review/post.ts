@@ -64,11 +64,14 @@ export async function flush(
     if (!t.discussionId) {
       return { ledger: l, failed: `${t.id} has an answer to post but no thread on !${l.mrIid} yet` };
     }
+    // `lastNoteId` is NOT moved to a note this loop posts. It marks how far a
+    // PERSON's replies have been put in front of the fixer (applyFix moves it),
+    // and the loop's own notes are told apart by their marker. Moving it here
+    // skipped any comment a person wrote while a session was still running: it
+    // has a lower id than the reply posted when the session ends.
     const discussion = o.live.find((d) => d.id === t.discussionId);
     const already = discussion?.notes.find((n) => sameMarker(parseMarker(n.body), w.marker));
-    if (already) {
-      t.lastNoteId = Math.max(t.lastNoteId ?? 0, already.id);
-    } else {
+    if (!already) {
       const posted = await api.reply(t.discussionId, w.body);
       if (posted === null) return { ledger: l, failed: `could not reply on the thread for ${t.id} on !${l.mrIid}` };
       if (posted === 'gone') {
@@ -77,7 +80,6 @@ export async function flush(
         done();
         continue;
       }
-      t.lastNoteId = Math.max(t.lastNoteId ?? 0, posted.noteId);
     }
     if (w.then !== 'none') {
       const r = await api.setResolved(t.discussionId, w.then === 'resolve');

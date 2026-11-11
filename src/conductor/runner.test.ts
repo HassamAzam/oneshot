@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyBaseCheck, applyStandingDecisions, baseCheckOutcome, codePhaseStatus, decideClaim, doneLabelSwap,
-  failedCases, isRepark, phasesStaleSince,
+  failedCases, failuresInARow, isRepark, phasesStaleSince,
   mergePollWait, recordedVerifyVerdict,
   mergeScopedVerify, nextIndex, refusalIsFinal, remediationFreeze, salvagedReview,
   sharedDatabaseRefusal, statusForFailure, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
@@ -176,6 +176,21 @@ test('a phase that passed before the fixer last committed is stale; one that ran
   assert.deepEqual(phasesStaleSince(['verify', 'ui-evidence', 'mr'], phases, undefined), []);
   // The latest passing record is the one that counts.
   assert.deepEqual(phasesStaleSince(['verify'], [...phases, rec('verify', 'ok', 500)], 300), []);
+});
+
+// A first review and every later re-check record as `review`. Counted across
+// the whole run, two bad laps early on would leave a re-check hours later with
+// one attempt; counted in a row, each streak gets its own three.
+test('a phase\'s failures are counted in a row, and a pass in between starts the count again', () => {
+  const rec = (phase: string, status: string) => ({ phase, status: status as 'ok' });
+  assert.equal(failuresInARow([rec('review', 'failed'), rec('review', 'failed')], 'review'), 2);
+  assert.equal(failuresInARow([rec('review', 'failed'), rec('review', 'ok'), rec('review', 'failed')], 'review'), 1);
+  // Another phase's records, an infra death and a `parked` mark neither count nor break the streak.
+  assert.equal(failuresInARow([
+    rec('review', 'failed'), rec('review-fix', 'ok'), rec('review', 'infra'), rec('review', 'parked'), rec('review', 'failed'),
+  ], 'review'), 2);
+  assert.equal(failuresInARow([rec('review', 'warned')], 'review'), 0);
+  assert.equal(failuresInARow([], 'review'), 0);
 });
 
 test('a parked run put back for the same reason, with no phase run, is a re-park', () => {

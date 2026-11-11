@@ -28,6 +28,24 @@ export interface DiffLine {
 
 const HUNK = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
+/**
+ * A finding's `file` as git names it: relative to the repository root.
+ *
+ * A reviewer is asked for that form and does not always return it. Its
+ * sub-agents are handed absolute paths, so a finding comes back as
+ * `/srv/erp-wt/t9174-…/apps/teams/admin.py`; a path copied from a diff header
+ * arrives as `./apps/…`. Either one fails the exact match a diff position needs
+ * (the thread then lands unpinned, with a server path printed in it) and the
+ * "file changed since the last review" test a re-check's new findings are held
+ * to (the finding is then dropped). `root` is the run's worktree.
+ */
+export function repoPath(file: unknown, root?: string | null): string {
+  let f = String(file ?? '').trim().replace(/\\/g, '/');
+  const r = String(root ?? '').replace(/\/+$/, '');
+  if (r && f.startsWith(`${r}/`)) f = f.slice(r.length + 1);
+  return f.replace(/^(\.\/)+/, '').replace(/^\/+/, '');
+}
+
 /** Every line of one file's new side that its unified diff shows, keyed by new line number. */
 export function shownLines(diff: string): Map<number, { oldLine?: number }> {
   const out = new Map<number, { oldLine?: number }>();
