@@ -13,8 +13,10 @@
  * run is skipped, and a ticket whose run died mid-phase is picked up from its
  * journal rather than restarted.
  */
-import { gitlabUsername, pickupAnyAssignee, pickupOnly, pickupSince, projectConfig } from '../lib/config.js';
-import { readJournal } from '../lib/artifacts.js';
+import {
+  DRY_RUN, MERGE_POLL_MS, gitlabUsername, pickupAnyAssignee, pickupOnly, pickupSince, projectConfig,
+} from '../lib/config.js';
+import { readJournal, type RunJournal } from '../lib/artifacts.js';
 import { foreignOwner } from '../lib/claims.js';
 import { isClaimed, latestRunStatus, logEvent, seeTicket } from '../lib/db.js';
 import { issuesWithEntryLabel, labelAddedAt, type Issue } from '../lib/gitlab.js';
@@ -57,6 +59,22 @@ export async function scan(): Promise<WatchResult> {
   }
 
   return triage(res.data);
+}
+
+/**
+ * How long a run parked on a human merge has before its next merge check, or
+ * null when it is due (or is not that kind of park). The same window
+ * `mergePollWait` applies inside runTicket, read here so a run that would only
+ * claim the slot, find nothing due and park again is never handed the slot: with
+ * one slot free, that re-check took it every tick and a ticket behind it whose
+ * plan had been approved never started.
+ */
+export function mergeWaitRemaining(j: RunJournal | null, status: string | null, now: number): number | null {
+  if (!j || status !== 'parked' || !j.reviewMode || DRY_RUN) return null;
+  if (typeof j.humanMergeCheckAt !== 'number') return null;
+  if (j.phases.some((p) => p.phase === 'merge' && p.status === 'ok')) return null;
+  const left = j.humanMergeCheckAt + MERGE_POLL_MS - now;
+  return left > 0 ? left : null;
 }
 
 /**
@@ -134,6 +152,11 @@ export async function triage(issues: Issue[]): Promise<WatchResult> {
     }
     if (isClaimed(issue.iid)) {
       skipped.push({ iid: issue.iid, why: 'run already in flight' });
+      continue;
+    }
+    const mergeWait = mergeWaitRemaining(readJournal(issue.iid), latestRunStatus(issue.iid), Date.now());
+    if (mergeWait !== null) {
+      skipped.push({ iid: issue.iid, why: `waiting on a human merge — next check in ${Math.ceil(mergeWait / 60_000)}m` });
       continue;
     }
     // The other machine's claim. This has to be a scan-time skip and not only a

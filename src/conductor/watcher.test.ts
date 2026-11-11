@@ -1,7 +1,8 @@
 import '../lib/test-project-env.js';
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { orderCandidates, triage } from './watcher.js';
+import { mergeWaitRemaining, orderCandidates, triage } from './watcher.js';
+import type { RunJournal } from '../lib/artifacts.js';
 import { db } from '../lib/db.js';
 import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
 
@@ -191,6 +192,19 @@ test('an unparseable ONESHOT_PICKUP_SINCE picks up nothing new', async () => {
     f.restore();
     delete process.env.ONESHOT_PICKUP_SINCE;
   }
+});
+
+test('a run parked on a human merge holds no slot until its next check is due', () => {
+  const now = Date.parse('2026-11-12T03:30:00Z');
+  const j = (over: Partial<RunJournal>): RunJournal =>
+    ({ phases: [], reviewMode: true, humanMergeCheckAt: now - 2 * 60_000, ...over }) as RunJournal;
+  assert.equal(mergeWaitRemaining(j({}), 'parked', now), 28 * 60_000);
+  assert.equal(mergeWaitRemaining(j({ humanMergeCheckAt: now - 31 * 60_000 }), 'parked', now), null);
+  assert.equal(mergeWaitRemaining(j({}), 'running', now), null);
+  assert.equal(mergeWaitRemaining(j({ reviewMode: false }), 'parked', now), null);
+  assert.equal(mergeWaitRemaining(j({ humanMergeCheckAt: undefined }), 'parked', now), null);
+  assert.equal(mergeWaitRemaining(j({ phases: [{ phase: 'merge', status: 'ok' }] as RunJournal['phases'] }), 'parked', now), null);
+  assert.equal(mergeWaitRemaining(null, 'parked', now), null);
 });
 
 test('a Loop ticket assigned to someone else is never a candidate; an unassigned one is', async () => {
