@@ -319,6 +319,13 @@ export interface RunJournal {
    */
   verifyRescopeCases?: string[];
   /**
+   * The verify-eval finding handed to a scoped re-run as feedback, set and
+   * cleared alongside `verifyRescopeCases`. When present the scoped verify
+   * prompt explains the re-run in the eval's words (a `pre-existing` label
+   * missing its proof) rather than QA's "corrected steps".
+   */
+  verifyEvalFeedback?: string;
+  /**
    * When the `merge` phase last asked GitLab whether a human has merged the
    * MR. A Review-labelled ticket is never merged by Oneshot, so this phase is
    * a wait, not an action, and re-asking on every --follow tick is pure noise.
