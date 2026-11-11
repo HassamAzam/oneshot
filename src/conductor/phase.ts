@@ -391,7 +391,11 @@ function mcpServers(): Record<string, unknown> {
   const cmd = envOr('GITLAB_MCP_CMD', existsSync(local) ? local : 'npx');
   const defaultArgs = cmd === 'npx' ? '-y @zereight/mcp-gitlab' : '';
   const args = envOr('GITLAB_MCP_ARGS', defaultArgs).split(' ').filter(Boolean);
-  const token = envOr('GITLAB_TOKEN');
+  // ONESHOT_GITLAB_TOKEN first, as src/lib/token.ts resolves it for the conductor's
+  // own calls: where an operator set it (the server's bot account), a session's
+  // GitLab tools must act as that same account, not as whoever's token a shared
+  // GITLAB_TOKEN line happens to hold.
+  const token = envOr('ONESHOT_GITLAB_TOKEN') || envOr('GITLAB_TOKEN');
   if (!token) return {};
   return {
     gitlab: {

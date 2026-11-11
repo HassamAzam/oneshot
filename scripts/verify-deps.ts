@@ -11,11 +11,12 @@
  * The lesson generalises: checking that a dependency is CONFIGURED is not the
  * same as checking that it RUNS. Everything here is spawned for real.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { BASE_ENV, ROOT, envOr, repoIdentity } from '../src/lib/config.js';
 import { playwrightCaches } from '../src/lib/appenv.cjs';
+import { probeStdioServer } from '../src/lib/mcpprobe.js';
 
 const G = '\x1b[32m', R = '\x1b[31m', Y = '\x1b[33m', D = '\x1b[2m', X = '\x1b[0m';
 let fails = 0;
@@ -23,81 +24,6 @@ let fails = 0;
 function pass(l: string, d = ''): void { console.log(`  ${G}PASS${X}  ${l}${d ? ` ${D}${d}${X}` : ''}`); }
 function warn(l: string, d = ''): void { console.log(`  ${Y}WARN${X}  ${l}${d ? ` ${D}${d}${X}` : ''}`); }
 function fail(l: string, d = ''): void { fails += 1; console.log(`  ${R}FAIL${X}  ${l}${d ? ` ${D}${d}${X}` : ''}`); }
-
-/**
- * Spawn an MCP stdio server the way a PHASE spawns it, and make it prove
- * itself by listing tools.
- *
- * Two things here were learned the hard way. The env is passed WHOLE rather
- * than merged over process.env, because that is the SDK's semantics and the
- * merge is what made this check lie: a server missing PATH dies with
- * `env: node: No such file or directory` inside a phase while passing here.
- * And "alive after N ms" is not the bar — the failure that actually happened
- * was a server the SDK reported as `connected` that served ZERO tools, so the
- * handshake and a non-empty tools/list are the only evidence worth anything.
- */
-function probeStdioServer(
-  cmd: string, args: string[], env: Record<string, string>, ms = 6000,
-): Promise<{ ok: boolean; detail: string; tools: number }> {
-  return new Promise((resolve) => {
-    let settled = false;
-    let stderr = '';
-    let stdout = '';
-    const child = spawn(cmd, args, {
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    const done = (r: { ok: boolean; detail: string; tools: number }): void => {
-      if (settled) return;
-      settled = true;
-      try { child.kill('SIGKILL'); } catch { /* already gone */ }
-      resolve(r);
-    };
-
-    child.stdout?.on('data', (d) => { stdout += String(d); });
-
-    const send = (o: unknown): void => {
-      try { child.stdin?.write(`${JSON.stringify(o)}\n`); } catch { /* exit handler reports */ }
-    };
-    send({
-      jsonrpc: '2.0', id: 1, method: 'initialize',
-      params: {
-        protocolVersion: '2024-11-05', capabilities: {},
-        clientInfo: { name: 'oneshot-doctor', version: '1' },
-      },
-    });
-    setTimeout(() => send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }), 1200);
-    setTimeout(() => {
-      const tools = stdout.split('\n').filter(Boolean).reduce((n, line) => {
-        try {
-          const m = JSON.parse(line) as { id?: number; result?: { tools?: unknown[] } };
-          return m.id === 2 ? (m.result?.tools ?? []).length : n;
-        } catch { return n; }
-      }, 0);
-      done(tools > 0
-        ? { ok: true, detail: `${tools} tools`, tools }
-        : {
-          ok: false, tools: 0,
-          detail: `handshake produced NO tools — a session would see the server as connected ` +
-            `and hold none of its tools. ${stderr.trim().slice(0, 160)}`,
-        });
-    }, ms);
-
-    child.stderr?.on('data', (d) => { stderr += String(d).slice(0, 400); });
-
-    child.on('error', (err) => {
-      done({ ok: false, tools: 0, detail: `spawn failed: ${err.message}` });
-    });
-
-    child.on('exit', (code) => {
-      done({
-        ok: false, tools: 0,
-        detail: `exited early (code ${code}) ${stderr.trim().slice(0, 160)}`,
-      });
-    });
-  });
-}
 
 async function main(): Promise<void> {
   console.log('\nOneshot dependency probe');
@@ -123,9 +49,10 @@ async function main(): Promise<void> {
     pass('resolved to a local binary', cmd.replace(ROOT, '.'));
   }
 
-  const token = envOr('GITLAB_TOKEN');
+  // The token a phase hands the server (src/conductor/phase.ts, mcpServers).
+  const token = envOr('ONESHOT_GITLAB_TOKEN') || envOr('GITLAB_TOKEN');
   if (!token) {
-    warn('GITLAB_TOKEN unset — probing without auth');
+    warn('no GitLab token (ONESHOT_GITLAB_TOKEN or GITLAB_TOKEN) — probing without auth');
   }
   // The same API root a phase hands the server (src/conductor/phase.ts). With
   // GITLAB_REPO_URL unusable there is none to give; listing tools needs no API
@@ -143,9 +70,12 @@ async function main(): Promise<void> {
     USE_GITLAB_WIKI: 'false',
     USE_MILESTONE: 'false',
   });
+  // "Lists some tools" is not the bar: the CLI rejects the whole list over one
+  // tool it cannot accept, and this check passed on 69 unusable tools while every
+  // session ran without GitLab (src/lib/mcpprobe.ts).
   probe.ok
-    ? pass('server serves tools', probe.detail)
-    : fail('server serves NO tools', probe.detail);
+    ? pass('server serves tools a session accepts', `${probe.detail}${probe.tookMs === null ? '' : ` in ${probe.tookMs}ms`}`)
+    : fail('server serves NO usable tools', probe.detail);
 
   console.log('\nClaude Code binary');
   const which = spawnSync('which', ['claude'], { encoding: 'utf8' });

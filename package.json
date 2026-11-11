@@ -48,7 +48,8 @@
     "tsx": "^4.23.11",
     "@zereight/mcp-gitlab": "^1.0.66",
     "playwright": "^1.61.1",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

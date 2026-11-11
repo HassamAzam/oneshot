@@ -54,6 +54,8 @@ import { budgetConfig } from './lib/config.js';
 import { localTestsFlags, retiredFlagError } from './lib/cliargs.js';
 import { describe, scan } from './conductor/watcher.js';
 import { refusalIsFinal, runTicket, type RunOutcome } from './conductor/runner.js';
+import { sessionMcpServers } from './conductor/phase.js';
+import { probeStdioServer } from './lib/mcpprobe.js';
 import { killLiveLocalTests } from './conductor/localtests.js';
 import {
   SCOPE_PHASE, localTestsGc, localTestsTick, outcomeLine as localTestsOutcomeLine, runLocalTestsOnce,
@@ -486,7 +488,44 @@ async function preflight(): Promise<boolean> {
     log.warn('no Slack channel configured — status stays on this console only');
   }
 
+  // Not awaited and never fatal: the Loop can open and merge an MR without a
+  // session holding a GitLab tool, so this is a loud line rather than a refusal.
+  void checkGitlabMcp();
+
   return !fatal;
+}
+
+/**
+ * Say at boot whether sessions will be given the GitLab tools.
+ *
+ * The SDK reports an MCP server `connected` whether or not a session can use
+ * what it lists, so a broken one is silent until a phase needs a tool and finds
+ * none: the server ran its whole first day that way, 42 sessions of #9174
+ * logging the rejection to a debug file nobody reads (src/lib/mcpprobe.ts). The
+ * probe spawns the exact spec a phase hands the SDK and applies the CLI's own
+ * verdict.
+ *
+ * It also pays the cold start once, here, instead of inside the first session:
+ * after the server's nightly reboot the first spawn read its modules off a cold
+ * disk and took over thirty seconds — past the CLI's 30s connection timeout.
+ */
+async function checkGitlabMcp(): Promise<void> {
+  const spec = (sessionMcpServers({}) as {
+    gitlab?: { command: string; args: string[]; env: Record<string, string> };
+  }).gitlab;
+  if (!spec) return;
+  try {
+    const r = await probeStdioServer(spec.command, spec.args, spec.env);
+    if (r.ok) {
+      log.ok(`gitlab mcp ${r.detail}${r.tookMs === null ? '' : ` (answered in ${r.tookMs}ms)`}`);
+      return;
+    }
+    log.error(`gitlab mcp sessions will run with NO GitLab tools — ${r.detail}`);
+    log.error('  `npm run deps:verify` reproduces this; the `mr` phase cannot write the MR description until it passes.');
+    logEvent('gitlab_mcp_unusable', { listed: r.listed, rejected: r.rejected, detail: r.detail.slice(0, 300) });
+  } catch (err) {
+    log.warn('gitlab mcp could not be probed', { error: (err as Error).message });
+  }
 }
 
 let networkHeldSince: number | null = null;
