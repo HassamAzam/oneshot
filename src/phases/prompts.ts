@@ -2809,10 +2809,12 @@ Push this run's branch and open the merge request.
 
 2. Push: \`git push -u origin ${ctx.branch ?? '(unleased)'}\` from your worktree. This run leased
    that branch and may push to nothing else; a denial here means you named the wrong ref, not
-   that you need a different flag. Never force-push, at any time, for any reason. Confirm the
-   remote head matches your local HEAD before continuing — an MR opened against a stale remote
-   branch reviews code that is not the code you wrote. Push even when an MR already exists: the
-   MR shows whatever the remote branch holds.
+   that you need a different flag. Never force-push, at any time, for any reason. A push git
+   refuses as non-fast-forward means the remote holds history your branch does not: do not pull,
+   merge or rebase past it; set \`blocked\` with git's message and a person reconciles it.
+   Confirm the remote head matches your local HEAD before continuing — an MR opened against a
+   stale remote branch reviews code that is not the code you wrote. Push even when an MR already
+   exists: the MR shows whatever the remote branch holds.
 
 3. Create the MR (or update the existing one):
      source: ${ctx.branch ?? '(unleased)'}

@@ -21,8 +21,11 @@ import { rmSync } from 'node:fs';
 
 process.env.DRY_RUN = '1';
 
-const { lapWindow, verifyGateRoute, verifyRescopeIsScoped } = await import('./runner.js');
-const { nextConfirmation, MAX_CONFIRMATIONS, rearmGate } = await import('./reviewgate.js');
+const { lapWindow, settleVerifyCase, verifyGateRoute, verifyRescopeIsScoped } = await import('./runner.js');
+const {
+  nextConfirmation, MAX_CONFIRMATIONS, rearmGate, requestedCaseIds, settledVerifyCases, verifyCaseFloors,
+  verifyCasesRequestBody, verifyDirectivesByCase,
+} = await import('./reviewgate.js');
 const { writeJournal, readJournal } = await import('../lib/artifacts.js');
 const { runDir } = await import('../lib/config.js');
 type Journal = Awaited<ReturnType<typeof readJournal>>;
@@ -172,4 +175,111 @@ test('a confirmation alone cycles to implement', () => {
 
 test('neither means the gate settles on the terminal verdicts it applied', () => {
   assert.equal(verifyGateRoute({ confirmed: [], rescope: [] }), 'settle');
+});
+
+// ------------------------------------- a case the standing request never named
+
+/** A QA reply as `repliesAfter` hands it over. */
+const reply = (id: number, text: string): { id: number; text: string; user: string; at: null } =>
+  ({ id, text, user: 'qa', at: null });
+
+test('the request is read back to the cases it listed', () => {
+  const body = verifyCasesRequestBody([
+    { id: 'TC-21', evidence: 'the dashboard shows **0** rows' }, { id: 'TC-22' },
+  ]);
+  assert.deepEqual(requestedCaseIds(body), ['TC-21', 'TC-22']);
+});
+
+test('a follow-up request says so, and lists only what it asks', () => {
+  const body = verifyCasesRequestBody([{ id: 'TC-12' }], true);
+  assert.match(body, /follow-up/);
+  assert.deepEqual(requestedCaseIds(body), ['TC-12']);
+  assert.doesNotMatch(verifyCasesRequestBody([{ id: 'TC-12' }]), /follow-up/);
+});
+
+test('a request from before requestedCases is read off its note, so a new failing case is unasked', () => {
+  // #9072: note 302703 listed TC-21 and TC-22; TC-12 began failing on a later lap.
+  const state = { requestTs: null, requestNoteId: 302703, approved: false, feedback: [] };
+  const notes = [{ id: 302703, body: verifyCasesRequestBody([{ id: 'TC-21' }, { id: 'TC-22' }]) }];
+  const floors = verifyCaseFloors(state, notes);
+  assert.equal(floors['TC-12'], undefined, 'TC-12 was never asked about, so the gate must ask');
+  assert.deepEqual(floors, { 'TC-21': 302703, 'TC-22': 302703 });
+});
+
+test('a request whose note is gone covers nothing, so every case is asked again', () => {
+  const state = { requestTs: null, requestNoteId: 5, approved: false, feedback: [] };
+  assert.deepEqual(verifyCaseFloors(state, []), {});
+  assert.deepEqual(verifyCaseFloors({ ...state, requestNoteId: null }, []), {});
+});
+
+test('recorded asks win over the note body', () => {
+  const state = {
+    requestTs: null, requestNoteId: 10, approved: false, feedback: [],
+    requestedCases: { 'TC-21': 10, 'TC-12': 30 },
+  };
+  assert.deepEqual(verifyCaseFloors(state, [{ id: 10, body: '- **TC-99**' }]), { 'TC-21': 10, 'TC-12': 30 });
+});
+
+test('a case asked in a follow-up takes no verdict from replies written before it', () => {
+  const floors = { 'TC-21': 10, 'TC-12': 30 };
+  const replies = [
+    // Written to the first request, before anyone asked about TC-12.
+    reply(20, 'TC-21: pre-existing\nTC-12: skip'),
+    reply(40, 'TC-12: expected'),
+  ];
+  const perCase = verifyDirectivesByCase(replies, ['TC-21', 'TC-12'], floors);
+  assert.deepEqual(perCase.get('TC-21')?.map((d) => d.verdict), ['pre-existing']);
+  assert.deepEqual(perCase.get('TC-12')?.map((d) => [d.verdict, d.noteId]), [['expected', 40]]);
+});
+
+test('a case no request has named takes nothing from any reply', () => {
+  const perCase = verifyDirectivesByCase([reply(20, 'TC-12: expected')], ['TC-12'], { 'TC-21': 10 });
+  assert.equal(perCase.size, 0);
+});
+
+test('re-arming drops the asked cases with the note that asked them', () => {
+  journal(9008, {
+    verifyCasesApproval: {
+      requestTs: null, requestNoteId: 10, approved: false, feedback: [], requestedCases: { 'TC-21': 10 },
+    },
+  });
+  const after = rearmGate(9008, 'verifyCases');
+  assert.equal(after?.verifyCasesApproval?.requestedCases, undefined);
+});
+
+// ------------------------------------------- a settled case that fails again
+
+test('a case QA settled stays settled, with the bug it already has', () => {
+  const settled = settledVerifyCases([
+    { caseId: 'TC-21', verdict: 'pre-existing', by: 'qa', issueIid: 9197 },
+    { caseId: 'TC-22', verdict: 'pre-existing', by: 'qa', issueIid: 9198 },
+    { caseId: 'TC-14', verdict: 'missing-steps', by: 'qa' },
+  ]);
+  assert.equal(settled.get('TC-21')?.issueIid, 9197);
+  assert.equal(settled.get('TC-22')?.issueIid, 9198);
+  // `missing-steps` asks for more work; it does not settle the case.
+  assert.equal(settled.has('TC-14'), false);
+});
+
+test('the last decision on a case decides whether it is settled', () => {
+  const settled = settledVerifyCases([
+    { caseId: 'TC-14', verdict: 'confirmed', by: 'qa' },
+    { caseId: 'TC-14', verdict: 'skip', by: 'qa' },
+    { caseId: 'TC-15', verdict: 'expected', by: 'qa' },
+    { caseId: 'TC-15', verdict: 'confirmed', by: 'qa' },
+  ]);
+  assert.equal(settled.get('TC-14')?.verdict, 'skip');
+  // QA confirming it a real bug afterwards reopened it.
+  assert.equal(settled.has('TC-15'), false);
+  assert.equal(settledVerifyCases(undefined).size, 0);
+});
+
+test('a reused pre-existing verdict names the bug it already has, and opens none', () => {
+  const c = { id: 'TC-21', result: 'fail' as const, evidence: 'no rows', screenshot: '' };
+  const out = settleVerifyCase(c, { verdict: 'pre-existing', by: 'qa', issueIid: 9197 });
+  assert.equal(out.result, 'skipped');
+  assert.match(out.evidence, /tracked as #9197\. no rows$/);
+  assert.equal(c.result, 'fail', 'the case handed in is not mutated');
+  assert.equal(settleVerifyCase(c, { verdict: 'expected', by: 'qa' }).result, 'pass');
+  assert.match(settleVerifyCase(c, { verdict: 'invalid', by: 'qa' }).evidence, /^QA \(qa\) marked invalid\./);
 });

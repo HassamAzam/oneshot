@@ -132,6 +132,14 @@ export interface ReviewGateState {
    * existed -- see `requestCovers()`.
    */
   requestedDigest?: string;
+  /**
+   * Verify-case gate only: each case a request asked QA about, and the id of
+   * the note that asked. A reply counts for a case only when it comes after
+   * that note, and a failing case no request named is asked about in a
+   * follow-up note rather than waited on in silence. ABSENT means a request
+   * posted before this field existed -- see `verifyCaseFloors()`.
+   */
+  requestedCases?: Record<string, number>;
 }
 
 /**

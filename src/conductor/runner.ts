@@ -111,7 +111,8 @@ import { schemaFor } from './schemas.js';
 import { mergePhase, mrOpenPhase } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
-  MAX_CONFIRMATIONS, rearmGate,
+  MAX_CONFIRMATIONS, isTerminalVerdict, rearmGate, settledVerifyCases,
+  type TerminalVerdict, type VerifyGateResult,
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
   type GateAttachment,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
@@ -198,6 +199,30 @@ export function mergeScopedVerify(
   const merged = baseline.map((c) => freshById.get(c.id) ?? c);
   for (const c of freshById.values()) if (!baseline.some((p) => p.id === c.id)) merged.push(c);
   return merged;
+}
+
+/**
+ * Rewrite a case's result and evidence for a QA verdict that settles it. Pure.
+ *
+ * `issueIid` is the bug a `pre-existing` verdict split off. A verdict settled
+ * on an earlier lap is applied through here too, with the bug it already has.
+ */
+export function settleVerifyCase(
+  c: CaseResult,
+  d: { verdict: TerminalVerdict; by: string; issueIid?: number },
+): CaseResult {
+  if (d.verdict === 'expected') {
+    return { ...c, result: 'pass', evidence: `QA (${d.by}) confirmed expected behaviour. ${c.evidence ?? ''}`.trim() };
+  }
+  if (d.verdict === 'pre-existing') {
+    return {
+      ...c, result: 'skipped',
+      evidence: `QA (${d.by}) classified pre-existing${d.issueIid ? `; tracked as #${d.issueIid}` : ''}. `
+        + `${c.evidence ?? ''}`.trim(),
+    };
+  }
+  // `skip` and `invalid` both drop the case; the verdict is kept for the audit.
+  return { ...c, result: 'skipped', evidence: `QA (${d.by}) marked ${d.verdict}. ${c.evidence ?? ''}`.trim() };
 }
 
 /** The audit comment posted on the ticket when the verify-case gate resolves. */
@@ -317,6 +342,12 @@ export const CODE_PHASES: Record<
     park?: boolean;
     /** Set only by `merge`: new MR review threads for the runner to triage. */
     feedback?: MrFeedbackSignal;
+    /**
+     * Set only by `mr-open`, when the remote branch holds commits the run
+     * cannot account for: the run BLOCKS whatever the phase's onFail says,
+     * because 'warn' would carry on checking code the MR does not show.
+     */
+    block?: boolean;
   }>) | undefined
 > = {
   'mr-open': mrOpenPhase,
@@ -532,10 +563,12 @@ export function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['st
  * real refusals and disagreeing with the `In Review` label on the ticket.
  */
 export function codePhaseStatus(
-  p: PhaseConfig, done: { ok: boolean; park?: boolean },
+  p: PhaseConfig, done: { ok: boolean; park?: boolean; block?: boolean },
 ): PhaseRecord['status'] {
   if (done.ok) return 'ok';
   if (done.park) return 'parked';
+  // A block overrides onFail, so its record must not read 'warned' either.
+  if (done.block) return 'failed';
   return statusForFailure(p);
 }
 
@@ -2716,6 +2749,9 @@ export async function runTicket(
     if (done.park) {
       return { kind: 'stop', status: 'parked', reason: done.error ?? `${p.name}: parked` };
     }
+    if (done.block) {
+      return { kind: 'stop', status: 'blocked', reason: `${p.name}: ${done.error ?? 'blocked'}` };
+    }
     return afterFailure(p, index, done.error ?? 'phase failed');
   }
 
@@ -2823,33 +2859,42 @@ export async function runTicket(
     const meta = new Map(
       (readArtifact<{ cases?: TestCase[] }>(iid, 'testcases.json')?.cases ?? []).map((c) => [c.id, c]),
     );
-    const failing = caseResults.filter(countsAsFailure).map((c) => ({
+    // A case QA already settled keeps that verdict when it fails again, and
+    // never goes back to the gate: the gate re-reads every reply on every pass,
+    // so it would act on the line that settled the case a second time.
+    const settled = settledVerifyCases(j.verifyCaseDecisions);
+    const failingAll = caseResults.filter(countsAsFailure);
+    const reused = failingAll.flatMap((c) => settled.get(c.id) ?? []);
+    const failing = failingAll.filter((c) => !settled.has(c.id)).map((c) => ({
       id: c.id, evidence: c.evidence, scenario: meta.get(c.id)?.scenario, steps: meta.get(c.id)?.steps,
     }));
-    const gate = await checkVerifyGate({ iid, failing });
+    const gate: VerifyGateResult = failing.length
+      ? await checkVerifyGate({ iid, failing })
+      : { verdict: 'actionable', apply: [], rescope: [], confirmed: [], pending: [], confirmSpend: {} };
     if (gate.verdict === 'unavailable') return { block: VERIFY_GATE_UNAVAILABLE };
 
     // Apply the terminal verdicts (skip / invalid / expected / pre-existing) to verify.json in place.
-    if (gate.apply.length) {
+    if (gate.apply.length || reused.length) {
       const decisions: NonNullable<RunJournal['verifyCaseDecisions']> = [];
       const applied = caseResults.map((c) => ({ ...c }));
+      const settle = (id: string, d: Parameters<typeof settleVerifyCase>[1]): void => {
+        const at = applied.findIndex((x) => x.id === id);
+        if (at !== -1) applied[at] = settleVerifyCase(applied[at]!, d);
+      };
+      for (const d of reused) {
+        if (isTerminalVerdict(d.verdict)) settle(d.caseId, { verdict: d.verdict, by: d.by, issueIid: d.issueIid });
+      }
       for (const d of gate.apply) {
         const c = applied.find((x) => x.id === d.caseId);
         if (!c) continue;
         const by = d.by ?? 'unknown';
-        if (d.verdict === 'expected') {
-          c.result = 'pass';
-          c.evidence = `QA (${by}) confirmed expected behaviour. ${c.evidence ?? ''}`.trim();
-          decisions.push({ caseId: d.caseId, verdict: 'expected', by });
-        } else if (d.verdict === 'pre-existing') {
+        if (d.verdict === 'pre-existing') {
           const issue = await createIssue(
             `${ticket.title} — ${d.caseId}: pre-existing failure (from #${iid})`,
             preExistingIssueBody(iid, ticket.title, c),
           );
           const newIid = issue.ok ? issue.data?.iid : undefined;
-          c.result = 'skipped';
-          c.evidence = `QA (${by}) classified pre-existing${newIid ? `; tracked as #${newIid}` : ''}. `
-            + `${c.evidence ?? ''}`.trim();
+          settle(d.caseId, { verdict: 'pre-existing', by, issueIid: newIid });
           if (newIid) {
             await addIssueNote(iid,
               `**${d.caseId}** is a pre-existing issue, not caused by this change (QA: ${by}). `
@@ -2859,21 +2904,25 @@ export async function runTicket(
               { iid, error: issue.error?.slice(0, 120) });
           }
           decisions.push({ caseId: d.caseId, verdict: 'pre-existing', by, issueIid: newIid });
-        } else {
-          // `skip` and `invalid` both drop the case; the verdict is kept for the audit.
-          c.result = 'skipped';
-          c.evidence = `QA (${by}) marked ${d.verdict}. ${c.evidence ?? ''}`.trim();
+        } else if (isTerminalVerdict(d.verdict)) {
+          settle(d.caseId, { verdict: d.verdict, by });
           decisions.push({ caseId: d.caseId, verdict: d.verdict, by });
         }
       }
       r.out.data = { ...r.out.data, results: applied };
       writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
       prior.verify = r.out.data;
+      // Only the fresh verdicts are recorded: a reused one is already in the
+      // journal, and recording it again would list it twice on the MR note.
       j = updateJournal(iid, {
         verifyCaseDecisions: [...(j.verifyCaseDecisions ?? []), ...decisions],
       }) ?? j;
       if (decisions.length) await addIssueNote(iid, verifyDecisionsAuditBody(decisions));
-      log.ok(`verify-case gate applied ${decisions.length} QA verdict(s) on #${iid}`);
+      log.ok(`verify-case gate applied ${decisions.length} QA verdict(s) on #${iid}`, {
+        // Logged, not posted: a parked run re-runs verify on every resume, and
+        // a note per re-run would be the ticket noise this reuse exists to stop.
+        reused: reused.map((d) => `${d.caseId}=${d.verdict}${d.issueIid ? ` #${d.issueIid}` : ''}`).join(', '),
+      });
       caseResults = applied;
     }
 

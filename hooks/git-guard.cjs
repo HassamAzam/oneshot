@@ -82,7 +82,8 @@ function checkPush(t, cfg) {
   if (rest.some((a) => a === '-f' || a === '--force' || a.startsWith('--force-with-lease'))) {
     C.event('denied_force_push', { cmd: t.join(' ') });
     C.deny(
-      'Denied: force-push. Nothing in Oneshot force-pushes, to any branch, ever. ' +
+      'Denied: force-push. No session force-pushes, to any branch, ever — the conductor\'s ' +
+      'mr-open is the one place this run\'s branch is rewritten, and only over its own history. ' +
       'If history needs rewriting, stop and report it — a human decides that.',
     );
   }
