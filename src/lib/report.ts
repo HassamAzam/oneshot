@@ -34,6 +34,8 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from '
 import { join } from 'node:path';
 import { envOr, runDir } from './config.js';
 import { readJournal, type PhaseRecord, type RunJournal } from './artifacts.js';
+import { latestDiagnosis, readDiagnosisFile } from '../diagnosis/record.js';
+import { isOwnPhase } from '../diagnosis/stop.js';
 import { log } from './log.js';
 
 /**
@@ -229,6 +231,8 @@ export interface ReportModel {
   mrUrl: string;
   mergedSha: string;
   blockedWhy: string;
+  /** The failure diagnosis of the run's stop, when one was made (src/diagnosis): where it went wrong and what to do. */
+  diagnosis: { headline: string; nextStep: string; causes: string[] } | null;
   remediations: Array<{ phase: string; reason: string; fixed: boolean; changes: string[] }>;
   phases: PhaseReport[];
   agentCount: number;
@@ -431,10 +435,16 @@ function phaseFrom(rec: PhaseRecord, dir: string, file: string): PhaseReport {
 function orphanPhase(dir: string, file: string): PhaseReport {
   const parsed = readTranscript(join(dir, file));
   const match = /^(.*)-lap(\d+)\.jsonl$/.exec(file);
+  const phase = match?.[1] ?? file.replace(/\.jsonl$/, '');
+  // The failure diagnosis (src/diagnosis) runs its sessions on a run that has
+  // already stopped and never writes the journal, so its transcripts have no
+  // record by design. Calling them a phase that "never reported back" would
+  // send a reader looking for a crash that did not happen.
+  const afterRun = isOwnPhase(phase);
   return {
-    phase: match?.[1] ?? file.replace(/\.jsonl$/, ''),
+    phase,
     lap: Number(match?.[2] ?? 0),
-    status: 'unrecorded',
+    status: afterRun ? 'after-run' : 'unrecorded',
     startedAt: 0,
     endedAt: 0,
     durationMs: 0,
@@ -442,7 +452,9 @@ function orphanPhase(dir: string, file: string): PhaseReport {
     turns: 0,
     attempts: parsed.attempts,
     results: parsed.results,
-    error: 'no journal record — the phase never reported back',
+    error: afterRun
+      ? 'run by the failure diagnosis after the run stopped — not a phase of the run'
+      : 'no journal record — the phase never reported back',
     transcript: file,
     agents: parsed.agents,
     entries: parsed.entries,
@@ -450,6 +462,7 @@ function orphanPhase(dir: string, file: string): PhaseReport {
 }
 
 function header(iid: number, j: RunJournal | null): Omit<ReportModel, 'phases' | 'agentCount'> {
+  const d = latestDiagnosis(readDiagnosisFile(runDir(iid)), j?.runId);
   return {
     iid,
     title: clean(j?.title ?? '', 300),
@@ -461,6 +474,13 @@ function header(iid: number, j: RunJournal | null): Omit<ReportModel, 'phases' |
     mrUrl: clean(j?.mrUrl ?? '', 300),
     mergedSha: clean(j?.mergedSha ?? '', 60),
     blockedWhy: clean(j?.blockedWhy ?? '', RESULT_LIMIT),
+    diagnosis: d
+      ? {
+        headline: clean(d.headline ?? '', 400),
+        nextStep: clean(d.nextStep ?? '', 1500),
+        causes: (d.findings ?? []).filter((f) => f.evidenced).map((f) => clean(`${f.id} [${f.category}] ${f.title}`, 200)),
+      }
+      : null,
     remediations: (j?.remediations ?? []).map((r) => ({
       phase: r.phase,
       reason: clean(r.reason, ARG_LIMIT),
@@ -544,6 +564,11 @@ h1{margin:0 0 6px;font-size:19px;font-weight:600}
 h1 .iid{color:#6b7480;font-weight:400}
 .meta{display:flex;flex-wrap:wrap;gap:8px 18px;color:#5b636d;font-size:13px}
 .meta b{color:#1c2024;font-weight:600}
+.diagnosis{margin-top:12px;padding:10px 12px;border:1px solid #dfe3e8;border-left:3px solid #a3341f;border-radius:6px;
+ background:#fbfcfd;font-size:13.5px}
+.diagnosis b{font-weight:600;margin-right:6px}
+.diagnosis div{margin-top:6px}
+.diagnosis ul{margin:6px 0 0;padding-left:18px;color:#3c444d}
 main{padding:20px 24px 60px}
 table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #dfe3e8;border-radius:6px}
 th{text-align:left;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#6b7480;
@@ -562,7 +587,7 @@ td.err{color:#a3341f;max-width:340px;overflow-wrap:anywhere}
 .pill.ok{background:#dff3e2;color:#20603a}
 .pill.failed,.pill.refused,.pill.blocked,.pill.aborted{background:#fadfd9;color:#8f2c17}
 .pill.warned,.pill.unrecorded{background:#fdf1cf;color:#7a5606}
-.pill.skipped,.pill.parked{background:#e6e9ed;color:#5b636d}
+.pill.skipped,.pill.parked,.pill.after-run{background:#e6e9ed;color:#5b636d}
 .hidden{display:none}
 .detail td{background:#fbfcfd;padding:0}
 .pad{padding:14px 16px}
@@ -705,10 +730,17 @@ function headerHtml(m: ReportModel): string {
   bits.push(`<span><b>${m.agentCount}</b> agents</span>`);
   if (m.runId) bits.push(`<span>${escapeHtml(m.runId)}</span>`);
   if (m.blockedWhy) bits.push(`<span>blocked: ${escapeHtml(m.blockedWhy.slice(0, 200))}</span>`);
+  // The diagnosis, when there is one, is what a reader of a stopped run came for.
+  const d = m.diagnosis;
+  const diagnosis = d
+    ? `<div class="diagnosis"><b>Diagnosis</b> ${escapeHtml(d.headline)}`
+      + `${d.nextStep ? `<div><b>What to do next</b> ${escapeHtml(d.nextStep)}</div>` : ''}`
+      + `${d.causes.length ? `<ul>${d.causes.map((c) => `<li>${escapeHtml(c)}</li>`).join('')}</ul>` : ''}</div>`
+    : '';
   return `<header>
 <h1><span class="iid">#${m.iid}</span> ${escapeHtml(m.title || 'untitled run')}</h1>
 <div class="meta">${bits.join('')}</div>
-</header>`;
+${diagnosis}</header>`;
 }
 
 export function renderHtml(m: ReportModel): string {

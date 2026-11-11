@@ -21,7 +21,7 @@ const ZWSP = '\u200B';
  * slash keeps the text reading the same while no line starts with a command;
  * the same character after `@` stops `@all` / `@user` from pinging anyone.
  */
-function inertNoteText(text: string): string {
+export function inertNoteText(text: string): string {
   return text
     .replace(/^([^\S\r\n]*)\//gm, `$1${ZWSP}/`)
     .replace(/@(?=\S)/g, `@${ZWSP}`);

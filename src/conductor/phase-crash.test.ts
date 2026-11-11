@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { crashIsInfra } from './phase.js';
+import { crashIsInfra, isLimitNotice } from './phase.js';
 
 const EXIT_1 = 'Claude Code process exited with code 1';
 
@@ -24,4 +24,15 @@ test('a session that ran out of its budget is a failure, because a re-run lands 
 
 test('a session that already returned its verdict is never re-attempted for the exit code after it', () => {
   assert.equal(crashIsInfra(EXIT_1, 300, { data: { verdict: 'approve' }, resultSubtype: 'success' }), false);
+});
+
+test('a tagged frame is a usage-limit notice whatever it says, and prose is one only where prose counts', () => {
+  assert.equal(isLimitNotice('rate_limit', '', false), true);
+  assert.equal(isLimitNotice('rate_limit', "You've hit your limit · resets 4:30pm", true), true);
+  assert.equal(isLimitNotice('', "You've hit your limit · resets 4:30pm", true), true);
+  // A diagnosis session quoting the run it is explaining.
+  const quoting = 'review lap 2 was recorded as `rate_limit: You\'ve hit your session limit · resets 4:30pm`; that is the cause.';
+  assert.equal(isLimitNotice('', quoting, true), true, 'which is why the Loop keeps the text match and these sessions do not');
+  assert.equal(isLimitNotice('', quoting, false), false);
+  assert.equal(isLimitNotice('', 'ordinary words', true), false);
 });

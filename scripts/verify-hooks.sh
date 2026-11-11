@@ -1238,6 +1238,14 @@ expect_deny  "Write verify.json (the merge gate reads it)" \
 expect_deny  "Write run.json (the journal, holds human approvals)" \
                                        artifact-guard.cjs "$(write_payload "$RUN/run.json")"
 expect_deny  "Edit findings.json"      artifact-guard.cjs "$(edit_json_payload "$RUN/findings.json")"
+# The failure diagnosis's record drives the ticket note and the fix pipeline. It is
+# the conductor's: a session that could write it could word its own finding.
+expect_deny  "Write the diagnosis record" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/diagnosis.json")"
+expect_deny  "redirect into the diagnosis record" \
+                                       artifact-guard.cjs "$(bash_payload "echo '{}' > $RUN/diagnosis.json")"
+expect_allow "cat the diagnosis record (reads are never refused)" \
+                                       artifact-guard.cjs "$(bash_payload "cat $RUN/diagnosis.json")"
 expect_deny  "Write merge.json (name defaulted from the phase, not declared)" \
                                        artifact-guard.cjs "$(write_payload "$RUN/merge.json")"
 expect_deny  "Write ANOTHER run's artifact" \

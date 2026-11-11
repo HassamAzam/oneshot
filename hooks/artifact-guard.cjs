@@ -83,7 +83,15 @@ const JOURNAL = 'run.json';
  * `writes: ['run']` has no reason to write any of them, and a forged resources
  * file turns the next recovery into a kill list of the session's choosing.
  */
-const CONDUCTOR_STATE = ['local-tests-resources.json', 'local-tests-capture.json', 'local-tests-seq'];
+const CONDUCTOR_STATE = [
+  'local-tests-resources.json', 'local-tests-capture.json', 'local-tests-seq',
+  // The failure diagnosis's record (src/diagnosis): what a stop was found to be,
+  // whether its note was posted, and which findings may have a fix opened. The
+  // ticket note, the dashboard panel and the fix pipeline are all driven from
+  // it, so a session that could write it could have a finding of its own
+  // wording turned into a pull request on a public repository.
+  'diagnosis.json',
+];
 
 /**
  * Used only when config/phases.json cannot be read. A guard that protects

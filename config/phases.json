@@ -419,6 +419,77 @@
       "_why": "Code, not a session, and not in the Loop's CODE_PHASES. ON DEMAND, so the Loop steps over it; the local automation tests mode (src/localtests) runs it once QA approves the list, through src/conductor/localtests.ts, which drives scripts/localtests.cjs against the MR's merge commit with the merge commit's first parent as the base. It is the LAST phase of a ticket: its results note \u2014 the automation report \u2014 is the last thing Oneshot posts, and it marks the ticket labels.localTestsDone, passed or failed. The entry stays because it is this run's configuration: its artifact and the timeoutMin below. Copying the baseline database, applying the scope's patch to a fresh automation worktree, running Cypress and reading its results is deterministic, and no model should hold the automation credentials or a database it could write to. Idempotent by cache key: the specs, the code under test, the automation commit and the patch. One Cypress run per desk (src/lib/cypresslease.ts): a busy desk PARKS the run rather than failing it, and the next tick tries again. Same target scope and desk switch as local-tests-scope, and placed after it at the end of the list for the reason its _why_n gives.",
       "_why_onFail": "warn, and inert like local-tests-scope's. A setup failure (no baseline database, a patch that no longer applies, a script that died) is the desk's problem: the ticket gets the reason and labels.localTestsTrigger back, so the run is tried again, and it is not marked done. Failing TESTS are not a failure of this step at all: they are posted with the rest of the results and the ticket is marked labels.localTestsDone.",
       "_why_timeoutMin": "The FLOOR of the conductor's own kill, and the one place this code phase reads its timeoutMin. The script holds each Cypress run to localTests.maxRunMinutes, but around that it copies the database, migrates, builds the ticket's app (25 minutes allowed cold) and, when tests failed, builds the base app and re-runs the failures to say whether they fail on dev too. So the conductor kills the script's whole process group at the LATER of maxRunMinutes + 15 and this: the first alone (60 minutes today) would cut exactly the runs that needed the most building, usually in the middle of the base re-run. 120 is an ESTIMATE of a cold build, a full Cypress run and a base re-run; correct it from real runs (runDeadlineMs in src/lib/cypresslease.ts)."
+    },
+    {
+      "name": "diagnose",
+      "n": 15,
+      "kind": "session",
+      "tier": "heavy",
+      "cwd": "conductor",
+      "maxTurns": 80,
+      "timeoutMin": 30,
+      "writes": [],
+      "onFail": "warn",
+      "onDemand": true,
+      "skills": [
+        "failure-diagnosis"
+      ],
+      "artifact": "diagnosis/session.json",
+      "_why": "The failure diagnosis mode's one session (src/diagnosis). ON DEMAND: the Loop never schedules it and never builds a prompt for it. The mode invokes it by name (runPhase) on a run that has ALREADY stopped, blocked or parked with trouble on its record, once per distinct stop (src/diagnosis/stop.ts), and only on a desk that sets ONESHOT_DIAGNOSIS=1. It exists because the one sentence a stopped run leaves on the ticket is whatever the last phase said, and on the first ticket run on the server that sentence was wrong about nearly everything: fifteen sessions were recorded as a crashed process, two of them had run out of structured-output tries, one out of turns, most had finished, and almost every real cause was the harness or the machine rather than the ticket. Finding that out took a person a day of reading transcripts. A session, because the last step is judgement: which of several failures is the cause and which are its consequences, and whether a cause is the harness, the machine, the ticket's change or a decision. Everything before that step is NOT left to the session: src/diagnosis/evidence.ts reads the whole run directory in code and hands over a digest, and src/diagnosis/citations.ts re-opens every file and line the session cites after it ends, so a finding whose evidence is not there is shown as a lead and not as a finding.",
+      "_why_vs_remediate": "Not `remediate` with more turns. `remediate` runs INSIDE a run that is about to block, sees the one block in front of it, may change the environment and may resume the run, and is capped at two attempts so the run reaches a person. This runs AFTER the stop, reads every attempt of the run, changes nothing, and classifies each cause by who has to act. remediate.json is one of its inputs, so what remediation already established is not derived twice.",
+      "_why_writes": "Empty, which phase.ts reads as read-only: the session gets no Write, Edit or NotebookEdit tool. Its output is its structured result and nothing else. A diagnosis that edits anything is a change nobody reviewed, made on a run that is about to be read as evidence. It is also started WITHOUT the GitLab MCP server (gitlabMcp: false in src/diagnosis/runner.ts): it reads transcripts for a living, transcripts quote whatever a ticket or a web page said, and a session holding no GitLab tool cannot be talked into using one. The note is rendered and posted by code (src/diagnosis/note.ts).",
+      "_why_cwd": "'conductor', like remediate: the cause is rarely inside the ticket's worktree, and a harness finding has to be shown in THIS repo's source, which is where the session is standing. The run directory is named in the prompt by absolute path.",
+      "_why_tier": "HEAVY for remediate's reason: this is diagnosis from indirect evidence, the job a cheaper model does badly because it pattern-matches to the loudest error. The loudest error is the thing this phase exists to see past.",
+      "_why_budget": "80 turns / 30 min is an ESTIMATE, to be corrected from real runs. The digest carries most of the reading, so the turns are for confirming the facts a finding rests on and following two or three causes into a transcript or the code. The one comparable measurement is remediate on the same run: 23 turns, 4.5 minutes, with far less handed to it. If a diagnosis lands near the cap, look first at whether it was reading transcripts raw instead of through the peek commands.",
+      "_why_artifact": "diagnosis/session.json, inside the run directory's diagnosis/ folder beside evidence.json, so the session's raw answer and the digest it was given sit together. The record everything else reads is diagnosis.json one level up: the same answer after its citations were checked, with the note id and any fix pull request."
+    },
+    {
+      "name": "fix-author",
+      "n": 16,
+      "kind": "session",
+      "tier": "heavy",
+      "cwd": "worktree",
+      "maxTurns": 150,
+      "timeoutMin": 60,
+      "writes": [
+        "worktree"
+      ],
+      "onFail": "warn",
+      "onDemand": true,
+      "coding": true,
+      "artifact": "diagnosis/fix/author.json",
+      "_why": "The first of the fix pipeline's three kinds of session (src/diagnosis/fix/pipeline.ts): it writes the fix for ONE diagnosed harness defect, with a test that fails without it. ON DEMAND, and never part of a ticket's run: the pipeline invokes it by name after a diagnosis, for a finding that is the harness, confirmed, and shown in this repository's code (fixEligibility in src/diagnosis/fix/decide.ts), and only where the machine can reach GitHub. Its 'worktree' is NOT the work repo's: it is a private clone of THIS repository, on its own branch at the base, made outside the conductor's directory for the one finding and deleted afterwards. Outside, so write-scope's absolute denial of the running conductor's src/, hooks/ and config/ still holds while the copy is edited. A clone and not a git worktree, so its only remote is the operator's clone on this disk: git-guard lets a session push the branch it was leased, and from here that push cannot reach GitHub. It commits and does nothing else: git-guard denies gh to every session, and the one push to GitHub and the pull request are made by code after the review, of the exact commit that was measured. HEAVY because the change is to the conductor itself, where a plausible wrong fix is worse than none. It may refuse, and is told so: a defect that does not reproduce on the base branch, is already fixed there, or is really a design decision gets no pull request.",
+      "_why_budget": "150 turns / 60 min is an ESTIMATE from implement's shape (220 / 150 for a ticket-sized change with research already done) scaled down: one cause, at most 15 files and 800 lines (diffGuard), in a repository whose whole suite runs in about a minute. Correct it from real runs."
+    },
+    {
+      "name": "fix-review",
+      "n": 17,
+      "kind": "session",
+      "tier": "heavy",
+      "cwd": "worktree",
+      "maxTurns": 60,
+      "timeoutMin": 25,
+      "writes": [],
+      "onFail": "warn",
+      "onDemand": true,
+      "artifact": "diagnosis/fix/review.json",
+      "_why": "A reviewer of the author's commits. Run TWICE per fix, in parallel, as two sessions that never see each other: one reads for correctness and what the diff did not touch, the other for whether the tests prove anything and whether the change is only what it says (REVIEW_LENSES in src/diagnosis/fix/prompts.ts). Neither is given the author's account of its own work, only the diagnosis and the diff, because a reviewer handed a conclusion tends to return it. Read-only: `writes` is empty, so it has no Write or Edit tool. Its blockers cost the author nothing until fix-verify has tried to refute them.",
+      "_why_budget": "60 turns / 25 min, review's own shape (70 / 30) for a diff a fraction of the size. An ESTIMATE."
+    },
+    {
+      "name": "fix-verify",
+      "n": 18,
+      "kind": "session",
+      "tier": "heavy",
+      "cwd": "worktree",
+      "maxTurns": 80,
+      "timeoutMin": 30,
+      "writes": [],
+      "onFail": "warn",
+      "onDemand": true,
+      "artifact": "diagnosis/fix/verify.json",
+      "_why": "The adversarial pass, and the reason the review is worth having. It is handed every blocker the two reviewers raised and told to REFUTE each one by running the code, and it is asked the question nobody else is: does this change remove the diagnosed cause. It exists because reviewers over-report and agree with each other for the wrong reason: a multi-lens review of this repository raised 39 blockers of which 13 survived being checked. Only a blocker it could not knock down goes back to the author, and a blocker it does not rule on is treated as upheld (upheld in src/diagnosis/fix/decide.ts), so silence never clears one. Its verdict can stop a pull request that has no point standing against it: if it cannot confirm the cause is fixed, the one thing the pipeline exists to establish is not established. Read-only, like the reviewers.",
+      "_why_budget": "80 turns / 30 min: more than a reviewer because every ruling is something it ran. An ESTIMATE."
     }
   ]
 }
