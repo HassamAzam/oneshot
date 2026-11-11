@@ -16,6 +16,10 @@
  *   - no deleting protected branches, local or remote
  *   - no `git remote set-url` (repointing origin defeats every other rule)
  *   - no `gh` / `glab` CLI, which are unguarded paths to the same operations
+ *   - no `git credential …` and no direct run of a credential helper: on an
+ *     https origin git authenticates with a token it fetches for itself
+ *     (scripts/git-credential-oneshot.cjs), and these are the two commands that
+ *     would print that token into a transcript
  *   - no git command whose working directory is outside the leased worktree.
  *     ~/Documents/erp is a live repo with a real remote on this machine; a
  *     `git commit -am` with the wrong cwd would land there
@@ -700,6 +704,24 @@ function denyTestRunner(what) {
   );
 }
 
+/**
+ * Refuse a command that makes git's credential helper print.
+ *
+ * `git credential fill`, `git credential-<helper> get` and the helper script run
+ * directly all answer with `password=<the GitLab token>` on stdout, which a
+ * session's transcript then holds. git itself needs none of them: fetch and
+ * push call the helper internally and never show its answer.
+ */
+function denyCredential(seg) {
+  C.event('denied_credential', { cmd: seg.slice(0, 120) });
+  C.deny(
+    'Denied: that asks git\'s credential helper to print the GitLab token git authenticates ' +
+    'with. git uses it for fetch and push on its own — run the fetch or the push, not the ' +
+    'helper. If git itself cannot authenticate, say so in `blocked`; a credential is an ' +
+    'operator\'s to fix, never a phase\'s to read.',
+  );
+}
+
 function checkCwd(cmd) {
   const wt = leasedWorktree();
   if (!wt) return;
@@ -761,8 +783,15 @@ try {
         );
       }
 
+      // A credential helper run by hand prints what it would have handed git.
+      const helperByHand = /^git-credential-/.test(path.basename(t[0]))
+        || (['node', 'nodejs'].includes(path.basename(t[0]))
+          && t.slice(1).some((a) => /(^|\/)git-credential-[\w-]+\.c?js$/.test(a)));
+      if (helperByHand) denyCredential(seg);
+
       if (path.basename(t[0]) !== 'git') continue;
       const sub = t.find((a, i) => i > 0 && !a.startsWith('-') && t[i - 1] !== '-C');
+      if (sub && /^credential(-|$)/.test(sub)) denyCredential(seg);
 
       checkConductorPhase(t);
       if (!governed.has(idx)) checkReadOnlyWorktreePhase(t);

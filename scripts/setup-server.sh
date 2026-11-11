@@ -451,20 +451,26 @@ else
   esac
 fi
 
-# The token stays in $ENV_FILE: the helper reads it from the conductor's own
-# environment at fetch/push time, so nothing secret lands in ~/.gitconfig.
+# The token stays in the env files. git asks scripts/git-credential-oneshot.cjs for it
+# at fetch/push time: the environment when it has the token (the conductor), else
+# $ONESHOT_DIR/.env. The inline helper this replaces read the environment only, and a
+# phase session's environment carries no token by design, so every git fetch and push
+# inside a session failed "HTTP Basic: Access denied" (#9174's mr phase).
 step "Git credentials for $SVC_USER"
 if [ -z "$REPO_URL" ] || ! printf '%s' "$REPO_URL" | grep -q '^https://'; then ok "origin is not https — no helper needed"
 else
   git_origin="$(printf '%s' "$REPO_URL" | sed -E 's#^(https://[^/]+).*#\1#')"
-  helper='!f() { test "$1" = get || exit 0; echo username=oauth2; echo "password=${ONESHOT_GITLAB_TOKEN:-$GITLAB_TOKEN}"; }; f'
-  current="$(runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" git config --global --get "credential.$git_origin.helper" 2>/dev/null || true)"
-  if [ "$current" = "$helper" ]; then ok "git reads the GitLab token from the environment for $git_origin"
-  elif [ "$CHECK" = 1 ]; then due "no git credential helper for $git_origin — every 'git fetch origin dev' fails with 'could not read Username'"
+  node_bin="$(command -v node || echo /usr/bin/node)"
+  helper="!\"$node_bin\" \"$ONESHOT_DIR/scripts/git-credential-oneshot.cjs\""
+  current="$(runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" git config --global --get-all "credential.$git_origin.helper" 2>/dev/null || true)"
+  if [ "$current" = "$helper" ]; then ok "git asks $ONESHOT_DIR/scripts/git-credential-oneshot.cjs for the GitLab token ($git_origin)"
+  elif [ "$CHECK" = 1 ]; then due "git credential helper for $git_origin is not git-credential-oneshot.cjs — git fetch and push fail inside phase sessions, whose environment carries no token"
   elif ! id "$SVC_USER" >/dev/null 2>&1; then die "user $SVC_USER missing" "re-run without --check"
   else
-    runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" git config --global "credential.$git_origin.helper" "$helper"
-    did "git credential helper for $git_origin (token read from the environment, never written to disk)"
+    # --replace-all: a helper list is additive, and the old environment-only one
+    # answering first with an empty password is the failure being fixed.
+    runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" git config --global --replace-all "credential.$git_origin.helper" "$helper"
+    did "git credential helper for $git_origin (the token is read from the environment or $ONESHOT_DIR/.env at fetch/push time; nothing is written to ~/.gitconfig)"
   fi
 fi
 

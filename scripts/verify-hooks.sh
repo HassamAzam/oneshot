@@ -109,6 +109,18 @@ expect_deny  "remote set-url"          git-guard.cjs "$(bash_payload 'git remote
 expect_deny  "reset --hard origin/dev" git-guard.cjs "$(bash_payload 'git reset --hard origin/dev')"
 expect_deny  "gh CLI"                  git-guard.cjs "$(bash_payload 'gh pr merge 12 --squash')"
 expect_deny  "glab CLI"                git-guard.cjs "$(bash_payload 'glab mr merge 12')"
+# On an https origin git fetches its own token (scripts/git-credential-oneshot.cjs).
+# These are the commands that would print it into a transcript.
+expect_deny  "git credential fill"     git-guard.cjs "$(bash_payload 'printf "protocol=https\nhost=gitlab.example.com\n\n" | git credential fill')"
+expect_deny  "git credential-store get" git-guard.cjs "$(bash_payload 'git credential-store get')"
+expect_deny  "the helper run by hand"  git-guard.cjs "$(bash_payload 'node /srv/oneshot/scripts/git-credential-oneshot.cjs get')"
+expect_deny  "the helper run by hand, relative" \
+                                       git-guard.cjs "$(bash_payload 'echo host=x | node scripts/git-credential-oneshot.cjs get')"
+expect_deny  "a helper binary by name" git-guard.cjs "$(bash_payload 'git-credential-cache get')"
+expect_allow "fetch and push still authenticate through it" \
+                                       git-guard.cjs "$(bash_payload 'git fetch origin dev && git push origin oneshot/ticket-0-verify')"
+expect_allow "reading which helper is configured" \
+                                       git-guard.cjs "$(bash_payload 'git config --get-all credential.helper')"
 expect_deny  "cd into the context repo" git-guard.cjs "$(bash_payload 'cd ~/Documents/erp && git commit -am wip')"
 expect_deny  "git -C into the context repo" \
                                        git-guard.cjs "$(bash_payload 'git -C /Users/'"$USER"'/Documents/erp status')"
