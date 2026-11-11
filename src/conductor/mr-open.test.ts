@@ -8,7 +8,12 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CODE_PHASES } from './runner.js';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CODE_PHASES, codePhaseStatus } from './runner.js';
+import { pushRunBranch } from './codephases.js';
 
 const VAR = 'GITLAB_REPO_URL';
 
@@ -107,4 +112,105 @@ test('the default pipeline does not carry mr-open at all', async () => {
   // it must be absent, not merely harmless.
   const names = (await phaseList('')).map((x) => x.name);
   assert.ok(!names.includes('mr-open'));
+});
+
+// ------------------------------------------------- pushing after a rebase
+
+const BRANCH = 'oneshot/ticket-9072-x';
+
+/**
+ * A bare origin, the run's worktree on its leased branch (pushed once), and a
+ * second clone standing in for anyone else who can push to that branch.
+ */
+function withBranch(fn: (r: {
+  wt: string; other: string; git: (...a: string[]) => string; tip: (ref: string) => string;
+}) => void): void {
+  const base = mkdtempSync(join(tmpdir(), 'oneshot-push-'));
+  const git = (...args: string[]): string => {
+    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  const origin = join(base, 'origin.git');
+  const wt = join(base, 'wt');
+  const other = join(base, 'other');
+  git('init', '-q', '--bare', origin);
+  git('clone', '-q', origin, wt);
+  git('-C', wt, 'commit', '-q', '--allow-empty', '-m', 'base');
+  git('-C', wt, 'push', '-q', 'origin', 'HEAD:refs/heads/dev');
+  git('-C', wt, 'checkout', '-q', '-b', BRANCH);
+  git('-C', wt, 'commit', '-q', '--allow-empty', '-m', 'the change');
+  git('-C', wt, 'push', '-q', '-u', 'origin', BRANCH);
+  git('clone', '-q', '-b', BRANCH, origin, other);
+  const tip = (ref: string): string => git('-C', origin, 'rev-parse', ref);
+  try { fn({ wt, other, git, tip }); } finally { rmSync(base, { recursive: true, force: true }); }
+}
+
+/** What `implement` did on #9072: rewrite the branch's own commits onto a newer dev. */
+function rebaseOntoNewerDev(wt: string, git: (...a: string[]) => string): void {
+  git('-C', wt, 'checkout', '-q', 'dev');
+  git('-C', wt, 'commit', '-q', '--allow-empty', '-m', 'dev moved on');
+  git('-C', wt, 'push', '-q', 'origin', 'dev');
+  git('-C', wt, 'checkout', '-q', BRANCH);
+  git('-C', wt, 'rebase', '-q', '--keep-empty', 'dev');
+}
+
+test('an ordinary push is not forced', () => {
+  withBranch(({ wt, git, tip }) => {
+    git('-C', wt, 'commit', '-q', '--allow-empty', '-m', 'a fix');
+    assert.deepEqual(pushRunBranch(wt, BRANCH, { allowForce: true }), { ok: true, forced: false });
+    assert.equal(tip(BRANCH), git('-C', wt, 'rev-parse', 'HEAD'));
+  });
+});
+
+test('a branch rebased over its own history is force-pushed, so the MR shows the new commits', () => {
+  withBranch(({ wt, git, tip }) => {
+    rebaseOntoNewerDev(wt, git);
+    // The plain push alone is refused — the push #9072's mr-open recorded as a mere warning.
+    assert.notEqual(spawnSync('git', ['-C', wt, 'push', 'origin', BRANCH]).status, 0);
+    assert.deepEqual(pushRunBranch(wt, BRANCH, { allowForce: true }), { ok: true, forced: true });
+    assert.equal(tip(BRANCH), git('-C', wt, 'rev-parse', 'HEAD'));
+  });
+});
+
+test('a commit someone else pushed is never overwritten — the run blocks instead', () => {
+  withBranch(({ wt, other, git, tip }) => {
+    git('-C', other, 'commit', '-q', '--allow-empty', '-m', 'a reviewer\'s fix');
+    git('-C', other, 'push', '-q', 'origin', BRANCH);
+    const theirs = tip(BRANCH);
+    rebaseOntoNewerDev(wt, git);
+    const out = pushRunBranch(wt, BRANCH, { allowForce: true });
+    assert.equal(out.ok, false);
+    assert.equal(!out.ok && out.block, true, 'a remote the run cannot account for must block, not warn');
+    assert.match(!out.ok ? out.error : '', /never pointed at/);
+    assert.equal(tip(BRANCH), theirs, 'their commit is still the tip');
+  });
+});
+
+test('a push that fails for any other reason stays a warning, as before', () => {
+  withBranch(({ wt, git }) => {
+    git('-C', wt, 'remote', 'set-url', 'origin', join(wt, 'no-such-remote.git'));
+    const out = pushRunBranch(wt, BRANCH, { allowForce: true });
+    assert.equal(out.ok, false);
+    assert.equal(!out.ok && out.block, false);
+    // The reason, not just "Command failed: git -C … push …" cut off at 200 characters.
+    assert.match(!out.ok ? out.error : '', /no-such-remote/);
+  });
+});
+
+test('a dry run says what it would force and rewrites nothing', () => {
+  withBranch(({ wt, git, tip }) => {
+    const before = tip(BRANCH);
+    rebaseOntoNewerDev(wt, git);
+    const out = pushRunBranch(wt, BRANCH, { allowForce: false });
+    assert.equal(out.ok, false);
+    assert.equal(!out.ok && out.block, false);
+    assert.equal(tip(BRANCH), before);
+  });
+});
+
+test('a blocked code phase is recorded as failed, not warned, whatever its onFail', () => {
+  const mrOpen = { name: 'mr-open', onFail: 'warn' } as Parameters<typeof codePhaseStatus>[0];
+  assert.equal(codePhaseStatus(mrOpen, { ok: false }), 'warned');
+  assert.equal(codePhaseStatus(mrOpen, { ok: false, block: true }), 'failed');
 });

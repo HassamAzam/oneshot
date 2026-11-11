@@ -1255,6 +1255,75 @@ async function recordSuccess(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<voi
   });
 }
 
+export type PushResult =
+  | { ok: true; forced: boolean }
+  | { ok: false; error: string; block: boolean };
+
+/**
+ * Push this run's branch, and rewrite the remote branch only when what it
+ * would drop is this checkout's own history.
+ *
+ * A plain push is refused as non-fast-forward once `implement` rebases the
+ * branch onto the base to clear the MR's conflicts. That used to be a warning,
+ * and the MR kept the old commits: on #9072 review and merge then acted on
+ * code the MR did not contain, and the branch was force-pushed by hand.
+ *
+ * The force is leased against the remote tip read just before it, and only
+ * when that tip is a commit this branch once pointed at (its reflog): then
+ * everything the push drops is work this checkout already had, rewritten.
+ * Anything else on the remote — a person's push, GitLab's own rebase — this
+ * run cannot account for, so it is not overwritten and the run blocks.
+ */
+export function pushRunBranch(worktree: string, branch: string, opts: { allowForce: boolean }): PushResult {
+  const git = (...args: string[]): string => execFileSync('git', ['-C', worktree, ...args], {
+    encoding: 'utf8', stdio: 'pipe', timeout: 120_000,
+  });
+  // The message is "Command failed: <the command>" and then stderr; the reason
+  // is in stderr, above git's advice on how to get past it.
+  const why = (err: unknown): string => {
+    const e = err as { stderr?: string; message: string };
+    const text = e.stderr?.trim() || e.message;
+    return text.split('\n').filter((l) => !l.startsWith('hint:')).join('\n').trim().slice(-300);
+  };
+
+  try {
+    git('push', '-u', 'origin', branch);
+    return { ok: true, forced: false };
+  } catch (err) {
+    const stderr = (err as { stderr?: string }).stderr ?? '';
+    if (!/\[rejected\]|non-fast-forward|fetch first/.test(stderr)) {
+      return { ok: false, block: false, error: `could not push ${branch}: ${why(err)}` };
+    }
+  }
+
+  let remote = '';
+  let held: string[] = [];
+  try {
+    remote = git('ls-remote', 'origin', `refs/heads/${branch}`).split(/\s/)[0] ?? '';
+    held = git('reflog', 'show', '--format=%H', `refs/heads/${branch}`).split('\n').filter(Boolean);
+  } catch (err) {
+    return { ok: false, block: true, error: `${branch} was refused as non-fast-forward, and its remote tip could not be checked: ${why(err)}` };
+  }
+  if (!remote || !held.includes(remote)) {
+    return {
+      ok: false, block: true,
+      error: `origin/${branch} is at ${short(remote || null)}, which this run's branch never pointed at — `
+        + 'someone else pushed to it, or GitLab rebased it — and the local branch does not contain it. '
+        + 'Oneshot will not overwrite it: fold that work into the worktree (or confirm it can go), push, '
+        + 'then unblock.',
+    };
+  }
+  if (!opts.allowForce) {
+    return { ok: false, block: false, error: `[dry-run] would force-push ${branch} over ${short(remote)}` };
+  }
+  try {
+    git('push', `--force-with-lease=refs/heads/${branch}:${remote}`, '-u', 'origin', branch);
+    return { ok: true, forced: true };
+  } catch (err) {
+    return { ok: false, block: true, error: `force-push of ${branch} over ${short(remote)} was refused: ${why(err)}` };
+  }
+}
+
 /**
  * Open the merge request as soon as the code exists, not at the end.
  *
@@ -1276,11 +1345,14 @@ async function recordSuccess(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<voi
  *
  * Failure here is a WARN, not an abort. An early MR is a convenience for the
  * humans reading the gates; `mr` still opens one at phase 8 if this could not.
- * A run must not die because a courtesy push failed.
+ * A run must not die because a courtesy push failed. The exception is a remote
+ * branch holding commits this run cannot account for (`pushRunBranch`): every
+ * phase after this one would then check code the MR does not show, so that
+ * BLOCKS rather than warns.
  */
 export async function mrOpenPhase(
   ctx: CodePhaseCtx,
-): Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }> {
+): Promise<{ ok: boolean; error?: string; data?: Record<string, unknown>; block?: boolean }> {
   const journal = readJournal(ctx.iid) ?? ctx.journal;
   const branch = journal.branch;
   const worktree = journal.worktree;
@@ -1290,13 +1362,9 @@ export async function mrOpenPhase(
 
   const base = projectConfig().branches.base;
 
-  try {
-    execFileSync('git', ['-C', worktree, 'push', '-u', 'origin', branch], {
-      encoding: 'utf8', stdio: 'pipe', timeout: 120_000,
-    });
-  } catch (err) {
-    return { ok: false, error: `could not push ${branch}: ${(err as Error).message.slice(0, 200)}` };
-  }
+  const pushed = pushRunBranch(worktree, branch, { allowForce: !DRY_RUN });
+  if (!pushed.ok) return { ok: false, error: pushed.error, block: pushed.block };
+  if (pushed.forced) log.warn(`mr-open force-pushed ${branch} over its own earlier history`, { iid: ctx.iid });
 
   const existing = await findMergeRequests({ sourceBranch: branch, state: 'opened' });
   const found = existing.ok ? (existing.data ?? [])[0] : undefined;
@@ -1309,6 +1377,7 @@ export async function mrOpenPhase(
         mrIid: found.iid,
         mrUrl: found.web_url,
         draft: found.title.startsWith('Draft:'),
+        ...(pushed.forced ? { forcePushed: true } : {}),
         summary: `Reused the merge request already open for ${branch}.`,
       },
     };
@@ -1348,6 +1417,7 @@ export async function mrOpenPhase(
       mrIid: made.data.iid,
       mrUrl: made.data.web_url,
       draft: true,
+      ...(pushed.forced ? { forcePushed: true } : {}),
       summary: `Opened draft !${made.data.iid} from ${branch} into ${base}.`,
     },
   };

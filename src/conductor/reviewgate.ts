@@ -1045,6 +1045,12 @@ export type VerifyVerdict =
 /** The four terminal verdicts, which settle a case outright (unlike `missing-steps` and `confirmed`). */
 const TERMINAL_VERDICTS: ReadonlySet<VerifyVerdict> = new Set(['skip', 'invalid', 'expected', 'pre-existing']);
 
+export type TerminalVerdict = 'skip' | 'invalid' | 'expected' | 'pre-existing';
+
+export function isTerminalVerdict(v: VerifyVerdict): v is TerminalVerdict {
+  return TERMINAL_VERDICTS.has(v);
+}
+
 /**
  * How many times one case may be confirmed a real bug before it has to be
  * settled some other way.
@@ -1433,8 +1439,13 @@ export function parseVerifyDirectives(text: string, failingIds: string[]): Verif
   return out;
 }
 
-/** The comment the verify-case gate posts, listing each failing case and the six verdicts. */
-export function verifyCasesRequestBody(failing: VerifyFailingCase[]): string {
+/**
+ * The comment the verify-case gate posts, listing each failing case and the six verdicts.
+ *
+ * `followUp` is the re-ask: a case began failing after an earlier request was
+ * posted, so that request never named it and no reply to it can be about it.
+ */
+export function verifyCasesRequestBody(failing: VerifyFailingCase[], followUp = false): string {
   const lines = failing.map((c) => {
     const ev = (c.evidence ?? '').split('\n')[0]!.slice(0, 300).trim();
     return `- **${c.id}**${ev ? ` — ${ev}` : ''}`;
@@ -1442,6 +1453,10 @@ export function verifyCasesRequestBody(failing: VerifyFailingCase[]): string {
   return [
     '## Verify needs a QA decision',
     '',
+    ...(followUp
+      ? ['_A follow-up: the case(s) below started failing after the earlier request, which did not '
+        + 'list them. Verdicts already given there still stand._', '']
+      : []),
     'Verify re-ran these case(s) through `implement` twice and they still fail. ' +
     'No code change fixed them yet, so QA decides what each one means:',
     '',
@@ -1514,6 +1529,80 @@ export function parseCorrectedSteps(text: string, caseId: string): string[] | nu
   return enumerated;
 }
 
+/** The case ids a verify-case request listed, read back off its body. Pure. */
+export function requestedCaseIds(body: string): string[] {
+  return [...body.matchAll(/^- \*\*([^*\n]+)\*\*/gm)].map((m) => m[1]!.trim());
+}
+
+/**
+ * Which note asked QA about each case: the floor that case's replies are read
+ * from. Pure.
+ *
+ * A case missing here was never asked about, and the gate re-asks rather than
+ * waiting on a verdict nobody was asked for — what parked #9072 when TC-12
+ * started failing on a later lap than the request that listed TC-21 and TC-22.
+ *
+ * A request posted before `requestedCases` existed is read back off its own
+ * note, every case it listed floored at it, which is how the gate read it then.
+ * A note that is no longer in `notes` covers nothing, so its cases are asked
+ * again: re-asking is the one safe read when what was asked is unknown.
+ */
+export function verifyCaseFloors(state: ReviewGateState, notes: IssueNote[]): Record<string, number> {
+  if (state.requestedCases) return state.requestedCases;
+  const at = state.requestNoteId;
+  if (at == null) return {};
+  const request = notes.find((n) => n.id === at);
+  return Object.fromEntries(requestedCaseIds(request?.body ?? '').map((id) => [id, at]));
+}
+
+/**
+ * Every directive per failing case, across every reply, in the order sent. Pure.
+ *
+ * A reply answers only the cases asked about BEFORE it was written. Without
+ * that, a case asked about in a follow-up would take a verdict from a reply on
+ * the first request, written before anyone asked about it.
+ */
+export function verifyDirectivesByCase(
+  replies: ReadonlyArray<GateReply>, failingIds: string[], floors: Record<string, number>,
+): Map<string, Array<{ verdict: VerifyVerdict; by: string | null; raw: string; noteId: number }>> {
+  const perCase = new Map<
+    string, Array<{ verdict: VerifyVerdict; by: string | null; raw: string; noteId: number }>
+  >();
+  for (const r of replies) {
+    const asked = failingIds.filter((id) => floors[id] != null && r.id > floors[id]!);
+    if (!asked.length) continue;
+    for (const d of parseVerifyDirectives(r.text, asked)) {
+      const arr = perCase.get(d.caseId) ?? [];
+      arr.push({ verdict: d.verdict, by: r.user, raw: d.raw, noteId: r.id });
+      perCase.set(d.caseId, arr);
+    }
+  }
+  return perCase;
+}
+
+type VerifyCaseDecision = NonNullable<RunJournal['verifyCaseDecisions']>[number];
+
+/**
+ * The cases QA has already settled, each with the verdict that settled it. Pure.
+ *
+ * A settled case that fails again on a later verify lap keeps that verdict
+ * rather than going back to the gate. The gate re-reads every reply on every
+ * pass, so a case sent back to it re-reads the line that settled it and acts on
+ * it a second time: on #9072 that opened #9199 and #9200 as duplicates of the
+ * pre-existing bugs #9197 and #9198. The last decision for a case wins, and
+ * only a terminal one settles it; a later `confirmed` reopened it.
+ */
+export function settledVerifyCases(
+  decisions: RunJournal['verifyCaseDecisions'],
+): Map<string, VerifyCaseDecision> {
+  const out = new Map<string, VerifyCaseDecision>();
+  for (const d of decisions ?? []) {
+    if (TERMINAL_VERDICTS.has(d.verdict)) out.set(d.caseId, d);
+    else out.delete(d.caseId);
+  }
+  return out;
+}
+
 /** The Slack heads-up for the verify-case gate — its own, because it does not resolve on `approved`. */
 function verifyCaseGateAskText(journal: RunJournal, noteId: number, mentions: string, count: number): string {
   const link = `<${issueUrl(journal.iid)}#note_${noteId}|#${journal.iid} ${linkLabel(journal.title)}>`;
@@ -1535,7 +1624,12 @@ function verifyCaseGateAskText(journal: RunJournal, noteId: number, mentions: st
  * all qualified replies after it and re-parses, so a reviewer may answer the
  * cases over several comments. It resolves the moment every failing case
  * carries a directive; until then it is `pending`, exactly as the engine's
- * other gates are while they wait.
+ * other gates are while they wait. A case no request has named yet gets a
+ * follow-up request of its own, and is read only from replies after it.
+ *
+ * `failing` must leave out the cases QA already settled (`settledVerifyCases`):
+ * every reply is re-read on every pass, so a settled case passed in here would
+ * take the verdict that settled it a second time.
  */
 export async function checkVerifyGate(
   opts: { iid: number; failing: VerifyFailingCase[] },
@@ -1559,44 +1653,60 @@ export async function checkVerifyGate(
     return { verdict: 'unavailable', apply: [], rescope: [], confirmed: [], pending: failingIds, confirmSpend: {} };
   }
 
+  const nothingYet: VerifyGateResult = {
+    verdict: 'actionable', apply: [], rescope: [], confirmed: [], pending: failingIds, confirmSpend: {},
+  };
   let journal = readJournal(iid);
-  if (!journal) return { verdict: 'actionable', apply: [], rescope: [], confirmed: [], pending: failingIds, confirmSpend: {} };
+  // A request listing no case asks nobody anything.
+  if (!journal || !failing.length) return nothingYet;
+  const asked = journal;
 
   let state = stateOf(journal, 'verifyCases');
 
-  if (state.requestNoteId == null) {
-    const posted = await addIssueNote(iid, verifyCasesRequestBody(failing));
+  // Posts the request for `cases` and records each one against it. The first
+  // request names every failing case; a follow-up names only the ones no
+  // request has named yet, and leaves the others on the note that asked them.
+  const ask = async (cases: VerifyFailingCase[], followUp: boolean): Promise<boolean> => {
+    const posted = await addIssueNote(iid, verifyCasesRequestBody(cases, followUp));
     if (!posted.ok || !posted.data) {
       log.warn('verify-case gate request could not be posted to the ticket — will retry next tick', { iid });
-      return { verdict: 'actionable', apply: [], rescope: [], confirmed: [], pending: failingIds, confirmSpend: {} };
+      return false;
     }
-    state = { ...state, requestNoteId: posted.data.id };
+    const noteId = posted.data.id;
+    state = {
+      ...state,
+      requestNoteId: state.requestNoteId ?? noteId,
+      requestedCases: { ...state.requestedCases, ...Object.fromEntries(cases.map((c) => [c.id, noteId])) },
+    };
     persist(iid, 'verifyCases', state);
     const mentions = await mentionsFor('verifyCases');
-    await notifySlack(journal, verifyCaseGateAskText(journal, posted.data.id, mentions, failing.length), true);
-    log.phase(`verify-case QA decision requested on #${iid}`, { note: posted.data.id, cases: failing.length });
-    return { verdict: 'actionable', apply: [], rescope: [], confirmed: [], pending: failingIds, confirmSpend: {} };
+    await notifySlack(asked, verifyCaseGateAskText(asked, noteId, mentions, cases.length), true);
+    log.phase(`verify-case QA decision requested on #${iid}`, { note: noteId, cases: cases.length, followUp });
+    return true;
+  };
+
+  const since = state.requestNoteId;
+  if (since == null) {
+    await ask(failing, false);
+    return nothingYet;
   }
 
   const notes = await issueNotes(iid);
   if (!notes.ok || !notes.data) {
     log.warn('verify-case gate could not read the ticket comments — will retry next tick', { iid });
-    return { verdict: 'actionable', apply: [], rescope: [], confirmed: [], pending: failingIds, confirmSpend: {} };
+    return nothingYet;
   }
   const noteData = notes.data;
 
-  // Every directive per case, across every qualified reply, in the order sent.
-  const replies = repliesAfter(noteData, state.requestNoteId).filter((r) => mayApprove(r, 'verifyCases'));
-  const perCase = new Map<
-    string, Array<{ verdict: VerifyVerdict; by: string | null; raw: string; noteId: number }>
-  >();
-  for (const r of replies) {
-    for (const d of parseVerifyDirectives(r.text, failingIds)) {
-      const arr = perCase.get(d.caseId) ?? [];
-      arr.push({ verdict: d.verdict, by: r.user, raw: d.raw, noteId: r.id });
-      perCase.set(d.caseId, arr);
-    }
-  }
+  // A case that began failing after the standing request was posted was never
+  // asked about, so no reply can settle it. Ask about it now, in its own note.
+  state = { ...state, requestedCases: verifyCaseFloors(state, noteData) };
+  const unasked = failing.filter((c) => state.requestedCases![c.id] == null);
+  if (unasked.length) await ask(unasked, true);
+
+  // Every directive per case, across every qualified reply after the note that asked it.
+  const replies = repliesAfter(noteData, since).filter((r) => mayApprove(r, 'verifyCases'));
+  const perCase = verifyDirectivesByCase(replies, failingIds, state.requestedCases ?? {});
 
   const missing: Record<string, { oursNoteId: number; rerunDone?: boolean }> = { ...(journal.verifyMissingSteps ?? {}) };
   const confirmedState: Record<string, ConfirmState> = { ...(journal.verifyConfirmed ?? {}) };
