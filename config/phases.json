@@ -193,7 +193,8 @@
       "skills": [
         "erp-code-review",
         "dead-code-sweep",
-        "ponytail-review"
+        "ponytail-review",
+        "review-threads"
       ],
       "labelSkills": {
         "Beta": "beta-version-toggle"
@@ -222,6 +223,7 @@
       "onDemand": true,
       "coding": true,
       "skills": [
+        "review-threads",
         "ponytail",
         "django-backend-standards",
         "django-migration-standards",

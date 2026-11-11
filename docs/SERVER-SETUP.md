@@ -131,7 +131,7 @@ FAIL stops the run.
 
 | Step | Check | Do |
 |---|---|---|
-| credentials | an https clone is needed and git has no credential for the host | `credential.<origin>.helper store` + `~/.git-credentials` (0600) from the GitLab token |
+| credentials | an https clone is needed and git has no credential for the host (after `setup-server.sh` it has: `scripts/git-credential-oneshot.cjs`, below) | `credential.<origin>.helper store` + `~/.git-credentials` (0600) from the GitLab token |
 | clone | `WORK_REPO/.git` exists | `git clone GITLAB_REPO_URL` |
 | venv | `venv/bin/python` is 3.12 and `requirements/base.txt` hash = `venv/.oneshot-requirements.sha256` | `python3.12 -m venv venv`, `pip install -r requirements/base.txt` |
 | npm | `package-lock.json` hash = `node_modules/.oneshot-lock.sha256` | `npm ci` |
@@ -268,3 +268,25 @@ Accounts live in `state/dashboard-users.json` (scrypt hashes, mode 0600). Sessio
 are signed with `ONESHOT_DASHBOARD_TOKEN`, so changing the token signs everyone out. Five wrong
 passwords from one address lock it out for 15 minutes. Scripts can still pass the token as a
 Basic-auth password.
+
+## Git, GitLab tools and Django tests inside a phase session
+
+A phase session's environment is an allowlist and carries no GitLab token. Three things make a
+session work on the server anyway; `setup-server.sh` and the conductor set all three up.
+
+- **git over https.** `setup-server.sh` points `credential.<origin>.helper` at
+  `scripts/git-credential-oneshot.cjs`, which answers git with the token from the environment
+  (the conductor) or from `/srv/oneshot/.env` (everything the conductor starts). The token is
+  never in a session's environment, and `hooks/git-guard.cjs` refuses `git credential …` from a
+  session. Check it as a session would see it, from an empty environment:
+  `sudo -u oneshot -H env -i HOME=/home/oneshot PATH=/usr/bin:/bin git -C /srv/erp ls-remote origin HEAD`.
+- **GitLab MCP tools.** `npm run deps:verify` must print `server serves tools a session accepts`.
+  It fails when the hoisted `zod` is 4.x (`npm ls zod`): `@zereight/mcp-gitlab` then lists every
+  tool with an empty schema and the Claude CLI discards the whole list, while still reporting the
+  server `connected`. `package.json` pins zod 3; `npm ci` restores it. The conductor runs the same
+  probe at boot and logs `gitlab mcp …` either way.
+- **Django tests.** The app repo's `hrdb/test_settings.py` hardcodes a `postgres` superuser the
+  server does not have. Every worktree is seeded with `hrdb/test_settings_oneshot.py` (from
+  `config/erp/test_settings.template.py`): the same settings on the connection in
+  `hrdb/local_settings.py`, so `manage.py test … --settings=hrdb.test_settings_oneshot --noinput`
+  runs as the `oneshot` role (which needs `CREATEDB`) against a test database of the run's own.

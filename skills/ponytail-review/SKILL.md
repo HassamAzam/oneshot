@@ -6,7 +6,8 @@ description: >
   speculative abstractions. Complements correctness-focused review and
   dead-code-sweep — does NOT flag dead code (dead-code-sweep handles that).
   Outputs in the same {id, severity, file, line, what, why, fix} schema the
-  review phase uses, so findings integrate into the structured findings.json.
+  review phase uses, so its findings are raised with the rest — each as its own
+  thread on the merge request, for the fixer to answer (see review-threads).
 ---
 
 # Ponytail Review — over-engineering sweep
