@@ -125,6 +125,10 @@ export function probeStdioServer(
     });
     child.stderr?.on('data', (d) => { if (stderr.length < 2000) stderr += String(d); });
     child.on('error', (err) => done(failed(`spawn failed: ${err.message}`)));
+    // A server that dies before reading its stdin turns the writes below into an
+    // EPIPE, raised as an 'error' EVENT on the stream — not thrown from write().
+    // Unheard, it is an uncaught exception, and this runs inside the conductor.
+    child.stdin?.on('error', () => { /* the exit handler reports */ });
     child.on('exit', (code) => done(failed(`exited early (code ${code}) ${stderr.trim().slice(0, 160)}`)));
 
     const send = (o: unknown): void => {

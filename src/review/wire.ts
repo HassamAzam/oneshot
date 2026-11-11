@@ -6,8 +6,8 @@
 import { DRY_RUN, envOr } from '../lib/config.js';
 import { readArtifact, writeArtifact } from '../lib/artifacts.js';
 import {
-  allMrDiscussions, createMrDiscussion, getMergeRequest, mergeRequestDiffs, replyToMrDiscussion,
-  setMrDiscussionResolved, type GitlabResult, type MrDiff,
+  allMrDiscussions, createMrDiscussion, currentUsername, getMergeRequest, mergeRequestDiffs,
+  replyToMrDiscussion, setMrDiscussionResolved, type GitlabResult, type MrDiff,
 } from '../lib/gitlab.js';
 import { log } from '../lib/log.js';
 import { liveOpenThreads } from './ledger.js';
@@ -43,11 +43,16 @@ const gone = (res: GitlabResult<unknown>): boolean => res.kind === 'notfound';
 
 /** GitLab, as the loop needs it, for one merge request. */
 export function reviewApiFor(mrIid: number): ReviewApi {
-  // Read once per API object: the diff does not change between the threads of one flush.
-  let diffs: Promise<MrDiff[] | null> | null = null;
-  const diffFiles = (): Promise<MrDiff[] | null> => {
-    diffs ??= mergeRequestDiffs(mrIid).then((r) => (r.ok && r.data ? r.data.files : null));
-    return diffs;
+  // The diff is read once per head: it does not change between the threads of
+  // one flush, and it does the moment the fixer's commits are pushed — this
+  // object outlives that push. A read that failed is not kept.
+  let diffs: { head: string; files: MrDiff[] } | null = null;
+  const diffFiles = async (head: string): Promise<MrDiff[] | null> => {
+    if (diffs?.head === head) return diffs.files;
+    const r = await mergeRequestDiffs(mrIid);
+    if (!r.ok || !r.data) return null;
+    diffs = { head, files: r.data.files };
+    return diffs.files;
   };
 
   return {
@@ -56,9 +61,12 @@ export function reviewApiFor(mrIid: number): ReviewApi {
       return res.ok && res.data ? res.data : null;
     },
 
+    self: () => currentUsername(),
+
     async createThread(at, body) {
-      const [mr, files] = await Promise.all([getMergeRequest(mrIid), diffFiles()]);
+      const mr = await getMergeRequest(mrIid);
       const refs = mr.ok ? mr.data?.diff_refs ?? null : null;
+      const files = refs ? await diffFiles(refs.head_sha) : null;
       const where = refs && files ? diffLineFor(files, at.file, at.line) : null;
       if (refs && where) {
         const pinned = await createMrDiscussion(mrIid, body(true), {

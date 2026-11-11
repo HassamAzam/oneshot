@@ -888,7 +888,9 @@ export function qualityGate(ctx: CodePhaseCtx): string | null {
   // and a verdict that outlived the fix it asked for has refused a merge here
   // before. Only a run the OLD loop reviewed, which has no ledger and no
   // threads to read, is still held to what its last review recorded.
-  if (readReviewLedger(iid)) return null;
+  // With the loop switched off (ONESHOT_REVIEW_THREADS=0) that live check is off
+  // too, so the file is the gate again — ledger or no ledger.
+  if (reviewThreadsEnabled() && readReviewLedger(iid)) return null;
 
   const review = fromPrior<{
     verdict?: string; findings?: Array<{ id?: string; severity?: string }>;

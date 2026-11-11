@@ -26,11 +26,19 @@ test('a case made of the project\'s own test run is code-level, however it is wo
 });
 
 test('a linter, a type check or a build as the check is code-level too', () => {
-  assert.equal(codeLevelTool(ui({ scenario: 'Verify that flake8 reports nothing on the changed files' })), 'flake8');
+  assert.equal(codeLevelTool(ui({ steps: ['Check that flake8 reports nothing on the changed files'] })), 'flake8');
   assert.equal(codeLevelTool(ui({ expected: 'pylint exits 0' })), 'pylint');
-  assert.equal(codeLevelTool(ui({ steps: ['npx eslint frontend/src/teams'] })), 'eslint');
-  assert.equal(codeLevelTool(ui({ steps: ['Run npx tsc --noEmit'] })), 'tsc');
+  assert.equal(codeLevelTool(ui({ steps: ['npx eslint frontend/src/teams'] })), 'a lint or type check');
+  assert.equal(codeLevelTool(ui({ steps: ['Run tsc --noEmit'] })), 'tsc');
   assert.equal(codeLevelTool(ui({ steps: ['npm run build'] })), 'a build or lint script');
+  // A command line is the check wherever the case writes it, its title included.
+  assert.equal(codeLevelTool(ui({ scenario: 'npm run lint passes on the new component' })), 'a build or lint script');
+});
+
+test('a UI case whose title only mentions a tool stays in the list', () => {
+  // The case is browser steps; the title says where the bug was first seen.
+  assert.equal(codeLevelTool(ui({ scenario: 'Regression for the bug the Jest snapshot missed: adding a team' })), null);
+  assert.equal(codeLevelTool(ui({ scenario: 'Team name that pytest fixtures never covered (unicode)' })), null);
 });
 
 test('a UI case is a UI case', () => {

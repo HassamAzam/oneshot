@@ -117,6 +117,15 @@ expect_deny  "the helper run by hand"  git-guard.cjs "$(bash_payload 'node /srv/
 expect_deny  "the helper run by hand, relative" \
                                        git-guard.cjs "$(bash_payload 'echo host=x | node scripts/git-credential-oneshot.cjs get')"
 expect_deny  "a helper binary by name" git-guard.cjs "$(bash_payload 'git-credential-cache get')"
+expect_deny  "git -c k=v credential fill" git-guard.cjs "$(bash_payload 'git -c core.askPass= credential fill')"
+expect_deny  "a helper of the session's own, by -c" \
+                                       git-guard.cjs "$(bash_payload 'git -c credential.helper=store fetch origin dev')"
+expect_deny  "a helper of the session's own, by config" \
+                                       git-guard.cjs "$(bash_payload 'git config --global credential.https://gitlab.example.com.helper store')"
+expect_deny  "trace redaction switched off" \
+                                       git-guard.cjs "$(bash_payload 'GIT_TRACE_REDACT=0 GIT_TRACE_CURL=1 git fetch origin dev')"
+expect_allow "a traced fetch, redacted by default" \
+                                       git-guard.cjs "$(bash_payload 'GIT_TRACE=1 git fetch origin dev')"
 expect_allow "fetch and push still authenticate through it" \
                                        git-guard.cjs "$(bash_payload 'git fetch origin dev && git push origin oneshot/ticket-0-verify')"
 expect_allow "reading which helper is configured" \

@@ -722,6 +722,19 @@ function denyCredential(seg) {
   );
 }
 
+/** Global options of `git` itself that take their value as the next token. */
+const GIT_VALUE_OPTS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--config-env']);
+
+/** The subcommand of a tokenised git call, stepping over git's own options and their values. */
+function gitSubcommand(t) {
+  for (let i = 1; i < t.length; i += 1) {
+    if (GIT_VALUE_OPTS.has(t[i])) { i += 1; continue; }
+    if (t[i].startsWith('-')) continue;
+    return t[i];
+  }
+  return '';
+}
+
 function checkCwd(cmd) {
   const wt = leasedWorktree();
   if (!wt) return;
@@ -789,9 +802,20 @@ try {
           && t.slice(1).some((a) => /(^|\/)git-credential-[\w-]+\.c?js$/.test(a)));
       if (helperByHand) denyCredential(seg);
 
+      // Trace output with redaction switched off prints the Authorization header.
+      if (/\bGIT_TRACE_REDACT\s*=/.test(seg)) denyCredential(seg);
+
       if (path.basename(t[0]) !== 'git') continue;
       const sub = t.find((a, i) => i > 0 && !a.startsWith('-') && t[i - 1] !== '-C');
-      if (sub && /^credential(-|$)/.test(sub)) denyCredential(seg);
+      // gitSubcommand, not `sub`: with `git -c key=value credential fill` the
+      // first bare token is the config value. And no session sets a helper of
+      // its own — git hands every configured helper the password on `store`.
+      if (/^credential(-|$)/.test(gitSubcommand(t))) denyCredential(seg);
+      const helperKey = /^credential\.(.*\.)?helper/i;
+      const setsHelper = t.some((a, i) => t[i - 1] === '-c' && helperKey.test(a))
+        || (gitSubcommand(t) === 'config' && t.some((a) => helperKey.test(a))
+          && !t.some((a) => ['--get', '--get-all', '--get-regexp', '--list', '-l', 'get', 'list'].includes(a)));
+      if (setsHelper) denyCredential(seg);
 
       checkConductorPhase(t);
       if (!governed.has(idx)) checkReadOnlyWorktreePhase(t);

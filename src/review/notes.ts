@@ -13,7 +13,9 @@ import { inertNoteText } from '../mrfeedback/respond.js';
 import { isBlocking, renderMarker, type ReviewMarker, type ReviewSeverity } from './markers.js';
 import type { ReviewThread } from './types.js';
 
-const clean = (text: string): string => inertNoteText(String(text ?? '').trim());
+// `<!--` is broken as well: these notes are told apart by a marker that is an
+// HTML comment, and model-written text must not be able to open one.
+const clean = (text: string): string => inertNoteText(String(text ?? '').trim()).replace(/<!--/g, '<\u200B!--');
 const short = (sha: string): string => String(sha ?? '').slice(0, 8);
 
 /** The note that opens a thread: the finding, written to be read on the MR by a person. */

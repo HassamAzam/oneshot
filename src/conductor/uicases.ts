@@ -23,19 +23,34 @@
  */
 import type { TestCase } from '../phases/types.js';
 
-/** A tool whose invocation is the check itself, with the name it is reported under. */
-const CODE_LEVEL: Array<[RegExp, string]> = [
+/**
+ * A command line that IS the check, with the name it is reported under. These
+ * are invocations — a runner with its verb — so they count wherever a case
+ * writes one: in what it does or in what it expects.
+ */
+const INVOCATIONS: Array<[RegExp, string]> = [
   [/\bmanage\.py\s+test\b/i, 'manage.py test'],
   [/\bpython3?\s+-m\s+(pytest|unittest)\b/i, 'pytest'],
-  [/\bpytest\b/i, 'pytest'],
-  [/\b(npx\s+|yarn\s+)?jest\b/i, 'jest'],
+  [/\b(npx|yarn|pnpm)\s+jest\b/i, 'jest'],
   [/\b(npm|yarn|pnpm)\s+(run\s+)?test\b/i, 'npm test'],
   [/\bcoverage\s+run\b/i, 'coverage'],
+  [/\bnpx\s+(eslint|tsc)\b/i, 'a lint or type check'],
+  [/\b(npm|yarn|pnpm)\s+run\s+(build|lint|check)\b/i, 'a build or lint script'],
+];
+
+/**
+ * A tool's bare name. A step that names one is running it, and an expected
+ * result that names one is reading its output; a SCENARIO that names one is
+ * usually talking about it ("the bug the Jest snapshot missed"), and a UI case
+ * must not be dropped for its title.
+ */
+const TOOLS_BY_NAME: Array<[RegExp, string]> = [
+  [/\bpytest\b/i, 'pytest'],
+  [/\bjest\b/i, 'jest'],
   [/\bflake8\b/i, 'flake8'],
   [/\bpylint\b/i, 'pylint'],
-  [/\b(npx\s+)?eslint\b/i, 'eslint'],
-  [/\b(npx\s+)?tsc\b/, 'tsc'],
-  [/\b(npm|yarn|pnpm)\s+run\s+(build|lint|check)\b/i, 'a build or lint script'],
+  [/\beslint\b/i, 'eslint'],
+  [/\btsc\b/, 'tsc'],
 ];
 
 /**
@@ -44,9 +59,11 @@ const CODE_LEVEL: Array<[RegExp, string]> = [
  * the precondition.
  */
 export function codeLevelTool(c: Pick<TestCase, 'scenario' | 'steps' | 'expected'>): string | null {
-  const text = [c.scenario, ...(Array.isArray(c.steps) ? c.steps : []), c.expected]
-    .map((x) => String(x ?? '')).join('\n');
-  for (const [re, name] of CODE_LEVEL) if (re.test(text)) return name;
+  const steps = (Array.isArray(c.steps) ? c.steps : []).map((x) => String(x ?? '')).join('\n');
+  const text = [String(c.scenario ?? ''), steps, String(c.expected ?? '')].join('\n');
+  for (const [re, name] of INVOCATIONS) if (re.test(text)) return name;
+  const doesAndExpects = [steps, String(c.expected ?? '')].join('\n');
+  for (const [re, name] of TOOLS_BY_NAME) if (re.test(doesAndExpects)) return name;
   return null;
 }
 

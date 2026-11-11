@@ -166,6 +166,23 @@ test('a run reviewed as MR threads is not refused by a stale findings.json', () 
   assert.equal(qualityGate(ctx({})), null, 'the live threads decide, in mergePhase');
 });
 
+test('with the thread loop switched off, findings.json is the gate again even beside a ledger', () => {
+  // ONESHOT_REVIEW_THREADS=0 also switches off the live check in mergePhase. A
+  // ledger left by an earlier lap must not then excuse the review altogether.
+  cleanup();
+  writeArtifact(IID, 'verify.json', CLEAN_VERIFY);
+  writeArtifact(IID, 'findings.json', BLOCKED_REVIEW);
+  writeArtifact(IID, 'review-threads.json', LEDGER);
+  const before = process.env.ONESHOT_REVIEW_THREADS;
+  process.env.ONESHOT_REVIEW_THREADS = '0';
+  try {
+    assert.match(qualityGate(ctx({})) ?? '', /F-1 \[blocker\]/);
+  } finally {
+    if (before === undefined) delete process.env.ONESHOT_REVIEW_THREADS;
+    else process.env.ONESHOT_REVIEW_THREADS = before;
+  }
+});
+
 test('a run the old loop reviewed, with no ledger, is still held to its last review', () => {
   cleanup();
   writeArtifact(IID, 'verify.json', CLEAN_VERIFY);

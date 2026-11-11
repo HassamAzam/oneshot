@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyBaseCheck, applyStandingDecisions, baseCheckOutcome, codePhaseStatus, decideClaim, doneLabelSwap,
-  failedCases, isRepark,
+  failedCases, isRepark, phasesStaleSince,
   mergePollWait, recordedVerifyVerdict,
   mergeScopedVerify, nextIndex, refusalIsFinal, remediationFreeze, salvagedReview,
   sharedDatabaseRefusal, statusForFailure, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
@@ -164,6 +164,19 @@ test('the run goes through once the poll window is due', () => {
 // over. #9174 logged 62 `run_finished` events, 62 report rewrites and 62 trace
 // exports for four waits, because every "not yet" was recorded as a run ending.
 const GATE = 'awaiting test-case approval — a QA reviewer comments `approved` on the ticket';
+
+// The review loop is left and re-entered — a retry, a park, a restart — between
+// its fixer committing and its reviewer accepting. What the fixer overtook is
+// read from when it committed, not from HEAD on the pass that happens to finish.
+test('a phase that passed before the fixer last committed is stale; one that ran after is not', () => {
+  const rec = (phase: string, status: string, startedAt: number) => ({ phase, status: status as 'ok', startedAt });
+  const phases = [rec('verify', 'ok', 100), rec('ui-evidence', 'failed', 150), rec('mr', 'warned', 400)];
+  assert.deepEqual(phasesStaleSince(['verify', 'ui-evidence', 'mr'], phases, 300), ['verify']);
+  // No fixer commit on record: nothing was overtaken.
+  assert.deepEqual(phasesStaleSince(['verify', 'ui-evidence', 'mr'], phases, undefined), []);
+  // The latest passing record is the one that counts.
+  assert.deepEqual(phasesStaleSince(['verify'], [...phases, rec('verify', 'ok', 500)], 300), []);
+});
 
 test('a parked run put back for the same reason, with no phase run, is a re-park', () => {
   assert.equal(isRepark({ wasParked: true, parkedWhy: GATE, reason: GATE, phasesAtClaim: 7, phasesNow: 7 }), true);

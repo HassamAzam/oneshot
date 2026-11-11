@@ -38,7 +38,7 @@ const ACTIONS: readonly ReviewAction[] = [
   'raised', 'fixed', 'declined', 'reopened', 'withdrawn', 'accepted', 'stands', 'closed',
 ];
 
-const MARKER_RE = /<!--\s*oneshot:review((?:\s+[a-z]+=[A-Za-z0-9_.:-]+)+)\s*-->/;
+const MARKER_RE = /<!--\s*oneshot:review((?:\s+[a-z]+=[A-Za-z0-9_.:-]+)+)\s*-->/g;
 const SAFE_VALUE = /^[A-Za-z0-9_.:-]+$/;
 
 /** Anything this loop posted, whatever it says. The cheap test for "not a person's note". */
@@ -64,7 +64,11 @@ export function renderMarker(m: ReviewMarker): string {
 /** The marker in a note body, or null when there is none or it is malformed. */
 export function parseMarker(body: string | null | undefined): ReviewMarker | null {
   if (typeof body !== 'string') return null;
-  const m = MARKER_RE.exec(body);
+  // The LAST one: every note this loop writes ends with its marker, and what
+  // comes before it is a finding or a reply — text a model wrote about code
+  // that may itself quote a marker.
+  const all = [...body.matchAll(MARKER_RE)];
+  const m = all[all.length - 1];
   if (!m) return null;
   const f: Record<string, string> = {};
   for (const pair of m[1]!.trim().split(/\s+/)) {

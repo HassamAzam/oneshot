@@ -1169,6 +1169,28 @@ export function recordedVerifyVerdict(o: {
   return fixedSince ? 'run' : 'cycle';
 }
 
+/**
+ * The already-passed phases a later fixer commit has overtaken.
+ *
+ * `candidates` are the phases after `review`, in order; one is stale when its
+ * last passing record started before `fixedAt`, the moment the review loop last
+ * saw its fixer change the branch (ReviewLedger.fixedAt). Asked of the records
+ * rather than of HEAD-at-entry, so the answer is the same on the pass that ran
+ * the fixer and on a later one that only finished the review.
+ */
+export function phasesStaleSince(
+  candidates: string[],
+  phases: Array<Pick<PhaseRecord, 'phase' | 'status' | 'startedAt'>>,
+  fixedAt: number | undefined,
+): string[] {
+  if (!fixedAt) return [];
+  return candidates.filter((name) => {
+    const passed = phases.filter((r) => r.phase === name && (r.status === 'ok' || r.status === 'warned' || r.status === 'skipped'));
+    const last = passed[passed.length - 1];
+    return last !== undefined && last.startedAt < fixedAt;
+  });
+}
+
 export function nextIndex(
   control: Exclude<Control, { kind: 'stop' }>,
   current: number,
@@ -1945,11 +1967,17 @@ export async function runTicket(
     // reads where it stands from the MR and its ledger, never from how it got
     // here. After the test-case gate above, which still holds it back.
     if (phase.name === 'review' && reviewThreads()) {
+      const recordsBefore = j.phases.length;
       const control = await driveReviewLoop(phase, i);
       forced.delete(phase.name);
-      await updateCard(j.slackTs ?? '', cardState(j));
-      await publishPending({ iid, runId, journal: j });
       j = readJournal(iid) ?? j;
+      // Only when the pass did something. A parked review is re-entered every
+      // tick to read the merge request, and a card update from a journal the
+      // claim has just flipped to 'running' would show a waiting run as working.
+      if (j.phases.length !== recordsBefore) {
+        await updateCard(j.slackTs ?? '', cardState(j));
+        await publishPending({ iid, runId, journal: j });
+      }
       if (opts.signal?.aborted) return finish(j, 'aborted', 'the conductor asked this run to stop');
       if (control === null) { i += 1; continue; }
       if (control.kind === 'stop') {
@@ -2912,10 +2940,10 @@ export async function runTicket(
           + 'ONESHOT_REVIEW_THREADS=0 to review through implement as before',
       };
     }
-    const leaseError = ensureLeases(p);
-    if (leaseError) return { kind: 'stop', status: 'blocked', reason: leaseError };
-
-    const headAtEntry = revParse(wt, 'HEAD');
+    // No lease is taken here. A parked review is re-entered on every tick only
+    // to read the merge request, and ensureLeases brings the app up: taken at
+    // entry it leased a port and started a dev server once a minute, for a pass
+    // that re-parks and releases the lease. Each session takes its own, below.
     /** A stop only the session's own result can call for: a usage limit, an account notice, a `blocked`. */
     let halt: Control | null = null;
 
@@ -2924,6 +2952,11 @@ export async function runTicket(
       if (!quota.allowed) {
         halt = { kind: 'stop', status: 'blocked', reason: `quota: ${quota.reason}` };
         return { ok: false, why: `quota: ${quota.reason}`, infra: false };
+      }
+      const leaseError = ensureLeases(cfgS);
+      if (leaseError) {
+        halt = { kind: 'stop', status: 'blocked', reason: leaseError };
+        return { ok: false, why: leaseError, infra: false };
       }
       await updateCard(j.slackTs ?? '', cardState(j, [cfgS.name]));
       updateRun(runId, { phase: cfgS.name, status: 'running', owner_seen_at: Date.now() });
@@ -2988,8 +3021,10 @@ export async function runTicket(
       push: () => pushRunBranch(wt, branch),
       stopping: () => Boolean(opts.signal?.aborted) || existsSync(PAUSE),
       announcePark: async (body) => {
-        await addIssueNote(iid, body);
+        const note = await addIssueNote(iid, body);
+        if (!note.ok) return false; // not said yet: the next pass tries again
         await thread(j.slackTs ?? null, `#${iid} — code review needs a person: open thread(s) on !${mrIid}`);
+        return true;
       },
       info: (line) => log.phase(line),
     });
@@ -3000,7 +3035,10 @@ export async function runTicket(
     const raised = ledger?.threads.length ?? 0;
     const open = ledger?.threads.filter((t) => !t.resolved).length ?? 0;
     const view = reviewArtifact(ledger, `Code review on !${mrIid}: ${raised} thread(s) raised, ${open} open.`);
-    writeArtifact(iid, p.artifact ?? 'findings.json', view);
+    // Only when it says something new: a parked run comes through here every
+    // tick, and a rewrite a minute makes the file look freshly graded.
+    const viewFile = p.artifact ?? 'findings.json';
+    if (JSON.stringify(readArtifact(iid, viewFile)) !== JSON.stringify(view)) writeArtifact(iid, viewFile, view);
     prior[p.name] = view;
 
     const lastReview = (): PhaseRecord | undefined => [...j.phases].reverse().find((rec) => rec.phase === p.name);
@@ -3018,13 +3056,16 @@ export async function runTicket(
         if (last !== 'ok' && last !== 'warned') mark('warned', 'the open review threads were settled on the merge request');
         // The fixer committed after phases that had already passed (a review
         // forced again late in a run): what they checked is no longer the code.
-        if (headAtEntry !== revParse(wt, 'HEAD')) {
-          const stale = list.slice(index + 1)
-            .filter((t) => !t.onDemand && t.name !== 'testcases' && !CODE_PHASES[t.name] && phaseSettled(iid, t.name))
-            .map((t) => t.name);
-          for (const name of stale) forced.add(name);
-          if (stale.length) log.warn(`review-fix changed the code — re-running ${stale.join(', ')}`);
-        }
+        // Read from the ledger's record of the fixer's last commit, not from
+        // HEAD at entry: the loop is re-entered after a retry, a park or a
+        // restart, and by then the commit is no longer "since entry".
+        const stale = phasesStaleSince(
+          list.slice(index + 1).filter((t) => !t.onDemand && t.name !== 'testcases' && !CODE_PHASES[t.name])
+            .map((t) => t.name),
+          j.phases, ledger?.fixedAt,
+        );
+        for (const name of stale) forced.add(name);
+        if (stale.length) log.warn(`review-fix changed the code — re-running ${stale.join(', ')}`);
         if (isMilestone(p)) await thread(j.slackTs ?? null, milestoneText(p, view, iid));
         return null;
       }
@@ -4061,6 +4102,9 @@ export async function runTicket(
       status: 'parked', ended_at: journal.stoppedAt ?? Date.now(), blocked_why: reason,
       owner_seen_at: Date.now(),
     });
+    // Normally nothing is leased on this path. If something on the way here took
+    // a lease, its server goes with it, by the same test finish() applies.
+    if (journal.port !== undefined && portHeldBy(journal.runId) === journal.port) reapPortServer(journal.port);
     releasePort(journal.runId);
     releasePromotion(journal.runId);
     log.info(`#${journal.iid} still parked — ${reason.split('\n')[0]!.slice(0, 110)}`);

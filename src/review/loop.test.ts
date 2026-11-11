@@ -34,6 +34,8 @@ class FakeMr implements ReviewApi {
     return this.down ? null : JSON.parse(JSON.stringify(this.discussionsList)) as MrDiscussion[];
   }
 
+  async self(): Promise<string | null> { return BOT; }
+
   async createThread(at: { file: string; line: number }, body: (positioned: boolean) => string) {
     if (this.failCreate > 0) { this.failCreate -= 1; return null; }
     const positioned = !this.refusePosition && at.line < 500;
@@ -251,6 +253,37 @@ test('a blocker the fixer declines and the reviewer upholds parks the run with o
   assert.match(w.parks[0]!, /merge_requests\/11307#note_100/);
   // Only one fixer lap was spent: the loop did not burn the other two disagreeing.
   assert.equal(w.fixerInputs.length, 1);
+});
+
+test('a park note that did not land is posted on the next pass, not forgotten', async () => {
+  const w = world({
+    reviews: [{ findings: [F('F-05', 'major')] }, { findings: [], threads: [{ id: 'F-05', ruling: 'stands', note: 'no' }] }],
+    fixes: [{ threads: [{ id: 'F-05', action: 'declined', reply: 'no', commit: '' }] }],
+  });
+  let gitlabUp = false;
+  w.deps.announcePark = async (body) => { if (!gitlabUp) return false; w.parks.push(body); return true; };
+  assert.equal((await driveReview(w.deps)).kind, 'parked');
+  assert.equal(w.parks.length, 0);
+  gitlabUp = true;
+  assert.equal((await driveReview(w.deps)).kind, 'parked');
+  assert.equal((await driveReview(w.deps)).kind, 'parked');
+  assert.equal(w.parks.length, 1, 'once it lands it is not repeated');
+});
+
+test('the ledger records when the fixer last changed the branch, and a pass that changes nothing writes nothing', async () => {
+  const w = world({
+    reviews: [{ findings: [F('F-01', 'major')] }, { findings: [], threads: [{ id: 'F-01', ruling: 'accepted', note: '' }] }],
+    fixes: [{ threads: [{ id: 'F-01', action: 'fixed', reply: 'Done.', commit: 'b2' }], commit: 'b2' }],
+  });
+  const t0 = Date.now();
+  assert.equal((await driveReview(w.deps)).kind, 'done');
+  assert.ok((w.ledger?.fixedAt ?? 0) >= t0, 'what later phases are judged stale against');
+  // Settled: a later pass reads the merge request and saves nothing.
+  let saves = 0;
+  const save = w.deps.save;
+  w.deps.save = (l) => { saves += 1; save(l); };
+  assert.equal((await driveReview(w.deps)).kind, 'done');
+  assert.equal(saves, 0);
 });
 
 test('while it waits, a parked review runs no session and repeats no note', async () => {

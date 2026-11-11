@@ -834,6 +834,20 @@ export function mrDiscussions(mrIid: number): Promise<GitlabResult<MrDiscussion[
   return call<MrDiscussion[]>('GET', `/projects/${projectId()}/merge_requests/${mrIid}/discussions?per_page=100`);
 }
 
+let selfName: string | null = null;
+
+/**
+ * The username the WRITE token acts as — the account every note this process
+ * posts is authored by. Null when GitLab would not say; a failure is not
+ * remembered, so the next caller asks again.
+ */
+export async function currentUsername(): Promise<string | null> {
+  if (selfName) return selfName;
+  const res = await call<{ username?: string }>('GET', '/user', undefined, true);
+  if (res.ok && res.data?.username) selfName = res.data.username;
+  return selfName;
+}
+
 /** Enough for any real review (2,000 threads); only here so a misbehaving API cannot loop forever. */
 const MAX_DISCUSSION_PAGES = 20;
 

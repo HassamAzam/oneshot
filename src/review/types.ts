@@ -110,6 +110,12 @@ export interface ReviewLedger {
   pushOwed?: boolean;
   /** The set of open threads the last "needs a person" note listed, so it is posted once per set. */
   parkNoted?: string;
+  /**
+   * When the loop last saw its fixer change the branch (epoch ms). A phase that
+   * passed before this checked code that has since moved, however many times
+   * the loop was left and re-entered in between.
+   */
+  fixedAt?: number;
 }
 
 /** A finding as the reviewer session returns it (FINDINGS_SCHEMA). */
@@ -170,6 +176,8 @@ export interface FixPromptInput {
 export interface ReviewApi {
   /** Every discussion on the MR, or null when GitLab could not be read. */
   discussions(): Promise<MrDiscussion[] | null>;
+  /** The username this run posts as, or null when GitLab would not say. */
+  self(): Promise<string | null>;
   /**
    * Open a thread at `file:line`: on the diff line when GitLab will take it
    * there, on the MR as a whole otherwise. `body` is asked for the note text

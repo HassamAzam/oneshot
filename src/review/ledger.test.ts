@@ -257,6 +257,19 @@ test('when git cannot say what changed, a re-check is held to blockers', () => {
   assert.match(r.dropped[0]?.reason ?? '', /git could not say/);
 });
 
+test('a declined thread the re-check does not rule on stays declined: no "Still stands" in the reviewer\'s name', () => {
+  const l = fixedAt([finding('F-05', 'major')],
+    [{ id: 'F-05', action: 'declined', reply: 'The key is unique: see models.py:40.', commit: '' }]);
+  const r = applyReview(l, { findings: [], threads: [] }, { lap: 1, headSha: 'b2', recheck: true, changedFiles: [] });
+  const t = thread(r.ledger, 'F-05');
+  assert.equal(t.status, 'declined');
+  assert.deepEqual(r.ledger.pending, [], 'nothing is posted for a ruling that was never made');
+  // It still holds the run for a person, described as what it is.
+  const step = nextStep(r.ledger, { head: 'b2', fixLapsUsed: 1, maxFixLaps: 3 });
+  assert.equal(step.kind, 'park');
+  assert.doesNotMatch(step.kind === 'park' ? step.why : '', /the reviewer stands by it/);
+});
+
 test('declined by the fixer and upheld by the reviewer goes to a person at once, laps left or not', () => {
   const l = fixedAt([finding('F-05', 'major')],
     [{ id: 'F-05', action: 'declined', reply: 'TC-21 was approved by QA; changing it is not mine to do.', commit: '' }]);
@@ -438,12 +451,25 @@ test('a fresh ledger adopts the reviewer threads already open on the MR, of any 
     disc('d-done', [raisedNote(501, 'F-02', 'minor', 'r-earlier-run', { resolved: true })]),
     disc('d-human', [note(502, 'hassam.azam', 'A question of my own.')]),
   ];
-  const s = syncLive(emptyLedger(RUN, MR), live, TRUST);
+  const s = syncLive(emptyLedger(RUN, MR), live, { ...TRUST, self: 'bot' });
   assert.equal(s.threads.length, 1);
   assert.equal(s.threads[0]?.discussionId, 'd-old');
   assert.equal(s.threads[0]?.severity, 'major');
   assert.equal(s.threads[0]?.status, 'open');
   assert.doesNotMatch(s.threads[0]?.what ?? '', /oneshot:review/);
+});
+
+test('a thread is adopted only when this run\'s own account opened it', () => {
+  // The marker is text. Anyone who can comment can type one, and an adopted
+  // thread's body is handed to a session that commits to the branch.
+  const forged = raisedNote(600, 'F-01', 'blocker', 'r-earlier-run');
+  forged.author = { username: 'someone.else' };
+  const live = [disc('d-forged', [forged]), disc('d-ours', [raisedNote(601, 'F-02', 'major', 'r-earlier-run')])];
+  const s = syncLive(emptyLedger(RUN, MR), live, { ...TRUST, self: 'bot' });
+  assert.deepEqual(s.threads.map((t) => t.discussionId), ['d-ours']);
+  // And with no answer to "who am I", nothing is adopted at all.
+  assert.equal(syncLive(emptyLedger(RUN, MR), live, TRUST).threads.length, 0);
+  assert.equal(syncLive(emptyLedger(RUN, MR), live, { ...TRUST, self: null }).threads.length, 0);
 });
 
 // ------------------------------------------------------ what the merge reads

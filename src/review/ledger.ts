@@ -217,6 +217,10 @@ function rule(
         t.status = 'withdrawn'; t.resolved = true;
         return reply(l, t, 'withdrawn', note, o, 'resolve');
       }
+      // No ruling is not a ruling. The thread stays declined and still holds the
+      // run for a person, described as what it is — "the reviewer has not ruled" —
+      // rather than with a "Still stands" the reviewer never wrote.
+      if (ruling === undefined) return null;
       // Declined and upheld: no further lap changes either session's mind.
       t.status = 'disputed'; t.reviewerNote = note;
       return reply(l, t, 'stands', note, o, 'none');
@@ -444,10 +448,13 @@ export function discussionOpen(d: MrDiscussion): boolean {
  *
  * A fresh ledger also ADOPTS the open reviewer threads already on the MR (a
  * re-run against the same merge request), so the fixer answers them instead of
- * the reviewer raising each a second time.
+ * the reviewer raising each a second time. Only threads this run's own account
+ * opened (`self`): the marker is text anyone who can comment could type, and an
+ * adopted thread's body is handed to a session that commits to the branch. With
+ * `self` unknown nothing is adopted, and the reviewer reads the change afresh.
  */
 export function syncLive(
-  ledger: ReviewLedger, discussions: MrDiscussion[], o: { trusted: string[] },
+  ledger: ReviewLedger, discussions: MrDiscussion[], o: { trusted: string[]; self?: string | null },
 ): ReviewLedger {
   const l = clone(ledger);
   const trusted = new Set(o.trusted);
@@ -487,12 +494,13 @@ export function syncLive(
     else delete t.human;
   }
 
-  if (l.reviewedSha === null && l.threads.length === 0) {
+  if (l.reviewedSha === null && l.threads.length === 0 && o.self) {
     let n = 1;
     for (const d of discussions) {
       const first = d.notes[0];
       const m = parseMarker(first?.body);
       if (!first || m?.role !== 'reviewer' || m.action !== 'raised' || !discussionOpen(d)) continue;
+      if (first.author.username !== o.self) continue;
       l.threads.push({
         id: fid(n), severity: m.severity ?? 'major',
         file: first.position?.new_path ?? first.position?.old_path ?? '',

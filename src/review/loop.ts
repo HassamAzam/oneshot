@@ -56,8 +56,11 @@ export interface LoopDeps {
   push(): { ok: boolean; error?: string };
   /** The run was asked to stop, or is paused. Checked between steps, never mid-write. */
   stopping(): boolean;
-  /** Tell a person the review needs them. Called once per distinct set of open threads. */
-  announcePark(body: string): Promise<void>;
+  /**
+   * Tell a person the review needs them. Called once per distinct set of open
+   * threads; `false` means the note did not land, and it is tried again next pass.
+   */
+  announcePark(body: string): Promise<boolean | void>;
   info(line: string): void;
 }
 
@@ -108,8 +111,11 @@ export async function driveReview(d: LoopDeps): Promise<LoopOutcome> {
       continue; // read the merge request again now that it has changed
     }
 
-    l = syncLive(l, live, { trusted: d.trusted });
-    d.save(l);
+    const synced = syncLive(l, live, { trusted: d.trusted, self: await d.api.self() });
+    // Saved only when GitLab said something new: a parked run reads the merge
+    // request every tick, and most ticks it says what it said the last time.
+    if (JSON.stringify(synced) !== JSON.stringify(l)) d.save(synced);
+    l = synced;
 
     const used = d.fixLapsUsed();
     const next = nextStep(l, { head, fixLapsUsed: used, maxFixLaps: d.maxFixLaps });
@@ -137,13 +143,13 @@ export async function driveReview(d: LoopDeps): Promise<LoopOutcome> {
         // A fixer that died may still have committed. Those commits are on the
         // branch whatever became of its answer, so they are pushed and re-checked.
         if (after !== head) {
-          l = { ...l, pushOwed: true, recheckOwed: true };
+          l = { ...l, pushOwed: true, recheckOwed: true, fixedAt: Date.now() };
           d.save(l);
         }
         return { kind: 'session-failed', phase: 'review-fix', why: s.why, infra: s.infra };
       }
       const applied = applyFix(l, s.data, { lap: s.lap, headBefore: head, headAfter: after, handed });
-      l = applied.ledger;
+      l = after !== head ? { ...applied.ledger, fixedAt: Date.now() } : applied.ledger;
       d.save(l);
       d.info(`review-fix lap${s.lap}: fixed ${applied.fixed.join(', ') || 'none'}; `
         + `not changed ${applied.declined.join(', ') || 'none'}`
@@ -161,12 +167,14 @@ export async function driveReview(d: LoopDeps): Promise<LoopOutcome> {
     if (next.kind === 'park') {
       const key = next.threads.map((t) => `${t.id}:${t.status}`).join(',');
       if (l.parkNoted !== key) {
-        await d.announcePark(parkNoteBody({
+        const said = await d.announcePark(parkNoteBody({
           threads: next.threads, mrIid: d.mrIid, mrUrl: d.mrUrl, runId: d.runId,
           fixLaps: used, maxFixLaps: d.maxFixLaps,
         }));
-        l = { ...l, parkNoted: key };
-        d.save(l);
+        if (said !== false) {
+          l = { ...l, parkNoted: key };
+          d.save(l);
+        }
       }
       return { kind: 'parked', why: next.why, threads: next.threads };
     }

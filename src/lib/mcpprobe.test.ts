@@ -94,6 +94,21 @@ test('a server that never answers is a failure within the window, not a hang', a
   assert.match(r.detail, /no tools\/list answer/);
 });
 
+test('a command that cannot be started is a failed probe, not a crash of the caller', async () => {
+  // This runs inside the conductor at boot. The writes to a child that never
+  // started fail as an 'error' event on its stdin, which nothing used to hear.
+  const r = await probeStdioServer('/nonexistent/oneshot-mcp-server', [], ENV, 5_000);
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /spawn failed|exited early/);
+  await new Promise((resolve) => setTimeout(resolve, 50)); // room for a late stream error to surface
+});
+
+test('a server that closes its stdin and dies does not take the caller with it', async () => {
+  const r = await probeStdioServer(process.execPath, ['-e', 'process.stdin.destroy(); setTimeout(() => process.exit(4), 100)'], ENV, 5_000);
+  assert.equal(r.ok, false);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+});
+
 test('a command that exits at once says so', async () => {
   const r = await probeStdioServer(process.execPath, ['-e', 'process.exit(3)'], ENV, 5_000);
   assert.equal(r.ok, false);
