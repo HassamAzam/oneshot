@@ -356,9 +356,13 @@ export function applyReview(
   const words = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   // Against what was open BEFORE this answer only: two findings of one review
   // may well sit on the same line.
+  // The SAME words, not the same place: two different defects can share a line,
+  // and dropping the second one silently is worse than a duplicate a person
+  // resolves. And never in the direction that loses a graver finding.
+  const rank: Record<ReviewSeverity, number> = { blocker: 3, major: 2, minor: 1, suggestion: 0 };
   const openBefore = l.threads.filter((t) => !t.resolved);
   const sameAsOpen = (f: Finding): ReviewThread | undefined => openBefore.find((t) => t.file === f.file
-    && (t.line === f.line || (words(t.what).length > 12 && words(t.what) === words(f.what))));
+    && words(t.what).length > 12 && words(t.what) === words(f.what) && rank[t.severity] >= rank[f.severity]);
   let n = nextNumber(l);
   for (const f of findings) {
     if (wasRuling.has(f)) continue;

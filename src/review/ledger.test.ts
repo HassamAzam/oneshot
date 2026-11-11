@@ -331,14 +331,27 @@ test('a review run again over an earlier attempt\'s threads does not post the sa
   }, { lap: 0, headSha: 'a1', recheck: false, changedFiles: null, partial: true }).ledger);
   const again = applyReview(first, {
     findings: [
-      finding('F-01', 'major', { line: 611, what: 'Person coverage was removed.' }),                       // same place
       finding('F-02', 'major', { line: 640, what: 'the person test was deleted, instead of repaired' }),  // same words
       finding('F-03', 'minor', { line: 700, what: 'An unrelated assertion checks the whole page.' }),      // new
     ],
   }, { lap: 1, headSha: 'a1', recheck: false, changedFiles: null });
   assert.equal(again.raised.length, 1);
   assert.equal(again.ledger.threads.length, 2);
-  assert.deepEqual(again.dropped.map((d) => d.reason), ['already open on the merge request as F-01', 'already open on the merge request as F-01']);
+  assert.deepEqual(again.dropped.map((d) => d.reason), ['already open on the merge request as F-01']);
+});
+
+test('a different defect on the same line as an open thread is still posted — a graver one above all', () => {
+  const first = landed(applyReview(emptyLedger(RUN, MR), {
+    findings: [finding('F-01', 'minor', { line: 611, what: 'The assertion checks the whole page.' })],
+  }, { lap: 0, headSha: 'a1', recheck: false, changedFiles: null, partial: true }).ledger);
+  const again = applyReview(first, {
+    findings: [
+      finding('F-02', 'blocker', { line: 611, what: 'The delete view skips the permission check.' }),
+      finding('F-03', 'blocker', { line: 611, what: 'The assertion checks the whole page.' }),   // same words, graver
+    ],
+  }, { lap: 1, headSha: 'a1', recheck: false, changedFiles: null });
+  assert.equal(again.raised.length, 2);
+  assert.deepEqual(again.dropped, []);
 });
 
 test('a thread kept open over a person\'s reply can still be told its fix failed', () => {

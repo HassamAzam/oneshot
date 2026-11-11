@@ -28,7 +28,7 @@
  *     the previous artifact before the new one is written.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { copyFileSync, existsSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DRY_RUN, MERGE_POLL_MS, WORK_REPO, phaseByName, projectConfig,
@@ -1484,19 +1484,27 @@ export function setAsideUncommitted(worktree: string, label: string, alsoUntrack
     encoding: 'utf8', stdio: 'pipe', timeout: 60_000,
   });
   const status = (): string => git(['status', '--porcelain', '-z', '--untracked-files=no']);
-  /** Paths this call put in the index itself, to take back if it gives up. */
-  const staged: string[] = [];
+  // The index exactly as the session left it, to put back if this gives up.
+  // Resetting only the paths it added is not enough: adding `a.py/inner.py`
+  // also drops the entry of the tracked FILE `a.py` it replaced, and no reset
+  // of the inner path puts that back. A copy of the index file does.
+  let indexFile = '';
+  let indexCopy = '';
   const unstage = (): void => {
-    if (!staged.length) return;
-    try { git(['reset', '-q', '--', ...staged]); } catch { /* best effort: the warning below says what is left */ }
+    if (!indexCopy) return;
+    try { renameSync(indexCopy, indexFile); } catch { /* best effort: the warning below says what is left */ }
+    indexCopy = '';
   };
   try {
     // `git add -N` leaves an entry `stash create` refuses ("not uptodate"); a real add of it is the same file.
     const intentToAdd = String(status()).split('\0').filter((e) => e.startsWith(' A ')).map((e) => e.slice(3));
     const created = alsoUntracked.filter((f) => !f.endsWith('/') && existsSync(join(worktree, f)));
-    for (const f of [...new Set([...created, ...intentToAdd])]) {
-      git(['add', '--', f]);
-      staged.push(f);
+    const toAdd = [...new Set([...created, ...intentToAdd])];
+    if (toAdd.length) {
+      indexFile = git(['rev-parse', '--path-format=absolute', '--git-path', 'index']).trim();
+      indexCopy = `${indexFile}.oneshot-aside`;
+      copyFileSync(indexFile, indexCopy);
+      for (const f of toAdd) git(['add', '--', f]);
     }
     const paths = porcelainPaths(status());
     if (!paths.length) { unstage(); return []; }
@@ -1513,6 +1521,7 @@ export function setAsideUncommitted(worktree: string, label: string, alsoUntrack
     // git knows only the first as a path at HEAD).
     const outer = paths.filter((p) => !paths.some((q) => q !== p && p.startsWith(`${q}/`)));
     git(['restore', '--source=HEAD', '--staged', '--worktree', '--', ...outer]);
+    if (indexCopy) { try { unlinkSync(indexCopy); } catch { /* gone */ } }
     return paths;
   } catch (err) {
     unstage();

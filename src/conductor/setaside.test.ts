@@ -208,6 +208,22 @@ test('a tracked file replaced by a directory comes back as the file', () => fixt
   assert.equal(readFileSync(join(wt, 'apps', 'admin.py'), 'utf8'), 'x = 1\n');
 }));
 
+test('when the move fails after a tracked file was replaced by a directory, the index is exactly as the session left it', () => fixture(({ wt }) => {
+  rmSync(join(wt, 'apps', 'admin.py'));
+  mkdirSync(join(wt, 'apps', 'admin.py'));
+  writeFileSync(join(wt, 'apps', 'admin.py', 'inner.py'), 'x = 3\n');
+  const blob = git(wt, 'rev-parse', 'HEAD:apps/models.py');
+  execFileSync('git', ['-C', wt, 'update-index', '--index-info'], {
+    input: `100644 ${blob} 1\tapps/conflict.py\n100644 ${blob} 2\tapps/conflict.py\n`, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const before = git(wt, 'status', '--porcelain');
+
+  assert.deepEqual(setAsideUncommitted(wt, 'r-1 review-fix lap 1', ['apps/admin.py/inner.py']), []);
+
+  assert.equal(git(wt, 'status', '--porcelain'), before);
+  assert.doesNotMatch(before, /^D  apps\/admin\.py$/m);
+}));
+
 test('a file whose name looks like a pattern is moved as the file it is', () => fixture(({ wt }) => {
   writeFileSync(join(wt, 'apps', 'a*.py'), 'star = 1\n');
   git(wt, '--literal-pathspecs', 'add', 'apps/a*.py');

@@ -182,7 +182,8 @@ export async function driveReview(d: LoopDeps): Promise<LoopOutcome> {
       l = applied.ledger;
       d.save(l);
       d.info(`review lap${s.lap} (${next.recheck ? 're-check' : 'first review'}): ${applied.raised.length} thread(s) raised`
-        + `${applied.dropped.length ? `, ${applied.dropped.length} new finding(s) not entitled to a thread on a re-check` : ''}`
+        + `${applied.dropped.length ? `, ${applied.dropped.length} finding(s) not posted (${next.recheck
+          ? 'not entitled to a thread on a re-check' : 'already open on the merge request'})` : ''}`
         + `, ${openThreads(l).length} open`);
       continue;
     }
