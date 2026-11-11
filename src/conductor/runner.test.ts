@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyBaseCheck, baseCheckOutcome, codePhaseStatus, decideClaim, doneLabelSwap, failedCases, isRepark,
-  mergePollWait,
+  mergePollWait, recordedVerifyVerdict,
   mergeScopedVerify, nextIndex, refusalIsFinal, remediationFreeze, salvagedReview,
   sharedDatabaseRefusal, statusForFailure, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
   verifyAfterBaseCheckDeath,
@@ -759,4 +759,77 @@ test('no Loop code path reaches the local automation tests', async () => {
   ]) {
     assert.ok(!src.includes(name), `runner.ts still names ${name}`);
   }
+});
+
+// ------------------------------------------------- a verify verdict already on record
+// #9174 ran its twenty-case list six times and learned one thing — TC-21 fails —
+// the first time. Lap 1 re-ran it because a restart lost the cycle lap 0 had asked
+// for; laps 3, 4 and 5 re-ran it once per tick while the run was parked at the QA gate.
+
+const T = 1_000_000;
+const rec = (phase: string, status: string, startedAt: number, endedAt = startedAt + 10) =>
+  ({ phase, status: status as 'ok', startedAt, endedAt });
+const ONE_FAILING = { results: [{ id: 'TC-01', result: 'pass' }, { id: 'TC-21', result: 'fail', evidence: 'Ran 3 tests' }] };
+const ALL_PASS = { results: [{ id: 'TC-01', result: 'pass' }] };
+const verdictOf = (over: Partial<Parameters<typeof recordedVerifyVerdict>[0]>) => recordedVerifyVerdict({
+  phases: [], artifact: ONE_FAILING, artifactMtimeMs: T + 500, maxLaps: 3, window: 0,
+  cycleTo: 'implement', rescopePending: false, ...over,
+});
+
+test('a failed verify whose fix lap never ran cycles to implement instead of re-running the list', () => {
+  // #9174 lap 0: recorded at 16:42:25, conductor stopped at 16:42:26.
+  const phases = [rec('implement', 'ok', T - 1000), rec('verify', 'failed', T, T + 100)];
+  assert.equal(verdictOf({ phases }), 'cycle');
+});
+
+test('once implement has run since that failure, verify runs: that is the re-check it asked for', () => {
+  const phases = [rec('implement', 'ok', T - 1000), rec('verify', 'failed', T, T + 100), rec('implement', 'ok', T + 200)];
+  assert.equal(verdictOf({ phases }), 'run');
+});
+
+test('an implement lap that died after the failure does not count as the fix', () => {
+  const phases = [rec('implement', 'ok', T - 1000), rec('verify', 'failed', T, T + 100), rec('implement', 'infra', T + 200)];
+  assert.equal(verdictOf({ phases }), 'cycle');
+});
+
+test('a verify that has spent its laps asks the QA gate, however often the run is re-entered', () => {
+  // #9174 after lap 2: parked at the gate. Each later tick must poll it, not run 20 cases.
+  const phases = [
+    rec('verify', 'failed', T), rec('verify', 'failed', T + 100), rec('implement', 'ok', T + 200),
+    rec('verify', 'failed', T + 300, T + 400),
+  ];
+  assert.equal(verdictOf({ phases }), 'gate');
+});
+
+test('no recorded failure to act on means verify simply runs', () => {
+  assert.equal(verdictOf({ phases: [] }), 'run');
+  assert.equal(verdictOf({ phases: [rec('verify', 'warned', T)] }), 'run');
+  assert.equal(verdictOf({ phases: [rec('verify', 'failed', T), rec('verify', 'infra', T + 100)] }), 'run');
+  // The lap failed some other way: its artifact names no failing case.
+  assert.equal(verdictOf({ phases: [rec('verify', 'failed', T, T + 100)], artifact: ALL_PASS }), 'run');
+  assert.equal(verdictOf({ phases: [rec('verify', 'failed', T, T + 100)], artifact: null }), 'run');
+});
+
+test('an artifact older than the failed lap is a previous lap\'s, and is not acted on', () => {
+  // A session that died wrote nothing, so verify.json on disk is still the lap before it.
+  const phases = [rec('verify', 'failed', T, T + 100)];
+  assert.equal(verdictOf({ phases, artifactMtimeMs: T - 1 }), 'run');
+  assert.equal(verdictOf({ phases, artifactMtimeMs: null }), 'run');
+});
+
+test('QA\'s corrected steps waiting for their scoped re-run are not second-guessed', () => {
+  const phases = [rec('verify', 'failed', T), rec('verify', 'failed', T + 100), rec('verify', 'failed', T + 300, T + 400)];
+  assert.equal(verdictOf({ phases, rescopePending: true }), 'run');
+});
+
+test('failures from before the lap window spend none of the budget, so a confirmed bug gets its fix lap', () => {
+  // QA called the case a real bug: verifyConfirmedAt rebases the window past all three failures.
+  const phases = [rec('verify', 'failed', T), rec('verify', 'failed', T + 100), rec('verify', 'failed', T + 300, T + 400)];
+  assert.equal(verdictOf({ phases, window: T + 500 }), 'cycle');
+  assert.equal(verdictOf({ phases, window: 0 }), 'gate');
+});
+
+test('a phase with nowhere to cycle to runs rather than guessing', () => {
+  const phases = [rec('verify', 'failed', T, T + 100)];
+  assert.equal(verdictOf({ phases, cycleTo: undefined }), 'run');
 });

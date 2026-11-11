@@ -1070,6 +1070,61 @@ export function verifyRescopeIsScoped(gate: { confirmed: unknown[]; rescope: unk
   return gate.rescope.length > 0 && gate.confirmed.length === 0;
 }
 
+/**
+ * What a `verify` verdict that is ALREADY on record means for the lap about to
+ * start: nothing ('run'), ask the QA gate about it ('gate'), or go and make the
+ * fix it asked for ('cycle').
+ *
+ * `verify` answers through its artifact — which cases failed — and the loop
+ * acts on that answer in the same pass: cycle to `implement`, or, once its laps
+ * are spent, ask QA what each still-failing case means. Both decisions lived
+ * only in that pass. A run that stopped right after them (a conductor restart,
+ * or the park the gate itself asks for) came back holding a failed record and
+ * nothing that remembered why, so the loop did the one thing it knew: run the
+ * whole case list again.
+ *
+ * On #9174 that was four of six verify laps. The conductor was restarted one
+ * second after lap 0 recorded its single failing case, and lap 1 re-ran all
+ * twenty cases instead of cycling to the fix. Then the run parked at the QA
+ * gate over that same case — and laps 3, 4 and 5 re-ran the list once per
+ * conductor tick, 3.8M weighted tokens and fifty-seven minutes, while the
+ * question sat unanswered on the ticket. The gate was written to be polled once
+ * a tick (checkVerifyGate); the loop could only reach it through a session.
+ *
+ * 'run' whenever the record is not that verdict: the last lap is not a failure,
+ * the artifact on disk is older than it (a lap that died left the previous
+ * lap's file), it names no failing case, or QA's corrected steps are waiting
+ * for their scoped re-run. Pure, so each of those is pinned by a test.
+ */
+export type RecordedVerify = 'run' | 'gate' | 'cycle';
+
+export function recordedVerifyVerdict(o: {
+  phases: Array<Pick<PhaseRecord, 'phase' | 'status' | 'startedAt' | 'endedAt'>>;
+  /** verify.json as it stands on disk, and when it was last written. */
+  artifact: Record<string, unknown> | null;
+  artifactMtimeMs: number | null;
+  maxLaps: number;
+  /** lapWindow(): only failures from here on spend the lap budget. */
+  window: number;
+  cycleTo: string | undefined;
+  /** QA's corrected steps are waiting for a scoped re-run (journal.verifyRescopeCases). */
+  rescopePending: boolean;
+}): RecordedVerify {
+  const mine = o.phases.filter((p) => p.phase === 'verify');
+  const last = mine[mine.length - 1];
+  if (!last || last.status !== 'failed' || o.rescopePending) return 'run';
+  if (failedCases('verify', o.artifact) === null) return 'run';
+  if (o.artifactMtimeMs === null || o.artifactMtimeMs < last.startedAt) return 'run';
+
+  const spent = mine.filter((p) => p.status === 'failed' && p.startedAt >= o.window).length;
+  if (spent >= o.maxLaps) return 'gate';
+
+  if (!o.cycleTo) return 'run';
+  const fixedSince = o.phases.some((p) => p.phase === o.cycleTo
+    && (p.status === 'ok' || p.status === 'warned') && p.startedAt >= last.endedAt);
+  return fixedSince ? 'run' : 'cycle';
+}
+
 export function nextIndex(
   control: Exclude<Control, { kind: 'stop' }>,
   current: number,
@@ -1610,6 +1665,24 @@ export async function runTicket(
       log.info(`skip ${phase.name} — already succeeded this run`);
       i += 1;
       continue;
+    }
+
+    // A verify verdict already on record is acted on, not earned again by
+    // re-running the case list (recordedVerifyVerdict). Not when a cycle has
+    // just forced verify: that IS the re-run the verdict asked for.
+    if (phase.name === 'verify' && !forced.has('verify')) {
+      const recorded = await resumeRecordedVerify(phase, i);
+      if (recorded !== undefined) {
+        if (recorded === null) { i += 1; continue; }
+        if (recorded.kind === 'stop') {
+          const resumeAt = await resumeAfterRemediation(recorded, phase.name);
+          if (resumeAt === null) return finish(j, recorded.status, stopReason(recorded));
+          i = resumeAt;
+          continue;
+        }
+        i = nextIndex(recorded, i, i, list, forced);
+        continue;
+      }
     }
 
     // The Design label's design-approval gate — between `design` and `plan`.
@@ -2294,57 +2367,10 @@ export async function runTicket(
         ) {
           // Verify spent its full lap budget and still records failing cases.
           // Where afterFailure would block, ask QA what each one means instead.
-          const outcome = await verifyCaseGate(r);
-          if (outcome === 'resolved') {
-            // Re-record the lap as resolved so the phase reads succeeded, and keep
-            // the rewritten (now non-failing) results as prior — verifyCaseGate
-            // has already set prior.verify, so do not null it below.
-            recordPhase(iid, {
-              phase: 'verify', lap: r.lap, status: 'warned',
-              startedAt: r.startedAt, endedAt: r.endedAt, model: modelFor(r.cfg),
-              turns: r.out.turns, weighted: r.out.weighted, sessionId: r.out.sessionId,
-              error: 'resolved by the verify-case QA gate',
-            });
-            j = readJournal(iid) ?? j;
-            // flow stays empty → the loop advances to the next phase.
-          } else if (outcome === 'reverify') {
-            // QA gave corrected steps for a `missing-steps` case: re-run verify
-            // scoped to that case alone (cycle to verify itself, not implement —
-            // no code changed). The scoped results merge back in the next pass.
-            const vIdx = list.findIndex((q) => q.name === 'verify');
-            prior[r.cfg.name] = null;
-            claim(
-              vIdx === -1
-                ? { kind: 'stop', status: 'blocked', reason: 'verify: cannot re-run — verify is not in the phase list' }
-                : { kind: 'cycle', jumpTo: vIdx, windowEnd: vIdx },
-              r.cfg.name,
-            );
-          } else if (outcome === 'refix') {
-            // QA confirmed the failure is a real bug for this ticket: cycle to
-            // `implement`, not to verify. This is the one outcome that asks for
-            // a code change, so every phase between implement and here re-runs
-            // — the same path a first-lap verify failure takes, which is why it
-            // reuses `cycleTo` rather than naming implement itself.
-            const iIdx = list.findIndex((q) => q.name === r.cfg.cycleTo);
-            prior[r.cfg.name] = null;
-            claim(
-              iIdx === -1
-                ? {
-                    kind: 'stop', status: 'blocked',
-                    reason: `verify: QA confirmed a real bug but cycleTo '${r.cfg.cycleTo}' is not in the phase list`,
-                  }
-                : { kind: 'cycle', jumpTo: iIdx, windowEnd: r.index },
-              r.cfg.name,
-            );
-          } else {
-            prior[r.cfg.name] = null;
-            claim(
-              'park' in outcome
-                ? { kind: 'stop', status: 'parked', reason: `verify: ${outcome.park}` }
-                : { kind: 'stop', status: 'blocked', reason: `verify: ${outcome.block}` },
-              r.cfg.name,
-            );
-          }
+          // prior.verify is set by the gate when it resolves and nulled otherwise,
+          // so it is not touched again here.
+          const gated = await settleVerifyAtGate(r);
+          if (gated) claim(gated, r.cfg.name);
         } else {
           claim(
             afterFailure(
@@ -2742,6 +2768,104 @@ export async function runTicket(
 
   function lapWindowFor(phase: string): number {
     return lapWindow(j, phase);
+  }
+
+  /**
+   * Act on a verify verdict the journal already holds, without a session.
+   * `undefined` when there is none to act on and verify should simply run;
+   * otherwise what the run does next, with null meaning "carry on past verify".
+   */
+  async function resumeRecordedVerify(p: PhaseConfig, index: number): Promise<Control | null | undefined> {
+    const file = p.artifact ?? 'verify.json';
+    const path = artifactPath(iid, file);
+    const data = readArtifact<Record<string, unknown>>(iid, file);
+    const verdict = recordedVerifyVerdict({
+      phases: j.phases,
+      artifact: data,
+      artifactMtimeMs: existsSync(path) ? statSync(path).mtimeMs : null,
+      maxLaps: p.maxLaps ?? 2,
+      window: lapWindowFor('verify'),
+      cycleTo: p.cycleTo,
+      rescopePending: Boolean(j.verifyRescopeCases?.length),
+    });
+    if (verdict === 'run') return undefined;
+    const last = [...j.phases].reverse().find((rec) => rec.phase === 'verify')!;
+
+    if (verdict === 'cycle') {
+      const jumpTo = list.findIndex((q) => q.name === p.cycleTo);
+      if (jumpTo === -1) return undefined;
+      log.warn(`verify lap${last.lap} already recorded its failing case(s) and the fix lap it asked for `
+        + `never ran — cycling to ${p.cycleTo} instead of running the list again`);
+      logEvent('verify_verdict_resumed', { lap: last.lap, action: 'cycle' }, { runId, phase: 'verify' });
+      return { kind: 'cycle', jumpTo, windowEnd: index };
+    }
+
+    log.info(`verify lap${last.lap} already recorded its failing case(s) — asking the QA gate, not running the list again`);
+    const control = await settleVerifyAtGate({
+      cfg: p, index, lap: last.lap, startedAt: last.startedAt, endedAt: last.endedAt, rowId: -1,
+      // The lap's own turns and tokens are on its failed record already; a
+      // 'resolved' re-record that repeated them would count that session twice.
+      out: {
+        ok: true, data, blocked: null, summary: '', turns: 0, weighted: 0,
+        sessionId: last.sessionId ?? '', rateLimited: false,
+      },
+    });
+    // The gate sets prior.verify only on the pass that applies a verdict; a
+    // pass that merely finds every case settled must still hand the results on.
+    if (control === null) prior.verify = readArtifact(iid, file);
+    return control;
+  }
+
+  /**
+   * Ask the QA gate about a verify lap whose failing cases are on record, and
+   * say what the run does next — null to carry on past verify.
+   *
+   * One body for both ways in: straight after a lap that spent verify's budget,
+   * and on a later pass that finds that lap already recorded (see
+   * recordedVerifyVerdict). The second is what lets a parked run poll the gate
+   * once a tick without running the case list again to get there.
+   */
+  async function settleVerifyAtGate(r: PhaseResult): Promise<Control | null> {
+    const outcome = await verifyCaseGate(r);
+    if (outcome === 'resolved') {
+      // Re-record the lap as resolved so the phase reads succeeded. verifyCaseGate
+      // has already set prior.verify to the rewritten (now non-failing) results.
+      recordPhase(iid, {
+        phase: 'verify', lap: r.lap, status: 'warned',
+        startedAt: r.startedAt, endedAt: r.endedAt, model: modelFor(r.cfg),
+        turns: r.out.turns, weighted: r.out.weighted, sessionId: r.out.sessionId,
+        error: 'resolved by the verify-case QA gate',
+      });
+      j = readJournal(iid) ?? j;
+      return null;
+    }
+    prior[r.cfg.name] = null;
+    if (outcome === 'reverify') {
+      // QA gave corrected steps for a `missing-steps` case: re-run verify
+      // scoped to that case alone (cycle to verify itself, not implement —
+      // no code changed). The scoped results merge back in the next pass.
+      const vIdx = list.findIndex((q) => q.name === 'verify');
+      return vIdx === -1
+        ? { kind: 'stop', status: 'blocked', reason: 'verify: cannot re-run — verify is not in the phase list' }
+        : { kind: 'cycle', jumpTo: vIdx, windowEnd: vIdx };
+    }
+    if (outcome === 'refix') {
+      // QA confirmed the failure is a real bug for this ticket: cycle to
+      // `implement`, not to verify. This is the one outcome that asks for
+      // a code change, so every phase between implement and here re-runs
+      // — the same path a first-lap verify failure takes, which is why it
+      // reuses `cycleTo` rather than naming implement itself.
+      const iIdx = list.findIndex((q) => q.name === r.cfg.cycleTo);
+      return iIdx === -1
+        ? {
+            kind: 'stop', status: 'blocked',
+            reason: `verify: QA confirmed a real bug but cycleTo '${r.cfg.cycleTo}' is not in the phase list`,
+          }
+        : { kind: 'cycle', jumpTo: iIdx, windowEnd: r.index };
+    }
+    return 'park' in outcome
+      ? { kind: 'stop', status: 'parked', reason: `verify: ${outcome.park}` }
+      : { kind: 'stop', status: 'blocked', reason: `verify: ${outcome.block}` };
   }
 
   /**
