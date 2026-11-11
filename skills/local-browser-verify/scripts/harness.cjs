@@ -49,6 +49,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { spawn, spawnSync, execFileSync } = require('child_process');
 
 const ONESHOT_HOME = process.env.ONESHOT_HOME || path.resolve(__dirname, '../../..');
@@ -105,11 +106,55 @@ function requirePlaywright() {
   }
 }
 
+/** A path compared by what it points at: /tmp and /private/tmp are one worktree. */
+function realPath(target) {
+  try { return fs.realpathSync(target); } catch { return path.resolve(target); }
+}
+
+/**
+ * The worktree this process is serving, by the precedence up() resolves it with.
+ *
+ * up() pins ONESHOT_WORKTREE from the worktree it settled on before it touches any of
+ * the paths below, so an in-process caller that passes `opts.worktree` instead —
+ * scripts/app.cjs does — keys the same directory the CLI would.
+ */
+function servedWorktree() {
+  return realPath(process.env.ONESHOT_WORKTREE || process.cwd());
+}
+
+/**
+ * state/runs/<iid>/ for a ticket; for a hand-driven bring-up with no ticket, one
+ * directory per worktree rather than a single shared one.
+ *
+ * `state/runs/adhoc` used to be that single directory, so two sessions without
+ * ONESHOT_IID shared servers.json, app-env.json, storage-state.json and both logs. The
+ * second read the first's and "reused" an app built from different code — verifying its
+ * ticket against another worktree's checkout, or, when the leased ports differed,
+ * reporting the other session's webpack port as E_PORT_DRIFT. Keyed on the worktree,
+ * two checkouts no longer meet, and one checkout still finds the app it left running:
+ * the basename keeps the directory recognisable, the digest keeps two same-named
+ * worktrees apart.
+ */
 function runDir() {
   if (process.env.ONESHOT_RUN_DIR) return process.env.ONESHOT_RUN_DIR;
   const iid = process.env.ONESHOT_IID;
-  if (!iid) return path.join(ONESHOT_HOME, 'state', 'runs', 'adhoc');
-  return path.join(ONESHOT_HOME, 'state', 'runs', String(iid));
+  if (iid) return path.join(ONESHOT_HOME, 'state', 'runs', String(iid));
+  const wt = servedWorktree();
+  const digest = crypto.createHash('sha1').update(wt).digest('hex').slice(0, 8);
+  return path.join(ONESHOT_HOME, 'state', 'runs', 'adhoc', `${path.basename(wt)}-${digest}`);
+}
+
+/**
+ * Whether a recorded server set may be adopted for this worktree. Liveness is up()'s
+ * business; this is identity.
+ *
+ * A servers.json with no worktree recorded is not adoptable. A cold start is always
+ * safe, and if that app holds the port, assertPortFreeOrOurs names the pid and the cwd
+ * it runs from instead of this guessing.
+ */
+function servesWorktree(existing, wt) {
+  if (!existing || !existing.worktree) return false;
+  return realPath(existing.worktree) === realPath(wt);
 }
 
 /**
@@ -713,6 +758,15 @@ function processStartedAt(pid) {
 }
 
 /**
+ * The tail of a webpack log from the last start react-dev-utils announced. A log with
+ * no such line has printed nothing to date it against, so it is returned whole.
+ */
+function sinceLastStart(logText) {
+  const at = logText.lastIndexOf('Starting the development server');
+  return at === -1 ? logText : logText.slice(at);
+}
+
+/**
  * Wait until the bundle Django points at is finished — bundleState() says what that
  * means — never a port probe.
  *
@@ -741,7 +795,11 @@ async function waitWebpack(wt, port, pid, budgetMs, startedAt) {
     // silently — but the env can still put it somewhere we did not ask for. Assert once.
     if (!sawPort) {
       const logText = fs.existsSync(p.webpack()) ? fs.readFileSync(p.webpack(), 'utf8') : '';
-      const m = logText.match(/webpack output is served from http:\/\/localhost:(\d+)/);
+      // Only what THIS start printed. up() truncates the log before it spawns, but
+      // app.cjs joins a bring-up it did not start and reads a log it did not truncate,
+      // where an earlier build of the same worktree can have left a line of its own.
+      // Same rule bundleState() applies to a compile result: only the last one counts.
+      const m = sinceLastStart(logText).match(/webpack output is served from http:\/\/localhost:(\d+)/);
       if (m) {
         sawPort = true;
         if (Number(m[1]) !== Number(port)) {
@@ -803,6 +861,9 @@ async function assertBundleReachable(bePort) {
 
 async function up(opts = {}) {
   const wt = opts.worktree || process.env.ONESHOT_WORKTREE || process.cwd();
+  // Before the first p.*() call: runDir() keys a ticketless run directory on the
+  // worktree being served, and this caller may have passed it as an option.
+  process.env.ONESHOT_WORKTREE = wt;
   const bePort = Number(opts.bePort || process.env.ONESHOT_PORT || 8002);
   const fePort = Number(opts.fePort || process.env.ONESHOT_FE_PORT || bePort + 1000);
   ensure(H()); ensure(ART());
@@ -810,7 +871,13 @@ async function up(opts = {}) {
   preflight(wt);
   checkDb(wt);
 
-  const existing = readJson(p.servers());
+  const recorded = readJson(p.servers());
+  if (recorded && !servesWorktree(recorded, wt)) {
+    // Live pids and a 200 are not identity: an app from another checkout has both.
+    // Adopting it meant verifying this ticket against that worktree's code.
+    log('ignoring servers.json recorded against', recorded.worktree || 'an unrecorded worktree');
+  }
+  const existing = servesWorktree(recorded, wt) ? recorded : null;
   if (existing && alive(existing.djangoPid) && alive(existing.webpackPid)
       && await httpStatus(`http://localhost:${existing.bePort}/admin/login/`) === 200) {
     log('already up, reusing', existing.bePort, existing.fePort);
@@ -1379,7 +1446,7 @@ const API = {
   up, down, status, open, login, goto, shot, settle, overlap, runCase, smoke, registry,
   HarnessError,
   /**
-   * Internals, exported for scripts/app.cjs and nothing else.
+   * Internals, exported for scripts/app.cjs and the tests in src/lib/harness.test.ts.
    *
    * app.cjs owns the machine-wide question ("is an app already up, and is it on my
    * code?"); this file owns the repository facts ("how does this app actually start").
@@ -1390,6 +1457,7 @@ const API = {
   preflight, checkDb, disabledIntegrations, applyPatches, composeConfigJs,
   needsCollectstatic, collectStatic,
   startDjango, startWebpack, waitDjango, waitWebpack, bundleState,
+  runDir, servesWorktree,
   assertBundleReachable, describeEnv, listenerPid, pidCwd, alive, httpStatus,
 };
 module.exports = API;
