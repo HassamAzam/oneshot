@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Keeps the conductor inside its daily run window. ONESHOT_WINDOW is "<from>-<to>" in 24h
-# hours (default 10-22: runs from 10:00, stops at 22:00) or "always".
+# hours (default 1-0: runs from 01:00, stops at 00:00 — an hour before the server's nightly
+# 01:00 reboot) or "always". A <from> greater than <to> wraps past midnight.
 #   window.sh check   exit 0 inside the window, 1 outside (the conductor's ExecCondition)
 #   window.sh apply   start the conductor inside the window, stop it outside (the hourly timer)
 set -euo pipefail
 
-WINDOW="${ONESHOT_WINDOW:-10-22}"
+WINDOW="${ONESHOT_WINDOW:-1-0}"
 UNIT=oneshot-conductor.service
 
 in_window() {
