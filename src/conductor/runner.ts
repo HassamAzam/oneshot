@@ -51,7 +51,7 @@ import { existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
+  DRY_RUN, gitlabUsername, pickupAnyAssignee, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -1313,7 +1313,7 @@ export async function runTicket(
   const list = phases().filter((p) => !p.labelGated || carried.has(p.labelGated.toLowerCase()));
   const owner = opts.conductor;
 
-  if (issue.assignees.length > 0) {
+  if (!pickupAnyAssignee() && issue.assignees.length > 0) {
     const me = gitlabUsername();
     if (!me) {
       log.info(`#${iid} — assigned ticket, but this desk has no GitLab identity`);
