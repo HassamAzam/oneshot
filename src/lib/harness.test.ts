@@ -22,6 +22,7 @@ const harness = require(
   join(ROOT, 'skills/local-browser-verify/scripts/harness.cjs'),
 ) as {
   applyPatches: (wt: string, bePort: number, fePort: number) => { apiUrl: boolean };
+  runDir: () => string;
   needsCollectstatic: (wt: string) => boolean;
   disabledIntegrations: (wt: string) => Array<{ name: string; why: string }>;
   waitDjango: (port: number, pid: number, budgetMs: number) => Promise<boolean>;
@@ -617,4 +618,30 @@ test('a hidden overlay reports outsideViewport from its box, not a fixed false',
   }), POPPER, FIELD, FAST);
   assert.equal(r.intersects, false);
   assert.equal(r.outsideViewport, true);
+});
+
+// A phase session is given ONESHOT_TICKET and neither ONESHOT_IID nor ONESHOT_RUN_DIR.
+// Reading ONESHOT_IID alone sent a session's `app.cjs ensure` to state/runs/adhoc —
+// the warm instance's directory — where it read that instance's webpack.log and
+// refused the run's own app as E_PORT_DRIFT, in every verify lap of #9174.
+test('the harness keeps a session\'s state in the ticket\'s run directory, not in adhoc', () => {
+  const keys = ['ONESHOT_RUN_DIR', 'ONESHOT_IID', 'ONESHOT_TICKET'] as const;
+  const saved = keys.map((k) => [k, process.env[k]] as const);
+  const set = (v: Partial<Record<typeof keys[number], string>>): void => {
+    for (const k of keys) { if (v[k] === undefined) delete process.env[k]; else process.env[k] = v[k]; }
+  };
+  try {
+    set({ ONESHOT_TICKET: '9174' });
+    assert.equal(harness.runDir(), join(ROOT, 'state', 'runs', '9174'));
+    // The conductor's own bring-up passes ONESHOT_IID; both name the same directory.
+    set({ ONESHOT_IID: '9174' });
+    assert.equal(harness.runDir(), join(ROOT, 'state', 'runs', '9174'));
+    // An explicit directory still wins: the base app and local tests rely on it.
+    set({ ONESHOT_TICKET: '9174', ONESHOT_RUN_DIR: '/tmp/base-app' });
+    assert.equal(harness.runDir(), '/tmp/base-app');
+    set({});
+    assert.equal(harness.runDir(), join(ROOT, 'state', 'runs', 'adhoc'));
+  } finally {
+    for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
 });

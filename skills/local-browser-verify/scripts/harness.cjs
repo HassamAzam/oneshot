@@ -107,9 +107,24 @@ function requirePlaywright() {
   }
 }
 
+/**
+ * Where this process keeps its harness state: ONESHOT_RUN_DIR when given, else the
+ * ticket's run directory, else `adhoc`.
+ *
+ * ONESHOT_TICKET counts as the ticket. A phase session is given ONESHOT_TICKET and
+ * neither ONESHOT_IID nor ONESHOT_RUN_DIR (src/lib/ids.ts, phaseEnv), while the
+ * conductor's own bring-up of the same run passes ONESHOT_IID — so with ONESHOT_IID
+ * alone read here, a session's `app.cjs ensure` looked in `adhoc`, which is where the
+ * loop's warm instance keeps ITS logs. waitWebpack then read the warm instance's
+ * webpack.log, saw its port, and refused the run's own healthy app as
+ * "E_PORT_DRIFT: webpack is serving on 9010 but we leased 9100". Every verify lap of
+ * #9174 and its ui-evidence hit that and spent turns working around it.
+ * scripts/app.cjs (finishEnv) and demo-recording's record.cjs already fall back the
+ * same way.
+ */
 function runDir() {
   if (process.env.ONESHOT_RUN_DIR) return process.env.ONESHOT_RUN_DIR;
-  const iid = process.env.ONESHOT_IID;
+  const iid = process.env.ONESHOT_IID || process.env.ONESHOT_TICKET;
   if (!iid) return path.join(ONESHOT_HOME, 'state', 'runs', 'adhoc');
   return path.join(ONESHOT_HOME, 'state', 'runs', String(iid));
 }
@@ -1404,7 +1419,7 @@ const API = {
    * place.
    */
   preflight, checkDb, disabledIntegrations, applyPatches, composeConfigJs,
-  needsCollectstatic, collectStatic,
+  needsCollectstatic, collectStatic, runDir,
   startDjango, startWebpack, waitDjango, waitWebpack, bundleState,
   assertBundleReachable, describeEnv, listenerPid, pidCwd, alive, httpStatus,
 };
