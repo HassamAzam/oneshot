@@ -121,7 +121,7 @@ function world(findings: CheckedFinding[] = [finding()], over: Partial<Script> =
     if (cmd === 'gh' && has('pr create')) return s.prCreate;
     if (cmd === 'git' && has('ls-remote')) { counts.lsRemote += 1; return { code: 0, out: s.lsRemote(counts.lsRemote - 1) }; }
     if (cmd === 'git' && has('rev-parse --verify --quiet refs/heads/')) return { code: s.hadLocal ? 0 : 1, out: '' };
-    if (cmd === 'git' && has(' clone ')) {
+    if (cmd === 'git' && args.includes('init')) {
       const path = args[args.length - 1]!;
       mkdirSync(join(path, '.git', 'info'), { recursive: true });
       return { code: 0, out: '' };
@@ -208,7 +208,7 @@ test('a checkout whose origin is not GitHub, or a machine with no GitHub sign-in
       assert.match(w.fix()?.why ?? '', expected);
       assert.match(lines[0]!, /no pull request \(unavailable\)/);
       assert.equal(w.sessions.length, 0);
-      assert.equal(w.ran(' clone ').length, 0);
+      assert.equal(w.ran(' init ').length, 0);
     } finally { w.cleanup(); }
   }
 });
@@ -257,19 +257,36 @@ test('the whole path: author, two reviewers, verifier, then code pushes one comm
   } finally { w.cleanup(); }
 });
 
-test('the fix is written in a private clone: a session has no way to GitHub, whatever it pushes', async () => {
+test('the fix is written in a private repository that holds the base branch and nothing else of the operator\'s', async () => {
   const w = world();
   try {
     await w.go();
-    // Cloned from the operator's clone, so `origin` in the checkout is a directory on this disk.
-    const clone = w.ran(' clone ')[0]!;
-    assert.ok(clone.endsWith(`${w.repo} ${join(w.wtRoot, BRANCH.replace(/\//g, '-'))}`), clone);
-    assert.equal(w.ran('worktree add').filter((c) => !c.includes('-base')).length, 0, 'not a worktree of it: a worktree shares its remotes');
+    const path = join(w.wtRoot, BRANCH.replace(/\//g, '-'));
+    // Not a worktree (it shares the operator's remotes) and not a clone (it brings every branch they have).
+    assert.equal(w.ran(' clone ').length, 0);
+    assert.equal(w.ran('worktree add').filter((c) => !c.includes('-base')).length, 0);
+    assert.ok(w.ran(' init ')[0]!.endsWith(path));
+    // `origin` there is a directory on this disk, and one ref is taken from it.
+    assert.deepEqual(w.ran('remote add'), [`git remote add origin ${w.repo}`]);
+    assert.deepEqual(w.ran('git fetch --quiet --no-tags'), ['git fetch --quiet --no-tags origin +refs/remotes/origin/main:refs/remotes/origin/main']);
     assert.ok(w.ran('checkout').some((c) => c.includes(`--no-track -B ${BRANCH} ba5e000`)), 'on a branch that tracks nothing');
     // The link to node_modules is the pipeline's own, kept out of `git status` and `git add -A`.
     assert.ok(w.excludes.every((e) => /^\/node_modules$/m.test(e)), 'excluded before the first session starts');
-    // Everything measured is against the commit GitHub's base was at, by id.
+    // Everything measured is against the commit GitHub's base was at, by id, and is the commit, not the directory.
     assert.ok(w.ran('diff --no-renames --name-only').every((c) => c.includes('ba5e000...HEAD')));
+    assert.equal(w.ran('clean --quiet -fdx -e /node_modules').length, 1, 'ignored files are cleared before the checks run');
+  } finally { w.cleanup(); }
+});
+
+test('a merge commit in the change is refused: the checkout held the base and the author\'s own commits, nothing else', async () => {
+  const w = world();
+  const exec = w.deps.exec!;
+  w.deps.exec = async (cmd, args, o) => (cmd === 'git' && args.includes('--merges') ? { code: 0, out: 'abc1234\n' } : exec(cmd, args, o));
+  try {
+    await w.go();
+    assert.equal(w.fix()?.state, 'refused');
+    assert.match(w.fix()?.why ?? '', /contains a merge commit/);
+    assert.equal(w.ran('git push').length, 0);
   } finally { w.cleanup(); }
 });
 
@@ -474,6 +491,14 @@ test('a change that is too large, untested, or touches the lockfile is refused b
 });
 
 test('a verifier that will not pass the change stops it, and blockers that outlive two rounds stop it too', async () => {
+  // "Fix first" that names nothing to fix is not a yes.
+  const vague = world([finding()], { verify: () => okOut({ ...SHIP, verdict: 'fix-first', reason: 'something is off' }) });
+  try {
+    await vague.go();
+    assert.match(vague.fix()?.why ?? '', /the verifier would not pass it: something is off/);
+    assert.equal(vague.ran('git push').length, 0);
+  } finally { vague.cleanup(); }
+
   const unconvinced = world([finding()], { verify: () => okOut({ ...SHIP, fixesTheCause: false, reason: 'the diagnosed path is unchanged' }) });
   try {
     await unconvinced.go();
@@ -528,7 +553,7 @@ test('what is pushed is the commit that was measured and read, wherever a later 
     // And the checkout is put back at that commit after each of them.
     const restores = w.ran(`checkout --quiet --force --no-track -B ${BRANCH} c0ffee1`);
     assert.equal(restores.length, 2, 'after the two reviewers, and after the verifier');
-    assert.equal(w.ran('clean --quiet -fd').length, 2);
+    assert.equal(w.calls.filter((c) => c === 'git clean --quiet -fd').length, 2);
     assert.ok(w.ran('log --format=%B')[0]!.includes('ba5e000..c0ffee1'), 'what is screened for leaks is that commit too');
   } finally { w.cleanup(); }
 });
@@ -582,7 +607,7 @@ test('a defect in code the base branch does not have gets no pull request, and n
     assert.equal(w.fix()?.state, 'refused');
     assert.match(w.fix()?.why ?? '', /the code it shows \(src\/review\/ledger\.ts\) is not on origin\/main/);
     assert.equal(w.sessions.length, 0);
-    assert.equal(w.ran(' clone ').length, 0);
+    assert.equal(w.ran(' init ').length, 0);
   } finally { w.cleanup(); }
 });
 

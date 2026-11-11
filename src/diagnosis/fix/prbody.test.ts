@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import '../../lib/test-project-env.js';
-import { fixPrMarker, leaks, publicSafe, renderPrBody, type PrBodyInput, type PrivateText } from './prbody.js';
+import { fixPrMarker, leaks, publicSafe, renderPrBody, unpublishable, type PrBodyInput, type PrivateText } from './prbody.js';
 import type { ReviewPoint } from './decide.js';
 
 const point = (id: string, severity: ReviewPoint['severity'], what: string): ReviewPoint => ({ id, severity, file: 'src/conductor/phase.ts', line: 762, what, why: 'w', fix: 'f' });
@@ -111,4 +111,31 @@ test('a description cannot close an issue of this repository, and a credential i
   const text = `${'x'.repeat(385)} GITLAB_TOKEN=glpat-abcdefghijklmnop tail`;
   const body = renderPrBody({ ...INPUT, checks: { ...INPUT.checks, red: { ok: true, text } } });
   assert.doesNotMatch(body, /glpat-/);
+});
+
+// ----------------------------------------- what the adversarial pass found next
+
+test('a line break in the middle of something private does not hide it', () => {
+  const wrapped = 'fix(phase): keep the result\n\nSeen while running "Show the total on the\ninvoice list" on that desk.\n';
+  assert.deepEqual(leaks(wrapped, KNOWN), ['the ticket\'s title']);
+  assert.doesNotMatch(publicSafe(wrapped, KNOWN), /invoice\s+list/);
+  // A table cell is made safe before it is cut, with the known text: half a host is not one anything recognises.
+  const body = renderPrBody({ ...INPUT, known: KNOWN, points: [point('B-1', 'nit', `${'x'.repeat(182)} gitlab.internal.example is named`)] });
+  assert.doesNotMatch(body, /gitlab\.in/);
+});
+
+test('what a commit would publish is refused by kind: an address, a private network, a keyword GitHub acts on', () => {
+  const kinds = (text: string, where: 'message' | 'added' = 'message') => unpublishable(text, KNOWN, where);
+  assert.deepEqual(kinds('fix(x): y\n\nReported-by: jane.doe@corp.example\n'), ['an e-mail address']);
+  assert.deepEqual(kinds('fix(x): y\n\ncc @octocat\n'), ['a mention']);
+  assert.deepEqual(kinds('fix(x): y, fixes #12\n'), ['a closing keyword, which would close an issue of this repository']);
+  assert.deepEqual(kinds('+const HOST = "10.20.30.40";', 'added'), ['a private network address']);
+  // What every commit here carries, and what code is full of, is not any of those.
+  assert.deepEqual(kinds('fix(x): y\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n'), []);
+  assert.deepEqual(kinds('fix(x): see erp#9174 and PR #197; uses `@types/node`\n'), []);
+  assert.deepEqual(kinds("+import x from '@anthropic-ai/claude-agent-sdk';\n+ * @param cfg the phase\n+const a = 'a@example.com';\n+// git@github.com:acme/oneshot.git", 'added'), []);
+});
+
+test('a remote\'s address is not an e-mail address', () => {
+  assert.equal(publicSafe('clone git@github.com:acme/oneshot.git and mail jane.doe@corp.example'), 'clone git@github.com:acme/oneshot.git and mail <email>');
 });

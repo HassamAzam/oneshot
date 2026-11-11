@@ -94,7 +94,7 @@ function deps(p: ReturnType<typeof project>, author: (wt: string) => void): { de
         if (cmd === 'gh' && args.includes('list')) return { code: 0, out: '[]' };
         if (cmd === 'gh' && args.includes('create')) return { code: 0, out: 'https://github.com/acme/oneshot/pull/7\n' };
         // It has to look like GitHub to be accepted, and what is pushed to has to be the local bare origin.
-        if (cmd === 'git' && args[0] === 'remote') return { code: 0, out: args.includes('--push') ? p.origin : 'https://github.com/acme/oneshot.git' };
+        if (cmd === 'git' && args[0] === 'remote' && args[1] === 'get-url') return { code: 0, out: args.includes('--push') ? p.origin : 'https://github.com/acme/oneshot.git' };
         return real.exec(cmd, args, o);
       },
       phase: (name): PhaseConfig => ({
@@ -197,9 +197,20 @@ test('on a real repository: a session that pushes its own branch reaches this di
   // fix checkout `origin` is the operator's clone, so that is where it lands.
   const p = project();
   try {
+    // Work of the operator's that was never pushed: it must not be in the fix checkout to be merged or copied.
+    git(p.repo, 'checkout', '-q', '-b', 'private/unpushed');
+    writeFileSync(join(p.repo, 'src', 'secret.ts'), 'export const unpublished = true;\n');
+    git(p.repo, 'add', '-A');
+    git(p.repo, 'commit', '-q', '-m', 'wip: not for anyone yet');
+    const privateSha = git(p.repo, 'rev-parse', 'HEAD');
+    git(p.repo, 'checkout', '-q', 'main');
     let early = '';
     let onRemoteThen = 'unset';
+    let refsThere = 'unset';
+    let privateThere = true;
     const w = deps(p, (wt) => {
+      refsThere = git(wt, 'for-each-ref', '--format=%(refname)');
+      try { git(wt, 'cat-file', '-e', `${privateSha}^{commit}`); } catch { privateThere = false; }
       writeFileSync(join(wt, 'src', 'add.ts'), 'export const add = (a: number, b: number): number => a * b; // unreviewed first try\n');
       git(wt, 'add', '-A');
       git(wt, 'commit', '-q', '-m', 'wip: first try');
@@ -212,6 +223,9 @@ test('on a real repository: a session that pushes its own branch reaches this di
     const lines = await fixFromDiagnosis({ iid: IID, dir: p.runDir }, w.deps);
     assert.deepEqual(lines, ['D-3 pull request opened: https://github.com/acme/oneshot/pull/7']);
     assert.equal(onRemoteThen, '', 'the session\'s push did not reach the remote');
+    assert.deepEqual(refsThere.split('\n').sort(), [`refs/heads/${BRANCH}`, 'refs/remotes/origin/main'], 'the checkout holds the base and its own branch');
+    assert.equal(privateThere, false, 'and not even the objects of a branch the operator never pushed');
+    assert.equal(git(p.repo, 'rev-parse', 'private/unpushed'), privateSha, 'which is still where they left it');
     const published = git(p.repo, 'ls-remote', '--heads', p.origin, BRANCH).split('\t')[0];
     assert.notEqual(published, early, 'what is published is the commit that was checked');
     assert.match(git(p.origin, 'show', `${published}:src/add.ts`), /a \+ b/);

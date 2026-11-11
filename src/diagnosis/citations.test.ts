@@ -210,3 +210,79 @@ test('a quote copied from the peek commands checks out with their label and thei
     assert.equal(checkCitation(cite(t, 6, '[result error_max_turns turns=9]'), w.roots).ok, false);
   } finally { w.cleanup(); }
 });
+
+// ----------------------------------------- what the adversarial pass found next
+
+test('the parts of an elided quote are held to one line: two fields of two journal records are not a sentence about one', () => {
+  const w = world();
+  try {
+    writeFileSync(join(w.roots.run, 'run.json'), [
+      '{', '  "phases": [', '    {', '      "phase": "implement",', '      "error": "cancelled by the conductor"', '    },',
+      '    {', '      "phase": "mr-open",', '      "status": "ok"', '    }', '  ]', '}',
+    ].join('\n'));
+    // The error is implement's (line 5). mr-open is the next record (line 8).
+    const stitched = checkCitation(cite('run.json', 5, '"error": "cancelled by the conductor" … "phase": "mr-open"'), w.roots);
+    assert.equal(stitched.ok, false);
+    // One line, elided in its middle, is still fine; so is a plain quote that runs over a line break.
+    writeFileSync(join(w.roots.repo, 'src', 'conductor', 'one.ts'), 'const settled = readTheResultFrame(frame) ?? fallbackFromTheExitText(error);\n');
+    assert.equal(checkCitation(cite('repo:src/conductor/one.ts', 1, 'const settled = readTheResultFrame … fallbackFromTheExitText(error);'), w.roots).ok, true);
+    assert.equal(checkCitation(cite('run.json', 4, '"phase": "implement", "error": "cancelled by the conductor"'), w.roots).ok, true);
+  } finally { w.cleanup(); }
+});
+
+test('a result frame\'s label is checked against the frame, not taken off the quote', () => {
+  const w = world();
+  try {
+    const t = 'transcripts/verify-lap0.jsonl';
+    // The frame is `success` after 9 turns. A quote that says otherwise in front of its real text is wrong about the frame.
+    assert.equal(checkCitation(cite(t, 6, '[result error_max_turns turns=450] Verification complete. 19 of 20 test cases pass.'), w.roots).ok, false);
+    assert.equal(checkCitation(cite(t, 6, '[result success turns=450] Verification complete. 19 of 20 test cases pass.'), w.roots).ok, false);
+    assert.equal(checkCitation(cite(t, 6, '[result success turns=9] Verification complete. 19 of 20 test cases pass.'), w.roots).ok, true);
+    assert.equal(checkCitation(cite(t, 6, 'Verification complete. 19 of 20 test cases pass.'), w.roots).ok, true);
+  } finally { w.cleanup(); }
+});
+
+test('three dots that are in the text are text: a verbatim line is tried as written before it is read as elided', () => {
+  const w = world();
+  try {
+    writeFileSync(join(w.roots.repo, 'src', 'conductor', 'dots.ts'), ['additional.push(...more);', '// Ran 4 tests ... FAILED (errors=1)', '// test_x (apps.tests.X) ... ERROR'].join('\n'));
+    for (const [line, quote] of [[1, 'additional.push(...more);'], [2, 'Ran 4 tests ... FAILED (errors=1)'], [3, 'test_x (apps.tests.X) ... ERROR']] as const) {
+      assert.equal(checkCitation(cite('repo:src/conductor/dots.ts', line, quote), w.roots).ok, true, quote);
+    }
+  } finally { w.cleanup(); }
+});
+
+test('a quote of punctuation is not evidence, and neither is the diagnosis\'s own output under another case or behind a link', () => {
+  const w = world();
+  try {
+    writeFileSync(join(w.roots.repo, 'src', 'conductor', 'rule.ts'), '// ------------------------------------------------------------\nconst x = 1;\n');
+    assert.match(checkCitation(cite('repo:src/conductor/rule.ts', 1, '------------'), w.roots).note, /almost no words/);
+    assert.match(checkCitation(cite('repo:src/conductor/rule.ts', 1, '// ------------------------'), w.roots).note, /almost no words/);
+
+    const own = 'a sentence the session wrote about the run, long enough to check';
+    mkdirSync(join(w.roots.run, 'diagnosis'), { recursive: true });
+    writeFileSync(join(w.roots.run, 'diagnosis', 'session.json'), JSON.stringify({ cause: own }));
+    symlinkSync(join(w.roots.run, 'diagnosis', 'session.json'), join(w.roots.run, 'notes.json'));
+    assert.match(checkCitation(cite('notes.json', 1, own), w.roots).note, /cannot cite its own output/, 'a link to it is it');
+    // Only where the disk itself ignores case does the other spelling open anything.
+    const other = checkCitation(cite('Diagnosis/SESSION.json', 1, own), w.roots);
+    assert.equal(other.ok, false);
+    assert.match(other.note, /cannot cite its own output|no such file/);
+  } finally { w.cleanup(); }
+});
+
+test('one check opens a bounded number of files, however many are cited', () => {
+  const w = world();
+  try {
+    const findings: Finding[] = [{
+      id: 'D-1', title: 't', category: 'harness', phases: '', recorded: '', cause: '', solution: '', where: [], fix: 'pr', confidence: 'confirmed',
+      evidence: Array.from({ length: 70 }, (_, i) => {
+        writeFileSync(join(w.roots.repo, 'src', `f${i}.ts`), `export const value${i} = 'a line long enough';\n`);
+        return cite(`repo:src/f${i}.ts`, 1, `export const value${i} = 'a line long enough';`);
+      }),
+    }];
+    const r = checkFindings(findings, w.roots);
+    assert.equal(r.verified, 60);
+    assert.match(r.findings[0]!.evidence[69]!.note, /more than 60 files were cited/);
+  } finally { w.cleanup(); }
+});

@@ -38,7 +38,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { redact } from '../lib/report.js';
 import type { PhaseRecord, RunJournal } from '../lib/artifacts.js';
-import { CODE_REPEATS, SESSION_REPEATS, countsAsRun, isOwnPhase } from './stop.js';
+import { CODE_REPEATS, SESSION_REPEATS, countsAsRun, isOwnPhase, isRerecord } from './stop.js';
 import { scanTranscript, type RawSignal, type Session, type SignalKind } from './transcript.js';
 
 const isOwn = isOwnPhase;
@@ -107,6 +107,8 @@ export interface Attempt {
 export interface PhaseSummary {
   phase: string;
   records: number;
+  /** Times the phase ran: not a poll that found a person had not acted, and not the conductor's second record of one session. */
+  ran: number;
   byStatus: Record<string, number>;
   minutes: number;
   weighted: number;
@@ -299,13 +301,20 @@ function foldAttempts(records: PhaseRecord[], transcripts: Set<string>): Attempt
 
 function summarisePhases(records: PhaseRecord[], policy: Record<string, PhasePolicy>): PhaseSummary[] {
   const by = new Map<string, PhaseSummary>();
+  const before = new Map<string, PhaseRecord>();
   for (const r of records) {
     const s = by.get(r.phase)
-      ?? { phase: r.phase, records: 0, byStatus: {}, minutes: 0, weighted: 0, policy: policyText(policy[r.phase]) };
+      ?? { phase: r.phase, records: 0, ran: 0, byStatus: {}, minutes: 0, weighted: 0, policy: policyText(policy[r.phase]) };
     s.records += 1;
     s.byStatus[r.status] = (s.byStatus[r.status] ?? 0) + 1;
-    s.minutes += Math.max(0, r.endedAt - r.startedAt) / 60_000;
-    s.weighted += r.weighted ?? 0;
+    // The conductor's verdict on a session it already recorded repeats that
+    // session's time and tokens: counted once, and one run of the phase.
+    if (!isRerecord(before.get(r.phase), r)) {
+      if (countsAsRun(r.status)) s.ran += 1;
+      s.minutes += Math.max(0, r.endedAt - r.startedAt) / 60_000;
+      s.weighted += r.weighted ?? 0;
+    }
+    before.set(r.phase, r);
     by.set(r.phase, s);
   }
   return [...by.values()].map((s) => ({ ...s, minutes: Math.round(s.minutes) }));
@@ -602,7 +611,7 @@ function factsFor(
     const code = policy[p.phase]?.kind === 'code';
     // Times the phase RAN. A `parked` record is a poll that found a person had
     // not acted yet, one every half hour for as long as a merge request waits.
-    const ran = Object.entries(p.byStatus).reduce((n, [status, k]) => n + (countsAsRun(status) ? k : 0), 0);
+    const ran = p.ran;
     if (ran >= (code ? CODE_REPEATS : SESSION_REPEATS)) {
       facts.push({
         kind: 'repeated', phase: p.phase,
@@ -826,8 +835,9 @@ export function buildEvidence(input: EvidenceInputs): Evidence | null {
       transcripts: scanned.length,
       transcriptBytes: scanned.reduce((n, t) => n + t.scan.bytes, 0),
       sessions: scanned.reduce((n, t) => n + t.scan.sessions.length, 0),
-      weighted: records.reduce((n, r) => n + (r.weighted ?? 0), 0),
-      minutes: Math.round(records.reduce((n, r) => n + Math.max(0, r.endedAt - r.startedAt), 0) / 60_000),
+      // From the per-phase sums, which count a session's time and tokens once however often it was recorded.
+      weighted: phases.reduce((n, p) => n + p.weighted, 0),
+      minutes: phases.reduce((n, p) => n + p.minutes, 0),
     },
     phases,
     attempts,
@@ -889,7 +899,7 @@ export function renderEvidence(e: Evidence, o: { maxAttempts?: number; maxSignal
 
   out.push('', '## Phases', 'phase · records · by status · minutes · weighted · policy');
   for (const p of e.phases) {
-    out.push(`- ${p.phase} · ${p.records} · ${Object.entries(p.byStatus).map(([k, n]) => `${n} ${k}`).join(', ')} · ${p.minutes}m · ${compact(p.weighted)}${p.policy ? ` · ${p.policy}` : ''}`);
+    out.push(`- ${p.phase} · ${p.records}${p.ran !== p.records ? ` (ran ${p.ran}×)` : ''} · ${Object.entries(p.byStatus).map(([k, n]) => `${n} ${k}`).join(', ')} · ${p.minutes}m · ${compact(p.weighted)}${p.policy ? ` · ${p.policy}` : ''}`);
   }
 
   out.push('', '## Phase attempts, in order', 'id · phase lap · status · start–end UTC · turns · what the journal recorded · transcript');

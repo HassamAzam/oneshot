@@ -36,10 +36,14 @@ import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { redact } from '../lib/report.js';
 import { isOwnPhase } from './stop.js';
-import { frameText } from './transcript.js';
+import { frameText, resultLine } from './transcript.js';
 import type { CheckedCitation, CheckedFinding, Citation, Finding } from './types.js';
 
 const MIN_QUOTE = 12;
+/** Letters and digits a quote must hold: twelve dashes are in every file. */
+const MIN_WORD_CHARS = 8;
+/** Files one check will open. A diagnosis cites a handful, and each one is read whole. */
+const MAX_FILES = 60;
 /** An elided quote: at most this many parts, each at least this long, all within this many characters of the first. */
 const MAX_PARTS = 3;
 const MIN_PART = 12;
@@ -56,18 +60,25 @@ const REPO_PREFIX = 'repo:';
 const flat = (s: string): string => s.replace(/\s+/g, ' ').trim();
 
 /** What the peek commands print around a frame's own text: their label in front, and how much they cut behind. */
-const PEEK_LABEL_RE = /^(?:said:|call [\w-]+:|result(?: \([\w-]+\))?:|ERROR(?: \([\w-]+\))?:|\[stderr\]|\[result [^\]]*\])\s*/;
+const PEEK_LABEL_RE = /^(?:said:|call [\w-]+:|result(?: \([\w-]+\))?:|ERROR(?: \([\w-]+\))?:|\[stderr\])\s*/;
 const PEEK_CUT_RE = /(?:…\s*)?\(\+\d+ chars\)\s*$/;
 
 /** The quote as ordered fragments: an ellipsis in the middle stands for text left out. */
 export function quoteParts(quote: string): string[] {
-  const whole = flat(quote).replace(/^["'“”`]+|["'“”`]+$/g, '').replace(PEEK_CUT_RE, '');
+  return quoteText(quote).split(/…|\.{3,}/).map((p) => p.trim()).filter((p) => p.length > 0);
+}
+
+/**
+ * The quote as one text: flattened, without the quotation marks around it or
+ * what the peek commands print around a frame's own words. A result frame's
+ * `[result … turns=N]` label is NOT taken off: it says something about the
+ * frame, and is checked against it.
+ */
+export function quoteText(quote: string): string {
+  const whole = flat(quote).replace(/^["'“”`]+|["'“”`]+$/g, '').replace(PEEK_CUT_RE, '').trim();
   // The label comes off only when something is left behind it: a quote that IS the label is checked as it stands.
   const body = whole.replace(PEEK_LABEL_RE, '');
-  return (body.trim() ? body : whole)
-    .split(/…|\.{3,}/)
-    .map((p) => p.trim())
-    .filter((p) => p.length > 0);
+  return body.trim() ? body.trim() : whole;
 }
 
 /**
@@ -97,6 +108,7 @@ export function containsQuote(text: string, parts: string[], maxSpan = MAX_SPAN)
 /** Why a quote cannot be checked at all, or ''. */
 function tooLoose(parts: string[]): string {
   if (parts.join('').length < MIN_QUOTE) return `the quote is under ${MIN_QUOTE} characters, too short to check`;
+  if ((parts.join('').match(/[\p{L}\p{N}]/gu) ?? []).length < MIN_WORD_CHARS) return 'the quote holds almost no words, too little to check';
   if (parts.length > MAX_PARTS) return `the quote leaves text out in more than ${MAX_PARTS - 1} places, too loose to check`;
   if (parts.length > 1 && parts.some((p) => p.length < MIN_PART)) {
     return `a part of the quote kept around an ellipsis is under ${MIN_PART} characters, too loose to check`;
@@ -162,7 +174,11 @@ const NOT_SOURCE = new Set(['state', 'state-dry', 'node_modules', '.git']);
  * not source.
  */
 export function notCitable(path: string, roots: Roots): string {
-  const inRun = relative(resolve(roots.run), path);
+  // Through links, and in one case: a link named `notes.json` to the session's
+  // own answer is that answer, and on a disk that ignores case so is
+  // `Diagnosis/session.json`.
+  const real = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
+  const inRun = relative(real(roots.run), real(path)).toLowerCase();
   if (inRun && !inRun.startsWith('..') && !isAbsolute(inRun)) {
     const rel = inRun.split(sep).join('/');
     const own = /^transcripts\/(.+)-lap\d+\.jsonl$/.exec(rel);
@@ -171,8 +187,8 @@ export function notCitable(path: string, roots: Roots): string {
     }
     return '';
   }
-  const inRepo = relative(resolve(roots.repo), path).split(sep);
-  if (NOT_SOURCE.has(inRepo[0] ?? '') || basename(path).startsWith('.env')) return 'not a file of the repository\'s source';
+  const inRepo = relative(real(roots.repo), real(path)).toLowerCase().split(sep);
+  if (NOT_SOURCE.has(inRepo[0] ?? '') || basename(path).toLowerCase().startsWith('.env')) return 'not a file of the repository\'s source';
   return '';
 }
 
@@ -180,6 +196,7 @@ interface Loaded { lines: string[]; jsonl: boolean; decoded: Map<number, string[
 
 function load(path: string, cache: Map<string, Loaded | null>): Loaded | null {
   if (cache.has(path)) return cache.get(path) ?? null;
+  if (cache.size >= MAX_FILES) return null;
   let out: Loaded | null = null;
   try {
     if (existsSync(path) && statSync(path).isFile() && statSync(path).size <= MAX_FILE_BYTES) {
@@ -203,17 +220,17 @@ function formsAt(f: Loaded, index: number): string[] {
   const had = f.decoded.get(index);
   if (had) return had;
   let text = raw;
-  let label = '';
+  const extra: string[] = [];
   try {
     const frame = JSON.parse(raw) as Record<string, unknown>;
     text = frameText(frame);
-    // A result frame's outcome, as its own JSON spells it and as the peek commands print it.
-    if (frame.type === 'result') label = `"subtype":"${String(frame.subtype ?? '')}" [result ${String(frame.subtype ?? '')} turns=${String(frame.num_turns ?? 0)}]`;
+    // A result frame's outcome: as the peek commands print the frame, label first, and as its own JSON spells it.
+    const line = resultLine(frame);
+    if (line) extra.push(line.length <= REDACT_MAX_CHARS ? redact(line) : line, `"subtype":"${String(frame.subtype ?? '')}"`);
   } catch { /* a cut-off line is matched as it stands */ }
   const seen = flat(text);
   const shown = seen.length <= REDACT_MAX_CHARS ? redact(seen) : seen;
-  const out = shown === seen ? [seen] : [seen, shown];
-  if (label) out.push(label);
+  const out = [...(shown === seen ? [seen] : [seen, shown]), ...extra];
   f.decoded.set(index, out);
   return out;
 }
@@ -222,47 +239,60 @@ const lineHas = (f: Loaded, index: number, parts: string[]): boolean => formsAt(
 
 export function checkCitation(c: Citation, roots: Roots, cache: Map<string, Loaded | null> = new Map()): CheckedCitation {
   const bad = (note: string): CheckedCitation => ({ ...c, ok: false, note });
-  const parts = quoteParts(c.quote ?? '');
-  const loose = tooLoose(parts);
+  // As written first, dots and all: `Ran 4 tests ... FAILED` and `push(...more)` are text, not elisions.
+  const literal = [quoteText(c.quote ?? '')].filter(Boolean);
+  const elided = quoteParts(c.quote ?? '');
+  const loose = tooLoose(literal);
   if (loose) return bad(loose);
 
   const path = resolveCited(String(c.file ?? ''), roots);
   if (!path) return bad('the file is outside the run directory and this repository');
   const barred = notCitable(path, roots);
   if (barred) return bad(barred);
+  const had = cache.has(path);
   const f = load(path, cache);
-  if (!f) return bad('no such file');
+  if (!f) return bad(!had && cache.size >= MAX_FILES ? `more than ${MAX_FILES} files were cited, and this one was not opened` : 'no such file');
 
   const at = Math.max(0, Math.trunc(Number(c.line) || 1) - 1);
-  if (lineHas(f, at, parts)) return { ...c, ok: true, note: '' };
-
-  // A text file's quote can run across lines; a transcript's cannot leave its frame.
-  if (!f.jsonl) {
-    const window = f.lines.slice(Math.max(0, at - NEAR), at + NEAR + 1).map(flat).join(' ');
-    if (containsQuote(window, parts)) return { ...c, ok: true, note: '' };
-  }
-
-  for (let d = 1; d <= NEAR; d += 1) {
-    for (const i of [at - d, at + d]) {
-      if (i >= 0 && i < f.lines.length && lineHas(f, i, parts)) {
-        return { ...c, line: i + 1, ok: true, note: `found at line ${i + 1}, not ${at + 1}` };
+  const found = (parts: string[], acrossLines: boolean): CheckedCitation | null => {
+    if (lineHas(f, at, parts)) return { ...c, ok: true, note: '' };
+    // A text file's quote can run across lines; a transcript's cannot leave its frame.
+    if (acrossLines && !f.jsonl) {
+      const window = f.lines.slice(Math.max(0, at - NEAR), at + NEAR + 1).map(flat).join(' ');
+      if (containsQuote(window, parts)) return { ...c, ok: true, note: '' };
+    }
+    for (let d = 1; d <= NEAR; d += 1) {
+      for (const i of [at - d, at + d]) {
+        if (i >= 0 && i < f.lines.length && lineHas(f, i, parts)) {
+          return { ...c, line: i + 1, ok: true, note: `found at line ${i + 1}, not ${at + 1}` };
+        }
       }
     }
-  }
-  for (let i = 0; i < f.lines.length; i += 1) {
-    if (lineHas(f, i, parts)) return { ...c, line: i + 1, ok: true, note: `found at line ${i + 1}, not ${at + 1}` };
-  }
-  // The whole file as one text, for a quote that runs across more lines than the
-  // window above. Never for an elided one: three parts "in order somewhere in
-  // the file" is true of almost any three parts.
-  if (!f.jsonl && parts.length === 1) {
-    // Pretty-printed JSON escapes quotes and line breaks, so try its decoded strings too.
-    const whole = f.lines.join('\n');
-    let decoded = '';
-    try { decoded = flat(frameText(JSON.parse(whole))); } catch { /* not JSON */ }
-    if (containsQuote(flat(whole), parts) || (decoded && containsQuote(decoded, parts))) {
-      return { ...c, ok: true, note: 'found in the file, across lines' };
+    for (let i = 0; i < f.lines.length; i += 1) {
+      if (lineHas(f, i, parts)) return { ...c, line: i + 1, ok: true, note: `found at line ${i + 1}, not ${at + 1}` };
     }
+    if (acrossLines && !f.jsonl) {
+      // Pretty-printed JSON escapes quotes and line breaks, so try its decoded strings too.
+      const whole = f.lines.join('\n');
+      let decoded = '';
+      try { decoded = flat(frameText(JSON.parse(whole))); } catch { /* not JSON */ }
+      if (containsQuote(flat(whole), parts) || (decoded && containsQuote(decoded, parts))) {
+        return { ...c, ok: true, note: 'found in the file, across lines' };
+      }
+    }
+    return null;
+  };
+
+  const whole = found(literal, true);
+  if (whole) return whole;
+  if (elided.length > 1) {
+    const why = tooLoose(elided);
+    if (why) return bad(why);
+    // The parts of an elided quote are held to ONE line of the file, or one
+    // frame of a transcript. Joined across lines, two fields of two different
+    // journal records read as a sentence about one of them.
+    const part = found(elided, false);
+    if (part) return part;
   }
   return bad('the quote is not in that file');
 }

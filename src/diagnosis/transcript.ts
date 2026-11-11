@@ -250,6 +250,21 @@ export function outputBrief(output: unknown): string {
   return redact(bits.join(' · ').slice(0, OUTPUT_CHARS));
 }
 
+/**
+ * A result frame as the peek commands print it, uncut: `[result success
+ * turns=12] <its text>`. The citation check matches a quote against this, so a
+ * quote copied from peek's output checks out label and all, and a label that
+ * says something else about the frame does not.
+ */
+export function resultLine(frame: unknown): string | null {
+  const f = frame as Frame | null;
+  if (!f || typeof f !== 'object' || f.type !== 'result') return null;
+  const errors = Array.isArray(f.errors) ? f.errors.map(String).join('; ') : '';
+  const subtype = String(f.subtype ?? 'result');
+  const text = subtype === 'success' ? String(f.result ?? '') : errors || String(f.result ?? '');
+  return `[result ${subtype}${f.is_error === true ? ' is_error' : ''} turns=${Number(f.num_turns ?? 0)}] ${flat(text)}`;
+}
+
 function resultFrame(frame: Frame, line: number): ResultFrame {
   const errors = Array.isArray(frame.errors) ? frame.errors.map(String).join('; ') : '';
   const subtype = String(frame.subtype ?? 'result');

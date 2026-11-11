@@ -144,10 +144,11 @@ export function reviewPoints(lens: string, data: Record<string, unknown> | null 
     const p = (raw ?? {}) as Record<string, unknown>;
     const what = typeof p.what === 'string' ? p.what.trim() : '';
     if (!what) continue;
-    const sev = String(p.severity ?? '');
+    const sev = String(p.severity ?? '').trim().toLowerCase();
     out.push({
       id: `${lens}-${out.length + 1}`,
-      severity: sev === 'blocker' || sev === 'nit' || sev === 'note' ? sev : 'nit',
+      // The schema allows three words. Anything else is read as the one that costs a round, not the one that costs nothing.
+      severity: sev === 'blocker' || sev === 'nit' || sev === 'note' ? sev : 'blocker',
       file: typeof p.file === 'string' ? p.file : '',
       line: Number(p.line) || 0,
       what,
@@ -175,8 +176,13 @@ export function rulingsOf(data: Record<string, unknown> | null | undefined): Rul
  * expensive one is a defect that left the building because nobody ruled on it.
  */
 export function upheld(points: ReviewPoint[], rulings: Ruling[], additional: ReviewPoint[]): ReviewPoint[] {
-  const ruled = new Map(rulings.map((r) => [r.id, r]));
-  const fromReview = points.filter((p) => p.severity === 'blocker' && ruled.get(p.id)?.holds !== false);
+  // Refuted means ruled on and every ruling says it does not hold: two rulings
+  // for one id that disagree leave it standing, whichever came last.
+  const refuted = (id: string): boolean => {
+    const mine = rulings.filter((r) => r.id === id);
+    return mine.length > 0 && mine.every((r) => r.holds === false);
+  };
+  const fromReview = points.filter((p) => p.severity === 'blocker' && !refuted(p.id));
   return [...fromReview, ...additional.filter((p) => p.severity === 'blocker')];
 }
 

@@ -107,7 +107,9 @@ test('a change to source needs a test the pipeline can run against the base: the
 
 test('two reviewers\' points are renumbered so they cannot collide, and model output is coerced', () => {
   const a = reviewPoints('A', { findings: [{ severity: 'blocker', what: 'wrong', why: 'w', file: 'src/x.ts', line: '12', fix: '' }, { severity: 'catastrophe', what: 'odd' }, { what: '  ' }, null] });
-  assert.deepEqual(a.map((p) => [p.id, p.severity, p.line]), [['A-1', 'blocker', 12], ['A-2', 'nit', 0]]);
+  // A severity the schema does not know is read as the one that costs a round.
+  assert.deepEqual(a.map((p) => [p.id, p.severity, p.line]), [['A-1', 'blocker', 12], ['A-2', 'blocker', 0]]);
+  assert.deepEqual(reviewPoints('B', { findings: [{ severity: ' BLOCKER ', what: 'x' }, { severity: 'Nit', what: 'y' }] }).map((p) => p.severity), ['blocker', 'nit']);
   assert.deepEqual(reviewPoints('B', { findings: 'none' }), []);
   assert.deepEqual(reviewPoints('B', null), []);
   assert.deepEqual(rulingsOf({ rulings: [{ id: 'A-1', holds: 'yes', reason: 'r' }, { holds: true }] }), [{ id: 'A-1', holds: false, reason: 'r' }]);
@@ -130,6 +132,10 @@ test('the tally is what happened: a blocker that stood and was then fixed was up
 
 test('a blocker the verifier did not rule on is upheld: silence is not a refutation', () => {
   assert.deepEqual(upheld([point('A-1')], [], []).map((p) => p.id), ['A-1']);
+  // Nor is a ruling for some other id, or two rulings that disagree.
+  assert.deepEqual(upheld([point('A-1')], [{ id: 'A-9', holds: false, reason: 'r' }, { id: 'a-1', holds: false, reason: 'r' }], []).map((p) => p.id), ['A-1']);
+  assert.deepEqual(upheld([point('A-1')], [{ id: 'A-1', holds: true, reason: 'reproduced' }, { id: 'A-1', holds: false, reason: 'on second thought' }], []).map((p) => p.id), ['A-1']);
+  assert.deepEqual(upheld([point('A-1')], [{ id: 'A-1', holds: false, reason: 'ran it' }], []), []);
 });
 
 // ---------------------------------------------------------------- the checks

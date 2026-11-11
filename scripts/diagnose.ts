@@ -12,9 +12,10 @@
  * The conductor does all of this on its own for a desk that sets
  * ONESHOT_DIAGNOSIS=1 (src/diagnosis/runner.ts). This is for a run it will not
  * pick up: one older than the age limit, one a person wants looked at now, or
- * one copied here from another machine. For a copy, add `--dir <run dir>` to
- * the first four commands and leave it where it is: placed under state/runs it
- * would be this desk's own run of that ticket.
+ * one copied here from another machine. `evidence` and `show` read a copy
+ * wherever it lies (`--dir <run dir>`). The two commands that start sessions
+ * do not: a session's transcript and answer are written under
+ * state/runs/<iid>, so the copy has to be there.
  *
  * By hand nothing is posted unless `--post` says so, whatever the desk's
  * settings are: a person trying a diagnosis out should not find it on the
@@ -33,10 +34,10 @@ const args = process.argv.slice(2);
 function usage(code: number): never {
   console.error([
     'usage:',
-    '  npm run diagnose -- <iid> [--post] [--dir <run dir>]',
+    '  npm run diagnose -- <iid> [--post]',
     '  npm run diagnose -- evidence <iid> | --dir <run dir>',
     '  npm run diagnose -- show <iid> [--dir <run dir>]',
-    '  npm run diagnose -- fix <iid> [finding id] [--post] [--dir <run dir>]',
+    '  npm run diagnose -- fix <iid> [finding id] [--post]',
     '  npm run diagnose -- peek --dir <run dir> frames <file> [from] [to]',
     '  npm run diagnose -- peek --dir <run dir> frame <file> <line> [chars]',
     '  npm run diagnose -- peek --dir <run dir> grep <pattern> [file …]',
@@ -143,6 +144,14 @@ async function main(): Promise<void> {
     return;
   }
 
+  // A session writes its transcript and its answer under state/runs/<iid>
+  // whatever directory it was pointed at, so a run read from elsewhere would
+  // be paid for and its answer never found.
+  if (given) {
+    console.error(`--dir is for \`evidence\` and \`show\`. To diagnose or fix a copied run, put the copy at ${runDir(iidOf(first === 'fix' ? words[0] : first))} first.`);
+    process.exit(2);
+  }
+
   const { ensureClaudeDir } = await import('../src/lib/claudedir.js');
   // The session resolves its skill from .claude in the repo root, which the
   // conductor composes at boot. By hand there may have been no boot.
@@ -152,7 +161,7 @@ async function main(): Promise<void> {
     const iid = iidOf(words[0]);
     const { fixFromDiagnosis } = await import('../src/diagnosis/fix/pipeline.js');
     const outcomes = await fixFromDiagnosis({
-      iid, dir: dirOf(iid), only: words[1] && !words[1].startsWith('--') ? words[1] : undefined, force: true, post: words.includes('--post'),
+      iid, dir: runDir(iid), only: words[1] && !words[1].startsWith('--') ? words[1] : undefined, force: true, post: words.includes('--post'),
     });
     for (const o of outcomes) console.log(o);
     return;
@@ -160,11 +169,10 @@ async function main(): Promise<void> {
 
   const iid = iidOf(first);
   const { diagnoseRun, outcomeLine } = await import('../src/diagnosis/runner.js');
-  const outcome = await diagnoseRun(iid, { force: true, post: words.includes('--post') }, given ? { runDir: () => dirOf(iid) } : undefined);
+  const outcome = await diagnoseRun(iid, { force: true, post: words.includes('--post') });
   console.log(outcomeLine(outcome));
   if (outcome.act === 'diagnosed' || outcome.act === 'superseded') {
-    const where = given ? ` --dir ${given}` : '';
-    console.log(`\n  npm run diagnose -- show ${iid}${where}     the note as it would read\n  ${join(dirOf(iid), 'diagnosis.json')}`);
+    console.log(`\n  npm run diagnose -- show ${iid}     the note as it would read\n  ${join(runDir(iid), 'diagnosis.json')}`);
   }
   process.exit(outcome.act === 'failed' ? 1 : 0);
 }

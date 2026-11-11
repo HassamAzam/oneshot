@@ -34,11 +34,32 @@ const CLOSING_RE = /\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)(\s*:?\s+)#(?=\d)/g
 export interface PrivateText { what: string; text: string }
 
 const escapeRe = (v: string): string => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const flatten = (v: string): string => v.replace(/\s+/g, ' ').trim();
+/** The text as a pattern that finds it however it was wrapped: a line break in a commit body is a space. */
+const anywhere = (text: string): RegExp => new RegExp(flatten(text).split(' ').map(escapeRe).join('\\s+'), 'gi');
+/** An address that is nobody's: a placeholder domain, a no-reply address, or the `git@host:` of a remote. */
+const NOBODY_RE = /@(?:[\w-]+\.)*example\.(?:com|org|net)$|(?:^|[.@])noreply\b|^git@/i;
 
 /** Which kinds of private text appear in `text`. Names the kind, never the text. */
 export function leaks(text: string, known: PrivateText[]): string[] {
-  const lower = text.toLowerCase();
-  return [...new Set(known.filter((k) => k.text.trim().length >= 4 && lower.includes(k.text.trim().toLowerCase())).map((k) => k.what))];
+  return [...new Set(known.filter((k) => k.text.trim().length >= 4 && anywhere(k.text).test(text)).map((k) => k.what))];
+}
+
+/**
+ * Everything in text that cannot be rewritten (a commit message, the lines a
+ * change adds) that must not be published: what the pipeline knows is private,
+ * a real e-mail address, a private network address, and, in a commit message,
+ * a mention or a closing keyword, both of which GitHub acts on. Names the kind.
+ */
+export function unpublishable(text: string, known: PrivateText[], where: 'message' | 'added'): string[] {
+  const out = leaks(text, known);
+  if ((text.match(EMAIL_RE) ?? []).some((m) => !NOBODY_RE.test(m))) out.push('an e-mail address');
+  if (new RegExp(PRIVATE_IP_RE.source).test(text)) out.push('a private network address');
+  if (where === 'message') {
+    if (new RegExp(CLOSING_RE.source, 'i').test(text)) out.push('a closing keyword, which would close an issue of this repository');
+    if (/(^|[^\w`/.])@[A-Za-z0-9][\w-]*(?![\w-]*[./@])/m.test(text.replace(EMAIL_RE, ''))) out.push('a mention');
+  }
+  return [...new Set(out)];
 }
 
 /**
@@ -50,12 +71,12 @@ export function leaks(text: string, known: PrivateText[]): string[] {
 export function publicSafe(text: string, known: PrivateText[] = []): string {
   let out = redact(text);
   for (const k of known) {
-    if (k.text.trim().length >= 4) out = out.replace(new RegExp(escapeRe(k.text.trim()), 'gi'), `<${k.what}>`);
+    if (k.text.trim().length >= 4) out = out.replace(anywhere(k.text), `<${k.what}>`);
   }
   return out
     .replace(URL_CREDENTIAL_RE, '$1')
     .replace(PRIVATE_IP_RE, '<internal address>')
-    .replace(EMAIL_RE, '<email>')
+    .replace(EMAIL_RE, (m) => (/^git@/i.test(m) ? m : '<email>'))
     .replace(HOME_RE, '~')
     .replace(CLOSING_RE, '$1$2#​')
     .replace(MENTION_RE, '$1@​');
@@ -92,8 +113,12 @@ export interface PrBodyInput {
 }
 
 const cut = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n).trimEnd()}…` : s);
-/** One line of a table or a code block. Made safe BEFORE it is cut: a credential cut in half is not one the redaction knows. */
-const line = (s: string, n = 300): string => cut(publicSafe(s.replace(/\s+/g, ' ').trim()), n);
+/**
+ * One line of a table or a code block. Made safe BEFORE it is cut, with what is
+ * known to be private: a credential or a host cut in half is not one anything
+ * recognises afterwards.
+ */
+const lineWith = (known: PrivateText[]) => (s: string, n = 300): string => cut(publicSafe(s.replace(/\s+/g, ' ').trim(), known), n);
 
 /**
  * The description. Review points are listed with what became of each one,
@@ -101,6 +126,7 @@ const line = (s: string, n = 300): string => cut(publicSafe(s.replace(/\s+/g, ' 
  * "A-2 was raised, the verifier ran the test and it does not hold" does.
  */
 export function renderPrBody(i: PrBodyInput): string {
+  const line = lineWith(i.known ?? []);
   const ruled = new Map(i.rulings.map((r) => [r.id, r]));
   const out: string[] = [];
 

@@ -473,11 +473,22 @@ export async function diagnoseRun(iid: number, opts: DiagnoseOpts = {}, over?: P
     }
     const not = foreign();
     if (not) return not;
-    if (asked) { delete had.noteSkipped; delete had.noteTries; }
-    if (await postNote(iid, dir, had, deps, true)) {
-      return { iid, act: 'diagnosed', key, findings: (had.findings ?? []).length, posted: true };
+    // Under the stop's lock, and read again inside it: two conductors over one
+    // state directory both see the note owed, and only one of them may post it.
+    const noteLock = join(dir, 'diagnosis', `.lock-${key}`);
+    if (!acquireLock(noteLock, LOCK_STALE_MS)) return { iid, act: 'skipped', why: 'another process is posting this stop\'s note' };
+    try {
+      const owed = record()?.stops[key];
+      if (!owed || owed.state !== 'diagnosed' || owed.note) return { iid, act: 'skipped', why: decision.why };
+      if (asked) { delete owed.noteSkipped; delete owed.noteTries; }
+      if (owed.noteSkipped) return { iid, act: 'skipped', why: decision.why };
+      if (await postNote(iid, dir, owed, deps, true)) {
+        return { iid, act: 'diagnosed', key, findings: (owed.findings ?? []).length, posted: true };
+      }
+      return { iid, act: 'skipped', why: decision.why };
+    } finally {
+      releaseLock(noteLock);
     }
-    return { iid, act: 'skipped', why: decision.why };
   }
 
   const phase = deps.phase();

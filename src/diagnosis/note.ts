@@ -42,7 +42,7 @@ const ACCOUNT_CHARS = 3500;
 const QUOTE_CHARS = 300;
 
 export function diagnosisMarker(key: string): string {
-  return `<!-- oneshot:diagnosis:${key} -->`;
+  return `<!-- oneshot:diagnosis:${key.replace(/[^\w-]/g, '')} -->`;
 }
 
 export function fixMarker(key: string, findingId: string): string {
@@ -86,7 +86,9 @@ export function readsAsClaimOrStop(body: string): boolean {
  * a little oddly is nothing beside a live run losing its ticket.
  */
 function seal(lines: string[], marker: string): string {
-  let body = defuse(lines.join('\n'));
+  // Once more over the whole of it, for whatever reached a line without going
+  // through inert(): no line starts with a command, and nobody is notified.
+  let body = defuse(inertNoteText(lines.join('\n')));
   if (readsAsClaimOrStop(body)) body = body.replace(/—/g, '-').replace(/stopped/gi, 'halted').replace(/claimed/gi, 'took');
   if (readsAsClaimOrStop(body)) {
     body = 'A diagnosis of this run was made and could not be written here safely. It is in the run directory and on the dashboard.';
@@ -200,13 +202,16 @@ export function renderDiagnosisNote(d: StopDiagnosis, ctx: NoteContext = {}): st
   }
 
   const c = d.citations;
+  const count = (v: unknown): number => (Number.isFinite(Number(v)) ? Number(v) : 0);
   const read = d.read
-    ? ` and ${d.read.transcripts} transcript(s) (${Math.max(1, Math.round(d.read.transcriptBytes / (1024 * 1024)))} MB)`
+    ? ` and ${count(d.read.transcripts)} transcript(s) (${Math.max(1, Math.round(count(d.read.transcriptBytes) / (1024 * 1024)))} MB)`
     : ' and transcripts';
+  // An operator's setting, and still a string that ends up on a ticket: an address or nothing.
+  const link = ctx.dashboardUrl && /^https?:\/\/[^\s()<>"'`]+$/.test(ctx.dashboardUrl) ? ctx.dashboardUrl : '';
   out.push(`_Read from the run's journal${read}.`
-    + (c ? ` ${c.verified} of ${c.checked} citations were re-opened and found.` : '')
+    + (c ? ` ${count(c.verified)} of ${count(c.checked)} citations were re-opened and found.` : '')
     + ' Nothing was changed: this is a diagnosis, not a repair.'
-    + (ctx.dashboardUrl ? ` [Open on the dashboard](${ctx.dashboardUrl}).` : '') + '_');
+    + (link ? ` [Open on the dashboard](${link}).` : '') + '_');
   return seal(out, diagnosisMarker(d.key));
 }
 

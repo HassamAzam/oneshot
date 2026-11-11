@@ -1,8 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import '../lib/test-project-env.js';
+import { ROOT } from '../lib/config.js';
 import {
-  decideDiagnosis, isLimitStop, journalTrouble, mayPostOn, reasonForKey, standing, stopKey, type DiagnosisConfig,
+  RESOLVED_RE, decideDiagnosis, isLimitStop, isRerecord, journalTrouble, mayPostOn, reasonForKey, standing, stopKey, type DiagnosisConfig,
 } from './stop.js';
 import type { PhaseRecord } from '../lib/artifacts.js';
 import type { DiagnosisFile, StopDiagnosis } from './types.js';
@@ -84,6 +87,29 @@ test('a merge request waiting hours for a person is not a phase repeating', () =
   assert.deepEqual(journalTrouble({ phases: [rec('verify', 'failed', 'x'), rec('merge', 'parked')] }, isCode), ['failed:verify']);
 });
 
+test('a failure a person settled at a gate is history, and the conductor\'s second record of a session is not a second run', () => {
+  // Shaped as the runner writes it (and as the first server run's journal holds it): verify fails,
+  // the run parks at the QA gate, QA rules, and the lap is re-recorded `warned` with these words.
+  const s = (phase: string, lap: number, status: PhaseRecord['status'], error: string | undefined, sessionId: string): PhaseRecord =>
+    ({ phase, lap, status, startedAt: 1, endedAt: 2, sessionId, ...(error ? { error } : {}) });
+  const atQaGate = [s('verify', 0, 'failed', 'verify recorded 1 failing case(s) of 20: TC-21', 'v0')];
+  const afterQa = [...atQaGate, s('verify', 0, 'warned', 'resolved by the verify-case QA gate', 'v0'), rec('mr'), rec('merge', 'parked', 'awaiting a human merge')];
+  assert.deepEqual(journalTrouble({ phases: atQaGate }, isCode), ['failed:verify'], 'a failing case waiting on QA is trouble');
+  assert.deepEqual(journalTrouble({ phases: afterQa }, isCode), [], 'and once QA has ruled, the wait for a merge behind it is routine');
+  assert.match(readFileSync(join(ROOT, 'src', 'conductor', 'runner.ts'), 'utf8'), /error: 'resolved by the verify-case QA gate'/, 'the runner still words it this way');
+  assert.equal(RESOLVED_RE.test('resolved by the verify-case QA gate'), true);
+
+  // Four review sessions, two of them recorded twice (the session, then the verdict on it): four runs, not six.
+  const review = [0, 1, 2, 3].flatMap((lap) => [
+    s('review', lap, 'failed', 'Claude Code process exited with code 1', `r${lap}`),
+    ...(lap >= 2 ? [s('review', lap, 'warned', 'review requested changes with 2 blocker/major finding(s)', `r${lap}`)] : []),
+  ]);
+  assert.deepEqual(journalTrouble({ phases: review }, isCode), ['warned:review'], 'six records, four runs: under the six that mean a phase is repeating');
+  assert.equal(isRerecord(review[4], review[5]!), true);
+  assert.equal(isRerecord(review[0], review[1]!), false);
+  assert.equal(isRerecord(rec('plan'), rec('plan')), false, 'records without a session id are never taken for one session');
+});
+
 test('a remediation is trouble, and a second one is new trouble', () => {
   const healed = { phase: 'merge', reason: 'r', category: 'code', fixed: false, changes: [], at: 1 };
   assert.deepEqual(journalTrouble({ phases: [], remediations: [healed] }), ['remediated:1']);
@@ -152,7 +178,7 @@ test('a routine park, with nothing failed on the way, is not diagnosed; a troubl
   const clean = decide({ status: 'parked', trouble: [] });
   assert.equal(clean.act, 'skip');
   assert.match((clean as { why: string }).why, /routine wait/);
-  assert.equal(decide({ status: 'parked', trouble: [], force: true }).act, 'skip', 'and asking does not make a clean wait a failure');
+  assert.equal(decide({ status: 'parked', trouble: [], force: true }).act, 'diagnose', 'a person may ask about any stop: the judgement is the tick\'s');
   assert.equal(decide({ status: 'parked', trouble: ['failed:verify'] }).act, 'diagnose');
   assert.equal(decide({ status: 'blocked', trouble: [] }).act, 'diagnose', 'a block is always a request for a person');
 });
@@ -248,6 +274,8 @@ test('a run that reads running is not written off: it is a resume, or only the t
   // A parked run's journal says `running`, with no reason, for the seconds of
   // every tick between being re-claimed and being put back.
   assert.equal(standing({ keyThen: 'k', statusNow: 'running', keyNow: 'whatever' }), 'owed');
+  // And `aborted` is the conductor having stopped it mid-phase: it resumes by itself.
+  assert.equal(standing({ keyThen: 'k', statusNow: 'aborted', keyNow: 'whatever' }), 'owed');
 });
 
 test('a note goes only where this desk would be allowed to run', () => {

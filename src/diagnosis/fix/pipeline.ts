@@ -24,13 +24,24 @@
  * the quota accounting apply to the sessions that change Oneshot's own source
  * exactly as they apply to the ones that change the work repo.
  *
- * NOTHING A SESSION DOES CAN PUBLISH. The fix is written in a private clone of
- * the operator's clone, made for the one finding and deleted afterwards. Its
- * only remote is that local clone, so the pushes the guards allow a session
- * (its own branch, to `origin`) land on this disk and nowhere else, and
- * git-guard denies `gh` and any other destination. The one push to GitHub is
- * made here, after the review, by address, and it pushes the exact commit the
- * checks and the reviewers saw: not a branch name a session could have moved.
+ * A SESSION IS GIVEN NO WAY TO PUBLISH. Three things stand in front of that,
+ * and none of them is a sandbox:
+ *
+ *   - The fix is written in a private repository made for the one finding and
+ *     deleted afterwards. It holds the base branch and nothing else of the
+ *     operator's clone (no other branch, no unpushed work), and its only remote
+ *     is that clone, a directory on this disk.
+ *   - For the fix phases git-guard holds git to an allowlist (read the change;
+ *     the author also commits it): no push, fetch, remote or config, and no git
+ *     reached through an environment variable, a flag or another command.
+ *   - The one push to GitHub is made here, after the review, by address, of
+ *     the exact commit the checks ran on and the reviewers read: not a branch
+ *     name a session could have moved. A merge commit in it is a refusal.
+ *
+ * A session is still a shell running as the operator. One that writes a program
+ * to do what the guard would refuse is not stopped by any of this, which is why
+ * the repository's own branch protection and the person who merges are part of
+ * the design and not a formality.
  *
  * WHERE IT RUNS. Wherever there is a clone whose origin is the GitHub
  * repository and a `gh` that is signed in. That is a desk. It is not the
@@ -66,7 +77,7 @@ import {
   checksPass, diffGuard, fixBranch, fixEligibility, githubSlug, isRunnableTest, nextMove, parseTap, prTitle, repoPathOf,
   reviewPoints, rulingsOf, tally, upheld, type Checks, type DiffStat, type ReviewPoint, type Ruling,
 } from './decide.js';
-import { fixPrMarker, leaks, publicSafe, renderPrBody, type PrivateText } from './prbody.js';
+import { fixPrMarker, publicSafe, renderPrBody, unpublishable, type PrivateText } from './prbody.js';
 import { fixAuthorPrompt, fixReviewPrompt, fixVerifyPrompt, type FixCtx } from './prompts.js';
 
 export const FIX_AUTHOR = 'fix-author';
@@ -218,23 +229,31 @@ interface Tree { path: string; branch: string; baseSha: string }
 const ours = (deps: FixDeps, path: string): boolean => path.startsWith(`${deps.worktreeRoot}/`);
 
 /**
- * A private clone of the operator's clone, on a new branch at the base.
+ * A private repository holding the base branch and nothing else, on a new
+ * branch at the base.
  *
- * A clone and not a worktree, for one reason: its `origin` is the directory it
- * was cloned from. A worktree shares the operator's remotes, so the push the
- * guards allow a session would go to GitHub; from here it cannot. The base
- * branch is fetched under its usual name, so `origin/<base>` in a prompt or a
- * command means what it means everywhere else.
+ * Not a worktree of the operator's clone: a worktree shares its remotes, so a
+ * push from one goes to GitHub. And not a clone of it either: a clone brings
+ * every branch the operator has, pushed or not, and a session that merged one
+ * would have the pipeline publish it. One ref is fetched, under its usual
+ * name, so `origin/<base>` in a prompt or a command means what it means
+ * everywhere else, and `origin` is a directory on this disk.
  */
 async function makeCheckout(deps: FixDeps, path: string, branch: string): Promise<Tree | { error: string }> {
   const last = (r: ExecResult): string => r.out.trim().split('\n').slice(-1)[0] ?? '';
   if (!ours(deps, path)) return { error: `${path} is outside ${deps.worktreeRoot}` };
   rmSync(path, { recursive: true, force: true });
-  mkdirSync(dirname(path), { recursive: true });
-  const clone = await deps.exec('git', ['-c', 'core.hooksPath=/dev/null', 'clone', '--quiet', '--no-checkout', deps.repo, path], { cwd: deps.repo, timeoutMs: 300_000 });
-  if (clone.code !== 0) return { error: `git clone failed: ${last(clone)}` };
+  mkdirSync(path, { recursive: true });
+  const init = await deps.exec('git', ['-c', 'core.hooksPath=/dev/null', 'init', '--quiet', path], { cwd: deps.repo });
+  if (init.code !== 0) return { error: `git init failed: ${last(init)}` };
+  // The committer is the operator, as for any commit made on this machine: read from their clone, kept in this one.
+  for (const key of ['user.name', 'user.email']) {
+    const who = await deps.exec('git', ['config', '--get', key], { cwd: deps.repo });
+    if (who.code === 0 && who.out.trim()) await deps.exec('git', ['config', key, who.out.trim()], { cwd: path });
+  }
+  await deps.exec('git', ['remote', 'add', 'origin', deps.repo], { cwd: path });
   const ref = `refs/remotes/origin/${deps.base}`;
-  const fetched = await deps.exec('git', ['fetch', '--quiet', 'origin', `+${ref}:${ref}`], { cwd: path, timeoutMs: 180_000 });
+  const fetched = await deps.exec('git', ['fetch', '--quiet', '--no-tags', 'origin', `+${ref}:${ref}`], { cwd: path, timeoutMs: 300_000 });
   if (fetched.code !== 0) return { error: `could not take origin/${deps.base} into the fix checkout: ${last(fetched)}` };
   const sha = await deps.exec('git', ['rev-parse', '--verify', `${ref}^{commit}`], { cwd: path });
   if (sha.code !== 0 || !sha.out.trim()) return { error: `origin/${deps.base} is not a commit in the fix checkout` };
@@ -556,6 +575,11 @@ export async function fixFinding(
       if (!guard.ok) return refused(guard.why);
       const dirty = (await deps.exec('git', ['status', '--porcelain'], { cwd: tree.path })).out.trim();
       const head = (await deps.exec('git', ['rev-parse', 'HEAD'], { cwd: tree.path })).out.trim();
+      // What is measured is the commit, not the directory: a file the tests need
+      // that git ignores (a fixture under state/) would pass here and be missing
+      // from what is published. Only when nothing is uncommitted, so the
+      // author's own unfinished work is never what gets removed.
+      if (!dirty) await deps.exec('git', ['clean', '--quiet', '-fdx', '-e', '/node_modules'], { cwd: tree.path });
 
       checks = await runChecks(deps, tree, stat, o.signal);
       if (o.signal?.aborted) return held('stopped while the checks were running');
@@ -606,7 +630,8 @@ export async function fixFinding(
         standing = still;
         outstanding = standing;
         stopNow = v.data.verdict === 'do-not-ship';
-        shippable = !stopNow && v.data.fixesTheCause === true;
+        // `ship`, in so many words, and the cause confirmed: a verdict of "fix first" that names nothing to fix is not a yes.
+        shippable = v.data.verdict === 'ship' && v.data.fixesTheCause === true;
         said = String(v.data.reason ?? '');
       }
 
@@ -629,10 +654,13 @@ export async function fixFinding(
     const messages = await deps.exec('git', ['log', '--format=%B', `${tree.baseSha}..${measured}`], { cwd: tree.path });
     const patch = await deps.exec('git', ['diff', '--no-renames', '--unified=0', tree.baseSha, measured], { cwd: tree.path });
     if (messages.code !== 0 || patch.code !== 0) return failed('could not read the commits back to see what they would publish');
+    // The checkout holds the base and what the author wrote on it. A merge brings in something else.
+    const merges = await deps.exec('git', ['rev-list', '--merges', `${tree.baseSha}..${measured}`], { cwd: tree.path });
+    if (merges.code !== 0 || merges.out.trim()) return refused('the change contains a merge commit: a fix is the author\'s own commits on the base, and nothing merged into them');
     const added = patch.out.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).join('\n');
     const leaked = [
-      ...leaks(messages.out, known).map((what) => `${what} in a commit message`),
-      ...leaks(added, known).map((what) => `${what} in the change itself`),
+      ...unpublishable(messages.out, known, 'message').map((what) => `${what} in a commit message`),
+      ...unpublishable(added, known, 'added').map((what) => `${what} in the change itself`),
     ];
     if (leaked.length) return refused(`it would publish ${leaked.join(', and ')}, on a public repository`);
 
@@ -654,7 +682,9 @@ export async function fixFinding(
       commands: { typecheck: COMMANDS.typecheck, tests: COMMANDS.tests, red: `the changed tests, on origin/${deps.base} without the fix` },
       points, rulings, additional, stood, fixed, tally: sum, rounds: round,
     }));
-    const title = prTitle(publicSafe(String(author.title ?? ''), known), publicSafe(finding.title, known));
+    // One line before it is screened: a title wrapped in the middle of a private phrase is still that phrase.
+    const oneLine = (v: unknown): string => String(v ?? '').replace(/\s+/g, ' ').trim();
+    const title = prTitle(publicSafe(oneLine(author.title), known), publicSafe(oneLine(finding.title), known));
     const pr = await deps.exec('gh', [
       'pr', 'create', '--repo', ready.slug, '--base', deps.base, '--head', branch, '--title', title, '--body-file', bodyFile,
     ], { cwd: deps.repo, timeoutMs: 120_000 });

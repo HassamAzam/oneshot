@@ -35,7 +35,7 @@
  */
 import { createHash } from 'node:crypto';
 import { envFlag, envOr } from '../lib/config.js';
-import type { RunJournal } from '../lib/artifacts.js';
+import type { PhaseRecord, RunJournal } from '../lib/artifacts.js';
 import type { DiagnosisFile } from './types.js';
 
 /** Sessions this feature runs itself: never evidence about the run, and never trouble. */
@@ -59,6 +59,24 @@ export function countsAsRun(status: string): boolean {
 }
 
 const CANCELLED_RE = /cancelled by the conductor/;
+/**
+ * The conductor's record of a failure a person has since settled: verify's
+ * failing case, once QA has ruled on it, is re-recorded `warned` with these
+ * words (src/conductor/runner.ts). It is on the journal as history, not as
+ * something still wrong, and stop.test.ts holds this wording to the runner's.
+ */
+export const RESOLVED_RE = /^resolved by /;
+
+/**
+ * Whether a record is the conductor's own verdict on a session it has already
+ * recorded: the same phase, lap and session, written a second time with the
+ * verdict's status and words (a review that finished and asked for changes; a
+ * verify failure a gate resolved). It is one run of the phase, not two, and
+ * its time and tokens are the first record's over again.
+ */
+export function isRerecord(prev: PhaseRecord | undefined, r: PhaseRecord): boolean {
+  return !!prev && !!r.sessionId && prev.phase === r.phase && prev.lap === r.lap && prev.sessionId === r.sessionId;
+}
 
 /**
  * The kinds of trouble STILL STANDING on a run's journal, as a set.
@@ -85,13 +103,18 @@ export function journalTrouble(
   const cancelled = new Map<string, number>();
   const ran = new Map<string, number>();
   const last = new Map<string, { status: string; error: string }>();
+  const before = new Map<string, PhaseRecord>();
   for (const r of j.phases ?? []) {
     if (isOwnPhase(r.phase) || !countsAsRun(r.status)) continue;
-    ran.set(r.phase, (ran.get(r.phase) ?? 0) + 1);
+    // The verdict replaces what its session was first recorded as, and is not a second run.
+    if (!isRerecord(before.get(r.phase), r)) ran.set(r.phase, (ran.get(r.phase) ?? 0) + 1);
+    before.set(r.phase, r);
     last.set(r.phase, { status: r.status, error: r.error ?? '' });
     if (r.status === 'infra' && CANCELLED_RE.test(r.error ?? '')) cancelled.set(r.phase, (cancelled.get(r.phase) ?? 0) + 1);
   }
   for (const [phase, r] of last) {
+    // Settled by a person at a gate: on the record, and no longer wrong.
+    if (RESOLVED_RE.test(r.error)) continue;
     if (r.status === 'failed' || r.status === 'warned' || r.status === 'refused') out.add(`${r.status}:${phase}`);
     if (r.status === 'infra' && (!CANCELLED_RE.test(r.error) || (cancelled.get(phase) ?? 0) >= 2)) out.add(`infra:${phase}`);
   }
@@ -208,11 +231,11 @@ export function decideDiagnosis(o: {
     return { act: 'skip', why: `gave up on this stop after ${mine.attempts} sessions: ${mine.lastError ?? 'no result'}` };
   }
 
+  if (o.force) return { act: 'diagnose', lap };
+
   if (o.status === 'parked' && o.trouble.length === 0) {
     return { act: 'skip', why: 'a routine wait: nothing is failed, warned or repeating behind it' };
   }
-
-  if (o.force) return { act: 'diagnose', lap };
 
   if (isLimitStop(o.reason)) return { act: 'skip', why: 'the stop is a usage or budget limit, which explains itself' };
 
@@ -267,7 +290,8 @@ export function decideDiagnosis(o: {
  *     diagnosis and leave the ticket alone.
  */
 export function standing(o: { keyThen: string; statusNow: string; keyNow: string }): 'stands' | 'owed' | 'superseded' {
-  if (o.statusNow === 'running') return 'owed';
+  // `aborted` is a run the conductor stopped mid-phase (a pause, a shutdown): it resumes by itself and stops again.
+  if (o.statusNow === 'running' || o.statusNow === 'aborted') return 'owed';
   return (o.statusNow === 'blocked' || o.statusNow === 'parked') && o.keyNow === o.keyThen ? 'stands' : 'superseded';
 }
 

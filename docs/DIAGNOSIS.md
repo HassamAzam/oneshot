@@ -78,7 +78,9 @@ review that asked for changes and then passed, or a session that died and was re
 successfully, leaves none: that is the pipeline working. What counts is a phase whose last run
 failed, warned or was refused; a phase run five times (six for a session phase); and a
 remediation. A `merge` poll that found the merge request still waiting for a person is not a
-run of the phase, however many there are.
+run of the phase, however many there are. Neither is the conductor's second record of one
+session, its verdict on it. And a failure a person has settled at a gate (verify's failing
+case, once QA has ruled on it) is history, not trouble.
 
 | The run is | Diagnosed? |
 |---|---|
@@ -204,7 +206,10 @@ the stop, not as a phase of the run.
 diagnosis never writes `run.json`: the runner holds the journal in memory and writes it back,
 so a second writer would lose one side's change. Its own file has several writers too (the
 conductor's pass, a diagnosis by hand, a fix running for an hour), so each re-reads it,
-changes its own entry and replaces the file in one step.
+changes its own entry and replaces the file in one step. The ticket note and the fix pipeline
+are driven from it, so the artifact guard keeps a run's own sessions from writing it, and what
+is read back is held to its declared shape: a count is a number, a key is a key, and a stop
+filed under one key that claims to be another is not a stop.
 
 ## The fix pull request
 
@@ -238,19 +243,29 @@ checked out, Oneshot can open the fix as a pull request. Four agents and a refer
    (`fix/diagnosed-<iid>-<stop>-<finding>`), one pull request against the base, and, on a desk
    that posts, the link on the ticket with what was measured.
 
-**No session can publish.** The fix is written in a private clone of the operator's clone,
-made for the one finding and deleted afterwards. Its only remote is that local clone, so the
-push the git guard allows a session (its own branch, to `origin`) lands on this disk; the
-guard denies `gh` and every other destination. The one push to GitHub is the referee's, by
-address, of the exact commit the measurements ran on and the reviewers read. After each
-read-only session the checkout is put back at that commit. Nothing is merged, and nothing in
-the pipeline can merge or turn auto-merge on.
+**A session is given no way to publish.** Three things stand in front of that:
+
+- The fix is written in a private repository made for the one finding and deleted afterwards.
+  It holds the base branch and nothing else of the operator's clone, no other branch and no
+  unpushed work, and its only remote is that clone, a directory on this disk.
+- For the fix phases the git guard holds git to an allowlist: read the change, and for the
+  author commit it. No push, fetch, remote or config, and no git reached through a variable, a
+  flag or another command.
+- The one push to GitHub is the referee's, by address, of the exact commit the measurements
+  ran on and the reviewers read. After each read-only session the checkout is put back at
+  that commit, and a merge commit in the change is a refusal.
+
+None of that is a sandbox. A session is a shell running as the operator, and one that wrote a
+program to do what the guard refuses would not be stopped by it. The repository's branch
+protection and the person who merges are the last line, which is one reason this step is off
+unless a desk asks for it. Nothing is merged, and nothing in the pipeline can merge or turn
+auto-merge on.
 
 It refuses rather than guesses. No pull request when: the diff is over 15 files or 800 lines,
 changes no test, changes source without a test that can be run against the base, or touches
 `package.json`, the lockfile, `deploy/`, `.github/` or team configuration; a blocker survives
 two rounds; the verifier will not confirm the cause is fixed, or says the change should not be
-opened at all; the commits would publish something private; a branch of the fix's name is
+opened at all; the commits would publish something private, or hold a merge; a branch of the fix's name is
 already on GitHub and is not this pipeline's pull request; GitHub cannot be asked; another
 process is already fixing it. A finding that was looked at gets a recorded answer, including
 "no pull request, and why", and `diagnosis.json` holds it. An attempt that was interrupted (a
@@ -267,8 +282,10 @@ reviewer looks. The repository is public and the ticket is not. The author is to
 the mechanism in the repository's terms; behind that, the title and the whole description have
 credentials, private addresses, e-mail addresses, home directories, mentions and closing
 keywords taken out, along with what the pipeline knows exactly is private: the work project's
-host, the ticket's title and this machine's name. The commits cannot be rewritten, so a commit
-message or an added line that carries one of those is a refusal.
+host, the ticket's title and this machine's name. The commits cannot be rewritten, so they
+are refused instead: a commit message or an added line that carries one of those, a real
+e-mail address or a private network address, or a commit message with a mention or a closing
+keyword, which GitHub acts on.
 
 **Where it runs.** Wherever there is a clone whose `origin` is the GitHub repository and a `gh`
 that is signed in. A machine without both records exactly that beside the finding and does
@@ -327,10 +344,10 @@ the age limit and the judgement about what is worth a session are skipped. A sto
 has its diagnosis is still never diagnosed twice: `<iid> --post` after a diagnosis that was not
 posted posts that diagnosis, at no cost.
 
-To diagnose, or fix from, a run that happened on another machine, copy its directory anywhere
-and add `--dir <that directory>` to any of these. Do not put the copy under `state/runs`:
-there it is this desk's own run of that ticket. The diagnosis needs nothing else. It reads the
-directory.
+To diagnose, or fix from, a run that happened on another machine, copy its directory to
+`state/runs/<iid>` here first: a session writes its transcript and its answer there, wherever
+it was told to read. The diagnosis needs nothing else. `evidence` and `show` start no session
+and read a copy wherever it lies: add `--dir <that directory>`.
 
 ## What it cost on the run it was built from
 
@@ -357,9 +374,10 @@ this one run and should be corrected from more.
   sessions and GitHub are stubbed in both. No live run of it has been made.
 - **The reproduction check cannot tell why a test fails on the base.** A test that imports a
   module the fix adds fails at the import. The verifier is asked to read the tests for that.
-- **The fix sessions read what their user can read.** They hold no GitHub tool and no remote
-  that reaches GitHub, and they are still shell sessions. Where `gh` keeps its token in a plain
-  file (`~/.config/gh/hosts.yml` on Linux) a session can read it, and no guard covers that file
+- **The guards on a fix session are guards on command text, not a sandbox.** It holds no GitHub
+  tool, no remote that reaches GitHub and a short list of git commands, and it is still a shell
+  running as the operator. Where `gh` keeps its token in a plain file
+  (`~/.config/gh/hosts.yml` on Linux) a session can read it, and no guard covers that file
   today. macOS keeps it in the keychain.
 - **What is private is recognised only where it can be named.** A person's name, or a host the
   pipeline was never told about, is not something a pattern knows. The pull request is opened

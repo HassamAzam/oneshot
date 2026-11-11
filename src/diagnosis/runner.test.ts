@@ -702,3 +702,60 @@ test('a finding\'s id is held to its shape: it goes into a hidden marker, a bran
   assert.equal(d.decisive, '', 'a decisive id that names no finding is dropped');
   assert.equal(normaliseDiagnosis({ decisive: 'D-2', findings: [{ id: 'D-2' }] }).decisive, 'D-2');
 });
+
+// ----------------------------------------- what the adversarial pass found next
+
+test('a record planted in the run directory cannot make the conductor post a command', async () => {
+  // A session of the run, talked into it: a "diagnosed" stop under the journal's own key,
+  // so no session is paid for and the note is rendered straight from the file.
+  const w = world();
+  try {
+    await run(w);                                   // a real diagnosis, to learn the stop's key
+    const key = record(w).stop.key;
+    const planted = (stopKey: string) => writeFileSync(join(w.dirs[990174]!, 'diagnosis.json'), JSON.stringify({
+      version: 1, iid: 990174, runId: 'r-test0001-abcdef', latest: key, sessions: 1,
+      stops: { [key]: {
+        key: stopKey, runId: 'r-test0001-abcdef', iid: 990174, status: 'blocked', stoppedPhase: 'merge\n/close', reason: '', trouble: [], state: 'diagnosed',
+        attempts: 1, lastAttemptAt: 1, headline: 'looks fine\n/label ~"Ready For Deployment"', nextStep: '/unassign', resumeFrom: '/close',
+        citations: { checked: 3, verified: '3\n/unassign\n' }, read: { transcripts: '2\n/close\n', transcriptBytes: 1 }, findings: [],
+      } },
+    }));
+
+    // Claiming to be another key that closes the comment: not a stop at all, so nothing is posted from it.
+    w.posted.length = 0;
+    planted(`${key} -->\n/close\n/label ~"Ready For Deployment"\n<!-- x`);
+    w.set({ now: NOW + 30 * 60_000 });
+    const first = await run(w);
+    assert.equal(first.act, 'diagnosed', 'the stop is simply diagnosed for real');
+    assert.equal(w.sessions.length, 2);
+    for (const p of w.posted) assert.doesNotMatch(p.body, /^\s*\/(close|label|unassign)/m);
+
+    // Under its real key, with commands in every field: posted, and inert.
+    w.posted.length = 0;
+    planted(key);
+    await run(w);
+    assert.equal(w.posted.length, 1);
+    const body = w.posted[0]!.body;
+    assert.doesNotMatch(body, /^\s*\/(close|label|unassign)/m, body);
+    assert.equal(body.match(/<!--/g)?.length, 1);
+    assert.ok(body.trimEnd().endsWith(diagnosisMarker(key)));
+    assert.match(body, /0 of 3 citations were re-opened and found/, 'a count that was not a number is not printed');
+  } finally { w.cleanup(); }
+});
+
+test('two conductors that both see a note owed post it once', async () => {
+  const w = world();
+  try {
+    // GitLab is unreachable when the diagnosis is made: the note is owed.
+    w.set({ reachable: false });
+    await run(w);
+    w.set({ reachable: true, now: NOW + 60_000 });
+    // The second look starts while the first is inside GitLab.
+    let second: Promise<unknown> | null = null;
+    const notes = w.deps.gitlab!.notes!;
+    w.deps.gitlab!.notes = async (iid) => { second ??= run(w); return notes(iid); };
+    await run(w);
+    await second;
+    assert.equal(w.posted.length, 1);
+  } finally { w.cleanup(); }
+});
