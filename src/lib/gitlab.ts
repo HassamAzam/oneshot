@@ -778,6 +778,8 @@ export interface MergeRequest {
   rebase_in_progress?: boolean;
   head_pipeline?: { id: number; status: string; web_url: string } | null;
   diverged_commits_count?: number;
+  /** The three shas a diff-line comment is positioned against. Absent on the list endpoint. */
+  diff_refs?: { base_sha: string; head_sha: string; start_sha: string } | null;
 }
 
 export interface ProjectSettings {
@@ -830,6 +832,33 @@ export function findMergeRequests(q: {
 /** One page (100) of an MR's discussions — the merge block message and the review-feedback loop read it. */
 export function mrDiscussions(mrIid: number): Promise<GitlabResult<MrDiscussion[]>> {
   return call<MrDiscussion[]>('GET', `/projects/${projectId()}/merge_requests/${mrIid}/discussions?per_page=100`);
+}
+
+/** Enough for any real review (2,000 threads); only here so a misbehaving API cannot loop forever. */
+const MAX_DISCUSSION_PAGES = 20;
+
+/**
+ * Every discussion on a merge request, a hundred a page until a short page.
+ *
+ * All or nothing, like mergeRequestDiffs: the review loop and the merge gate
+ * both decide from which threads are still open, and a list read half-way looks
+ * exactly like an MR with fewer open threads. An MR that somehow outgrows
+ * MAX_DISCUSSION_PAGES is reported as a failure rather than as its first pages.
+ */
+export async function allMrDiscussions(mrIid: number): Promise<GitlabResult<MrDiscussion[]>> {
+  const all: MrDiscussion[] = [];
+  for (let page = 1; page <= MAX_DISCUSSION_PAGES; page++) {
+    const res = await call<MrDiscussion[]>(
+      'GET', `/projects/${projectId()}/merge_requests/${mrIid}/discussions?per_page=100&page=${page}`,
+    );
+    if (!res.ok || !res.data) return { ...res, data: null };
+    all.push(...res.data);
+    if (res.data.length < 100) return { ...res, data: all };
+  }
+  return {
+    ok: false, kind: 'client', status: 0, data: null,
+    error: `!${mrIid} has more than ${MAX_DISCUSSION_PAGES * 100} discussions — refusing to decide from a partial list`,
+  };
 }
 
 /** One changed file of a merge request, as GET …/merge_requests/:iid/diffs returns it. */
@@ -1067,6 +1096,66 @@ export async function resolveMrDiscussion(
   return call<unknown>(
     'PUT',
     `/projects/${projectId()}/merge_requests/${mrIid}/discussions/${encodeURIComponent(discussionId)}?resolved=true`,
+    undefined, true,
+  );
+}
+
+/** Where on the diff a new discussion sits. `oldLine` only for a line the change did not touch. */
+export interface MrDiffPosition {
+  baseSha: string;
+  startSha: string;
+  headSha: string;
+  oldPath: string;
+  newPath: string;
+  newLine: number;
+  oldLine?: number;
+}
+
+/**
+ * Open a resolvable discussion on a merge request — on a diff line when
+ * `position` is given, on the MR as a whole otherwise. Only the code-review
+ * loop (src/review) opens these; a person's threads are answered through
+ * src/mrfeedback and never created here.
+ */
+export async function createMrDiscussion(
+  mrIid: number, body: string, position?: MrDiffPosition,
+): Promise<GitlabResult<{ id: string; notes: Array<{ id: number }> }>> {
+  if (DRY_RUN) {
+    log.warn(`[dry-run] would open a discussion on !${mrIid}`, { chars: body.length, positioned: Boolean(position) });
+    return { ok: true, kind: 'ok', status: 200, data: null };
+  }
+  return call<{ id: string; notes: Array<{ id: number }> }>(
+    'POST', `/projects/${projectId()}/merge_requests/${mrIid}/discussions`,
+    {
+      body,
+      ...(position ? {
+        position: {
+          position_type: 'text',
+          base_sha: position.baseSha,
+          start_sha: position.startSha,
+          head_sha: position.headSha,
+          old_path: position.oldPath,
+          new_path: position.newPath,
+          new_line: position.newLine,
+          ...(position.oldLine === undefined ? {} : { old_line: position.oldLine }),
+        },
+      } : {}),
+    },
+    true,
+  );
+}
+
+/** Resolve or reopen one MR thread. */
+export async function setMrDiscussionResolved(
+  mrIid: number, discussionId: string, resolved: boolean,
+): Promise<GitlabResult<unknown>> {
+  if (DRY_RUN) {
+    log.warn(`[dry-run] would ${resolved ? 'resolve' : 'reopen'} !${mrIid} thread ${discussionId}`);
+    return { ok: true, kind: 'ok', status: 200, data: null };
+  }
+  return call<unknown>(
+    'PUT',
+    `/projects/${projectId()}/merge_requests/${mrIid}/discussions/${encodeURIComponent(discussionId)}?resolved=${resolved}`,
     undefined, true,
   );
 }
