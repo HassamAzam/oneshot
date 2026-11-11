@@ -1,7 +1,10 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync } from 'node:fs';
-import { qualityGate } from './codephases.js';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { branchHeadSha, qualityGate, reviewRegrade } from './codephases.js';
 import { writeArtifact } from '../lib/artifacts.js';
 import { runDir } from '../lib/config.js';
 import { applyBaseCheck, type CodePhaseCtx } from './runner.js';
@@ -149,4 +152,163 @@ test('a confirmed pre-existing case on disk does not block a resumed run either'
   writeArtifact(IID, 'verify.json', baseChecked('fails'));
   writeArtifact(IID, 'findings.json', CLEAN_REVIEW);
   assert.equal(qualityGate(ctx({})), null);
+});
+
+// ------------------------------------------- a verdict that graded another sha
+
+/**
+ * erp#8893, as a test.
+ *
+ * `review` graded the diff at lap 0 and wrote three blockers. `implement`
+ * lap 1 fixed all three and moved the branch. Nothing re-runs review and
+ * nothing invalidates `findings.json`, so the gate refused over findings the
+ * branch no longer carried — and `unblock` could not clear it, because review
+ * SUCCEEDED and a succeeded record is never dropped. The run was stuck with no
+ * path out but a forced re-run by hand.
+ *
+ * These tests pin the discriminator that tells that run apart from erp#8800,
+ * where the blocking findings were genuinely still open and the refusal was
+ * correct. The branch sha is the whole difference.
+ */
+const gitIn = (cwd: string, ...args: string[]) => execFileSync('git', args, {
+  cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+});
+
+/** A one-commit repo on `branch`, plus a second commit on demand. */
+function repoAt(branch: string): { dir: string; sha: () => string; commit: () => string } {
+  const dir = mkdtempSync(join(tmpdir(), 'gate-sha-'));
+  gitIn(dir, 'init', '--quiet', '-b', branch);
+  gitIn(dir, 'config', 'user.email', 't@test');
+  gitIn(dir, 'config', 'user.name', 'T');
+  const commit = (): string => {
+    writeFileSync(join(dir, 'f.txt'), String(Math.random()));
+    gitIn(dir, 'add', '-A');
+    gitIn(dir, 'commit', '--quiet', '-m', 'c');
+    return gitIn(dir, 'rev-parse', 'HEAD').trim();
+  };
+  commit();
+  return { dir, sha: () => gitIn(dir, 'rev-parse', 'HEAD').trim(), commit };
+}
+
+const BRANCH = 'oneshot/ticket-999001-x';
+
+function shaCtx(prior: CodePhaseCtx['prior'], worktree: string, branch = BRANCH): CodePhaseCtx {
+  return {
+    iid: IID,
+    runId: 'r-test',
+    journal: { iid: IID, branch, worktree } as CodePhaseCtx['journal'],
+    prior,
+  };
+}
+
+test('a refusal stamped with a sha the branch has moved past asks for a re-grade', () => {
+  cleanup();
+  const repo = repoAt(BRANCH);
+  try {
+    const graded = repo.sha();
+    const moved = repo.commit();
+    assert.notEqual(graded, moved);
+    const c = shaCtx({ verify: CLEAN_VERIFY, review: { ...BLOCKED_REVIEW, gradedSha: graded } }, repo.dir);
+
+    const regrade = reviewRegrade(c);
+    assert.ok(regrade, 'a verdict about an older diff must be re-derived, not enforced');
+    assert.match(regrade, new RegExp(graded.slice(0, 10)));
+    assert.match(regrade, new RegExp(moved.slice(0, 10)));
+    // The gate itself is untouched: it still reports the refusal it always did.
+    // Only merge's ORDER of the two decides which one wins.
+    assert.ok(qualityGate(c), 'the recorded refusal is still on the record');
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test('a refusal stamped with the sha the branch still carries is enforced', () => {
+  cleanup();
+  const repo = repoAt(BRANCH);
+  try {
+    const c = shaCtx({ verify: CLEAN_VERIFY, review: { ...BLOCKED_REVIEW, gradedSha: repo.sha() } }, repo.dir);
+    assert.equal(reviewRegrade(c), null, 'review graded THIS diff and said no');
+    assert.ok(qualityGate(c), 'so the merge is refused');
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * erp#8800: the blocking findings were open, the verdict was about the diff in
+ * front of it, and no stamp existed yet. Enforced either way — an absent stamp
+ * is the pre-upgrade case and counts as covering, the same allowance
+ * `approvalCovers()` makes for sign-offs recorded before digests existed.
+ */
+test('an unstamped verdict is enforced, so runs already in flight are untouched', () => {
+  cleanup();
+  const repo = repoAt(BRANCH);
+  try {
+    const c = shaCtx({ verify: CLEAN_VERIFY, review: BLOCKED_REVIEW }, repo.dir);
+    assert.equal(reviewRegrade(c), null);
+    assert.ok(qualityGate(c));
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test('a failing case is never re-derivable, however stale the review is', () => {
+  cleanup();
+  const repo = repoAt(BRANCH);
+  try {
+    const graded = repo.sha();
+    repo.commit();
+    const c = shaCtx({ verify: FAILING_VERIFY, review: { ...BLOCKED_REVIEW, gradedSha: graded } }, repo.dir);
+    assert.equal(reviewRegrade(c), null, 'a stale review must not excuse a case that failed');
+    assert.match(qualityGate(c)!, /TC-1/);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test('an approving verdict is never re-graded, moved branch or not', () => {
+  cleanup();
+  const repo = repoAt(BRANCH);
+  try {
+    const graded = repo.sha();
+    repo.commit();
+    const c = shaCtx({ verify: CLEAN_VERIFY, review: { ...CLEAN_REVIEW, gradedSha: graded } }, repo.dir);
+    assert.equal(reviewRegrade(c), null, 'there is no refusal to re-derive');
+    assert.equal(qualityGate(c), null);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Fail-closed, and this is the direction that matters: a sha git cannot read
+ * must never read as "stale". Unknown means the recorded verdict stands.
+ */
+test('a branch tip git cannot read leaves the refusal in place', () => {
+  cleanup();
+  const review = { ...BLOCKED_REVIEW, gradedSha: 'deadbeefdeadbeef' };
+  assert.equal(reviewRegrade(shaCtx({ verify: CLEAN_VERIFY, review }, '/nonexistent/repo')), null);
+  assert.equal(reviewRegrade(shaCtx({ verify: CLEAN_VERIFY, review }, '')), null);
+  const repo = repoAt(BRANCH);
+  try {
+    assert.equal(
+      reviewRegrade(shaCtx({ verify: CLEAN_VERIFY, review }, repo.dir, 'no/such/branch')), null,
+      'a branch that does not exist is unknown, not moved',
+    );
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test('branchHeadSha reads the tip of the named branch, not of HEAD', () => {
+  const repo = repoAt(BRANCH);
+  try {
+    assert.equal(branchHeadSha(BRANCH, repo.dir), repo.sha());
+    gitIn(repo.dir, 'checkout', '--quiet', '-b', 'other');
+    const onOther = repo.commit();
+    assert.equal(branchHeadSha('other', repo.dir), onOther);
+    assert.notEqual(branchHeadSha(BRANCH, repo.dir), onOther);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
 });
