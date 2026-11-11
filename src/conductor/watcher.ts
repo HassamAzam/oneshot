@@ -14,7 +14,7 @@
  * journal rather than restarted.
  */
 import {
-  DRY_RUN, MERGE_POLL_MS, gitlabUsername, pickupAnyAssignee, pickupOnly, pickupSince, projectConfig,
+  DRY_RUN, MERGE_POLL_MS, gitlabUsername, pickupAnyAssignee, pickupLabel, pickupOnly, pickupSince, projectConfig,
 } from '../lib/config.js';
 import { readJournal, type RunJournal } from '../lib/artifacts.js';
 import { foreignOwner } from '../lib/claims.js';
@@ -105,6 +105,7 @@ export async function triage(issues: Issue[]): Promise<WatchResult> {
   const anyAssignee = pickupAnyAssignee();
   const only = pickupOnly();
   const since = pickupSince();
+  const required = pickupLabel();
   const candidates: Issue[] = [];
   const skipped: Array<{ iid: number; why: string }> = [];
 
@@ -113,6 +114,9 @@ export async function triage(issues: Issue[]): Promise<WatchResult> {
     // Outside ONESHOT_PICKUP_ONLY, dropped silently like a teammate's ticket: one
     // skip line per ticket on the board every tick would bury the listed ones.
     if (only && !only.has(issue.iid)) continue;
+    // Without ONESHOT_PICKUP_LABEL the ticket is not this conductor's board:
+    // dropped silently for the same reason.
+    if (required && !issue.labels.includes(required)) continue;
 
     if (issue.labels.includes(cfg.labels.exit)) {
       skipped.push({ iid: issue.iid, why: `already ${cfg.labels.exit}` });

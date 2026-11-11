@@ -951,6 +951,16 @@ export function pickupSince(): number | null {
 }
 
 /**
+ * ONESHOT_PICKUP_LABEL="Loop Server": a second label a ticket must carry, beside
+ * the entry label, for this conductor to work it — the opt-in that keeps a
+ * server off the rest of the board. Matched exactly, as GitLab names it. Null
+ * when unset.
+ */
+export function pickupLabel(): string | null {
+  return envOr('ONESHOT_PICKUP_LABEL').trim() || null;
+}
+
+/**
  * The conductor's own tick cadence — how often `src/index.ts` scans for
  * claimable tickets. Exported so anything that needs to describe its own
  * cadence as "the same as the tick loop" (e.g. the review-gate park state in

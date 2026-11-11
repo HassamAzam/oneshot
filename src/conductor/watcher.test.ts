@@ -194,6 +194,25 @@ test('an unparseable ONESHOT_PICKUP_SINCE picks up nothing new', async () => {
   }
 });
 
+test('ONESHOT_PICKUP_LABEL takes only tickets that also carry that label', async () => {
+  process.env.ONESHOT_PICKUP_ANY_ASSIGNEE = '1';
+  process.env.ONESHOT_PICKUP_LABEL = 'Loop Server';
+  const f = stubFetch((url) => (url.includes('/notes') ? [] : undefined));
+  try {
+    const r = await triage([
+      { ...issue(991001), labels: ['Loop', 'Loop Server'] },
+      { ...issue(991002), labels: ['Loop'] },
+      { ...issue(991003), labels: ['Loop', 'loop server'] },
+    ]);
+    assert.deepEqual(iids(r.candidates), [991001]);
+    assert.deepEqual(r.skipped, []);
+  } finally {
+    f.restore();
+    delete process.env.ONESHOT_PICKUP_ANY_ASSIGNEE;
+    delete process.env.ONESHOT_PICKUP_LABEL;
+  }
+});
+
 test('a run parked on a human merge holds no slot until its next check is due', () => {
   const now = Date.parse('2026-11-12T03:30:00Z');
   const j = (over: Partial<RunJournal>): RunJournal =>
