@@ -155,10 +155,11 @@ its own `oneshot_run_<iid>_<hex>` database and Redis DB. Delete the file's first
 
 ## Run window
 
-The conductor runs only inside `ONESHOT_WINDOW` (default `1-0`: 23 hours, from 01:00 to 00:00;
-`always` turns the window off). The server reboots itself at 01:00 (root's crontab), so the stop at
-00:00 leaves an hour for a run mid-phase to reach a checkpoint; a phase that takes longer than that
-is cut by the reboot and re-attempted as an infra death the next morning. `oneshot-window.timer` fires every hour and two minutes after boot,
+The conductor runs only inside `ONESHOT_WINDOW` (default `01:10-00:50`: all day except 00:50–01:10;
+either end may be an hour like `1-0` or a clock time; `always` turns the window off). The server
+reboots itself at 01:00 (root's crontab), so the stop at 00:50 gives a run mid-phase ten minutes to
+reach a checkpoint; a phase cut by the reboot is re-attempted as an infra death when the conductor
+starts again at 01:10. `oneshot-window.timer` fires every ten minutes and two minutes after boot,
 and `scripts/window.sh apply` starts or stops the conductor to match. A start outside the window
 is skipped by the unit's `ExecCondition`, so a reboot at night does not bring it up. The stop is the
 usual `SIGTERM`: in-flight runs reach a journal checkpoint and resume when the window opens again.

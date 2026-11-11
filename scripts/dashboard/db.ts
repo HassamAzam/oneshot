@@ -177,7 +177,7 @@ function views(rows: RunRow[], ctx: Context): RunView[] {
 }
 
 function context(now: number, alive: Set<string>): Context & { spec: string; valid: boolean; nextChange: number | null; parkedUntil: number | null } {
-  const spec = envOr('ONESHOT_WINDOW', '10-22');
+  const spec = envOr('ONESHOT_WINDOW', '01:10-00:50');
   const w = parseWindow(spec);
   const until = parkedUntil(now);
   return {

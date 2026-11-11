@@ -1,10 +1,11 @@
-# Applies the run window every hour on the hour, and two minutes after boot.
+# Applies the run window every ten minutes, and two minutes after boot. Ten minutes is the
+# finest edge ONESHOT_WINDOW is expected to carry (01:10-00:50 around the 01:00 reboot).
 [Unit]
-Description=Apply the Oneshot run window hourly
+Description=Apply the Oneshot run window every ten minutes
 
 [Timer]
 OnBootSec=2min
-OnCalendar=*-*-* *:00:00
+OnCalendar=*-*-* *:00/10:00
 AccuracySec=10s
 
 [Install]

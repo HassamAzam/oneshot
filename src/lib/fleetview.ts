@@ -22,27 +22,39 @@ export type BoardStatus =
   | 'done'
   | 'aborted';
 
+/** Minutes after local midnight. */
 export interface Window { from: number; to: number }
 
+const MINUTES_PER_DAY = 24 * 60;
+
+/** `H` or `HH:MM` in 24h time, as minutes after midnight; null when it is neither. */
+function clockMinutes(t: string): number | null {
+  const m = /^(\d{1,2})(?::(\d{2}))?$/.exec(t);
+  if (!m) return null;
+  const minutes = Number(m[1]) * 60 + Number(m[2] ?? 0);
+  return Number(m[2] ?? 0) > 59 || minutes > MINUTES_PER_DAY ? null : minutes;
+}
+
 /**
- * ONESHOT_WINDOW as scripts/window.sh reads it: `<from>-<to>` in 24h hours, or
- * `always`. Returns null for anything else, which window.sh refuses too.
+ * ONESHOT_WINDOW as scripts/window.sh reads it: `<from>-<to>` where each end is
+ * an hour (`1-0`) or a clock time (`01:10-00:50`), or `always`. Returns null for
+ * anything else, which window.sh refuses too.
  */
 export function parseWindow(spec: string): Window | 'always' | null {
   const s = spec.trim();
   if (s === 'always') return 'always';
-  const m = /^(\d{1,2})-(\d{1,2})$/.exec(s);
-  if (!m) return null;
-  const from = Number(m[1]);
-  const to = Number(m[2]);
-  return from > 24 || to > 24 ? null : { from, to };
+  const [a, b, ...rest] = s.split('-');
+  if (a === undefined || b === undefined || rest.length) return null;
+  const from = clockMinutes(a);
+  const to = clockMinutes(b);
+  return from === null || to === null ? null : { from, to };
 }
 
-/** True inside the window, by the local hour — the same test window.sh makes. */
+/** True inside the window, by the local clock — the same test window.sh makes. */
 export function inWindow(w: Window | 'always', at: Date): boolean {
   if (w === 'always') return true;
-  const h = at.getHours();
-  return w.from <= w.to ? h >= w.from && h < w.to : h >= w.from || h < w.to;
+  const now = at.getHours() * 60 + at.getMinutes();
+  return w.from <= w.to ? now >= w.from && now < w.to : now >= w.from || now < w.to;
 }
 
 /** When the window next opens (if closed) or closes (if open); null for `always` or a window that never changes. */
@@ -50,9 +62,9 @@ export function nextWindowChange(w: Window | 'always', at: Date): number | null 
   if (w === 'always' || w.from === w.to) return null;
   const open = inWindow(w, at);
   const t = new Date(at);
-  t.setMinutes(0, 0, 0);
-  for (let i = 0; i < 25; i++) {
-    t.setHours(t.getHours() + 1);
+  t.setSeconds(0, 0);
+  for (let i = 0; i <= MINUTES_PER_DAY; i++) {
+    t.setMinutes(t.getMinutes() + 1);
     if (inWindow(w, t) !== open) return t.getTime();
   }
   return null;

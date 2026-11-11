@@ -8,33 +8,48 @@ import {
 
 const at = (h: number, m = 0): Date => new Date(2026, 10, 10, h, m);
 
-test('parseWindow reads <from>-<to> and always, and refuses the rest', () => {
-  assert.deepEqual(parseWindow('10-22'), { from: 10, to: 22 });
-  assert.deepEqual(parseWindow(' 22-6 '), { from: 22, to: 6 });
+test('parseWindow reads hours, clock times and always, and refuses the rest', () => {
+  assert.deepEqual(parseWindow('10-22'), { from: 600, to: 1320 });
+  assert.deepEqual(parseWindow(' 22-6 '), { from: 1320, to: 360 });
+  assert.deepEqual(parseWindow('01:10-00:50'), { from: 70, to: 50 });
+  assert.deepEqual(parseWindow('10:00-22'), { from: 600, to: 1320 });
   assert.equal(parseWindow('always'), 'always');
-  assert.equal(parseWindow('10:00-22:00'), null);
   assert.equal(parseWindow('25-3'), null);
+  assert.equal(parseWindow('01:60-02:00'), null);
+  assert.equal(parseWindow('1-2-3'), null);
   assert.equal(parseWindow(''), null);
 });
 
 test('inWindow matches window.sh: from inclusive, to exclusive, wrapping past midnight', () => {
-  const day = { from: 10, to: 22 };
+  const day = { from: 600, to: 1320 };
   assert.equal(inWindow(day, at(9, 59)), false);
   assert.equal(inWindow(day, at(10)), true);
   assert.equal(inWindow(day, at(21, 59)), true);
   assert.equal(inWindow(day, at(22)), false);
-  const night = { from: 22, to: 6 };
+  const night = { from: 1320, to: 360 };
   assert.equal(inWindow(night, at(23)), true);
   assert.equal(inWindow(night, at(5)), true);
   assert.equal(inWindow(night, at(12)), false);
   assert.equal(inWindow('always', at(3)), true);
 });
 
-test('nextWindowChange names the next opening or closing hour', () => {
-  const day = { from: 10, to: 22 };
+test('a 20-minute stop around a 01:00 reboot is closed from 00:50 to 01:10 only', () => {
+  const w = parseWindow('01:10-00:50')!;
+  assert.equal(inWindow(w, at(0, 49)), true);
+  assert.equal(inWindow(w, at(0, 50)), false);
+  assert.equal(inWindow(w, at(1, 0)), false);
+  assert.equal(inWindow(w, at(1, 9)), false);
+  assert.equal(inWindow(w, at(1, 10)), true);
+  assert.equal(inWindow(w, at(13)), true);
+});
+
+test('nextWindowChange names the next opening or closing minute', () => {
+  const day = { from: 600, to: 1320 };
   assert.equal(nextWindowChange(day, at(8, 30)), at(10).getTime());
   assert.equal(nextWindowChange(day, at(15, 5)), at(22).getTime());
   assert.equal(nextWindowChange(day, at(23)), new Date(2026, 10, 11, 10).getTime());
+  assert.equal(nextWindowChange(parseWindow('01:10-00:50')!, at(14)), new Date(2026, 10, 11, 0, 50).getTime());
+  assert.equal(nextWindowChange(parseWindow('01:10-00:50')!, at(0, 55)), at(1, 10).getTime());
   assert.equal(nextWindowChange('always', at(3)), null);
 });
 
