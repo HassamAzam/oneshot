@@ -949,9 +949,18 @@ function renderCasesForTicket(cases: TestCase[]): string {
  * worse than saying nothing. What is under review here is the LIST — what this
  * run intends to test — not a result.
  */
-export function testcasesApprovalRequestBody(cases: TestCase[], why: string): string {
+export function testcasesApprovalRequestBody(cases: TestCase[], why: string, leftOut: string[] = []): string {
+  // Said to the person approving, because one of them may have asked for it: a
+  // request that is quietly not there reads as a request that was ignored.
+  const omitted = leftOut.length
+    ? `**Left out of this list** (${leftOut.length}) — code-level checks, which are not cases here:\n`
+      + `${leftOut.map((l) => `- ${mdText(l.replace(/\s+/g, ' ').trim())}`).join('\n')}\n\n`
+      + 'Every case above is something done in the app and seen on the screen. Running the project\'s '
+      + 'tests, a linter or a command is checked in code review and by the merge request\'s own tests, '
+      + 'not by this list.\n\n'
+    : '';
   return `**Oneshot pauses here** — ${why}\n\n` +
-    `**Test cases to be verified** (${cases.length})\n${renderCasesForTicket(cases)}\n\n---\n\n` +
+    `**Test cases to be verified** (${cases.length})\n${renderCasesForTicket(cases)}\n\n${omitted}---\n\n` +
     `${approverLine('testcases')}\n\n` +
     'Comment the single word **`approved`** to continue to `review`.\n\n' +
     'Anything else is a REVISION request, and the list is rewritten to match it — so say what you ' +

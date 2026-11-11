@@ -725,3 +725,21 @@ test('old journal without feedbackBy keeps parsing and stays index-aligned', () 
 test('no replies from reviewers changes nothing', () => {
   assert.equal(foldGateReplies(baseState, [], -1).state, null);
 });
+
+// The list posted for QA holds UI cases only (src/conductor/uicases.ts). What was
+// asked for and is not there is said, because the person approving may have asked.
+test('the test-case request names the code-level checks left out, and says where they are checked', () => {
+  const md = testcasesApprovalRequestBody([tcase()], 'why', [
+    "TC-21: Verify that this MR's own Django test class passes (manage.py test)",
+  ]);
+  assert.match(md, /\*\*Left out of this list\*\* \(1\) — code-level checks, which are not cases here:/);
+  assert.match(md, /- TC-21: Verify that this MR's own Django test class passes \(manage\.py test\)/);
+  assert.match(md, /checked in code review and by the merge request's own tests/);
+  // Still one list of cases, and the left-out block sits above the sign-off instructions.
+  assert.ok(md.indexOf('Left out of this list') < md.indexOf('Comment the single word'));
+});
+
+test('a list with nothing left out says nothing about it', () => {
+  assert.doesNotMatch(testcasesApprovalRequestBody([tcase()], 'why'), /Left out of this list/);
+  assert.doesNotMatch(testcasesApprovalRequestBody([tcase()], 'why', []), /Left out of this list/);
+});

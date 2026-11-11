@@ -301,12 +301,36 @@ test('plan keeps whole-flow frontend coverage on Playwright', () => {
   assert.match(prompt, /Playwright cases/);
 });
 
-test('testcases whitelists Jest as a runner a case may assert through', () => {
-  // The Good bullet's list is the only thing sanctioning a Jest case now that
-  // plan can order one. Drop Jest from it and testcases silently refuses the
-  // coverage plan asked for, restoring the old contradiction.
+test('testcases writes UI cases only: a test runner is never what a case asserts through', () => {
+  // Reversed on purpose. This prompt used to whitelist Jest, pytest and flake8 as
+  // runners a case could assert through, so that a unit test `plan` ordered had a
+  // case to go with it. But the list is posted to a QA reviewer and executed in a
+  // browser, and on #9174 the one runner case in it ("run the MR's Django test
+  // class, expect four tests OK") failed six verify laps that nineteen UI cases
+  // passed. A unit test plan orders is implement's to run and review's to read.
   const p = promptFor(cfg('testcases'), ctx(ticket()));
-  assert.match(p, /Jest for a frontend unit/);
+  assert.match(p, /## Every case is a UI case — this list is posted to QA/);
+  assert.match(p, /### 2\. Assert through the screen, never through a runner/);
+  assert.doesNotMatch(p, /Jest for a frontend unit/);
+  assert.doesNotMatch(p, /your steps are API-, command- or data-level/);
+  // What is not a case still goes somewhere a person and the reviewer will see it.
+  assert.match(p, /Put one line for it in `leftOut`/);
+  // The skill it loads describes shell-level scenarios for a person testing by hand; the prompt outranks it here.
+  assert.match(p, /Where `erp-ticket-test-plan` describes API- or shell-level scenarios/);
+});
+
+test('a change with no screen of its own is tested where its effect shows, not by command', () => {
+  const p = promptFor(cfg('testcases'), ctx(ticket())).replace(/\s+/g, ' ');
+  assert.match(p, /write the cases at the nearest screen where its EFFECT shows/);
+  assert.match(p, /Behaviour that no screen shows gets no case; name it in `leftOut`/);
+});
+
+test('review is handed the code-level checks the QA list left out', () => {
+  const withLeftOut = ctx(ticket(), { testcases: { cases: [], leftOut: ['TC-21: run the MR\'s Django test class (manage.py test)'] } });
+  const p = promptFor(cfg('review'), withLeftOut);
+  assert.match(p, /Code-level checks that were asked for and are NOT in that list/);
+  assert.match(p, /TC-21: run the MR's Django test class \(manage\.py test\)/);
+  assert.doesNotMatch(promptFor(cfg('review'), ctx(ticket())), /Code-level checks that were asked for/);
 });
 
 test('verify runs a shipped frontend unit test through Jest, non-interactively', () => {

@@ -434,15 +434,18 @@ export const TESTCASES_SCHEMA = phaseSchema({
   lv: str("Block header id. Emit 'LV_TBD' — the real number needs the sheet."),
   cases: {
     type: 'array',
-    description: '7-20 cases. This ONE list is executed by verify, ui-evidence and qa.',
+    description:
+      'UI cases only: each is something a person does in the running app and sees on the screen. '
+      + 'Typically 7-20; fewer when the change shows on fewer screens, never padded with command-level checks. '
+      + 'This ONE list is posted for QA and executed by verify and ui-evidence.',
     items: {
       type: 'object',
       additionalProperties: false,
       properties: {
         id: str('TC-01, TC-02, …'),
         scenario: str("Starts with 'Verify that…'"),
-        precondition: str('State that must exist first. Empty string if none.'),
-        steps: strArr('Ordered steps, one per element.'),
+        precondition: str('The state the case needs, in words and exact values. Empty string if none.'),
+        steps: strArr('Ordered UI steps — what the user does in the app, one action per element. Never a command to run.'),
         expected: str('The oracle. Required — without it a QA verdict means nothing.'),
         pass: {
           type: 'array',
@@ -460,6 +463,12 @@ export const TESTCASES_SCHEMA = phaseSchema({
   passesEmpty: strArr(
     'Passes you ran that legitimately produced nothing. Recording this is what stops ' +
     'a SKIPPED pass from looking identical to a clean one.',
+  ),
+  // Optional: most lists leave nothing out, and a required field is one more to drop.
+  leftOut: strArr(
+    'Checks you were asked for, or would otherwise have written, that are NOT UI cases — running the '
+    + "project's tests, a linter, a command, an API call, a database read. One line each, saying what the "
+    + 'check is. They are handed to code review and shown to QA as left out; they are never cases.',
   ),
 }, ['module', 'lv', 'cases', 'passesEmpty']);
 

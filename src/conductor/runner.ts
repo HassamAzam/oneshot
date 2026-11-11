@@ -127,6 +127,7 @@ import type { MrFeedbackSignal } from '../mrfeedback/types.js';
 import { fixLapsUsed, reviewArtifact, reviewSettled } from '../review/ledger.js';
 import { driveReview, type Session } from '../review/loop.js';
 import type { FixerOutput, ReviewerOutput } from '../review/types.js';
+import { leftOutLine, splitUiCases } from './uicases.js';
 import { readReviewLedger, reviewApiFor, reviewThreadsEnabled, writeReviewLedger } from '../review/wire.js';
 
 const exec = promisify(execFile);
@@ -1891,7 +1892,8 @@ export async function runTicket(
       const gate = await checkApprovalGate({
         iid,
         gate: 'testcases',
-        requestBody: testcasesApprovalRequestBody(cases, triggerLine(caseGate)),
+        requestBody: testcasesApprovalRequestBody(cases, triggerLine(caseGate),
+          ((prior.testcases as { leftOut?: unknown } | null)?.leftOut as string[] | undefined) ?? []),
         trigger: caseGate,
         // Appending runs on EVERY round that carried replies, approved or
         // not, and always before onApproved — a reviewer who lists an edge
@@ -2267,6 +2269,25 @@ export async function runTicket(
           r.out.ok = true;
           writeArtifact(iid, r.cfg.artifact ?? 'testcases.json', r.out.data);
           log.warn(`testcases salvaged from partial results — ${cases.length} case(s) recorded`);
+        }
+      }
+
+      // The list posted for QA holds UI cases only (src/conductor/uicases.ts). A
+      // case made of a test run, a linter or a build is taken out here, in
+      // code, before the list is published or put to the gate — and named in
+      // `leftOut`, so the person approving sees what is not there and `review`
+      // inherits it. After the salvage above, so a salvaged list is held to it too.
+      if (r.cfg.name === 'testcases' && r.out.ok && Array.isArray(r.out.data?.cases)) {
+        const split = splitUiCases(r.out.data.cases as TestCase[]);
+        if (split.leftOut.length) {
+          const said = Array.isArray(r.out.data.leftOut) ? (r.out.data.leftOut as unknown[]).map(String) : [];
+          r.out.data = { ...r.out.data, cases: split.ui, leftOut: [...said, ...split.leftOut.map(leftOutLine)] };
+          writeArtifact(iid, r.cfg.artifact ?? 'testcases.json', r.out.data);
+          log.warn(`testcases: left ${split.leftOut.length} code-level case(s) out of the QA list — `
+            + `${split.leftOut.map((x) => `${x.id} (${x.tool})`).join(', ')}`);
+          logEvent('testcases_code_level_left_out', {
+            ids: split.leftOut.map((x) => x.id), tools: split.leftOut.map((x) => x.tool), kept: split.ui.length,
+          }, { runId, phase: 'testcases' });
         }
       }
 

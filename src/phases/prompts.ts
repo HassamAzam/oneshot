@@ -423,6 +423,25 @@ function caseList(list: TestCase[], opts: { steps: boolean }): string {
 
 /** Acceptance criteria: the only oracle an executing phase is allowed to use. */
 /**
+ * The code-level checks the test-case list left out, for the phase that owns them.
+ *
+ * The list posted for QA holds UI cases only (src/conductor/uicases.ts). A check
+ * that is a test run, a linter or a command still matters; it is `review`'s to
+ * make from the code and the change's own tests, and this is where it is told so.
+ */
+function leftOutBlock(ctx: PromptCtx): string {
+  const raw = (ctx.prior.testcases as { leftOut?: unknown } | null | undefined)?.leftOut;
+  const lines = Array.isArray(raw) ? raw.map((x) => String(x).replace(/\s+/g, ' ').trim()).filter(Boolean) : [];
+  if (!lines.length) return '';
+  return `
+Code-level checks that were asked for and are NOT in that list — a case there is a UI case, so
+these are yours. Read the tests the change ships and the code they cover, and raise a finding
+where one of these does not hold:
+${lines.map((l) => `  - ${l}`).join('\n')}
+`;
+}
+
+/**
  * How to run Django tests in this worktree — only where the conductor seeded
  * settings that can (src/lib/worktrees.ts, seedTestSettings).
  *
@@ -1628,6 +1647,41 @@ ${JSON.stringify(ctx.prior.implement ?? {}, null, 2)}
 ${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'QA feedback on an earlier version of this list')}${betaBlock(ctx, 'testcases')}${djangoTestsBlock(ctx, true)}
 Write the test cases for this ticket.
 
+## Every case is a UI case — this list is posted to QA
+
+The list you write goes on the ticket for a QA reviewer to approve, and \`verify\` executes it in a
+browser. So every case is something a person DOES in the running app and SEES on the screen:
+
+- \`steps\` are what the user does — open a page, click, type, submit — one action per step, naming
+  each control by its visible label (and its testid in brackets where the diff or \`uiPath\` gives one).
+- \`expected\` is what the user then sees: text on the page, a dialog and its message, a redirect, a
+  row that appears or does not, a file that downloads.
+- \`precondition\` is the STATE the case needs, in words and exact values — "a team named
+  \`Ops' <Team>\` exists", "the logged-in user is not a superuser". It describes data; it is not a
+  script. Where only a one-line command pins the exact bytes, quote it there — never as a step, and
+  never as the thing the case checks.
+
+NOT a case, however it is worded:
+
+- running the project's own tests (\`manage.py test\`, pytest, Jest), a linter, a type check or a build;
+- calling an endpoint with curl or a test client, running a management command, querying the
+  database, or reading the code and asserting what it says.
+
+Those are the change's automated checks and they already have owners: \`implement\` runs them and
+reports what they printed in \`testsRun\`, \`review\` reads the tests the change ships, and CI runs
+them on the merge request. A QA reviewer can neither run one nor judge it from a ticket comment.
+On #9174 a single such case — "run the MR's Django test class, expect four tests OK" — failed six
+verify laps in a row that nineteen UI cases passed, and had to be skipped by hand.
+
+So when you would have written one, or the QA feedback above asks for one, do NOT add it as a
+case. Put one line for it in \`leftOut\` saying what the check is: QA is shown that list as left
+out and \`review\` is handed it. The conductor removes any case made of a test run, a linter or a
+build from \`cases\` anyway, so a case written that way is only a lost id.
+
+Where \`erp-ticket-test-plan\` describes API- or shell-level scenarios, that is for a person testing
+a ticket by hand on a server. In this phase it does not apply: write the UI scenario that shows the
+same behaviour, or leave it out.
+
 If there is QA feedback above, you are REVISING a list that already exists, not writing a new
 one — the current list is in \`testcases.json\` in your worktree and you output the whole
 revised list. Route each point by what it asks for: a case to ADD is appended, a case to DROP
@@ -1648,9 +1702,14 @@ a date utility it will not, because none of that vocabulary is in the changed li
 from \`uiPath\` in the research block above: the route, the clicks to the behaviour, the gate,
 and the testid and label constants with the files they live in. That field exists because this
 phase used to go and find them itself, one grep at a time, and a session that spends its budget
-reconstructing a screen never reaches the cases. If \`uiPath.reachable\` is false, this change
-has no UI surface and your steps are API-, command- or data-level; do not go looking for one.
-If it is true but thin, fill the gap with a handful of targeted reads, not a survey.
+reconstructing a screen never reaches the cases. If \`uiPath.reachable\` is false, the change has
+no screen of its own: write the cases at the nearest screen where its EFFECT shows — the page that
+renders the value a serializer returns, the list a query feeds, the Django admin page of the model.
+Behaviour that no screen shows gets no case; name it in \`leftOut\` and say in \`summary\` that it
+is covered by the change's own tests rather than by this list. A short list of real UI cases is the
+right answer for such a change — do not go looking for a surface that is not there, and do not
+substitute commands for one. If it is true but thin, fill the gap with a handful of targeted
+reads, not a survey.
 
 That advantage cuts both ways, and this is the one thing to get right in this phase: the
 ORACLE for every case comes from the acceptance criteria and the ticket, never from the diff.
@@ -1714,21 +1773,20 @@ Never assert a global property unless the ticket *is* that property.
   establish one — so a baseline you cannot point at is a baseline you do not
   have, and the scoped assertion above is the case to write instead.
 
-### 2. Never assert through tooling that is known not to run
+### 2. Assert through the screen, never through a runner
 
-You cannot run the tool to find out, but you do not have to: \`implement\`'s
-artifact is above, and its \`testsRun\` field records the commands that actually
-ran on this branch and what they returned. Read it before writing a case around
-any runner.
+A case is observed in the browser. One whose check is a test runner, a linter or a console
+command is not a case at all (see "Every case is a UI case" above), whether or not the tool runs.
 
-- **Bad:** a case built on a runner \`testsRun\` shows failing to start, or on one
-  neither \`testsRun\` nor any later phase of this pipeline runs — it is unpassable
-  by construction and proves nothing about the change either way, however the
-  assertion is written. A fresh Jest test the ticket ships is not this: \`verify\`
-  runs it (below), so it is a runner this pipeline uses.
-- **Good:** assert through a runner \`testsRun\` shows working, or one this
-  pipeline itself uses — Jest for a frontend unit, Playwright for the browser,
-  pytest and flake8 for the backend — and name it in \`steps\`.
+- **Bad:** "Run the new Jest test / \`manage.py test apps.x\` and expect it to pass." It is
+  \`implement\`'s to run and \`review\`'s to read, and its failure can be the machine's rather
+  than the change's — a database login, a runner that does not start.
+- **Good:** the UI scenario whose behaviour that test asserts: the page, the action, and what
+  the user sees. If the behaviour shows on no screen, it goes in \`leftOut\`, not in \`cases\`.
+
+\`implement\`'s artifact is above, and its \`testsRun\` field records what its own tests printed
+on this branch. Read it for what the change already proves about itself — not for a runner to
+build a case on.
 
 ### 3. One case, one subject
 
@@ -2123,7 +2181,7 @@ closed from an earlier review: ${(i.addressedFindings ?? []).join(', ') || '(non
 ## The test cases this code has to pass (phase 4)
 Read these as a specification, not as something to run — \`verify\` and \`qa\` execute them.
 ${caseList(cases, { steps: false })}
-${betaBlock(ctx, 'review')}
+${leftOutBlock(ctx)}${betaBlock(ctx, 'review')}
 Review the change on \`${ctx.branch ?? 'the ticket branch'}\` as if it were an MR you must
 approve or send back.
 
