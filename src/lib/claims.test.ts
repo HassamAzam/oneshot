@@ -19,6 +19,13 @@ test('a stop note after the claim ends it', () => {
   assert.deepEqual(activeClaims([claim(1, 'r-a', 10), stop(2, 'r-a', 5)], NOW), []);
 });
 
+test('with no age limit a three-day-old claim stays live until a stop note ends it', () => {
+  const old = claim(1, 'r-a', 3 * 24 * 60);
+  assert.deepEqual(activeClaims([old], NOW), []);
+  assert.deepEqual(activeClaims([old], NOW, Infinity).map((c) => c.noteId), [1]);
+  assert.deepEqual(activeClaims([old, stop(2, 'r-a', 5)], NOW, Infinity), []);
+});
+
 // The case: blocked once, resumed under the same run id, then parked. The old
 // stop note killed every later claim too, so each re-entry posted another one.
 test('a stop note does not end a claim the same run posted after it', () => {

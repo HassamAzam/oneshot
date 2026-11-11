@@ -13,7 +13,7 @@
  * run is skipped, and a ticket whose run died mid-phase is picked up from its
  * journal rather than restarted.
  */
-import { gitlabUsername, projectConfig } from '../lib/config.js';
+import { gitlabUsername, pickupAnyAssignee, projectConfig } from '../lib/config.js';
 import { foreignOwner } from '../lib/claims.js';
 import { isClaimed, latestRunStatus, logEvent, seeTicket } from '../lib/db.js';
 import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
@@ -66,6 +66,7 @@ export async function scan(): Promise<WatchResult> {
  */
 export async function triage(issues: Issue[]): Promise<WatchResult> {
   const cfg = projectConfig();
+  const anyAssignee = pickupAnyAssignee();
   const candidates: Issue[] = [];
   const skipped: Array<{ iid: number; why: string }> = [];
 
@@ -82,7 +83,7 @@ export async function triage(issues: Issue[]): Promise<WatchResult> {
       skipped.push({ iid: issue.iid, why: `carries ${cfg.labels.blocked}` });
       continue;
     }
-    if (issue.assignees.length > 0) {
+    if (!anyAssignee && issue.assignees.length > 0) {
       // Resolved at boot from this desk's own token, so the account that claims
       // the ticket is the same account that will comment, push and merge on it.
       const me = gitlabUsername();
@@ -106,7 +107,7 @@ export async function triage(issues: Issue[]): Promise<WatchResult> {
     // claim-time refusal: with one slot, a foreign-owned ticket at the head of
     // the list would be attempted and refused every tick and nothing behind it
     // would ever be tried. One notes read per surviving candidate per tick.
-    const foreign = await foreignOwner(issue.iid);
+    const foreign = await foreignOwner(issue.iid, { evenStale: anyAssignee });
     if (foreign) {
       skipped.push({
         iid: issue.iid,

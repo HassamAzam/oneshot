@@ -914,6 +914,16 @@ export const GITLAB_USERNAME = deskUsername();
 export function gitlabUsername(): string { return deskUsername(); }
 
 /**
+ * ONESHOT_PICKUP_ANY_ASSIGNEE=1: this conductor works every ticket carrying the
+ * entry label, whoever is assigned — the assignee is the person watching the
+ * run, not the machine running it. Ownership then rests on claim notes alone:
+ * another conductor's claim keeps this one off until a stop note ends it, however
+ * old (see foreignOwner). Off by default, so a desk only takes its own and
+ * unassigned tickets.
+ */
+export function pickupAnyAssignee(): boolean { return envFlag('ONESHOT_PICKUP_ANY_ASSIGNEE'); }
+
+/**
  * The conductor's own tick cadence — how often `src/index.ts` scans for
  * claimable tickets. Exported so anything that needs to describe its own
  * cadence as "the same as the tick loop" (e.g. the review-gate park state in

@@ -106,6 +106,37 @@ test('a Loop ticket that also carries the retired Ready For Automation label is 
   }
 });
 
+const claimNote = (id: number, runId: string, daysAgo: number): Record<string, unknown> => ({
+  id, system: false, author: { username: 'a.teammate' },
+  body: `Oneshot claimed this ticket — run \`${runId}\` (desk).\n\n<!-- oneshot:claim:${runId} -->`,
+  created_at: new Date(Date.now() - daysAgo * 86_400_000).toISOString(),
+});
+
+test('with ONESHOT_PICKUP_ANY_ASSIGNEE a teammate\'s unclaimed ticket is a candidate', async () => {
+  process.env.ONESHOT_PICKUP_ANY_ASSIGNEE = '1';
+  const f = stubFetch((url) => (url.includes('/notes') ? [] : undefined));
+  try {
+    const r = await triage([{ ...issue(990701), assignees: [{ username: 'usman.nasir' }] }]);
+    assert.deepEqual(iids(r.candidates), [990701]);
+  } finally {
+    f.restore();
+    delete process.env.ONESHOT_PICKUP_ANY_ASSIGNEE;
+  }
+});
+
+test('with ONESHOT_PICKUP_ANY_ASSIGNEE another conductor\'s claim keeps the ticket off, however old', async () => {
+  process.env.ONESHOT_PICKUP_ANY_ASSIGNEE = '1';
+  const f = stubFetch((url) => (url.includes('/notes') ? [claimNote(5, 'r-elsewhere-abc123', 3)] : undefined));
+  try {
+    const r = await triage([{ ...issue(990702), assignees: [{ username: 'usman.nasir' }] }]);
+    assert.deepEqual(iids(r.candidates), []);
+    assert.match(r.skipped[0]!.why, /claimed by another conductor — run r-elsewhere-abc123/);
+  } finally {
+    f.restore();
+    delete process.env.ONESHOT_PICKUP_ANY_ASSIGNEE;
+  }
+});
+
 test('a Loop ticket assigned to someone else is never a candidate; an unassigned one is', async () => {
   // On 2026-11-10 a server holding a bot token briefly ran without this rule and
   // claimed three teammates' tickets out of 43 carrying Loop. The token's user

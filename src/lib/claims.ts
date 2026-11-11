@@ -141,10 +141,13 @@ export function stoppedRuns(notes: IssueNote[]): Map<string, number> {
   return done;
 }
 
-/** Live claims, oldest first. Empty means the ticket is nobody's. */
-export function activeClaims(notes: IssueNote[], now = Date.now()): Claim[] {
+/**
+ * Live claims, oldest first. Empty means the ticket is nobody's. `stale` is
+ * how old a claim may be and still count; Infinity keeps every claim until a
+ * stop note ends it.
+ */
+export function activeClaims(notes: IssueNote[], now = Date.now(), stale = staleMs()): Claim[] {
   const stopped = stoppedRuns(notes);
-  const stale = staleMs();
   return parseClaims(notes).filter((c) => {
     const s = stopped.get(c.runId);
     return (s === undefined || s < c.noteId) && now - c.createdAt < stale;
@@ -162,10 +165,10 @@ export interface Ownership {
  * NOT "nobody owns it": callers treat null as "cannot tell" and do not claim on
  * the strength of it.
  */
-export async function readOwnership(iid: number): Promise<Ownership | null> {
+export async function readOwnership(iid: number, opts: { evenStale?: boolean } = {}): Promise<Ownership | null> {
   const res = await issueNotes(iid);
   if (!res.ok || !res.data) return null;
-  const active = activeClaims(res.data);
+  const active = activeClaims(res.data, Date.now(), opts.evenStale ? Infinity : staleMs());
   return { active, earliest: active[0] ?? null };
 }
 
@@ -175,9 +178,13 @@ export async function readOwnership(iid: number): Promise<Ownership | null> {
  * The scan calls this on every candidate, so the answer to "somebody else's"
  * has to come from disk, not the fleet table: a resumed run's own claim is the
  * one thing that must not read as foreign, and its run id is in the journal.
+ *
+ * `evenStale` counts another conductor's claim however old it is, until a stop
+ * note ends it. A conductor that picks up any assignee's ticket needs that: a
+ * teammate's desk parked on approval for two days is still that desk's run.
  */
-export async function foreignOwner(iid: number): Promise<Claim | null> {
-  const own = await readOwnership(iid);
+export async function foreignOwner(iid: number, opts: { evenStale?: boolean } = {}): Promise<Claim | null> {
+  const own = await readOwnership(iid, opts);
   if (!own?.earliest) return null;
   const mine = readJournal(iid)?.runId ?? null;
   return own.earliest.runId === mine ? null : own.earliest;

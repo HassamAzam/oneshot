@@ -50,7 +50,7 @@ import { activeRunsFleet, logEvent, reconcileForeignRuns } from './lib/db.js';
 import { ensureClaudeDir } from './lib/claudedir.js';
 import { probe, netState } from './lib/reachability.js';
 import { windowUsage, dayUsage, quotaParked } from './lib/quota.js';
-import { budgetConfig } from './lib/config.js';
+import { budgetConfig, pickupAnyAssignee } from './lib/config.js';
 import { localTestsFlags, retiredFlagError } from './lib/cliargs.js';
 import { describe, scan } from './conductor/watcher.js';
 import { refusalIsFinal, runTicket, type RunOutcome } from './conductor/runner.js';
@@ -327,7 +327,9 @@ async function banner(): Promise<void> {
   const idc = await checkIdentity();
   log.info(describeIdentity(idc));
   if (idc.warning) log.warn(idc.warning);
-  if (idc.username) {
+  if (pickupAnyAssignee()) {
+    log.info('selects    every Loop ticket whoever is assigned, unless another conductor\'s claim note is on it');
+  } else if (idc.username) {
     log.info(`selects    only tickets assigned to ${idc.username}, plus unassigned ones`);
   }
   if (solo) log.info('mode       --solo, a second conductor is refused');
