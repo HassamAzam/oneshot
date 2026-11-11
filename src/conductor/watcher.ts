@@ -13,10 +13,11 @@
  * run is skipped, and a ticket whose run died mid-phase is picked up from its
  * journal rather than restarted.
  */
-import { gitlabUsername, pickupAnyAssignee, pickupOnly, projectConfig } from '../lib/config.js';
+import { gitlabUsername, pickupAnyAssignee, pickupOnly, pickupSince, projectConfig } from '../lib/config.js';
+import { readJournal } from '../lib/artifacts.js';
 import { foreignOwner } from '../lib/claims.js';
 import { isClaimed, latestRunStatus, logEvent, seeTicket } from '../lib/db.js';
-import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
+import { issuesWithEntryLabel, labelAddedAt, type Issue } from '../lib/gitlab.js';
 import { isReachable, netState } from '../lib/reachability.js';
 import { checkQuota } from '../lib/quota.js';
 import { log } from '../lib/log.js';
@@ -59,6 +60,23 @@ export async function scan(): Promise<WatchResult> {
 }
 
 /**
+ * When the entry label was last added, per ticket, kept while the ticket's
+ * `updated_at` is unchanged: a label change moves `updated_at`, so the history
+ * is re-read exactly when the answer could differ, not for every ticket on every
+ * tick. Undefined when GitLab could not be read.
+ */
+const labelAdds = new Map<number, { updatedAt: string; at: number | null }>();
+
+async function entryLabelAddedAt(issue: Issue, label: string): Promise<number | null | undefined> {
+  const hit = labelAdds.get(issue.iid);
+  if (hit && hit.updatedAt === issue.updated_at) return hit.at;
+  const res = await labelAddedAt(issue.iid, label);
+  if (!res.ok) return undefined;
+  labelAdds.set(issue.iid, { updatedAt: issue.updated_at, at: res.data });
+  return res.data;
+}
+
+/**
  * The scan's verdict on each ticket it read: claimable, skipped with a reason,
  * or dropped silently (a teammate's). Split from scan() only so a test can
  * hand it tickets without the network and quota gates in front; scan() is
@@ -68,6 +86,7 @@ export async function triage(issues: Issue[]): Promise<WatchResult> {
   const cfg = projectConfig();
   const anyAssignee = pickupAnyAssignee();
   const only = pickupOnly();
+  const since = pickupSince();
   const candidates: Issue[] = [];
   const skipped: Array<{ iid: number; why: string }> = [];
 
@@ -86,6 +105,16 @@ export async function triage(issues: Issue[]): Promise<WatchResult> {
       // just reproduce whatever blocked it the first time.
       skipped.push({ iid: issue.iid, why: `carries ${cfg.labels.blocked}` });
       continue;
+    }
+    if (since !== null && !readJournal(issue.iid)) {
+      const added = await entryLabelAddedAt(issue, cfg.labels.entry);
+      if (added === undefined) {
+        skipped.push({ iid: issue.iid, why: `could not read when ${cfg.labels.entry} was added` });
+        continue;
+      }
+      // Labelled before ONESHOT_PICKUP_SINCE: one of the board's stale tickets.
+      // Dropped silently, like a teammate's — dozens of them would bury the rest.
+      if (added === null || added < since) continue;
     }
     if (!anyAssignee && issue.assignees.length > 0) {
       // Resolved at boot from this desk's own token, so the account that claims

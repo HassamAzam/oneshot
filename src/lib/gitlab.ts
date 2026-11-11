@@ -473,6 +473,34 @@ export async function issueNotes(
   return res;
 }
 
+export interface LabelEvent { action: string; created_at: string; label: { name: string } | null }
+
+/** When `label` was last added, from a ticket's label history; null if the history never adds it. */
+export function lastLabelAdd(events: LabelEvent[], label: string): number | null {
+  const times = events
+    .filter((e) => e.action === 'add' && e.label?.name === label)
+    .map((e) => Date.parse(e.created_at))
+    .filter((t) => Number.isFinite(t));
+  return times.length ? Math.max(...times) : null;
+}
+
+/**
+ * When `label` was last added to the ticket. The history is read whole: a busy
+ * ticket's latest add can sit past the first page, and an older add read as the
+ * latest would make a freshly re-labelled ticket look stale.
+ */
+export async function labelAddedAt(iid: number, label: string): Promise<GitlabResult<number | null>> {
+  const events: LabelEvent[] = [];
+  for (let page = 1; ; page += 1) {
+    const res = await call<LabelEvent[]>(
+      'GET', `/projects/${projectId()}/issues/${iid}/resource_label_events?per_page=100&page=${page}`,
+    );
+    if (!res.ok || !res.data) return { ...res, data: null };
+    events.push(...res.data);
+    if (res.data.length < 100) return { ...res, data: lastLabelAdd(events, label) };
+  }
+}
+
 /**
  * One file somebody attached to a ticket, as raw bytes. `filename` is passed as
  * it appears in the markdown link — already URL-encoded — because that is the

@@ -155,6 +155,44 @@ test('ONESHOT_PICKUP_ONLY limits candidates to the listed tickets, and a typo na
   }
 });
 
+test('ONESHOT_PICKUP_SINCE takes only tickets labelled Loop after the cutoff, and skips one it cannot read', async () => {
+  process.env.ONESHOT_PICKUP_ANY_ASSIGNEE = '1';
+  process.env.ONESHOT_PICKUP_SINCE = '2026-11-12T00:00:00Z';
+  const added = (iso: string): Record<string, unknown> => ({ action: 'add', created_at: iso, label: { name: 'Loop' } });
+  const history: Record<number, unknown> = {
+    990901: [added('2026-10-01T00:00:00Z')],
+    990902: [added('2026-11-12T08:00:00Z')],
+    990904: [added('2026-10-01T00:00:00Z'), { action: 'remove', created_at: '2026-10-02T00:00:00Z', label: { name: 'Loop' } }, added('2026-11-13T00:00:00Z')],
+  };
+  const f = stubFetch((url) => {
+    if (url.includes('/notes')) return [];
+    const m = /issues\/(\d+)\/resource_label_events/.exec(url);
+    return m ? history[Number(m[1])] : undefined;
+  });
+  try {
+    const board = [990901, 990902, 990903, 990904].map((iid) => ({ ...issue(iid), updated_at: `2026-11-12T09:00:0${iid % 10}Z` }));
+    const r = await triage(board);
+    assert.deepEqual(iids(r.candidates), [990902, 990904]);
+    assert.deepEqual(r.skipped, [{ iid: 990903, why: 'could not read when Loop was added' }]);
+  } finally {
+    f.restore();
+    delete process.env.ONESHOT_PICKUP_ANY_ASSIGNEE;
+    delete process.env.ONESHOT_PICKUP_SINCE;
+  }
+});
+
+test('an unparseable ONESHOT_PICKUP_SINCE picks up nothing new', async () => {
+  process.env.ONESHOT_PICKUP_SINCE = 'tomorrow-ish';
+  const f = stubFetch((url) => (url.includes('resource_label_events')
+    ? [{ action: 'add', created_at: '2026-11-12T08:00:00Z', label: { name: 'Loop' } }] : []));
+  try {
+    assert.deepEqual(iids((await triage([{ ...issue(990911), assignees: [] }])).candidates), []);
+  } finally {
+    f.restore();
+    delete process.env.ONESHOT_PICKUP_SINCE;
+  }
+});
+
 test('a Loop ticket assigned to someone else is never a candidate; an unassigned one is', async () => {
   // On 2026-11-10 a server holding a bot token briefly ran without this rule and
   // claimed three teammates' tickets out of 43 carrying Loop. The token's user

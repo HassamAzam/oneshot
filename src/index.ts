@@ -50,7 +50,7 @@ import { activeRunsFleet, logEvent, reconcileForeignRuns } from './lib/db.js';
 import { ensureClaudeDir } from './lib/claudedir.js';
 import { probe, netState } from './lib/reachability.js';
 import { windowUsage, dayUsage, quotaParked } from './lib/quota.js';
-import { budgetConfig, pickupAnyAssignee } from './lib/config.js';
+import { budgetConfig, pickupAnyAssignee, pickupSince } from './lib/config.js';
 import { localTestsFlags, retiredFlagError } from './lib/cliargs.js';
 import { describe, scan } from './conductor/watcher.js';
 import { refusalIsFinal, runTicket, type RunOutcome } from './conductor/runner.js';
@@ -331,6 +331,12 @@ async function banner(): Promise<void> {
     log.info('selects    every Loop ticket whoever is assigned, unless another conductor\'s claim note is on it');
   } else if (idc.username) {
     log.info(`selects    only tickets assigned to ${idc.username}, plus unassigned ones`);
+  }
+  const since = pickupSince();
+  if (since !== null) {
+    log.info(Number.isFinite(since)
+      ? `selects    new tickets only if ${cfg.labels.entry} was added from ${new Date(since).toISOString()}; runs already here resume`
+      : 'selects    no new tickets: ONESHOT_PICKUP_SINCE does not parse as a date; runs already here resume');
   }
   if (solo) log.info('mode       --solo, a second conductor is refused');
   if (followArg) log.info(`mode       --follow #${ticketArg}, re-checked every ${FOLLOW_TICK_MS / 1000}s until done/blocked`);

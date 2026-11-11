@@ -936,6 +936,21 @@ export function pickupOnly(): Set<number> | null {
 }
 
 /**
+ * ONESHOT_PICKUP_SINCE=2026-11-12T03:30+05:00: a ticket this conductor has never
+ * run is picked up only when the entry label was added to it at or after this
+ * moment, so the board's stale Loop tickets stay where they are. A ticket with a
+ * run on this machine resumes regardless. Null when unset (no cutoff); a value that
+ * does not parse as a date is Infinity, which picks up nothing new — a typo narrows
+ * rather than opens.
+ */
+export function pickupSince(): number | null {
+  const raw = envOr('ONESHOT_PICKUP_SINCE').trim();
+  if (!raw) return null;
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : Infinity;
+}
+
+/**
  * The conductor's own tick cadence — how often `src/index.ts` scans for
  * claimable tickets. Exported so anything that needs to describe its own
  * cadence as "the same as the tick loop" (e.g. the review-gate park state in
