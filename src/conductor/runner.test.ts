@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyBaseCheck, baseCheckOutcome, codePhaseStatus, decideClaim, doneLabelSwap, failedCases, isRepark,
+  applyBaseCheck, applyStandingDecisions, baseCheckOutcome, codePhaseStatus, decideClaim, doneLabelSwap,
+  failedCases, isRepark,
   mergePollWait, recordedVerifyVerdict,
   mergeScopedVerify, nextIndex, refusalIsFinal, remediationFreeze, salvagedReview,
   sharedDatabaseRefusal, statusForFailure, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
@@ -832,4 +833,44 @@ test('failures from before the lap window spend none of the budget, so a confirm
 test('a phase with nowhere to cycle to runs rather than guessing', () => {
   const phases = [rec('verify', 'failed', T, T + 100)];
   assert.equal(verdictOf({ phases, cycleTo: undefined }), 'run');
+});
+
+// ------------------------------------------------ a QA ruling holds for the run
+// #9174: QA ruled TC-21 `skip`. That was written into verify.json once; any later
+// verify lap would have run TC-21 again, failed it again, and gone back to ask.
+
+const ruled = (id: string, result: CaseResult['result'], evidence = 'observed'): CaseResult => ({ id, result, evidence, screenshot: '' });
+
+test('a case QA skipped stays skipped when a later verify lap fails it again', () => {
+  const r = applyStandingDecisions([ruled('TC-01', 'pass'), ruled('TC-21', 'fail', 'Ran 3 tests')],
+    [{ caseId: 'TC-21', verdict: 'skip', by: 'hassam.azam' }]);
+  assert.deepEqual(r.applied, ['TC-21']);
+  assert.equal(r.results[1]?.result, 'skipped');
+  assert.match(r.results[1]?.evidence ?? '', /QA \(hassam\.azam\) marked this skip earlier in this run\. Ran 3 tests/);
+  assert.equal(failedCases('verify', { results: r.results }), null, 'and verify no longer fails on it');
+});
+
+test('behaviour QA called expected is a pass; invalid and pre-existing drop the case', () => {
+  const r = applyStandingDecisions([ruled('TC-02', 'fail'), ruled('TC-03', 'fail'), ruled('TC-04', 'fail')], [
+    { caseId: 'TC-02', verdict: 'expected', by: 'qa' },
+    { caseId: 'TC-03', verdict: 'invalid', by: 'qa' },
+    { caseId: 'TC-04', verdict: 'pre-existing', by: 'qa' },
+  ]);
+  assert.deepEqual(r.results.map((c) => c.result), ['pass', 'skipped', 'skipped']);
+});
+
+test('a ruling is not applied to a case that now passes, or to one QA never ruled on', () => {
+  const r = applyStandingDecisions([ruled('TC-21', 'pass'), ruled('TC-05', 'fail')], [{ caseId: 'TC-21', verdict: 'skip', by: 'qa' }]);
+  assert.deepEqual(r.applied, []);
+  assert.deepEqual(r.results.map((c) => c.result), ['pass', 'fail']);
+});
+
+test('a verdict that asks for more work settles nothing, and a later one reopens an earlier ruling', () => {
+  assert.deepEqual(applyStandingDecisions([ruled('TC-07', 'fail')], [{ caseId: 'TC-07', verdict: 'confirmed', by: 'qa' }]).applied, []);
+  assert.deepEqual(applyStandingDecisions([ruled('TC-07', 'fail')], [{ caseId: 'TC-07', verdict: 'missing-steps', by: 'qa' }]).applied, []);
+  // Skipped first, then called a real bug: the case counts again.
+  assert.deepEqual(applyStandingDecisions([ruled('TC-07', 'fail')], [
+    { caseId: 'TC-07', verdict: 'skip', by: 'qa' }, { caseId: 'TC-07', verdict: 'confirmed', by: 'qa' },
+  ]).applied, []);
+  assert.deepEqual(applyStandingDecisions([ruled('TC-07', 'fail')], undefined).applied, []);
 });

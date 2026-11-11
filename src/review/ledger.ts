@@ -555,3 +555,39 @@ export function fixLapsUsed(
   }
   return phases.filter((p) => p.phase === 'review-fix' && p.status !== 'infra' && p.startedAt >= since).length;
 }
+
+/**
+ * The review as every other phase reads it: findings.json.
+ *
+ * That file used to be whatever the last reviewer session returned, and a
+ * verdict that outlived the fix it asked for went on refusing the merge. It is
+ * now a VIEW the conductor rewrites from the ledger after every step: the
+ * verdict is 'changes-requested' exactly while a blocker or major is open, and
+ * `findings` lists what is still open and nothing else. So `mr` describes the
+ * review as it stands, a later `implement` lap is not handed threads the fixer
+ * already owns, and the old merge gate would reach the same answer as the live
+ * one for as long as the two agree about GitLab.
+ */
+export function reviewArtifact(l: ReviewLedger | null, summary: string): Record<string, unknown> {
+  const threads = l?.threads ?? [];
+  const open = threads.filter((t) => !t.resolved);
+  const tally = (status: string): number => threads.filter((t) => t.status === status).length;
+  return {
+    summary,
+    blocked: null,
+    verdict: open.some((t) => isBlocking(t.severity)) ? 'changes-requested' : 'approve',
+    findings: open.map((t) => ({
+      id: t.id, severity: t.severity, file: t.file, line: t.line, what: t.what, why: t.why, fix: t.fix,
+    })),
+    threads: {
+      mrIid: l?.mrIid ?? null,
+      raised: threads.length,
+      open: open.length,
+      fixed: tally('accepted') + tally('fixed'),
+      withdrawn: tally('withdrawn'),
+      closed: tally('closed'),
+      disputed: tally('disputed'),
+      droppedOnRecheck: l?.dropped.length ?? 0,
+    },
+  };
+}

@@ -1,3 +1,4 @@
+import { isReviewNote } from '../review/markers.js';
 import type { FeedbackThread, MrDiscussion } from './types.js';
 
 /**
@@ -23,8 +24,14 @@ export function actionableThreads(
   const out: FeedbackThread[] = [];
   for (const d of discussions) {
     if (!d.notes.some((n) => n.resolvable && !n.resolved)) continue;
+    // The code-review loop's notes (src/review) are machine notes too, under a
+    // different marker. On a desk the conductor posts them as the operator, who
+    // is usually a listed reviewer, so without this every finding the reviewer
+    // session raised would come back here as that person's review comment. A
+    // person's own reply inside one of those threads carries no marker, and is
+    // still theirs to have answered.
     const trusted = d.notes.filter((n) =>
-      !n.system && !n.body.includes(REPLY_MARKER) && allowed.has(n.author.username));
+      !n.system && !n.body.includes(REPLY_MARKER) && !isReviewNote(n.body) && allowed.has(n.author.username));
     if (!trusted.length) continue;
     const lastNoteId = Math.max(...trusted.map((n) => n.id));
     if (lastNoteId <= (opts.handled[d.id] ?? 0)) continue;

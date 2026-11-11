@@ -1509,3 +1509,136 @@ test('implement, verify and testcases all carry the note in a seeded worktree, a
     rmSync(wt, { recursive: true, force: true });
   }
 });
+
+// --------------------------------------------- code review as threads on the MR
+// One session raises findings, a separate one answers them (src/review). The old
+// prompt told a later lap to re-raise "with the SAME id at severity 'blocker'" —
+// on #9174 that turned a lap-0 suggestion into a lap-2 blocker.
+
+import type { FixPromptInput, ReviewPromptInput, ReviewThread } from '../review/types.js';
+import { schemaFor } from '../conductor/schemas.js';
+
+const reviewThread = (over: Partial<ReviewThread> = {}): ReviewThread => ({
+  id: 'F-01', severity: 'major', file: 'apps/teams/tests/admin_test.py', line: 611,
+  what: 'The Person test was deleted instead of repaired.', why: 'TC-21 expects four tests.', fix: 'Restore it.',
+  raisedLap: 0, discussionId: 'd1', noteId: 100, positioned: true, status: 'open', resolved: false, ...over,
+});
+const FIRST: ReviewPromptInput = {
+  recheck: false, mrIid: 11307, sinceSha: null, headSha: 'a1b2c3d4e5f6', changedFiles: null, threads: [],
+};
+const RECHECK: ReviewPromptInput = {
+  recheck: true, mrIid: 11307, sinceSha: 'a1b2c3d4e5f6', headSha: 'b2c3d4e5f6a7',
+  changedFiles: ['apps/teams/tests/admin_test.py'],
+  threads: [
+    reviewThread({ status: 'fixed', resolved: true, fixer: { lap: 0, action: 'fixed', reply: 'Restored as expectedFailure.', commit: 'b2c3d4e5f6a7' } }),
+    reviewThread({ id: 'F-02', severity: 'blocker', status: 'declined', fixer: { lap: 0, action: 'declined', reply: 'Outside the ticket.', commit: '' } }),
+    reviewThread({ id: 'F-03', severity: 'minor', status: 'closed', resolved: true }),
+  ],
+};
+const OLD_FINDINGS = { review: { verdict: 'changes-requested', findings: [{ id: 'F-01', severity: 'major', file: 'a.py', line: 1, what: 'w', why: 'y', fix: 'f' }] } };
+
+test('a first review on a merge request is told its findings become threads a fixer answers', () => {
+  const p = promptFor(cfg('review'), { ...ctx(ticket()), review: FIRST });
+  assert.match(p, /## Where your findings go/);
+  assert.match(p, /its own thread on merge request !11307/);
+  assert.match(p, /A separate fixer session — not you, and not\s+`implement`/);
+  assert.match(p, /A thread's severity is fixed when it is raised/);
+  // The whole change is still reviewed, with the standards agents.
+  assert.match(p, /Dispatch ALL OF THEM IN ONE MESSAGE/);
+});
+
+test('the thread loop never hands the reviewer the old re-raise-as-blocker protocol', () => {
+  const p = promptFor(cfg('review'), { ...ctx(ticket(), OLD_FINDINGS), lap: 2, review: FIRST });
+  assert.doesNotMatch(p, /## This is review lap/);
+  assert.doesNotMatch(p, /re-raise it with the SAME id at severity 'blocker'/);
+});
+
+test('without a merge request to post on, review keeps the old loop\'s prompt unchanged', () => {
+  const p = promptFor(cfg('review'), { ...ctx(ticket(), OLD_FINDINGS), lap: 1 });
+  assert.match(p, /## This is review lap 1/);
+  assert.doesNotMatch(p, /## Where your findings go/);
+});
+
+test('a first review does not raise again what is already open on the merge request', () => {
+  const p = promptFor(cfg('review'), { ...ctx(ticket()), review: { ...FIRST, threads: [reviewThread()] } });
+  assert.match(p, /Already open on this merge request from an earlier review — do NOT raise these again/);
+  assert.match(p, /F-01 \[major\] apps\/teams\/tests\/admin_test\.py:611/);
+});
+
+test('a re-check rules on each thread and reads only what changed', () => {
+  const p = promptFor(cfg('review'), { ...ctx(ticket()), lap: 1, review: RECHECK });
+  assert.match(p, /## This is a RE-CHECK of merge request !11307, not a second review/);
+  for (const ruling of ['`accepted`', '`reopen`', '`withdrawn`', '`stands`']) assert.ok(p.includes(ruling), ruling);
+  // Each thread arrives with what the fixer said, and its state.
+  assert.match(p, /F-01 \[major\][\s\S]*the fixer says FIXED in b2c3d4e5: Restored as expectedFailure\./);
+  assert.match(p, /F-02 \[blocker\][\s\S]*the fixer DECLINED it: Outside the ticket\./);
+  assert.match(p, /state: DECLINED by the fixer — rule on its reason/);
+  // A thread already closed without a change is not put back in front of it.
+  assert.doesNotMatch(p, /F-03 \[minor\]/);
+  assert.match(p, /`git diff a1b2c3d4e5f6\.\.HEAD` is your whole reading list/);
+  assert.match(p, /apps\/teams\/tests\/admin_test\.py/);
+});
+
+test('a re-check is told what it may raise, and that nothing else is posted', () => {
+  const p = promptFor(cfg('review'), { ...ctx(ticket()), lap: 1, review: RECHECK });
+  assert.match(p, /a defect in a line those commits added or changed/);
+  assert.match(p, /a blocker: data loss, a security hole, a crash on the main path, a broken deploy/);
+  assert.match(p, /A new finding that is neither is dropped by the conductor/);
+  assert.match(p, /Never return a thread again as a new finding,\s+under a new id or at a higher severity/);
+  // No fan-out: the diff is a few lines.
+  assert.doesNotMatch(p, /Dispatch ALL OF THEM IN ONE MESSAGE/);
+  assert.match(p, /No sub-agents on a re-check/);
+});
+
+const FIX: FixPromptInput = {
+  mrIid: 11307, headSha: 'a1b2c3d4e5f6', lap: 1, maxLaps: 3,
+  threads: [
+    reviewThread({ status: 'reopened', reviewerNote: 'Still binds only click.', fixer: { lap: 0, action: 'fixed', reply: 'Bound auxclick.', commit: 'b2c3d4e5' } }),
+    reviewThread({ id: 'F-05', human: [{ noteId: 9, author: 'hassam.azam', body: 'Keep the test;\nmark it expectedFailure.' }] }),
+  ],
+};
+
+test('the fixer is handed threads to answer, and nothing that makes it a reviewer', () => {
+  const p = promptFor(cfg('review-fix'), { ...ctx(ticket()), branch: 'oneshot/ticket-1-x', reviewFix: FIX });
+  assert.match(p, /## You are the FIXER for the code review of merge request !11307/);
+  assert.match(p, /you do not raise findings of your own/);
+  assert.match(p, /### The threads — lap 1 of 3/);
+  assert.match(p, /F-01 \[major\] apps\/teams\/tests\/admin_test\.py:611/);
+  assert.match(p, /the reviewer's last word: Still binds only click\./);
+  assert.match(p, /Return an entry for EVERY thread above/);
+  // It commits; the conductor pushes and posts.
+  assert.match(p, /Do not push, and do not post anything/);
+  assert.match(p, /There are 2 laps after this one/);
+});
+
+test('a person\'s reply on a thread reaches the fixer, flattened to one line, and outranks the suggestion', () => {
+  const p = promptFor(cfg('review-fix'), { ...ctx(ticket()), reviewFix: FIX });
+  assert.match(p, /a reviewer on the merge request \(hassam\.azam\) replied: Keep the test; mark it expectedFailure\./);
+  assert.match(p, /outranks both the\s+suggestion and your own earlier answer/);
+});
+
+test('the fixer may decline, and is told who reads the reason', () => {
+  const p = promptFor(cfg('review-fix'), { ...ctx(ticket()), reviewFix: FIX }).replace(/\s+/g, ' ');
+  assert.match(p, /DECLINE it when the finding is wrong/);
+  assert.match(p, /contradicts the approved plan or a QA-approved test case/);
+  assert.match(p, /Never ship a workaround to make a thread go away/);
+});
+
+test('the fixer\'s last lap says what happens to what it leaves open', () => {
+  const p = promptFor(cfg('review-fix'), { ...ctx(ticket()), reviewFix: { ...FIX, lap: 3 } });
+  assert.match(p, /This is the last lap: a blocker or major still open after it goes to a person/);
+});
+
+test('review-fix is an on-demand coding phase with its own schema, and the reviewer still cannot write code', () => {
+  const fix = cfg('review-fix');
+  assert.equal(fix.onDemand, true);
+  assert.equal(fix.coding, true);
+  assert.ok(fix.writes?.includes('worktree'), 'the fixer edits the worktree');
+  assert.ok(!cfg('review').writes?.includes('worktree'), 'the reviewer does not');
+  const schema = schemaFor('review-fix') as { required: string[] };
+  assert.ok(schema.required.includes('threads'));
+  // Rulings are optional on purpose: a first review has none, and a dropped required field costs a lap.
+  const review = schemaFor('review') as { required: string[]; properties: Record<string, unknown> };
+  assert.ok(!review.required.includes('threads'));
+  assert.ok('threads' in review.properties);
+});

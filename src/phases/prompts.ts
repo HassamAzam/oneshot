@@ -33,6 +33,7 @@ import { DESIGN_DIR, NEW_TOKENS_FILE, TOKENS_FILE } from '../lib/designtokens.js
 import { TEST_SETTINGS_FILE, TEST_SETTINGS_MODULE } from '../lib/testsettings.js';
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
+import type { FixPromptInput, ReviewPromptInput, ReviewThread } from '../review/types.js';
 import { PRIOR_ART_KINDS } from '../conductor/schemas.js';
 import {
   GITLAB_PROJECT_URL, countsAsFailure, ticketScopeIds,
@@ -61,6 +62,14 @@ export interface PromptCtx {
   block?: { phase: string; reason: string };
   /** New MR review threads. Set only when the on-demand `mr-feedback` phase is invoked. */
   mrThreads?: MrFeedbackSignal;
+  /**
+   * Set when the code review runs as threads on the merge request
+   * (src/review): whether this reviewer lap is a first review or a re-check,
+   * and the threads it rules on. Absent, `review` is the old loop's prompt.
+   */
+  review?: ReviewPromptInput;
+  /** The open review threads the on-demand `review-fix` phase is to answer. */
+  reviewFix?: FixPromptInput;
   /**
    * `local-tests-scope` only: what the conductor checked out before the
    * session — the throwaway automation worktree and its commit — and the ERP
@@ -923,6 +932,14 @@ finding — tell \`util-reuse-agent\` so when you dispatch it, and do not raise 
 Put the points above into \`spec-conformance-agent\`'s \`ticket_context\` too: the split and the
 switch are in scope because of the label, and the description will not say so.`,
 
+
+  'review-fix': () => `Fix inside the version a thread is about. A thread on v2 is fixed under \`<module>_v2/\`;
+v1's directory stays as it is, unless the thread itself asks for an extension v2 cannot do
+without — an optional parameter with a default, a null guard — with every v1 call site doing
+what it did. A fix that would change v1's behaviour, move or rename a v1 file, or make v1 import
+from \`<module>_v2/\` is a decline, not a fix, and \`reply\` says so: it is exactly what the
+label exists to prevent. Never fold v2's copy of a component back into v1's to close a
+duplication finding — the duplication is the requirement.`,
   verify: () => `Reach every version THROUGH THE SWITCH, clicking it the way a user does. Never set the stored
 choice directly — a browser storage write, a database row, a query parameter: a case that skips
 the switch has not tested it. Log out through the app's own logout, never by clearing browser
@@ -1122,6 +1139,141 @@ You may WRITE only under
 which is not a limitation to work around but the shape of the job: a remediation is an ACTION
 on the environment — a process killed, a lock cleared, a port reclaimed — and almost never a
 file this repo keeps.`;
+}
+
+// ------------------------------------------------- code review as MR threads
+// src/review: one session raises findings, a separate one answers them, and the
+// conductor posts for both. These are the words each is given.
+
+const sha8 = (sha: string | null | undefined): string => String(sha ?? '').slice(0, 8) || '(unknown)';
+
+/** One thread as a session is shown it: the finding, then everything said on it since. */
+function threadEntry(t: ReviewThread): string {
+  const lines = [`- ${t.id} [${t.severity}] ${t.file}:${t.line}`, `    ${t.what}`];
+  if (t.why) lines.push(`    why: ${t.why}`);
+  if (t.fix) lines.push(`    suggested fix: ${t.fix}`);
+  if (t.fixer) {
+    lines.push(t.fixer.action === 'fixed'
+      ? `    the fixer says FIXED in ${sha8(t.fixer.commit)}: ${t.fixer.reply}`
+      : `    the fixer DECLINED it: ${t.fixer.reply}`);
+  }
+  if (t.reviewerNote) lines.push(`    the reviewer's last word: ${t.reviewerNote}`);
+  for (const h of t.human ?? []) {
+    lines.push(`    a reviewer on the merge request (${h.author}) replied: ${h.body.replace(/\s+/g, ' ').trim()}`);
+  }
+  return lines.join('\n');
+}
+
+const THREAD_STATE: Record<string, string> = {
+  open: 'open — not answered by the fixer',
+  fixed: 'marked FIXED by the fixer — check the fix',
+  declined: 'DECLINED by the fixer — rule on its reason',
+  reopened: 'open — you reopened it',
+  disputed: 'open — declined by the fixer, upheld by you',
+  accepted: 'closed — you accepted the fix',
+  withdrawn: 'closed — withdrawn',
+  closed: 'closed without a change',
+};
+
+/**
+ * What a first review is told about where its findings go.
+ *
+ * The old prompt's lap protocol ("re-raise it with the SAME id at severity
+ * 'blocker'") is gone with the loop it served: on #9174 it turned a lap-0
+ * suggestion into a lap-2 blocker. Here severity is graded once.
+ */
+function reviewThreadsBlock(r: ReviewPromptInput): string {
+  const already = r.threads.filter((t) => !t.resolved);
+  const carried = already.length
+    ? `
+Already open on this merge request from an earlier review — do NOT raise these again; the fixer
+has them:
+${already.map((t) => `  - ${t.id} [${t.severity}] ${t.file}:${t.line} — ${t.what.split('\n')[0]}`).join('\n')}
+`
+    : '';
+  return `
+## Where your findings go
+The conductor posts each finding as its own thread on merge request !${r.mrIid}, pinned to
+\`file:line\` when that line is in the diff. A separate fixer session — not you, and not
+\`implement\` — answers each thread with a commit or a reason, and you re-check its answers
+afterwards. So:
+
+- Write \`what\`, \`why\` and \`fix\` to be read ON THE MERGE REQUEST by a person who has seen
+  none of this prompt: each one self-contained, no "lap", no "as above", no other finding
+  referred to by number alone.
+- \`line\` is the line in the file as it is NOW — the new side of the diff.
+- Grade it honestly the first time. A thread's severity is fixed when it is raised: you cannot
+  raise it later, and a re-check may only reopen a thread, never re-grade or re-number it.
+- One finding per defect. Two symptoms of one cause are one thread.
+${carried}`;
+}
+
+/**
+ * The reviewer's second and later laps: rule on the answers, read what changed.
+ *
+ * Deliberately not a review. The rules about what a re-check may raise are
+ * enforced by the conductor (applyReview drops a new finding that is neither a
+ * blocker nor in a changed file); they are stated here so the session does not
+ * spend its turns on findings that will be discarded.
+ */
+function reviewRecheckPrompt(ctx: PromptCtx, r: ReviewPromptInput): string {
+  const shown = r.threads.filter((t) => t.status !== 'closed' && t.status !== 'withdrawn');
+  const changed = r.changedFiles === null
+    ? '(git could not list them — read the diff)'
+    : r.changedFiles.join(', ') || '(no file changed)';
+  const cases = testCases(ctx);
+  return `${ticketBlock(ctx.ticket)}
+## This is a RE-CHECK of merge request !${r.mrIid}, not a second review
+
+The change was reviewed at \`${sha8(r.sinceSha)}\`, and every finding from that review is a
+thread on the merge request. Since then a separate fixer session answered the threads — it
+fixed some and declined others with a reason — and the branch moved to \`${sha8(r.headSha)}\`.
+You do two things, and only these two.
+
+### 1. Rule on each thread
+Return one entry in \`threads\` for every thread below, with its id and a \`ruling\`:
+
+- \`accepted\` — the code at HEAD closes it. Check the fix itself, not only that the old symptom
+  is gone: when it rests on data (a key being unique, a field always being present), open the
+  file where that data is produced.
+- \`reopen\` — it was marked fixed and the fix does not close it, or the fix is itself wrong. Say
+  exactly what is still wrong in \`note\`: the fixer's next lap acts on that sentence.
+- \`withdrawn\` — the fixer declined it and its reason holds, or you now see the finding was
+  mistaken. Say which in \`note\`.
+- \`stands\` — the fixer declined it and its reason does NOT hold. Say why in \`note\`. This ends
+  the argument: the thread goes to a person with both of your notes on it, so write yours for
+  the person who has to decide.
+
+A thread's severity was set when it was raised. Never return a thread again as a new finding,
+under a new id or at a higher severity — \`reopen\` is how you say a fix failed.
+
+${shown.map((t) => `${threadEntry(t)}\n    state: ${THREAD_STATE[t.status] ?? t.status}`).join('\n') || '(no thread to rule on)'}
+
+### 2. Read what changed, and nothing else
+\`git diff ${r.sinceSha ?? `origin/${baseBranch()}`}..HEAD\` is your whole reading list. Files it touches:
+${changed}
+
+The rest of the change had its review. Put a NEW finding in \`findings\` only when it is
+
+  (a) a defect in a line those commits added or changed — cite that line — or
+  (b) a blocker: data loss, a security hole, a crash on the main path, a broken deploy.
+
+Nothing else is posted. A new finding that is neither is dropped by the conductor, so the turns
+spent on it are simply lost — do not use a re-check to notice things about code you already
+passed. When a fix YOU suggested is what introduced a defect, say so in \`what\`.
+
+For what the code has to do, the acceptance criteria and the test cases have not changed:
+${criteria(ctx)}
+${caseList(cases, { steps: false })}
+
+No sub-agents on a re-check: the diff is a few lines and the standards are in
+\`.claude/rules/\` if you need them.
+
+\`verdict\` is 'changes-requested' if you reopened a thread, let a blocker or major \`stand\`, or
+raised a blocker or major; otherwise 'approve'. Send \`findings: []\` when you raise nothing new.
+
+Do not change a line of code, and do not edit a file in the worktree: a reviewer who fixes
+what they find has reviewed nothing.`;
 }
 
 export const PROMPTS: Record<string, (ctx: PromptCtx) => string> = {
@@ -1913,7 +2065,11 @@ already cost this phase a whole lap.
 If the Task tool cannot resolve one of them, review that layer yourself against
 \`.claude/rules/\` and say in \`summary\` which agent was unavailable.`;
 
-    const lapBlock = ctx.lap > 0 && prev.length
+    // The review runs as threads on the merge request (src/review): a later lap
+    // is a re-check with its own, much narrower prompt.
+    if (ctx.review?.recheck) return reviewRecheckPrompt(ctx, ctx.review);
+
+    const lapBlock = !ctx.review && ctx.lap > 0 && prev.length
       ? `## This is review lap ${ctx.lap}
 
 Lap ${ctx.lap - 1} raised the findings below, and \`implement\` claims to have closed:
@@ -1945,7 +2101,7 @@ ${prev.map((f) => `- ${f.id} [${f.severity}] ${f.file}:${f.line} — ${f.what}`)
       : '';
 
     return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
-${lapBlock}
+${lapBlock}${ctx.review ? reviewThreadsBlock(ctx.review) : ''}
 ${reviewFeedbackBlock(ctx.journal.mrFeedback, i.addressedFeedback ?? [])}
 ## Acceptance criteria (phase 1) — the conformance oracle
 ${criteria(ctx)}
@@ -2027,6 +2183,67 @@ A defect you found is not a block. 'changes-requested' is your normal negative v
 Do not change a line of code, and do not edit a file in the worktree: a reviewer who fixes
 what they find has reviewed nothing. Your one legal write is the review-partial.json backstop
 above, under the run directory — nothing else.`;
+  },
+
+  'review-fix': (ctx) => {
+    const f = ctx.reviewFix;
+    const p = artifact<{ approach: string }>(ctx, 'plan');
+    const cases = testCases(ctx);
+    const threads = f?.threads ?? [];
+    const lapsLeft = f ? f.maxLaps - f.lap : 0;
+    const after = lapsLeft > 0
+      ? `There ${lapsLeft === 1 ? 'is 1 lap' : `are ${lapsLeft} laps`} after this one, and the reviewer re-checks every answer first.`
+      : 'This is the last lap: a blocker or major still open after it goes to a person.';
+
+    return `${ticketBlock(ctx.ticket)}
+## You are the FIXER for the code review of merge request !${f?.mrIid ?? '(unknown)'}
+
+A separate reviewer session read this change and raised the threads below on the merge request.
+Your whole job is to answer each one: fix it in code, or decline it with a reason. You do not
+review, you do not raise findings of your own, and you do not go looking for other things to
+improve — a thread you were not handed is not yours.
+
+You are on branch \`${ctx.branch ?? '(unleased)'}\`, already checked out in your worktree, at
+\`${sha8(f?.headSha)}\`. The change so far: \`git log --oneline origin/${baseBranch()}..HEAD\`.
+
+### The threads — lap ${f?.lap ?? 1} of ${f?.maxLaps ?? 1}
+${threads.map(threadEntry).join('\n') || '(none — say so in `summary` and return `threads: []`)'}
+
+### For each thread
+- FIX it when the finding is right, with the smallest correct change. \`suggested fix\` is the
+  reviewer's suggestion, not an instruction: the reviewer reads a diff and can be wrong about the
+  data behind it. Before you apply a fix that depends on data — a list key, an id, a field
+  assumed unique, stable or always present — confirm that property where the data is produced.
+  If the suggestion does not hold, close the finding a correct way and say how in \`reply\`.
+- DECLINE it when the finding is wrong (show why, citing \`file:line\`), when a correct fix lies
+  outside this ticket's scope, or when it contradicts the approved plan or a QA-approved test
+  case below — say which. Declining is a real answer, not a failure: a declined blocker or major
+  goes back to the reviewer and then to a person with your reason on it, so write the reason
+  for that person. Never ship a workaround to make a thread go away.
+- A reply from a reviewer on the merge request, where a thread shows one, outranks both the
+  suggestion and your own earlier answer: it is what a person asked for.
+- A thread marked as reopened was fixed once and the fix did not hold. Read the reviewer's last
+  word on it before you touch the code again.
+- One commit per thread where that is practical, message \`fix(review): <what changed> (<id>)\`.
+  Never amend, rebase or force anything, and never touch a file no thread requires.
+- If you add or change a test, run it. Run the project's linters over the files you touched and
+  set \`lintClean\` from what they printed; the pre-commit hook is broken on this machine, so
+  \`--no-verify\` is permitted and the linters are what stands in for it.
+- \`reply\` is posted on the thread as your answer: what changed and where (\`file:line\`), or why
+  nothing did. Plain sentences for a person. No @mentions and no slash commands.
+- Return an entry for EVERY thread above. One you leave out is treated as unanswered and comes
+  straight back.
+${djangoTestsBlock(ctx)}
+### What the change is held to
+Plan approach: ${p.approach || '(none recorded)'}
+Acceptance criteria:
+${criteria(ctx)}
+QA-approved test cases — a fix must not break one, and may not contradict one:
+${caseList(cases, { steps: false })}
+${betaBlock(ctx, 'review-fix')}
+Do not push, and do not post anything: the conductor pushes the branch and posts each \`reply\`
+on its thread, resolving the ones you fixed. You have no tools for either.
+${after}`;
   },
 
   verify: (ctx) => {

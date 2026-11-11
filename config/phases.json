@@ -188,6 +188,7 @@
       "cycleTo": "implement",
       "maxLaps": 3,
       "group": "check",
+      "_why_threads": "On a run with a merge request to post on, review is no longer a cycle through implement: it is the reviewer half of a two-session loop (src/review). The reviewer returns findings; the conductor posts each as its own resolvable thread on the MR; the on-demand `review-fix` phase answers the open threads with a commit and a reply, or a reason; the reviewer then re-checks, and may reopen a thread but never re-grade it or raise an unrelated new one. `maxLaps` there is the number of FIXER laps per review, counted since the code last changed outside the loop, and a thread still open after them parks the run for a person with the thread listed, before verify is spent on it. `onFail`/`cycleTo` are what the OLD loop reads, and they still apply where the new one cannot run: no merge request at review time (a target without `mr-open`), a dry run, or ONESHOT_REVIEW_THREADS=0. Why it changed: on #9174 the cycle never converged. Lap 2 raised a lap-0 suggestion to a blocker, lap 4 raised two new majors against a test the previous lap had added at the reviewer's own suggestion, and with the lap budget spent the run carried a verdict it could not act on through verify, ui-evidence and mr to a merge that was always going to refuse.",
       "_why_group": "testcases and review both consume only implement's output and neither reads the other's artifact, so they run concurrently. The one interaction \u2014 a review cycle lap re-entering implement \u2014 leaves testcases pinned (the case list is written once), so the group simply degrades to review alone on later laps. A pending test-case approval gate (src/conductor/reviewgate.ts) is a second exception: the runner holds review back out of the batch so the gate gets a solo iteration to check it, rather than the two running concurrently and the gate never firing.",
       "skills": [
         "erp-code-review",
@@ -204,6 +205,36 @@
         "util-reuse-agent"
       ],
       "artifact": "findings.json"
+    },
+    {
+      "name": "review-fix",
+      "n": 5.5,
+      "kind": "session",
+      "tier": "standard",
+      "cwd": "worktree",
+      "maxTurns": 120,
+      "timeoutMin": 60,
+      "writes": [
+        "worktree",
+        "run"
+      ],
+      "onFail": "blocked",
+      "onDemand": true,
+      "coding": true,
+      "skills": [
+        "ponytail",
+        "django-backend-standards",
+        "django-migration-standards",
+        "react-frontend-standards",
+        "django-query-optimisation",
+        "python-linting"
+      ],
+      "labelSkills": {
+        "Beta": "beta-version-toggle"
+      },
+      "artifact": "review-fix.json",
+      "_why": "ON DEMAND: the fixer half of the review loop (src/review). The main loop never schedules it; the conductor invokes it when the reviewer's threads on the merge request are open and a fix lap remains (review.maxLaps). It is a SEPARATE session from the reviewer on purpose, and the split is enforced by what each holds rather than by what each is told: review has no write scope on the worktree, so it cannot fix what it finds; this phase is handed threads and returns answers to them, and an id it was not handed is ignored, so it cannot raise a finding. Neither holds a GitLab write tool: the conductor pushes the branch and posts each reply, which is what lets every note carry a marker and be replayed safely. It is not `implement`: implement builds a plan and fans out to layer agents, at 0.5-1.3M weighted tokens a lap on #9174, while a review thread is a few lines in a named file. STANDARD tier and implement's standards skills, because it writes code that the same reviewer re-checks and verify then runs. 120 turns / 60m is an estimate from implement's cycle laps (18-73 turns on #9174), not a measurement: revisit after real laps. onFail 'blocked' is read only for an infra death, which is re-attempted in place like any other; a lap that ends without answers is a spent lap, and the loop decides from the threads still open.",
+      "_why_n": "5.5: between review (5) and verify (6), where its commits belong in the order of the pipeline. It occupies no slot in the sequence the loop walks, being on demand."
     },
     {
       "name": "verify",

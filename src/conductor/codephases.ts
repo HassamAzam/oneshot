@@ -51,6 +51,7 @@ import { countsAsFailure } from '../phases/types.js';
 import { mergeHooksFor, mrFeedbackActive } from '../mrfeedback/wire.js';
 import type { MergeHooks } from '../mrfeedback/mergehooks.js';
 import type { MrFeedbackSignal } from '../mrfeedback/types.js';
+import { liveReview, readReviewLedger, reviewThreadsEnabled } from '../review/wire.js';
 
 const POLL_MS = 8_000;
 const CI_POLL_MS = 15_000;
@@ -881,6 +882,14 @@ export function qualityGate(ctx: CodePhaseCtx): string | null {
       + 'Refusing to merge a change its own test cases do not pass.';
   }
 
+  // A run whose review ran as threads on the merge request is judged from those
+  // threads as they stand on GitLab, in mergePhase (reviewThreadsRefusal) — not
+  // from this file. findings.json describes the review as it was when written,
+  // and a verdict that outlived the fix it asked for has refused a merge here
+  // before. Only a run the OLD loop reviewed, which has no ledger and no
+  // threads to read, is still held to what its last review recorded.
+  if (readReviewLedger(iid)) return null;
+
   const review = fromPrior<{
     verdict?: string; findings?: Array<{ id?: string; severity?: string }>;
   }>('review', 'findings.json');
@@ -893,6 +902,38 @@ export function qualityGate(ctx: CodePhaseCtx): string | null {
   }
 
   return null;
+}
+
+/**
+ * Why the merge waits on the code review, or null when it does not.
+ *
+ * ANY open reviewer thread holds it, whatever its severity: the review loop
+ * closes non-blocking threads itself before it lets a run past, so one that is
+ * open here was reopened or left by a person — and this project refuses to
+ * merge with an unresolved thread in any case. A read that failed parks as
+ * well: "GitLab did not answer" must never be read as "nothing is open".
+ */
+export function reviewThreadsRefusal(
+  live: Awaited<ReturnType<typeof liveReview>>, mrIid: number, mrUrl: string,
+): { why: string; summary: string } | null {
+  if (live.kind === 'clear') return null;
+  if (live.kind === 'unreadable') {
+    return {
+      summary: `could not read the review threads on !${mrIid}`,
+      why: `cannot read the review threads on !${mrIid} (${live.why}) — not merging on an unknown review; `
+        + 'will look again on the next check',
+    };
+  }
+  const n = live.threads.length;
+  const named = live.threads.slice(0, 8)
+    .map((t) => `${t.finding} [${t.severity}]${t.file ? ` ${t.file}${t.line ? `:${t.line}` : ''}` : ''}`)
+    .join(', ');
+  return {
+    summary: `${n} review thread(s) open on !${mrIid}`,
+    why: `${n} code-review thread(s) are open on !${mrIid}: ${named}${n > 8 ? ', …' : ''}. Oneshot does not merge `
+      + 'over an open review thread — resolve each on the merge request once it is decided, or reply on it with '
+      + `what to do. ${mrUrl}`.trimEnd(),
+  };
 }
 
 /**
@@ -1013,6 +1054,22 @@ export async function mergePhase(
       rec.summary = `${threads.length} new review thread(s) on !${mrIid} — handing them to mr-feedback`;
       persistMerge(ctx, rec);
       return { ok: false, error: rec.summary, feedback: { mrIid, threads } };
+    }
+  }
+
+  // The code review, read off the merge request as it is NOW. After the
+  // feedback check on purpose: a reviewer thread a person has replied on is a
+  // person's request, and src/mrfeedback has just been offered it. What is
+  // left here is a reviewer thread nobody has settled — and that parks. It is
+  // not a failure and not something self-remediation can repair: the run waits
+  // for the thread to be resolved, and each poll looks again.
+  if (reviewThreadsEnabled() && first.data.state === 'opened') {
+    const refusal = reviewThreadsRefusal(await liveReview(mrIid), mrIid, rec.mrUrl ?? '');
+    if (refusal) {
+      rec.summary = refusal.summary;
+      persistMerge(ctx, rec);
+      log.warn(`merge: ${refusal.why}`);
+      return { ok: false, error: refusal.why, park: true };
     }
   }
 
@@ -1294,7 +1351,7 @@ async function recordSuccess(ctx: CodePhaseCtx, rec: MergeArtifact): Promise<voi
  * A run must not die because a courtesy push failed.
  */
 /** The sha a ref resolves to in `worktree`, or null when the ref does not exist. */
-function revParse(worktree: string, ref: string): string | null {
+export function revParse(worktree: string, ref: string): string | null {
   try {
     return execFileSync('git', ['-C', worktree, 'rev-parse', '--verify', '--quiet', ref], {
       encoding: 'utf8', stdio: 'pipe', timeout: 10_000,
@@ -1323,6 +1380,37 @@ export function mrOpenSettled(ctx: CodePhaseCtx): boolean {
   return head !== null && head === revParse(worktree, `refs/remotes/origin/${branch}`);
 }
 
+/**
+ * Push the run's branch from the conductor, where the GitLab credential lives.
+ *
+ * `mr-open` pushes what `implement` committed; the review loop pushes what its
+ * fixer committed (src/review), before any reply that names a commit is posted.
+ * Never forced: every commit on this branch was made by a phase of this run on
+ * top of the last push, so a push that is not a fast-forward means something
+ * else moved the branch, and that is a failure to report rather than overwrite.
+ */
+export function pushRunBranch(worktree: string, branch: string): { ok: boolean; error?: string } {
+  try {
+    execFileSync('git', ['-C', worktree, 'push', '-u', 'origin', branch], {
+      encoding: 'utf8', stdio: 'pipe', timeout: 120_000,
+    });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message.slice(0, 200) };
+  }
+}
+
+/** Files that differ between two commits of `worktree`, or null when git cannot say. */
+export function changedFilesBetween(worktree: string, from: string, to: string): string[] | null {
+  try {
+    return execFileSync('git', ['-C', worktree, 'diff', '--name-only', from, to], {
+      encoding: 'utf8', stdio: 'pipe', timeout: 60_000,
+    }).split('\n').map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
 export async function mrOpenPhase(
   ctx: CodePhaseCtx,
 ): Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }> {
@@ -1335,13 +1423,8 @@ export async function mrOpenPhase(
 
   const base = projectConfig().branches.base;
 
-  try {
-    execFileSync('git', ['-C', worktree, 'push', '-u', 'origin', branch], {
-      encoding: 'utf8', stdio: 'pipe', timeout: 120_000,
-    });
-  } catch (err) {
-    return { ok: false, error: `could not push ${branch}: ${(err as Error).message.slice(0, 200)}` };
-  }
+  const pushed = pushRunBranch(worktree, branch);
+  if (!pushed.ok) return { ok: false, error: `could not push ${branch}: ${pushed.error}` };
 
   const existing = await findMergeRequests({ sourceBranch: branch, state: 'opened' });
   const found = existing.ok ? (existing.data ?? [])[0] : undefined;

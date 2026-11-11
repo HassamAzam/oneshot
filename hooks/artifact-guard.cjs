@@ -83,7 +83,14 @@ const JOURNAL = 'run.json';
  * `writes: ['run']` has no reason to write any of them, and a forged resources
  * file turns the next recovery into a kill list of the session's choosing.
  */
-const CONDUCTOR_STATE = ['local-tests-resources.json', 'local-tests-capture.json', 'local-tests-seq'];
+const CONDUCTOR_STATE = [
+  'local-tests-resources.json', 'local-tests-capture.json', 'local-tests-seq',
+  // The code-review loop's ledger (src/review): which threads are open, what is
+  // still owed to GitLab, how many fix laps are spent. `review` and `review-fix`
+  // both hold `writes: ['run']`, and a session that could edit it could mark its
+  // own findings answered or hand itself another lap.
+  'review-threads.json',
+];
 
 /**
  * Used only when config/phases.json cannot be read. A guard that protects
@@ -93,7 +100,7 @@ const CONDUCTOR_STATE = ['local-tests-resources.json', 'local-tests-capture.json
  */
 const FALLBACK = [
   'recall.json', 'research.json', 'design.json', 'plan.json', 'implement.json',
-  'mr-open.json', 'testcases.json', 'findings.json', 'verify.json', 'base-check.json',
+  'mr-open.json', 'testcases.json', 'findings.json', 'review-fix.json', 'verify.json', 'base-check.json',
   'ui-evidence.json', 'mr.json', 'merge.json', 'remediate.json', 'mr-feedback.json',
 ];
 

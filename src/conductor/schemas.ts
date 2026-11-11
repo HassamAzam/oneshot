@@ -492,7 +492,67 @@ export const FINDINGS_SCHEMA = phaseSchema({
       required: ['id', 'severity', 'file', 'line', 'what', 'why', 'fix'],
     },
   },
+  // Not in `required`, on purpose. A first review has no thread to rule on, and
+  // every extra required field is one more a finished session can drop on its way
+  // out — #9174's lap 1 lost a whole review to a missing `verdict`. An absent
+  // ruling is read as "no objection" (src/review/ledger.ts), which is the safe
+  // direction: it can only leave a fix accepted, never invent a finding.
+  threads: {
+    type: 'array',
+    description: 'RE-CHECK ONLY: one ruling per review thread you were shown. Omit it, or send [], on a first review.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: str('The thread id exactly as shown, e.g. F-03'),
+        ruling: {
+          type: 'string', enum: ['accepted', 'reopen', 'withdrawn', 'stands'],
+          description:
+            "'accepted' = the code now closes it. 'reopen' = it was marked fixed and is not. "
+            + "'withdrawn' = the fixer declined it and its reason holds, or the finding was mistaken. "
+            + "'stands' = the fixer declined it and its reason does not hold.",
+        },
+        note: str("Why, in one or two sentences, for the person reading the thread. '' for a plain accepted."),
+      },
+      required: ['id', 'ruling', 'note'],
+    },
+  },
 }, ['verdict', 'findings']);
+
+/**
+ * What the fixer hands back: an answer for every review thread it was given.
+ *
+ * `threads` is the whole point of the phase, so it is the one array that may not
+ * be dropped. An id the fixer was not handed is ignored by the conductor, which
+ * is what "the fixer never raises findings" means in code (src/review/ledger.ts).
+ */
+export const REVIEW_FIX_SCHEMA = phaseSchema({
+  threads: {
+    type: 'array',
+    description: 'One entry for EVERY review thread you were handed, fixed or not.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: str('The thread id exactly as shown, e.g. F-03'),
+        action: {
+          type: 'string', enum: ['fixed', 'declined'],
+          description: "'fixed' only when a commit of this lap closes it. 'declined' when you changed nothing for it.",
+        },
+        reply: str(
+          'Posted on the thread as your answer. Fixed: what changed and where (file:line). Declined: why, '
+          + 'for a person to decide from. Plain sentences; no @mentions, no slash commands.',
+        ),
+        commit: str("Short SHA of the commit that fixes it. '' when declined."),
+      },
+      required: ['id', 'action', 'reply', 'commit'],
+    },
+  },
+  commits: strArr('Short SHAs committed this lap.'),
+  filesChanged: strArr('Repo-relative paths this lap changed.'),
+  lintClean: { type: 'boolean', description: 'The linters pass over the files this lap touched.' },
+  testsRun: str('What was run and the outcome. Empty string if none were run.'),
+}, ['threads', 'commits', 'filesChanged', 'lintClean', 'testsRun']);
 
 const CASE_RESULT = {
   type: 'array',
@@ -889,6 +949,7 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   testcases: TESTCASES_SCHEMA,
   implement: IMPLEMENT_SCHEMA,
   review: FINDINGS_SCHEMA,
+  'review-fix': REVIEW_FIX_SCHEMA,
   verify: VERIFY_SCHEMA,
   'base-check': BASE_CHECK_SCHEMA,
   'ui-evidence': UI_EVIDENCE_SCHEMA,

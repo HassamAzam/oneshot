@@ -68,3 +68,25 @@ test('a handled thread stays quiet until a reviewer writes again', () => {
   );
   assert.equal(t?.lastNoteId, 9);
 });
+
+// The code-review loop (src/review) posts its findings and answers under its own
+// marker. On a desk it posts them as the operator, who is usually a listed reviewer.
+const REVIEW_NOTE = '**F-05 · major** — a test was deleted\n<!-- oneshot:review role=reviewer finding=F-05 action=raised severity=major run=r-1 lap=0 -->';
+const FIXER_NOTE = '**Not changed** — conflicts with TC-21\n<!-- oneshot:review role=fixer finding=F-05 action=declined run=r-1 lap=0 -->';
+
+test('the review loop\'s own threads are not a person\'s feedback, even posted by a listed reviewer', () => {
+  const d = [{ id: 'bot', notes: [note({ by: 'hira.ijaz', body: REVIEW_NOTE }), note({ by: 'hira.ijaz', body: FIXER_NOTE })] }];
+  assert.deepEqual(actionableThreads(d, opts), []);
+  // Without the marker the same two notes ARE that reviewer's feedback: the marker is what tells them apart.
+  const plain = [{ id: 'human', notes: [note({ by: 'hira.ijaz', body: 'a test was deleted' })] }];
+  assert.equal(actionableThreads(plain, opts).length, 1);
+});
+
+test('a person\'s reply inside one of those threads is still theirs to have answered', () => {
+  const reply = note({ by: 'hira.ijaz', body: 'Keep the test; mark it expectedFailure.' });
+  const d = [{ id: 'bot', notes: [note({ by: 'hira.ijaz', body: REVIEW_NOTE }), note({ by: 'hira.ijaz', body: FIXER_NOTE }), reply] }];
+  const out = actionableThreads(d, opts);
+  assert.equal(out.length, 1);
+  assert.deepEqual(out[0]?.notes, [{ id: reply.id, author: 'hira.ijaz', body: 'Keep the test; mark it expectedFailure.' }]);
+  assert.equal(out[0]?.lastNoteId, reply.id);
+});

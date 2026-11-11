@@ -1250,6 +1250,14 @@ expect_deny  "Write verify.json (the merge gate reads it)" \
 expect_deny  "Write run.json (the journal, holds human approvals)" \
                                        artifact-guard.cjs "$(write_payload "$RUN/run.json")"
 expect_deny  "Edit findings.json"      artifact-guard.cjs "$(edit_json_payload "$RUN/findings.json")"
+# The code-review loop's ledger is the conductor's: a reviewer or fixer session that
+# could edit it could mark its own findings answered, or hand itself another lap.
+expect_deny  "Write the review loop's ledger" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/review-threads.json")"
+expect_deny  "sed -i over the review ledger" \
+                                       artifact-guard.cjs "$(bash_payload "sed -i 's/open/closed/' $RUN/review-threads.json")"
+expect_allow "cat the review ledger (reads are never refused)" \
+                                       artifact-guard.cjs "$(bash_payload "cat $RUN/review-threads.json")"
 expect_deny  "Write merge.json (name defaulted from the phase, not declared)" \
                                        artifact-guard.cjs "$(write_payload "$RUN/merge.json")"
 expect_deny  "Write ANOTHER run's artifact" \

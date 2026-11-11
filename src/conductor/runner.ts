@@ -79,7 +79,7 @@ import {
 } from '../lib/worktrees.js';
 import {
   addIssueNote, createIssue, createMergeRequest, deleteIssueNote, findMergeRequests, getIssue, getIssueNote,
-  allIssueNotes, issueUrl, swapLabel, updateMergeRequest, type Issue, type IssueNote,
+  allIssueNotes, issueUrl, mergeRequestUrl, swapLabel, updateMergeRequest, type Issue, type IssueNote,
 } from '../lib/gitlab.js';
 import { acquirePromotion, releasePromotion, sleep } from '../lib/promotion.js';
 import { checkQuota, quotaParked } from '../lib/quota.js';
@@ -100,7 +100,9 @@ import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
-import { mergePhase, mrOpenPhase, mrOpenSettled } from './codephases.js';
+import {
+  changedFilesBetween, mergePhase, mrOpenPhase, mrOpenSettled, pushRunBranch, revParse,
+} from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
   MAX_CONFIRMATIONS, rearmGate,
@@ -122,6 +124,10 @@ import {
   roundsUsed, startRound,
 } from '../mrfeedback/ledger.js';
 import type { MrFeedbackSignal } from '../mrfeedback/types.js';
+import { fixLapsUsed, reviewArtifact, reviewSettled } from '../review/ledger.js';
+import { driveReview, type Session } from '../review/loop.js';
+import type { FixerOutput, ReviewerOutput } from '../review/types.js';
+import { readReviewLedger, reviewApiFor, reviewThreadsEnabled, writeReviewLedger } from '../review/wire.js';
 
 const exec = promisify(execFile);
 
@@ -1071,6 +1077,43 @@ export function verifyRescopeIsScoped(gate: { confirmed: unknown[]; rescope: unk
 }
 
 /**
+ * Carry QA's settled verdicts on verify cases into a later lap's results.
+ *
+ * The verify-case gate lets a person rule on a case that keeps failing: skip
+ * it, call it invalid, accept the behaviour as expected, or split it off as
+ * pre-existing. Those rulings were written into verify.json once and nowhere a
+ * later lap would read them, so any re-run of verify — after the review's fixer
+ * commits, after a person's MR comments, after an unblock — executed the case
+ * again, failed it again, and walked the run back to the same gate to ask the
+ * same person the same question. A ruling a person made about a case holds for
+ * the rest of the run.
+ *
+ * Applied only where the fresh result is a failure: a case QA skipped that now
+ * passes simply passes. `confirmed` and `missing-steps` are not rulings that
+ * settle a case — they ask for more work — so they are not carried.
+ */
+export function applyStandingDecisions(
+  results: CaseResult[],
+  decisions: ReadonlyArray<{ caseId: string; verdict: string; by: string }> | undefined,
+): { results: CaseResult[]; applied: string[] } {
+  const standing = new Map<string, { verdict: string; by: string }>();
+  for (const d of decisions ?? []) {
+    if (['skip', 'invalid', 'expected', 'pre-existing'].includes(d.verdict)) standing.set(d.caseId, d);
+    else standing.delete(d.caseId); // a later `confirmed` reopens what an earlier ruling settled
+  }
+  const applied: string[] = [];
+  const out = results.map((c) => {
+    const d = standing.get(c.id);
+    if (!d || !countsAsFailure(c)) return c;
+    applied.push(c.id);
+    return d.verdict === 'expected'
+      ? { ...c, result: 'pass' as const, evidence: `QA (${d.by}) ruled this expected behaviour earlier in this run. ${c.evidence ?? ''}`.trim() }
+      : { ...c, result: 'skipped' as const, evidence: `QA (${d.by}) marked this ${d.verdict} earlier in this run. ${c.evidence ?? ''}`.trim() };
+  });
+  return { results: out, applied };
+}
+
+/**
  * What a `verify` verdict that is ALREADY on record means for the lap about to
  * start: nothing ('run'), ask the QA gate about it ('gate'), or go and make the
  * fix it asked for ('cycle').
@@ -1894,6 +1937,29 @@ export async function runTicket(
       // gate.verdict === 'approved' — fall through into 'review' below.
     }
 
+    // The code review, when it runs as threads on the merge request. One entry
+    // point for every way of arriving here — a first pass, a forced re-check
+    // after a verify fix, a resume, a tick of a parked run — because the loop
+    // reads where it stands from the MR and its ledger, never from how it got
+    // here. After the test-case gate above, which still holds it back.
+    if (phase.name === 'review' && reviewThreads()) {
+      const control = await driveReviewLoop(phase, i);
+      forced.delete(phase.name);
+      await updateCard(j.slackTs ?? '', cardState(j));
+      await publishPending({ iid, runId, journal: j });
+      j = readJournal(iid) ?? j;
+      if (opts.signal?.aborted) return finish(j, 'aborted', 'the conductor asked this run to stop');
+      if (control === null) { i += 1; continue; }
+      if (control.kind === 'stop') {
+        const resumeAt = await resumeAfterRemediation(control, phase.name);
+        if (resumeAt === null) return finish(j, control.status, stopReason(control));
+        i = resumeAt;
+        continue;
+      }
+      i = nextIndex(control, i, i, list, forced);
+      continue;
+    }
+
     // A group is the maximal run of CONSECUTIVE phases with the same marker
     // that are all about to run. A skipped or unimplemented member ends the
     // group rather than being stepped over — a group must stay a contiguous
@@ -1909,6 +1975,10 @@ export async function runTicket(
         // ever visits 'review' on its own — the only place the gate above
         // fires. Hold it back so the next iteration lands on it solo.
         if (next.name === 'review' && caseGatePending) break;
+        // Nor when the review is the thread loop: that is several sessions the
+        // loop sequences itself, and it is entered where the loop lands on
+        // `review` alone, just below the gate.
+        if (next.name === 'review' && reviewThreads()) break;
         members.push(k);
       }
     }
@@ -2001,6 +2071,16 @@ export async function runTicket(
         writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
         j = updateJournal(iid, { verifyRescopeCases: [] }) ?? j;
         log.phase(`verify merged ${scope.size} re-run case(s) back into the ${baseline.length}-case list`, { iid });
+      }
+
+      // A person's ruling on a case holds for the rest of the run (applyStandingDecisions).
+      if (r.cfg.name === 'verify' && r.out.ok && j.verifyCaseDecisions?.length) {
+        const standing = applyStandingDecisions((r.out.data?.results ?? []) as CaseResult[], j.verifyCaseDecisions);
+        if (standing.applied.length) {
+          r.out.data = { ...r.out.data, results: standing.results };
+          writeArtifact(iid, r.cfg.artifact ?? 'verify.json', r.out.data);
+          log.phase(`verify kept QA's earlier ruling on ${standing.applied.join(', ')}`, { iid });
+        }
       }
 
       // A verify that executed the list but passed NOTHING is not a green
@@ -2492,7 +2572,26 @@ export async function runTicket(
    * A cycle can still force it: `forced` short-circuits ahead of the check.
    */
   function shouldSkip(p: PhaseConfig): boolean {
-    return !forced.has(p.name) && phaseSettled(iid, p.name);
+    if (forced.has(p.name)) return false;
+    // The thread loop's own answer, when it has one: an earlier clean lap says
+    // nothing about threads opened since, so the phase records cannot be asked.
+    // A run whose review finished under the old loop has no ledger, and is not
+    // re-reviewed uninvited — only when something forces `review` again.
+    if (p.name === 'review' && reviewThreads()) {
+      const ledger = readReviewLedger(iid);
+      if (ledger) return reviewSettled(ledger, worktree ? revParse(worktree, 'HEAD') : null);
+    }
+    return phaseSettled(iid, p.name);
+  }
+
+  /**
+   * Whether this run's code review is the reviewer/fixer loop on the merge
+   * request (src/review) rather than the old cycle through `implement`. It
+   * needs a merge request to post on, which `mr-open` supplies on the targets
+   * that carry it; without one, review falls back to the old loop for this pass.
+   */
+  function reviewThreads(): boolean {
+    return reviewThreadsEnabled() && typeof j.mrIid === 'number' && Boolean(worktree);
   }
 
   /**
@@ -2563,7 +2662,7 @@ export async function runTicket(
     return null;
   }
 
-  async function runOne(p: PhaseConfig, index: number): Promise<PhaseResult> {
+  async function runOne(p: PhaseConfig, index: number, extra: Partial<PromptCtx> = {}): Promise<PhaseResult> {
     forced.delete(p.name);
     const lap = lapsOf(iid, p.name);
     const startedAt = Date.now();
@@ -2573,7 +2672,7 @@ export async function runTicket(
     // on that variable's ABSENCE — passing it everywhere would disarm the rule
     // for exactly the phases it exists to confine.
     const wt = p.cwd === 'worktree' ? worktree : undefined;
-    const ctx: PromptCtx = { ticket, runId, lap, branch, worktree: wt, port, prior, journal: j };
+    const ctx: PromptCtx = { ticket, runId, lap, branch, worktree: wt, port, prior, journal: j, ...extra };
 
     // Hand `design` its palette rather than making it go and distil one. The
     // phase budgets ~10 of its 115 turns for this (config/phases.json), and the
@@ -2768,6 +2867,172 @@ export async function runTicket(
 
   function lapWindowFor(phase: string): number {
     return lapWindow(j, phase);
+  }
+
+  /**
+   * Run the code review as threads on the merge request, from wherever it
+   * stands, and say what the run does next — null to carry on past review.
+   *
+   * The loop itself is src/review/loop.ts and knows nothing of this file; what
+   * is supplied here is the real world around it: the two sessions (through
+   * runOne, so each gets the tool policy, hooks, transcript and budget of any
+   * phase), git, GitLab, and the journal. Each session is recorded like any
+   * phase, so the card and the ledger show a `review` and a `review-fix` lap
+   * for every one that ran.
+   */
+  async function driveReviewLoop(p: PhaseConfig, index: number): Promise<Control | null> {
+    const mrIid = j.mrIid!;
+    const wt = worktree!;
+    const cfgFix = list.find((q) => q.name === 'review-fix');
+    if (!cfgFix || !isImplemented(cfgFix.name) || !schemaFor(cfgFix.name)) {
+      return {
+        kind: 'stop', status: 'blocked', noRemediation: true,
+        reason: 'review: the review-fix phase is missing from config/phases.json — add it back, or set '
+          + 'ONESHOT_REVIEW_THREADS=0 to review through implement as before',
+      };
+    }
+    const leaseError = ensureLeases(p);
+    if (leaseError) return { kind: 'stop', status: 'blocked', reason: leaseError };
+
+    const headAtEntry = revParse(wt, 'HEAD');
+    /** A stop only the session's own result can call for: a usage limit, an account notice, a `blocked`. */
+    let halt: Control | null = null;
+
+    const session = async <T>(cfgS: PhaseConfig, extra: Partial<PromptCtx>): Promise<Session<T>> => {
+      const quota = checkQuota(runId, cfgS.name, lapsOf(iid, cfgS.name));
+      if (!quota.allowed) {
+        halt = { kind: 'stop', status: 'blocked', reason: `quota: ${quota.reason}` };
+        return { ok: false, why: `quota: ${quota.reason}`, infra: false };
+      }
+      await updateCard(j.slackTs ?? '', cardState(j, [cfgS.name]));
+      updateRun(runId, { phase: cfgS.name, status: 'running', owner_seen_at: Date.now() });
+      const r = await runOne(cfgS, index, extra);
+
+      // The bargain a dead review has always had: what it wrote to
+      // review-partial.json before dying is kept if it holds a blocker or a
+      // major. A first review only — a re-check's rulings are not in that file,
+      // and a salvage without them would read every fix as accepted.
+      if (cfgS.name === 'review' && !extra.review?.recheck && !r.out.ok && !r.out.blocked) {
+        const path = artifactPath(iid, 'review-partial.json');
+        const fresh = existsSync(path) && statSync(path).mtimeMs >= r.startedAt;
+        const partial = fresh ? readArtifact<{ findings?: unknown }>(iid, 'review-partial.json') : null;
+        const salvaged = salvagedReview(partial?.findings ?? [], r.out.error ?? null);
+        if (salvaged) {
+          r.out.data = salvaged;
+          r.out.ok = true;
+          log.warn(`review salvaged from partial findings — ${salvaged.findings.length} recorded`);
+        }
+      }
+
+      const usable = r.out.ok && r.out.data !== null;
+      recordPhase(iid, {
+        phase: cfgS.name, lap: r.lap,
+        status: usable ? 'ok' : statusForFailure(cfgS, r.out.infra),
+        startedAt: r.startedAt, endedAt: r.endedAt, model: modelFor(cfgS),
+        turns: r.out.turns, weighted: r.out.weighted, sessionId: r.out.sessionId,
+        error: usable ? undefined : (r.out.accountAction ?? r.out.error ?? r.out.blocked ?? undefined),
+      });
+      j = readJournal(iid) ?? j;
+      if (usable) return { ok: true, lap: r.lap, data: r.out.data as T };
+
+      if (r.out.accountAction) {
+        logEvent('account_action', { phase: cfgS.name, lap: r.lap, notice: r.out.accountAction }, { runId, phase: cfgS.name });
+        halt = {
+          kind: 'stop', status: 'blocked', noRemediation: true,
+          reason: `${cfgS.name}: ${accountActionReason(r.out.accountAction, iid)}`,
+        };
+      } else if (r.out.rateLimited) {
+        halt = {
+          kind: 'stop', status: 'blocked', noRemediation: true,
+          reason: 'subscription usage limit — parked until the window resets',
+        };
+      } else if (r.out.blocked) {
+        halt = { kind: 'stop', status: 'blocked', reason: `${cfgS.name}: ${r.out.blocked}` };
+      }
+      return { ok: false, why: r.out.error ?? r.out.blocked ?? 'the session returned no answer', infra: Boolean(r.out.infra) };
+    };
+
+    const outcome = await driveReview({
+      runId, mrIid, mrUrl: j.mrUrl ?? mergeRequestUrl(mrIid),
+      maxFixLaps: p.maxLaps ?? 3,
+      trusted: mrFeedbackConfig().authors,
+      api: reviewApiFor(mrIid),
+      load: () => readReviewLedger(iid),
+      save: (l) => writeReviewLedger(iid, l),
+      head: () => revParse(wt, 'HEAD'),
+      changedFiles: (from, to) => changedFilesBetween(wt, from, to),
+      fixLapsUsed: () => fixLapsUsed((readJournal(iid) ?? j).phases),
+      runReviewer: (input) => session<ReviewerOutput>(p, { review: input }),
+      runFixer: (input) => session<FixerOutput>(cfgFix, { reviewFix: input }),
+      push: () => pushRunBranch(wt, branch),
+      stopping: () => Boolean(opts.signal?.aborted) || existsSync(PAUSE),
+      announcePark: async (body) => {
+        await addIssueNote(iid, body);
+        await thread(j.slackTs ?? null, `#${iid} — code review needs a person: open thread(s) on !${mrIid}`);
+      },
+      info: (line) => log.phase(line),
+    });
+
+    // findings.json is rewritten from the ledger whatever happened, so every
+    // later reader sees the review as it now stands (reviewArtifact).
+    const ledger = readReviewLedger(iid);
+    const raised = ledger?.threads.length ?? 0;
+    const open = ledger?.threads.filter((t) => !t.resolved).length ?? 0;
+    const view = reviewArtifact(ledger, `Code review on !${mrIid}: ${raised} thread(s) raised, ${open} open.`);
+    writeArtifact(iid, p.artifact ?? 'findings.json', view);
+    prior[p.name] = view;
+
+    const lastReview = (): PhaseRecord | undefined => [...j.phases].reverse().find((rec) => rec.phase === p.name);
+    const mark = (status: PhaseRecord['status'], why: string): void => {
+      const now = Date.now();
+      recordPhase(iid, { phase: p.name, lap: lapsOf(iid, p.name), status, startedAt: now, endedAt: now, error: why });
+      j = readJournal(iid) ?? j;
+    };
+
+    switch (outcome.kind) {
+      case 'done': {
+        // Settled without a reviewer session having the last word — a person
+        // resolved the open threads, or the run closed what was non-blocking.
+        const last = lastReview()?.status;
+        if (last !== 'ok' && last !== 'warned') mark('warned', 'the open review threads were settled on the merge request');
+        // The fixer committed after phases that had already passed (a review
+        // forced again late in a run): what they checked is no longer the code.
+        if (headAtEntry !== revParse(wt, 'HEAD')) {
+          const stale = list.slice(index + 1)
+            .filter((t) => !t.onDemand && t.name !== 'testcases' && !CODE_PHASES[t.name] && phaseSettled(iid, t.name))
+            .map((t) => t.name);
+          for (const name of stale) forced.add(name);
+          if (stale.length) log.warn(`review-fix changed the code — re-running ${stale.join(', ')}`);
+        }
+        if (isMilestone(p)) await thread(j.slackTs ?? null, milestoneText(p, view, iid));
+        return null;
+      }
+      case 'parked':
+        // Once per wait: a parked run is re-entered every tick, and a record
+        // per tick is what isRepark exists to prevent.
+        if (lastReview()?.status !== 'parked') mark('parked', outcome.why);
+        return { kind: 'stop', status: 'parked', reason: `review: ${outcome.why}` };
+      case 'retry-later':
+        return { kind: 'stop', status: 'parked', reason: `review: ${outcome.why} — retrying on the next check` };
+      case 'stopped':
+        return existsSync(PAUSE)
+          ? { kind: 'stop', status: 'aborted', reason: 'paused mid-phase — resumes when unpaused' }
+          : { kind: 'stop', status: 'aborted', reason: 'the conductor asked this run to stop' };
+      default: {
+        if (halt) return halt;
+        if (outcome.phase === 'review') {
+          // A reviewer that died is re-attempted like any phase; one that came
+          // back unusable gets two more tries, not a cycle through implement.
+          return afterFailure({ ...p, onFail: 'retry', maxRetries: 2 }, index, `review: ${outcome.why}`, outcome.infra);
+        }
+        // An infra death of the fixer costs no lap and is re-attempted. Any
+        // other failure is a lap spent with no answers: go round again, and the
+        // loop decides from the threads still open and the laps that are left.
+        if (outcome.infra) return afterFailure(cfgFix, index, `review-fix: ${outcome.why}`, true);
+        log.warn('review-fix ended without answers — the lap is spent', { why: outcome.why.slice(0, 120) });
+        return { kind: 'retry', at: index };
+      }
+    }
   }
 
   /**

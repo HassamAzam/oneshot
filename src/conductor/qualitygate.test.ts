@@ -1,7 +1,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
-import { qualityGate } from './codephases.js';
+import { qualityGate, reviewThreadsRefusal } from './codephases.js';
 import { writeArtifact } from '../lib/artifacts.js';
 import { runDir } from '../lib/config.js';
 import { applyBaseCheck, type CodePhaseCtx } from './runner.js';
@@ -149,4 +149,54 @@ test('a confirmed pre-existing case on disk does not block a resumed run either'
   writeArtifact(IID, 'verify.json', baseChecked('fails'));
   writeArtifact(IID, 'findings.json', CLEAN_REVIEW);
   assert.equal(qualityGate(ctx({})), null);
+});
+
+// ----------------------------------------- the review, read from the merge request
+// A run reviewed as threads on the MR is judged from those threads as they stand
+// on GitLab. findings.json describes the review as it was when it was written, and
+// on #9174 a verdict nobody could act on any more is what refused the merge.
+
+const LEDGER = { version: 1, runId: 'r-test', mrIid: 11307, reviewedSha: 'a1', recheckOwed: false, threads: [], pending: [], dropped: [] };
+
+test('a run reviewed as MR threads is not refused by a stale findings.json', () => {
+  cleanup();
+  writeArtifact(IID, 'verify.json', CLEAN_VERIFY);
+  writeArtifact(IID, 'findings.json', BLOCKED_REVIEW);
+  writeArtifact(IID, 'review-threads.json', LEDGER);
+  assert.equal(qualityGate(ctx({})), null, 'the live threads decide, in mergePhase');
+});
+
+test('a run the old loop reviewed, with no ledger, is still held to its last review', () => {
+  cleanup();
+  writeArtifact(IID, 'verify.json', CLEAN_VERIFY);
+  writeArtifact(IID, 'findings.json', BLOCKED_REVIEW);
+  assert.match(qualityGate(ctx({})) ?? '', /F-1 \[blocker\]/);
+});
+
+test('failing verify cases still refuse a thread-reviewed run: the ledger excuses the review, nothing else', () => {
+  cleanup();
+  writeArtifact(IID, 'verify.json', FAILING_VERIFY);
+  writeArtifact(IID, 'review-threads.json', LEDGER);
+  assert.match(qualityGate(ctx({})) ?? '', /TC-1/);
+});
+
+const open = (finding: string, severity: 'major' | 'minor', file: string | null = 'apps/teams/tests/admin_test.py') =>
+  ({ finding, severity, discussionId: `d-${finding}`, noteId: 1, file, line: file ? 611 : null });
+
+test('no open reviewer thread on the merge request: the review does not hold the merge', () => {
+  assert.equal(reviewThreadsRefusal({ kind: 'clear' }, 11307, 'https://x/mr/11307'), null);
+});
+
+test('an open reviewer thread holds the merge and is named, whatever its severity', () => {
+  const r = reviewThreadsRefusal({ kind: 'open', threads: [open('F-05', 'major'), open('F-06', 'minor', null)] }, 11307, 'https://x/mr/11307');
+  assert.ok(r);
+  assert.match(r.why, /2 code-review thread\(s\) are open on !11307/);
+  assert.match(r.why, /F-05 \[major\] apps\/teams\/tests\/admin_test\.py:611, F-06 \[minor\]/);
+  assert.match(r.why, /resolve each on the merge request/);
+  assert.match(r.why, /https:\/\/x\/mr\/11307$/);
+});
+
+test('threads that could not be read hold the merge too: no answer is not "nothing open"', () => {
+  const r = reviewThreadsRefusal({ kind: 'unreadable', why: 'fetch failed' }, 11307, '');
+  assert.match(r?.why ?? '', /cannot read the review threads on !11307 \(fetch failed\)/);
 });

@@ -12,8 +12,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MrDiscussion, MrNote } from '../mrfeedback/types.js';
 import {
-  applyFix, applyReview, closeLeftover, emptyLedger, fixableThreads, liveOpenThreads, nextStep, openBlocking,
-  openThreads, reviewSettled, syncLive,
+  applyFix, applyReview, closeLeftover, emptyLedger, fixLapsUsed, fixableThreads, liveOpenThreads, nextStep,
+  openBlocking, openThreads, reviewArtifact, reviewSettled, syncLive,
 } from './ledger.js';
 import { parseMarker, renderMarker } from './markers.js';
 import type { ReviewLedger, ReviewThread } from './types.js';
@@ -505,4 +505,55 @@ test('#9174\'s review reaches a person in two fix laps instead of circling to a 
   assert.equal(step.kind, 'park');
   assert.deepEqual(step.kind === 'park' && step.threads.map((t) => t.status), ['disputed']);
   assert.equal(openThreads(l).length, 1, 'one thread, with both sides on it, waiting for a person');
+});
+
+// ---------------------------------------------- findings.json, as a view of now
+
+test('findings.json says changes-requested exactly while a blocker or major is open, and lists only what is', () => {
+  const l = reviewed([finding('F-01', 'blocker'), finding('F-02', 'minor')]);
+  const before = reviewArtifact(l, 's') as { verdict: string; findings: Array<{ id: string }>; threads: Record<string, number> };
+  assert.equal(before.verdict, 'changes-requested');
+  assert.deepEqual(before.findings.map((f) => f.id), ['F-01', 'F-02']);
+
+  const fixed = landed(applyFix(l, {
+    threads: [{ id: 'F-01', action: 'fixed', reply: 'ok', commit: 'b2' }, { id: 'F-02', action: 'declined', reply: 'no', commit: '' }],
+  }, { lap: 0, headBefore: 'a1', headAfter: 'b2', handed: ['F-01', 'F-02'] }).ledger);
+  const after = reviewArtifact(fixed, 's') as typeof before;
+  // The verdict that refused #9174's merge had outlived the code it was about. This one cannot.
+  assert.equal(after.verdict, 'approve');
+  assert.deepEqual(after.findings, []);
+  assert.equal(after.threads.raised, 2);
+  assert.equal(after.threads.open, 0);
+});
+
+test('an open minor alone is not changes-requested, and no ledger is an approving empty view', () => {
+  const l = reviewed([finding('F-02', 'suggestion')]);
+  assert.equal((reviewArtifact(l, 's') as { verdict: string }).verdict, 'approve');
+  const none = reviewArtifact(null, 's') as { verdict: string; findings: unknown[] };
+  assert.equal(none.verdict, 'approve');
+  assert.deepEqual(none.findings, []);
+});
+
+// ------------------------------------------------------------- the lap budget
+
+const ph = (phase: string, status: string, startedAt: number, endedAt = startedAt + 5) => ({ phase, status, startedAt, endedAt });
+
+test('fix laps are counted since the code last changed outside the loop', () => {
+  // #9174's shape: a first review round, then verify sends the work back through implement.
+  const phases = [
+    ph('implement', 'ok', 100), ph('review', 'ok', 200), ph('review-fix', 'ok', 300), ph('review-fix', 'failed', 400),
+    ph('verify', 'failed', 500), ph('implement', 'ok', 600), ph('review', 'ok', 700),
+  ];
+  assert.equal(fixLapsUsed(phases.slice(0, 4)), 2);
+  // The old loop shared one budget across the run, so the re-review of the verify fix had none left.
+  assert.equal(fixLapsUsed(phases), 0);
+  assert.equal(fixLapsUsed([...phases, ph('review-fix', 'ok', 800)]), 1);
+});
+
+test('a fixer that died of infrastructure has not spent a lap', () => {
+  assert.equal(fixLapsUsed([ph('implement', 'ok', 100), ph('review-fix', 'infra', 300), ph('review-fix', 'ok', 400)]), 1);
+});
+
+test('an implement lap that failed does not start a fresh budget', () => {
+  assert.equal(fixLapsUsed([ph('implement', 'ok', 100), ph('review-fix', 'ok', 300), ph('implement', 'failed', 400)]), 1);
 });
