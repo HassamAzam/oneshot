@@ -25,10 +25,11 @@ import {
 import { dirname, join } from 'node:path';
 import { ensureClaudeDir } from './claudedir.js';
 import {
-  CONTEXT_REPO, WORK_REPO, WT_ROOT, envOr, expandPath, portPool, projectConfig, seedFrom,
+  CONTEXT_REPO, ROOT, WORK_REPO, WT_ROOT, envOr, expandPath, portPool, projectConfig, seedFrom,
 } from './config.js';
 import { db } from './db.js';
 import { retryRefLockRace } from './gitfetch.js';
+import { TEST_SETTINGS_FILE, TEST_SETTINGS_MODULE } from './testsettings.js';
 import { log } from './log.js';
 import { pidsOnPort, portsListening } from './procprobe.cjs';
 import {
@@ -260,6 +261,7 @@ export function seedWorktree(worktree: string): void {
     log.warn('no seed repo — the worktree cannot run the app without npm ci / venv setup', {
       fix: 'set ONESHOT_SEED_FROM to an already-installed clone',
     });
+    excluded.push(...seedTestSettings(worktree));
     addExcludes(worktree, excluded);
     return;
   }
@@ -301,8 +303,59 @@ export function seedWorktree(worktree: string): void {
     excluded.push(rel);
   }
 
+  // After the copies: it is written only where hrdb/local_settings.py now exists.
+  excluded.push(...seedTestSettings(worktree));
   addExcludes(worktree, excluded);
   pointAtRunDb(worktree, from);
+}
+
+// --------------------------------------------------------- Django test settings
+
+export { TEST_SETTINGS_FILE, TEST_SETTINGS_MODULE };
+const TEST_SETTINGS_TEMPLATE = join(ROOT, 'config', 'erp', 'test_settings.template.py');
+const TEST_SETTINGS_MARK = '# ONESHOT-GENERATED hrdb/test_settings_oneshot.py';
+
+/**
+ * Give a checkout a Django test-settings module that can reach THIS machine's database.
+ *
+ * The app repo's own `hrdb/test_settings.py` hardcodes a `postgres` superuser on
+ * localhost. A desk or server that provisions its own role has no such login, so
+ * `manage.py test --settings=hrdb.test_settings` dies on "password authentication
+ * failed for user postgres" before a single test runs. On #9174 that is what every
+ * implement lap reported instead of a test result, what each of six verify laps
+ * rediscovered and worked around with a scratch settings file of its own, and what
+ * self-remediation finally handed back as needing a database admin.
+ *
+ * So the worktree gets `hrdb/test_settings_oneshot.py`: the repo's test settings with
+ * the connection `hrdb/local_settings.py` already carries (see the template for why
+ * NAME travels too). Written only into a checkout that has both files — one that is
+ * not this app, or that was never given local settings, is left alone — and never
+ * over a file somebody else put at that path. Returns the paths to keep out of
+ * `git status`, which is the whole list or nothing.
+ */
+export function seedTestSettings(worktree: string): string[] {
+  try {
+    if (!existsSync(join(worktree, 'hrdb', 'test_settings.py'))
+      || !existsSync(join(worktree, 'hrdb', 'local_settings.py'))
+      || !existsSync(TEST_SETTINGS_TEMPLATE)) return [];
+    const dst = join(worktree, TEST_SETTINGS_FILE);
+    const want = readFileSync(TEST_SETTINGS_TEMPLATE, 'utf8');
+    if (existsSync(dst)) {
+      const have = readFileSync(dst, 'utf8');
+      if (!have.startsWith(TEST_SETTINGS_MARK)) {
+        log.warn(`${TEST_SETTINGS_FILE} in ${worktree} is not ours — left alone, so Django tests there use whatever it says`);
+        return [];
+      }
+      if (have === want) return [TEST_SETTINGS_FILE];
+    }
+    writeFileSync(dst, want);
+    return [TEST_SETTINGS_FILE];
+  } catch (err) {
+    log.warn('could not write the Django test settings — tests in this worktree fall back to hrdb.test_settings', {
+      worktree, error: (err as Error).message,
+    });
+    return [];
+  }
 }
 
 // ------------------------------------------------------------ per-run database

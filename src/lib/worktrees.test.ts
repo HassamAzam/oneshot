@@ -124,6 +124,31 @@ test('what we compose stays out of git status in a LINKED worktree', () => {
   }
 });
 
+test('the generated Django test settings are seeded with the worktree and stay out of git status', () => {
+  // One `git add -A` away from an MR otherwise, like every other seeded path.
+  const main = repoWithCommittedClaude();
+  const linked = join(main, '..', `wt-ts-${Date.now()}`);
+  try {
+    mkdirSync(join(main, 'hrdb'), { recursive: true });
+    writeFileSync(join(main, 'hrdb', 'test_settings.py'), 'DATABASES = {"default": {}}\n');
+    writeFileSync(join(main, '.gitignore'), 'hrdb/local_settings.py\n');
+    git(['add', '-A'], main);
+    git(['commit', '-qm', 'the app\'s own test settings'], main);
+    git(['worktree', 'add', '-q', '--detach', linked], main);
+    // The app's local settings are gitignored and arrive by seed copy; stand in for that.
+    writeFileSync(join(linked, 'hrdb', 'local_settings.py'), 'DATABASES = {"default": {"USER": "oneshot"}}\n');
+
+    seedWorktree(linked);
+
+    assert.ok(existsSync(join(linked, 'hrdb', 'test_settings_oneshot.py')));
+    assert.equal(git(['status', '--porcelain'], linked), '');
+  } finally {
+    try { git(['worktree', 'remove', '--force', linked], main); } catch { /* best effort */ }
+    rmSync(main, { recursive: true, force: true });
+    rmSync(linked, { recursive: true, force: true });
+  }
+});
+
 test('a checkout that does not commit .claude is left alone', () => {
   const dir = mkdtempSync(join(tmpdir(), 'oneshot-wt-'));
   try {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   SECTION_START, brokerFor, commands, dropRunDb, ensureRunDb, parseRunDbName, perRunDbMode, pgClient, pgTarget,
   readSeedDb, redisIndexForSlot, refreshBaseline, rewriteRunSettings, runDbName, runDbNameProblem, runFromWorktree,
-  sweepRunDbs, type PgTarget, type SpawnLike,
+  sweepRunDbs, testDbName, type PgTarget, type SpawnLike,
 } from './rundb.cjs';
 
 const SEED = `from .config import *
@@ -138,13 +138,17 @@ test('create refuses a missing or busy baseline, and any name the guard refuses 
   }
 });
 
-test('drop: one DROP ... WITH (FORCE) of exactly the run database', () => {
+test('drop: the run database and its Django test database, and nothing else', () => {
   const { spawn, calls } = fakeSpawn(() => '');
   dropRunDb(PG, 'oneshot_run_8790_1a2b3c', { spawn });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.cmd, 'psql');
-  assert.deepEqual(calls[0]?.args.slice(-1), ['DROP DATABASE IF EXISTS "oneshot_run_8790_1a2b3c" WITH (FORCE)']);
-  assert.ok(calls[0]?.args.includes('-w'));
+  // A killed `manage.py test` leaves test_<run database> behind (#9174 left one).
+  // It goes first: with the run database gone, no sweep would look for this run again.
+  assert.deepEqual(calls.map((c) => c.args[c.args.length - 1]), [
+    'DROP DATABASE IF EXISTS "test_oneshot_run_8790_1a2b3c" WITH (FORCE)',
+    'DROP DATABASE IF EXISTS "oneshot_run_8790_1a2b3c" WITH (FORCE)',
+  ]);
+  assert.ok(calls.every((c) => c.cmd === 'psql' && c.args.includes('-w')));
+  assert.equal(testDbName('oneshot_run_8790_1a2b3c'), 'test_oneshot_run_8790_1a2b3c');
 });
 
 test('baseline refresh: refuses while the seed is in use unless told to end those sessions', () => {
@@ -168,8 +172,10 @@ test('sweep: drops run databases whose run is done, aborted or unknown; keeps ru
   assert.deepEqual(r.dropped, ['oneshot_run_1_aaaaaa', 'oneshot_run_2_bbbbbb', 'oneshot_run_3_cccccc']);
   assert.deepEqual(r.kept.map((k) => k.status), ['running', 'blocked', 'parked']);
   const drops = calls.map((c) => c.args[c.args.length - 1]).filter((q) => /^DROP/.test(q ?? ''));
-  assert.equal(drops.length, 3);
-  assert.ok(drops.every((q) => /"oneshot_run_\d+_[a-f]+"/.test(q ?? '')));
+  // Each orphan goes with its Django test database: three runs, six drops.
+  assert.equal(drops.length, 6);
+  assert.ok(drops.every((q) => /"(test_)?oneshot_run_\d+_[a-f]+"/.test(q ?? '')));
+  assert.equal(drops.filter((q) => /"test_oneshot_run_/.test(q ?? '')).length, 3);
   const dry = fakeSpawn((sql) => (/left\(datname/.test(sql) ? dbs.join('\n') : ''));
   assert.equal(sweepRunDbs(PG, () => null, { spawn: dry.spawn }).dropped.length, 0, 'dry unless drop');
 });

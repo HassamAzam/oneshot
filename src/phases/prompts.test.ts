@@ -1,7 +1,9 @@
 import '../lib/test-project-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { labelledLayers, mrOpenNote, promptFor, systemPromptFor, type PromptCtx } from './prompts.js';
+import {
+  djangoTestsBlock, labelledLayers, mrOpenNote, promptFor, systemPromptFor, type PromptCtx,
+} from './prompts.js';
 import { gateSubjectDigest } from '../lib/artifacts.js';
 import {
   ROOT, localTestsConfig, localTestsPatchFile, localTestsWorktree, phaseByName, phases, runDir, type PhaseConfig,
@@ -1447,4 +1449,63 @@ test('the journal\'s old Loop gate state no longer reaches the prompt', () => {
   const journal = { localSpecsApproval: { feedback: ['disapproved:\n- stale Loop feedback'] } };
   const p = scopePrompt({ journal: journal as unknown as PromptCtx['journal'] });
   assert.doesNotMatch(p, /stale Loop feedback/);
+});
+
+// #9174: the app repo's hrdb.test_settings hardcodes a `postgres` superuser the server
+// does not have. Every implement and verify lap rediscovered that as a finding of its own.
+function seededWorktree(withSettings: boolean): string {
+  const wt = mkdtempSync(join(tmpdir(), 'oneshot-prompt-wt-'));
+  if (withSettings) {
+    mkdirSync(join(wt, 'hrdb'), { recursive: true });
+    writeFileSync(join(wt, 'hrdb', 'test_settings_oneshot.py'), '# ONESHOT-GENERATED hrdb/test_settings_oneshot.py\n');
+  }
+  return wt;
+}
+
+test('a worktree seeded with test settings tells the phase which module runs Django tests', () => {
+  const wt = seededWorktree(true);
+  try {
+    const block = djangoTestsBlock({ worktree: wt });
+    assert.match(block, /--settings=hrdb\.test_settings_oneshot/);
+    assert.match(block, /do not write a settings file\s+of your own/);
+    // An executing phase substitutes, and still judges the case as it was written.
+    assert.match(block, /judge the result against the case as written/);
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test('the test-case author runs with the seeded module but writes the repo\'s own into a case', () => {
+  const wt = seededWorktree(true);
+  try {
+    const block = djangoTestsBlock({ worktree: wt }, true);
+    assert.match(block, /--settings=hrdb\.test_settings_oneshot/);
+    assert.match(block, /name the repo's own `--settings=hrdb\.test_settings`/);
+    assert.doesNotMatch(block, /judge the result against the case as written/);
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test('a checkout the conductor seeded nothing into is told nothing', () => {
+  const wt = seededWorktree(false);
+  try {
+    assert.equal(djangoTestsBlock({ worktree: wt }), '');
+    assert.equal(djangoTestsBlock({}), '');
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test('implement, verify and testcases all carry the note in a seeded worktree, and none without one', () => {
+  const wt = seededWorktree(true);
+  try {
+    for (const phase of ['implement', 'verify', 'testcases']) {
+      const seeded = promptFor(cfg(phase), { ...ctx(ticket()), worktree: wt });
+      assert.match(seeded, /## Django tests on this machine/, `${phase} names the seeded settings`);
+      assert.doesNotMatch(promptFor(cfg(phase), ctx(ticket())), /## Django tests on this machine/, `${phase} without a worktree`);
+    }
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+  }
 });

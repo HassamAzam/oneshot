@@ -66,6 +66,7 @@ export const commands: {
 export function pgClient(pg: PgTarget, opts?: ClientOpts): PgClient;
 export function ensureRunDb(pg: PgTarget, name: string, opts?: ClientOpts): { name: string; created: boolean };
 export function dropRunDb(pg: PgTarget, name: string, opts?: ClientOpts): { name: string; dropped: boolean };
+export function testDbName(name: string): string;
 export function refreshBaseline(pg: PgTarget, opts?: ClientOpts & { terminate?: boolean }): {
   baseline: string; from: string; terminated: number;
 };

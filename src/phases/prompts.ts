@@ -25,10 +25,12 @@ import {
   type PhaseConfig,
 } from '../lib/config.js';
 import type { ScopeInputs } from '../conductor/localtests.js';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { approvalCovers, readArtifact, type Remediation, type RunJournal } from '../lib/artifacts.js';
 import { planFilePaths } from '../lib/planfiles.js';
 import { DESIGN_DIR, NEW_TOKENS_FILE, TOKENS_FILE } from '../lib/designtokens.js';
+import { TEST_SETTINGS_FILE, TEST_SETTINGS_MODULE } from '../lib/testsettings.js';
 import { implementFeedbackBlock, reviewFeedbackBlock, triagePrompt } from '../mrfeedback/prompts.js';
 import type { AddressedFeedback, MrFeedbackSignal } from '../mrfeedback/types.js';
 import { PRIOR_ART_KINDS } from '../conductor/schemas.js';
@@ -411,6 +413,43 @@ function caseList(list: TestCase[], opts: { steps: boolean }): string {
 }
 
 /** Acceptance criteria: the only oracle an executing phase is allowed to use. */
+/**
+ * How to run Django tests in this worktree — only where the conductor seeded
+ * settings that can (src/lib/worktrees.ts, seedTestSettings).
+ *
+ * The app repo's `hrdb.test_settings` hardcodes a `postgres` superuser. On a
+ * machine that provisions its own role every run of it dies on the login, and a
+ * session that is not told so treats that as a finding of its own: on #9174 five
+ * implement laps and six verify laps each rediscovered it, and each verify lap
+ * wrote itself a scratch settings file to get a result. Saying the answer once
+ * here is cheaper than any of those turns.
+ *
+ * `authoring` is the test-case phase: it may RUN tests to see where the change
+ * stands, but the commands it writes into a case are read by people and reused
+ * outside this machine, so those keep naming the repo's own module.
+ */
+export function djangoTestsBlock(ctx: Pick<PromptCtx, 'worktree'>, authoring = false): string {
+  if (!ctx.worktree || !existsSync(join(ctx.worktree, TEST_SETTINGS_FILE))) return '';
+  const written = authoring
+    ? `When you WRITE a test command into a case, name the repo's own \`--settings=hrdb.test_settings\`:
+the case is read by people and holds outside this machine, and whichever phase executes it makes
+the substitution above.`
+    : `Where a test case, the plan or a skill names \`--settings=hrdb.test_settings\`, run it with
+\`--settings=${TEST_SETTINGS_MODULE}\` instead and judge the result against the case as written.`;
+  return `
+## Django tests on this machine
+Run them with \`--settings=${TEST_SETTINGS_MODULE}\`, for example
+\`python manage.py test <labels> --settings=${TEST_SETTINGS_MODULE} --noinput\`.
+It is the repo's \`hrdb.test_settings\` on the database this checkout already runs on, and it gives
+this run a test database of its own. \`hrdb.test_settings\` itself hardcodes a \`postgres\` superuser
+this machine does not have, so run directly it stops at "password authentication failed" before a
+test executes. That is the machine, not the change, and it is already solved: do not investigate
+it, and do not write a settings file of your own.
+${written}
+\`${TEST_SETTINGS_FILE}\` is generated and git-ignored — never edit, commit or copy it.
+`;
+}
+
 /**
  * Managed test credentials for the local app, from ONESHOT_TEST_LOGIN
  * (email:password in .env). Managed OUTSIDE the session on purpose: the
@@ -1434,7 +1473,7 @@ ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 
 ## What implement (phase 3) actually built
 ${JSON.stringify(ctx.prior.implement ?? {}, null, 2)}
-${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'QA feedback on an earlier version of this list')}${betaBlock(ctx, 'testcases')}
+${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'QA feedback on an earlier version of this list')}${betaBlock(ctx, 'testcases')}${djangoTestsBlock(ctx, true)}
 Write the test cases for this ticket.
 
 If there is QA feedback above, you are REVISING a list that already exists, not writing a new
@@ -1744,7 +1783,7 @@ ${cases.map((c) => `  - ${c.id} [${c.blast}] ${c.scenario}\n      expects: ${c.e
     return `${ticketBlock(ctx.ticket)}${priorArt(ctx)}
 ${lapBlock}
 ${implementFeedbackBlock(ctx.journal.mrFeedback)}
-${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'Test-case gate reviewer feedback')}${approvedDesignBlock(ctx)}${betaBlock(ctx, 'implement')}
+${reviewGateFeedbackBlock(ctx.journal.testcasesApproval?.feedback, 'Test-case gate reviewer feedback')}${approvedDesignBlock(ctx)}${betaBlock(ctx, 'implement')}${djangoTestsBlock(ctx)}
 ## Plan (phase 2) — this is your specification
 ${JSON.stringify(ctx.prior.plan ?? {}, null, 2)}
 
@@ -2037,7 +2076,7 @@ re-run it, and keep that label only if the proof still holds.
 ${rescope.length ? scopeBlock : lapBlock}
 ## Acceptance criteria (phase 1)
 ${criteria(ctx)}
-${betaBlock(ctx, 'verify')}
+${betaBlock(ctx, 'verify')}${djangoTestsBlock(ctx)}
 ## Your app instance
 Worktree: ${ctx.worktree ?? '(none leased)'}
 Port:     ${ctx.port ?? '(none leased)'}   (also in $ONESHOT_PORT)

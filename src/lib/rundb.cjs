@@ -316,10 +316,27 @@ function ensureRunDb(pg, name, opts = {}) {
   return { name, created: true };
 }
 
+/**
+ * The Django test database that belongs to a run database.
+ *
+ * Django's test runner creates `test_<NAME>` beside the database a settings module
+ * names, and a worktree's generated hrdb/test_settings_oneshot.py names the run's own
+ * database (config/erp/test_settings.template.py) — so each run's tests build and
+ * destroy `test_oneshot_run_<iid>_<runid>` and never another run's. A test command
+ * that is killed leaves it behind; dropRunDb takes it with the run database.
+ */
+function testDbName(name) {
+  return `test_${name}`;
+}
+
 function dropRunDb(pg, name, opts = {}) {
   const problem = runDbNameProblem(name, pg);
   if (problem) throw new RunDbError('E_DB_NAME', `refusing to drop ${name}: ${problem}`);
   const c = opts.client || pgClient(pg, opts);
+  // The test database first: once the run database is gone no sweep looks for
+  // this run again, so a failure here must leave the pair to be retried together.
+  // Its name is built from one the guard has just accepted, never read from Postgres.
+  c.dropDb(testDbName(name));
   c.dropDb(name);
   return { name, dropped: true };
 }
@@ -392,5 +409,5 @@ module.exports = {
   shortRunId, runDbName, parseRunDbName, runFromWorktree, runDbNameProblem,
   DATABASES_RE, findDatabasesBlock, blockValue, checkValue, buildDatabasesBlock, readSeedDb,
   redisIndexForSlot, brokerFor, rewriteRunSettings,
-  pgTarget, connArgs, commands, pgClient, ensureRunDb, dropRunDb, refreshBaseline, sweepRunDbs, perRunDbMode,
+  pgTarget, connArgs, commands, pgClient, ensureRunDb, dropRunDb, testDbName, refreshBaseline, sweepRunDbs, perRunDbMode,
 };
