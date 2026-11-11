@@ -28,6 +28,7 @@
     "test": "tsx --test 'src/**/*.test.ts'",
     "deps:verify": "tsx scripts/verify-deps.ts",
     "langfuse": "tsx scripts/langfuse-export.ts",
+    "diagnose": "tsx scripts/diagnose.ts",
     "dashboard": "tsx scripts/serve.ts",
     "board": "node scripts/board/index.mjs",
     "board:once": "node scripts/board/index.mjs --once",

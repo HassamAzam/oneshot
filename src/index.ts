@@ -58,6 +58,8 @@ import { killLiveLocalTests } from './conductor/localtests.js';
 import {
   SCOPE_PHASE, localTestsGc, localTestsTick, outcomeLine as localTestsOutcomeLine, runLocalTestsOnce,
 } from './localtests/runner.js';
+import { diagnosisTick, outcomeLine as diagnosisOutcomeLine } from './diagnosis/runner.js';
+import { diagnosisConfig } from './diagnosis/stop.js';
 import {
   deregister, heartbeat, liveConductorIds, liveConductors, peersEverSeen, register,
 } from './lib/fleet.js';
@@ -138,6 +140,14 @@ let localTestsOn = false;
  * not in `running` — it holds no dispatch slot, no port and no claim.
  */
 let localTestsInFlight: Promise<void> | null = null;
+
+/**
+ * The failure diagnosis pass in flight, if any (src/diagnosis). Single-flight
+ * like the local tests and for the same reason: it is one model session at a
+ * time, it can run for half an hour, and it holds no dispatch slot, no port and
+ * no claim, so it is not in `running` either.
+ */
+let diagnosisInFlight: Promise<void> | null = null;
 
 /**
  * One controller for the whole process. On the first signal it is aborted, the
@@ -336,6 +346,11 @@ async function banner(): Promise<void> {
   } else if (localTestsConfig().enabled && !watchOnly && ticketArg === null) {
     const l = localTestsConfig().labels;
     log.info(`localtests on — "${l.trigger}" + a merged MR → "${l.running}" → "${l.done}"`);
+  }
+  if (diagnosisConfig().enabled && !watchOnly && ticketArg === null && localTestsArg === null) {
+    const d = diagnosisConfig();
+    log.info(`diagnosis  on — a blocked or troubled-parked run is explained ${d.post ? 'on its ticket and the dashboard' : 'on the dashboard only'}`
+      + `${d.fix ? ', and a harness defect gets a fix pull request' : ''}`);
   }
   const atMerge = mergeTriggerLabel();
   // Said on every desk, the mode on here or not: a Loop desk puts the label on
@@ -550,6 +565,25 @@ function kickLocalTests(): void {
 }
 
 /**
+ * Explain the runs that have stopped and want a person. Kicked, never awaited:
+ * the pass reads stopped runs and writes beside them, so nothing the Loop does
+ * this tick depends on it. Only a session it produced is worth a log line; the
+ * runs it looked at and left alone are the ordinary case, once a minute.
+ */
+function kickDiagnosis(): void {
+  if (diagnosisInFlight || stopping) return;
+  diagnosisInFlight = diagnosisTick({ signal: aborter.signal })
+    .then((outcomes) => {
+      for (const o of outcomes) if (o.act !== 'skipped') say.phase(`diagnose   ${diagnosisOutcomeLine(o)}`);
+    })
+    .catch((err) => {
+      say.error('diagnosis tick threw', { error: (err as Error).message });
+      logEvent('diagnosis_threw', { error: (err as Error).message });
+    })
+    .finally(() => { diagnosisInFlight = null; });
+}
+
+/**
  * How often a conductor beats on its own while it awaits something outside
  * tick(), which is otherwise the only place heartbeat() and renewPromotion()
  * run: an awaited --ticket run, and the shutdown drain. It must stay well
@@ -639,6 +673,11 @@ async function tick(): Promise<void> {
   // nothing, and this mode's first act on a ticket can be a comment.
   if (localTestsOn) kickLocalTests();
 
+  // Before the scan for the same reason, and only for a watching conductor:
+  // `--ticket` exists to run one ticket and exit (`npm run diagnose -- <iid>`
+  // is the by-hand equivalent), and --watch-only writes nothing.
+  if (!watchOnly && diagnosisConfig().enabled) kickDiagnosis();
+
   const result = await scan();
   await noteNetworkHold(result.held);
 
@@ -704,6 +743,19 @@ async function drain(): Promise<void> {
   if (localTestsInFlight) {
     say.warn('waiting on the local tests pass');
     await localTestsInFlight;
+  }
+  // The same signal cancelled a diagnosis session in flight. A cancelled one is
+  // not counted against its stop, and the next start finds the stop again.
+  if (diagnosisInFlight) {
+    say.warn('waiting on the diagnosis pass');
+    // With fixes on, the pass may be in the middle of a command that takes a
+    // while to die (a clone, a suite). The heartbeat keeps beating through it
+    // for the reason given below: a shutdown longer than the lease TTL must not
+    // read as a death.
+    const beat = setInterval(() => { heartbeat(); renewPromotion(me); }, OUT_OF_TICK_BEAT_MS);
+    beat.unref();
+    await diagnosisInFlight;
+    clearInterval(beat);
   }
   if (!running.size) return;
   const names = (): string => [...running.keys()].map((i) => `#${i}`).join(' ');

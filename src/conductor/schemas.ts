@@ -15,6 +15,8 @@ import { ADDRESSED_FEEDBACK_PROP, MR_FEEDBACK_PROPS } from '../mrfeedback/schema
 import { FILE_ACTIONS, FILE_AREAS } from '../lib/planfiles.js';
 import { FLOW_CHANGES, FLOW_KINDS } from '../lib/planflow.js';
 import { BLOCKERS } from './reproduction.js';
+import { DIAGNOSE_SCHEMA } from '../diagnosis/schema.js';
+import { FIX_AUTHOR_SCHEMA, FIX_REVIEW_SCHEMA, FIX_VERIFY_SCHEMA } from '../diagnosis/fix/schema.js';
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -924,6 +926,10 @@ export const SCHEMAS: Record<string, JsonSchema> = {
   mr: MR_SCHEMA,
   remediate: REMEDIATE_SCHEMA,
   'mr-feedback': MR_FEEDBACK_SCHEMA,
+  diagnose: DIAGNOSE_SCHEMA,
+  'fix-author': FIX_AUTHOR_SCHEMA,
+  'fix-review': FIX_REVIEW_SCHEMA,
+  'fix-verify': FIX_VERIFY_SCHEMA,
 };
 
 export function schemaFor(phase: string): JsonSchema | undefined {

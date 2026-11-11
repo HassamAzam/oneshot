@@ -536,6 +536,31 @@ left behind (`node scripts/localtests.cjs gc` clears them), and a seed `node_mod
 fallen behind the base branch's `package.json`. Setting a desk up, the reply options and the dry
 run: [docs/LOCAL-TESTS.md](docs/LOCAL-TESTS.md).
 
+## Failure diagnosis
+
+A run that stops and wants a person used to leave one sentence on the ticket: whatever the last
+phase said. On the first ticket run on the team's server that sentence was wrong about nearly
+everything. Fifteen sessions were recorded as a crashed process when most had finished, and
+almost every real cause was the harness or the machine rather than the ticket.
+
+So on a desk that sets `ONESHOT_DIAGNOSIS=1`, a watching conductor explains each stop itself,
+once. It reads the run directory in code into a short digest (the journal against the
+transcripts' own result frames, the failures that recur across sessions, the tools each
+session really had), gives that to one read-only session, and then re-opens every file and
+line the session cites: a finding whose evidence is not there is shown as a lead, not a
+finding. What comes out says where the run went wrong and what to do, with each cause classed
+as the harness's, the machine's, the ticket's own change or a person's decision. It is posted
+on the ticket and shown at the top of the run's page on the dashboard.
+
+For a confirmed harness defect it can also open the fix as a pull request on this repository:
+one session writes it with a test, the conductor itself checks that the test fails on the base
+branch without the fix, two sessions review it independently, and a fourth tries to refute
+their findings before any of them costs the author a round. Nothing is merged. That step runs
+only where there is a clone of the GitHub repository and a signed-in `gh`.
+
+`npm run diagnose -- <iid>` does it by hand. How a stop is recognised, what it needs and what
+it costs: [docs/DIAGNOSIS.md](docs/DIAGNOSIS.md).
+
 ## MR review feedback
 
 A reviewer's comment on a run's open merge request is answered, not just waited on. When the
@@ -918,10 +943,11 @@ problem, and letting it trip the breaker would make a wrong `GITLAB_TOKEN` look 
 | `src/phases/` | one module per phase: prompt, schema, tool policy |
 | `src/lib/` | config + session env, SQLite, GitLab, worktrees, promotion mutex, quota, reachability, memory |
 | `src/localtests/` | the local automation tests mode — readiness, QA's replies, the impacted-module report and the automation report it posts, the post-merge run |
+| `src/diagnosis/` | the failure diagnosis mode — the evidence digest, which stops are diagnosed, the citation check, the ticket note, and `fix/`, the pipeline that opens a fix pull request |
 | `config/` | project + labels, per-phase model/tools/skills/groups, budgets, reviewers, Slack |
 | `hooks/` | guardrails — passed to the SDK in-process, never installed globally |
 | `scripts/` | hook verify, `doctor`, preflight, dependency probe, unblock, report, the local-tests runner (`localtests.cjs`) |
-| `docs/` | [PLAN.md](docs/PLAN.md) · [HOOKS.md](docs/HOOKS.md) · [LOCAL-TESTS.md](docs/LOCAL-TESTS.md) |
+| `docs/` | [PLAN.md](docs/PLAN.md) · [HOOKS.md](docs/HOOKS.md) · [LOCAL-TESTS.md](docs/LOCAL-TESTS.md) · [DIAGNOSIS.md](docs/DIAGNOSIS.md) |
 | `state/` | gitignored — runs, artifacts, memory, SQLite, and `localtests/<iid>` for the local automation tests mode |
 
 ## Status

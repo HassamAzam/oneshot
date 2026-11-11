@@ -700,6 +700,78 @@ function denyTestRunner(what) {
   );
 }
 
+// ------------------------------------------------------------- fix sessions
+
+/**
+ * The failure diagnosis's fix sessions (src/diagnosis/fix) write a change to
+ * THIS repository, in a private checkout, and the pipeline publishes it after
+ * the review: to a public repository, as the operator. So nothing a fix
+ * session does with git may leave the machine, and the rules above are not
+ * enough for that. They judge a push by the branch it names, and a push can be
+ * pointed anywhere without naming anything: `git -c remote.origin.pushurl=…
+ * push origin <the leased branch>` reads as an allowed push, and so do
+ * `git config remote.origin.url …` followed by a bare push, `--repo=…`,
+ * `GIT_DIR=…` and `--git-dir=…` into the operator's own clone.
+ *
+ * For these phases the question is therefore turned round. git is held to a
+ * short list: what reading a change needs, and for the author what making one
+ * needs. Everything else is refused, including every way of reaching git that
+ * is not the word `git` at the front of the command with its subcommand in
+ * the open. A list of what is allowed fails closed on the route nobody
+ * thought of; a list of what is forbidden is how the routes above got through.
+ *
+ * It is still a guard on command text, not a sandbox: a session that writes a
+ * program to run git for it is not seen here. The pipeline pushes one commit
+ * by its id and a person merges; this closes the routes a session finds by
+ * trying.
+ */
+const FIX_PHASES = new Set(['fix-author', 'fix-review', 'fix-verify']);
+const FIX_GIT_READ = new Set([
+  'status', 'diff', 'log', 'show', 'rev-parse', 'rev-list', 'ls-files', 'ls-tree', 'grep', 'blame', 'cat-file',
+  'merge-base', 'describe', 'shortlog', 'name-rev', 'show-ref', 'branch', 'version', 'help',
+]);
+const FIX_GIT_WRITE = new Set(['add', 'commit', 'restore', 'checkout', 'switch', 'reset', 'rm', 'mv', 'apply', 'clean']);
+const FIX_GIT_GLOBAL_OK = new Set(['--no-pager', '-P', '--paginate', '-p', '--no-optional-locks', '--literal-pathspecs']);
+
+function checkFixPhase(cmd) {
+  const phase = C.phase();
+  if (!FIX_PHASES.has(phase)) return;
+  const no = (what) => {
+    C.event('denied_fix_git', { what, cmd: String(cmd).slice(0, 200) });
+    C.deny(
+      `Denied: ${what}, from the '${phase}' phase. A fix session reads the change with git ` +
+      '(status, diff, log, show, grep, blame) and the author commits it (add, commit, restore, ' +
+      'checkout, reset); nothing else, and nothing that could send it anywhere. The pipeline ' +
+      'publishes the commit it has checked. To search files for a word, use the Grep tool.',
+    );
+  };
+  const text = String(cmd || '');
+  if (/\bGIT_[A-Z0-9_]*\s*=/.test(text)) no('setting a GIT_* variable');
+  if (/--git-dir\b|--work-tree\b|--exec-path\b|\bpushurl\b|\binsteadof\b|\b(?:send|receive|upload)-pack\b|\bhttp-push\b/i.test(text)) {
+    no('pointing git at another repository or transport');
+  }
+  for (const seg of segments(text)) {
+    // The word by itself, wherever it stands: `.gitignore`, `.git/config` and `github` are not git calls.
+    if (!/(?:^|[\s(`'"$=/])git(?=$|[\s)`'";])/.test(seg)) continue;
+    const { t } = command(seg);
+    if (path.basename(t[0] || '') !== 'git') no('git run through another command');
+    let i = 1;
+    for (; i < t.length && t[i].startsWith('-'); i += 1) {
+      if (t[i] === '-C') { i += 1; continue; }
+      if (!FIX_GIT_GLOBAL_OK.has(t[i])) no(`\`git ${t[i]}\``);
+    }
+    const sub = t[i] || '';
+    const rest = t.slice(i + 1);
+    if (FIX_GIT_READ.has(sub)) {
+      const changes = /^(?:-[dDmMcCfu]|--(?:delete|move|copy|force|set-upstream|unset-upstream|track|edit-description))/;
+      if (sub === 'branch' && rest.some((a) => changes.test(a))) no('`git branch` that changes a branch');
+      continue;
+    }
+    if (phase === 'fix-author' && FIX_GIT_WRITE.has(sub)) continue;
+    no(`\`git ${sub || '(no subcommand)'}\``);
+  }
+}
+
 function checkCwd(cmd) {
   const wt = leasedWorktree();
   if (!wt) return;
@@ -745,6 +817,7 @@ try {
     // special rather than only that it is outside the worktree.
     const governed = checkLocalTests(cmd, data);
     checkCwd(cmd);
+    checkFixPhase(cmd);
 
     const segs = segments(cmd);
     for (let idx = 0; idx < segs.length; idx += 1) {

@@ -316,6 +316,47 @@ export ONESHOT_PHASE="$SAVED_PHASE"; export ONESHOT_WRITE_SCOPES="$SAVED_SCOPES"
 # Normal phases in their own checkouts are none of the automation rule's business.
 expect_allow "implement: branch, tag, stash and apply in its own worktree" \
                                        git-guard.cjs "$(bash_payload 'git branch tmp-x && git tag v0-local && git stash && git stash pop && git apply /tmp/x.patch')"
+# The failure diagnosis's fix sessions change THIS repository and the pipeline publishes
+# the result on a public one. For them git is an allowlist: read the change, and (the
+# author only) commit it. Every route by which a push can be pointed somewhere without
+# naming it was open under the rules above, which judge a push by its branch.
+FIXB="fix/diagnosed-0-abc123-d-1"
+fix_as() { # fix_as <phase> <allow|deny> <label> <command>
+    local scopes=""; [ "$1" = "fix-author" ] && scopes="$ONESHOT_WORKTREE"
+    ONESHOT_PHASE="$1" ONESHOT_BRANCH="$FIXB" ONESHOT_WRITE_SCOPES="$scopes" "expect_$2" "$1: $3" git-guard.cjs "$(bash_payload "$4")"
+}
+for P in fix-author fix-review fix-verify; do
+    fix_as "$P" allow "status, diff and log"            "git status --porcelain && git diff origin/main...HEAD && git log --oneline -5"
+    fix_as "$P" allow "show, grep and blame"            "git show HEAD:src/index.ts | head -20; git grep -n kickDiagnosis; git blame -L 1,5 src/index.ts"
+    fix_as "$P" allow "list branches"                   "git branch --show-current && git branch -a"
+    fix_as "$P" allow "read .git/config and .gitignore" "cat .git/config .gitignore"
+    fix_as "$P" allow "run the suite"                   "node node_modules/tsx/dist/cli.mjs --test src/diagnosis/stop.test.ts"
+    fix_as "$P" deny  "push the leased branch"          "git push origin $FIXB"
+    fix_as "$P" deny  "a bare push"                     "git push"
+    fix_as "$P" deny  "push with a pushurl on the command line" "git -c remote.origin.pushurl=https://github.com/o/r.git push origin $FIXB"
+    fix_as "$P" deny  "push with --repo"                "git push --repo=https://github.com/o/r.git"
+    fix_as "$P" deny  "repoint origin through config"   "git config remote.origin.url https://github.com/o/r.git"
+    fix_as "$P" deny  "add a remote"                    "git remote add $FIXB https://github.com/o/r.git"
+    fix_as "$P" deny  "fetch"                           "git fetch origin"
+    fix_as "$P" deny  "GIT_DIR in front"                "GIT_DIR=/tmp/other/.git git push origin $FIXB"
+    fix_as "$P" deny  "GIT_CONFIG_* in front"           "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.pushurl GIT_CONFIG_VALUE_0=https://x git status"
+    fix_as "$P" deny  "--git-dir"                       "git --git-dir=/tmp/other/.git log"
+    fix_as "$P" deny  "git behind env"                  "env git push origin $FIXB"
+    fix_as "$P" deny  "git behind a subshell"           "\$(which git) push origin $FIXB"
+    fix_as "$P" deny  "git behind node -e"              "node -e \"require('child_process').execSync('git push')\""
+    fix_as "$P" deny  "send-pack"                       "git send-pack https://github.com/o/r.git HEAD"
+    fix_as "$P" deny  "stash"                           "git stash"
+    fix_as "$P" deny  "merge"                           "git merge origin/some-branch"
+    fix_as "$P" deny  "move a branch"                   "git branch -f $FIXB HEAD~1"
+done
+fix_as fix-author allow "add and commit"                "git add -A && git commit -m 'fix(x): y'"
+fix_as fix-author allow "restore and checkout a path"   "git restore src/index.ts && git checkout -- src/index.ts"
+fix_as fix-review deny  "commit"                        "git commit -m x"
+fix_as fix-verify deny  "reset"                         "git reset --hard HEAD~1"
+# And nobody else is held to the list.
+ONESHOT_PHASE="mr" ONESHOT_WRITE_SCOPES="$ROOT/state/runs/0" expect_allow "mr still fetches and pushes its leased branch" \
+                                       git-guard.cjs "$(bash_payload "git fetch origin && git push origin $ONESHOT_BRANCH")"
+
 ONESHOT_PHASE="verify" expect_allow "verify: diff, log and show in its own worktree" \
                                        git-guard.cjs "$(bash_payload 'git diff origin/dev...HEAD && git log -p -3 && git show HEAD --stat')"
 ONESHOT_PHASE="mr" ONESHOT_WRITE_SCOPES="$ROOT/state/runs/0" expect_allow "mr: fetch, log and push of the leased branch" \
@@ -1238,6 +1279,14 @@ expect_deny  "Write verify.json (the merge gate reads it)" \
 expect_deny  "Write run.json (the journal, holds human approvals)" \
                                        artifact-guard.cjs "$(write_payload "$RUN/run.json")"
 expect_deny  "Edit findings.json"      artifact-guard.cjs "$(edit_json_payload "$RUN/findings.json")"
+# The failure diagnosis's record drives the ticket note and the fix pipeline. It is
+# the conductor's: a session that could write it could word its own finding.
+expect_deny  "Write the diagnosis record" \
+                                       artifact-guard.cjs "$(write_payload "$RUN/diagnosis.json")"
+expect_deny  "redirect into the diagnosis record" \
+                                       artifact-guard.cjs "$(bash_payload "echo '{}' > $RUN/diagnosis.json")"
+expect_allow "cat the diagnosis record (reads are never refused)" \
+                                       artifact-guard.cjs "$(bash_payload "cat $RUN/diagnosis.json")"
 expect_deny  "Write merge.json (name defaulted from the phase, not declared)" \
                                        artifact-guard.cjs "$(write_payload "$RUN/merge.json")"
 expect_deny  "Write ANOTHER run's artifact" \

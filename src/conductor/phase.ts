@@ -56,6 +56,25 @@ export interface PhaseInput {
    * GitLab write a prompt in the ticket could talk it into.
    */
   gitlabMcp?: boolean;
+  /**
+   * false = the session's own words are never read as a usage-limit notice;
+   * only the CLI's tagged frame and its error text are. Default true: every
+   * Loop phase keeps the text match. The failure-diagnosis sessions pass false
+   * because writing about failed runs is their job, a run that stopped on the
+   * limit is one of them, and a sentence quoting "resets 4:30pm" would
+   * otherwise park the whole conductor.
+   */
+  limitFromProse?: boolean;
+}
+
+/**
+ * Whether an assistant frame is the CLI saying the account is out of quota.
+ *
+ * The tag is the CLI's own and always counts. The text is matched as well,
+ * unless the caller has said this session's prose may talk about limits.
+ */
+export function isLimitNotice(errTag: string, text: string, proseCounts: boolean): boolean {
+  return errTag === 'rate_limit' || (proseCounts && looksLikeUsageLimit(text));
 }
 
 /**
@@ -519,7 +538,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
         const errTag = typeof rec.error === 'string' ? rec.error : '';
         const content = (msg.message as { content?: Array<{ text?: string }> } | undefined)?.content ?? [];
         const texts = content.map((c) => c.text ?? '').join(' ');
-        if (errTag === 'rate_limit' || looksLikeUsageLimit(texts)) {
+        if (isLimitNotice(errTag, texts, input.limitFromProse !== false)) {
           limitSignals.push(errTag, texts);
           out.error = `rate_limit: ${texts.slice(0, 200) || errTag}`;
           ac.abort();
@@ -589,7 +608,7 @@ export async function runPhase(input: PhaseInput): Promise<PhaseOutput> {
             out.ok = true;
           } else {
             out.error = NO_STRUCTURED_OUTPUT;
-            limitSignals.push(msg.result ?? '');
+            if (input.limitFromProse !== false) limitSignals.push(msg.result ?? '');
           }
         } else {
           out.error = `${msg.subtype}: ${(msg.errors ?? []).join('; ').slice(0, 300)}`;
