@@ -4,7 +4,7 @@ import { mkdirSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
   MAX_UPLOAD_BYTES, baseShotsFor, failingOnDevText, localTestsPlanNote, localTestsReportNote, localTestsScopeReady,
-  localTestsStartNote, mimeFor,
+  localTestsStartNote, mimeFor, researchNote,
 } from './publish.js';
 import { artifactDir, localTestsPatchFile } from './config.js';
 import { writeArtifact, type RunJournal } from './artifacts.js';
@@ -351,4 +351,45 @@ test('failing on dev reads the same three ways in the report and the gate', () =
   assert.equal(failingOnDevText(false), 'no — likely caused by this ticket');
   assert.equal(failingOnDevText(null), 'unknown');
   assert.equal(failingOnDevText(undefined), 'unknown');
+});
+
+const research = {
+  summary: 'Every page shares one static <title> tag.',
+  understanding: 'Screen-reader users cannot tell tabs apart.',
+  acceptanceCriteria: ['Titles are distinct per page'],
+  codePath: [{ file: 'templates/index.html', line: 34, role: 'the static `<title>` | one for all pages' }],
+  uiPath: { route: '/leaves/dashboard/', entryPoint: 'Log in as qa@example.com' },
+  unknowns: ['Which title format'],
+  reproduction: { verdict: 'not-applicable' },
+};
+
+test('the research note survives GitLab\'s sanitiser: tag-shaped prose is escaped, table pipes hold', () => {
+  const md = researchNote(9002, 'Page titles', 'https://gitlab.example.com/g/p/-/issues/9002', research);
+  assert.match(md, /^# Research — 9002 Page titles/);
+  assert.match(md, /one static &lt;title&gt; tag/);
+  assert.match(md, /\| templates\/index\.html \| 34 \| .* \\\| one for all pages \|/);
+  assert.match(md, /- Titles are distinct per page/);
+  assert.match(md, /## Unknowns\n- Which title format/);
+  assert.doesNotMatch(md, /## Reproduction/);
+});
+
+test('the research note folds the reference-only code path and UI path, and keeps the summary open', () => {
+  const md = researchNote(1, 'T', 'u', research);
+  assert.match(md, /<details><summary>Code path \(1 step\(s\)\)<\/summary>\n\n\| File/);
+  assert.match(md, /<details><summary>UI path<\/summary>/);
+  assert.ok(md.indexOf('## Summary') < md.indexOf('<details>'));
+});
+
+test('the research note is redacted like the run report: the pinned test login and token shapes never post', () => {
+  const prev = process.env.ONESHOT_TEST_LOGIN;
+  process.env.ONESHOT_TEST_LOGIN = 'qa@example.com:hunter2-pass';
+  try {
+    const md = researchNote(1, 'T', 'u', {
+      ...research, unknowns: ['logged in with hunter2-pass', 'GITLAB_TOKEN=glpat-abcdefghijklmnop'],
+    });
+    assert.doesNotMatch(md, /hunter2-pass|glpat-abcdefghijklmnop/);
+    assert.match(md, /\[redacted: credential\]/);
+  } finally {
+    if (prev === undefined) delete process.env.ONESHOT_TEST_LOGIN; else process.env.ONESHOT_TEST_LOGIN = prev;
+  }
 });

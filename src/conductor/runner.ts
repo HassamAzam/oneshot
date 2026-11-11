@@ -100,6 +100,7 @@ import {
 } from '../lib/designeval.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
+import { syncDrive } from '../lib/drivesync.js';
 import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import {
@@ -3721,6 +3722,10 @@ export async function runTicket(
     // written after that would land somewhere that no longer exists.
     const reportPath = writeRunReport(journal.iid);
     if (reportPath) log.ok(`report ${reportPath}`);
+
+    // The Drive folder's README carries the run's final status and stop reason,
+    // which no phase pass sees. Before teardown for the same reason as the report.
+    await syncDrive(journal.iid);
 
     // The run's own trace, written by the conductor rather than by the
     // sessions. Last, and never awaited for anything that matters: a Langfuse

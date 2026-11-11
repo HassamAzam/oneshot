@@ -17,6 +17,8 @@
     "unblock": "tsx scripts/unblock.ts",
     "mr-feedback:probe": "tsx scripts/mr-feedback-probe.ts",
     "report": "tsx scripts/report.ts",
+    "drive:sync": "tsx scripts/drive-sync.ts",
+    "drive:login": "tsx scripts/drive-login.ts",
     "replay": "tsx scripts/replay-plan.ts",
     "eval": "DRY_RUN=1 tsx scripts/eval-phase.ts",
     "eval:design": "tsx scripts/eval-design.ts",

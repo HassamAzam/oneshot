@@ -26,6 +26,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { STATE, artifactDir, runDir } from './config.js';
 import type { MrFeedbackLedger } from '../mrfeedback/types.js';
+import type { DriveLedger } from './drivesync.js';
 
 const RUNS_ARCHIVE = join(STATE, 'runs-archive');
 
@@ -383,6 +384,8 @@ export interface RunJournal {
    * fragile "see the comment above". Absent for keys posted under DRY_RUN.
    */
   publishedNotes?: Record<string, number>;
+  /** The ticket's Google Drive folder and what was last uploaded to it — see lib/drivesync.ts. */
+  drive?: DriveLedger;
   slackTs?: string;
   phases: PhaseRecord[];
   /** Blocks this run diagnosed and tried to clear by itself, oldest first. */
