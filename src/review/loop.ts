@@ -167,7 +167,12 @@ export async function driveReview(d: LoopDeps): Promise<LoopOutcome> {
           });
           l = kept.ledger;
           d.save(l);
-          d.info(`review did not finish — ${kept.raised.length} finding(s) it had are kept as threads; the review is still owed`);
+          // Posted now rather than on the next entry: if this was the last
+          // attempt the run stops here, and "kept as threads" has to be true.
+          const now = await d.api.discussions();
+          if (now) l = (await flush(l, d.api, { live: now, save: d.save, trusted: d.trusted })).ledger;
+          d.info(`review did not finish — ${kept.raised.length} finding(s) it had are kept as threads`
+            + `${l.pending.length ? ` (${l.pending.length} still to post)` : ''}; the review is still owed`);
         }
         return { kind: 'session-failed', phase: 'review', why: s.why, infra: s.infra };
       }

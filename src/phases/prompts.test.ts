@@ -1580,6 +1580,10 @@ test('a thread-mode review is told the truth about what a finding costs, and how
   assert.match(p, /exactly as `git diff --name-only` prints it/);
   // 'changes-requested' with nothing blocking is read as an incomplete review.
   assert.match(p, /'changes-requested' with NO blocker or major finding behind it is read as/);
+  // What was not covered goes in a field, not in the wording of the summary.
+  assert.match(p, /name it in `notReviewed`/);
+  assert.match(p, /a blocker or major recorded in that file is still posted as a thread/);
+  assert.doesNotMatch(p, /has already succeeded/);
   // Ids of the old loop's findings, whose text is nowhere in this prompt.
   assert.doesNotMatch(p, /closed from an earlier review/);
 });
@@ -1611,6 +1615,9 @@ test('a review retried because the last attempt was incomplete is told what that
   assert.match(p, /## The previous attempt at this review was NOT accepted/);
   assert.match(p, /backend-reviewer-agent NOT REVIEWED \(did not land\)\./);
   assert.match(p, /Cover the part\s+it left out YOURSELF/);
+  // The retry is not handed a phrase that would mark a complete review as incomplete.
+  assert.match(p, /leave\s+`notReviewed` empty/);
+  assert.doesNotMatch(p, /Report a dimension as NOT REVIEWED again/);
   // What that attempt did find is not raised a second time.
   assert.match(p, /Already open on this merge request from an earlier review — do NOT raise these again/);
   // A first attempt is told nothing of the kind.

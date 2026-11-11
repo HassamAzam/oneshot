@@ -1247,8 +1247,8 @@ It said of itself that it did not cover the whole change:
 
 Whatever it did find is already on the merge request (listed below, if anything). Cover the part
 it left out YOURSELF, in this session, before you wait on any agent — read that part of the diff
-against \`.claude/rules/\` directly. Report a dimension as NOT REVIEWED again only if you could
-not read it at all.
+against \`.claude/rules/\` directly. Once you have covered it, it is covered: leave
+\`notReviewed\` empty, and list a dimension there only if you could not read it at all.
 `
     : '';
   return `${again}
@@ -1267,6 +1267,10 @@ afterwards. So:
 - Grade it honestly the first time. A thread's severity is fixed when it is raised: you cannot
   raise it later, and a re-check may only reopen a thread, never re-grade or re-number it.
 - One finding per defect. Two symptoms of one cause are one thread.
+- If a dimension was neither landed by its agent nor covered by you, name it in \`notReviewed\`,
+  one entry each (as well as saying so in \`summary\`). That field — not the wording of your
+  summary — is what tells the conductor the review is not whole; it then keeps your findings and
+  runs the review again. Leave it empty when you covered everything.
 - EVERY finding you return is answered — a minor or a suggestion as much as a blocker. Each is
   a thread the fixer must fix or decline, and a fix it commits re-runs \`verify\` on the whole
   case list. So return a minor or a suggestion only when it should change IN THIS merge
@@ -2279,8 +2283,11 @@ and the ticket pays another ${mins} minutes for the same nothing.
 - WRITE AS YOU GO — the backstop for everything above. Each time an agent lands, and after each
   pass of your own, rewrite \`${runDir(ctx.ticket.iid)}/review-partial.json\` as
   \`{"findings": [<Finding so far>]}\` — the same shape as your final \`findings\` field. If this
-  session dies anyway, the conductor salvages a recorded blocker or major out of that file
-  instead of throwing the lap away, so a session that kept it current has already succeeded.
+  session dies anyway, ${ctx.review
+    ? `a blocker or major recorded in that file is still posted as a thread, and only the
+  review itself is run again — so a session that kept it current has lost nothing it found.`
+    : `the conductor salvages a recorded blocker or major out of that file
+  instead of throwing the lap away, so a session that kept it current has already succeeded.`}
 - Do not re-derive what you were handed. The diff, implement's file list and the case list above
   are your inputs; a survey of the repo is not, and it is the other way this phase runs out.
 

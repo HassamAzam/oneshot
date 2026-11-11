@@ -19,7 +19,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { porcelainPaths, setAsideUncommitted, untrackedFiles } from './codephases.js';
+import { createdUntracked, porcelainPaths, setAsideUncommitted, untrackedFiles } from './codephases.js';
 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim();
@@ -123,10 +123,10 @@ test('a staged deletion, a non-ASCII name and a new staged file are all moved in
 test('a file the lap created and never staged is moved; one that was there before is not', () => fixture(({ wt }) => {
   mkdirSync(join(wt, '.verify-scratch'), { recursive: true });
   writeFileSync(join(wt, '.verify-scratch', 'driver.js'), 'left by verify\n');
-  const before = new Set(untrackedFiles(wt));
+  const before = untrackedFiles(wt);
   // The lap: one new test file it forgot to add, nothing else.
   writeFileSync(join(wt, 'apps', 'test_new.py'), 'def test(): pass\n');
-  const created = untrackedFiles(wt).filter((f) => !before.has(f));
+  const created = createdUntracked(before, untrackedFiles(wt));
   assert.deepEqual(created, ['apps/test_new.py']);
 
   const moved = setAsideUncommitted(wt, 'r-1 review-fix lap 1', created);
@@ -146,6 +146,80 @@ test('a file the harness keeps patched (skip-worktree) is not touched', () => fi
 
   assert.equal(readFileSync(join(wt, 'apps', 'ports.js'), 'utf8'), 'port = 8100\n');
   assert.equal(readFileSync(join(wt, 'apps', 'admin.py'), 'utf8'), 'x = 1\n');
+}));
+
+test('"created by the lap" is empty whenever the comparison cannot be trusted', () => {
+  // The answer decides which files leave the tree; "every untracked file" is never it.
+  assert.deepEqual(createdUntracked(null, ['a.py']), [], 'the listing before the lap failed');
+  assert.deepEqual(createdUntracked(['a.py'], null), [], 'the listing after it failed');
+  assert.deepEqual(createdUntracked([], ['vendor/lib/', 'apps/new.py']), ['apps/new.py'], 'a nested repository is not a file');
+  const many = Array.from({ length: 300 }, (_, i) => `f${i}.py`);
+  assert.deepEqual(createdUntracked([], many), [], 'hundreds at once is an ignore rule that changed, not a fix lap');
+});
+
+test('an intent-to-add entry does not stop the move, and nothing the conductor staged is left staged', () => fixture(({ wt }) => {
+  writeFileSync(join(wt, 'apps', 'admin.py'), 'x = 2\n');
+  writeFileSync(join(wt, 'apps', 'ita.py'), 'i = 1\n');
+  git(wt, 'add', '-N', 'apps/ita.py');
+  const before = untrackedFiles(wt);
+  writeFileSync(join(wt, 'apps', 'helper.py'), 'h = 1\n');
+
+  const moved = setAsideUncommitted(wt, 'r-1 review-fix lap 1', createdUntracked(before, untrackedFiles(wt)));
+
+  assert.deepEqual(moved.sort(), ['apps/admin.py', 'apps/helper.py', 'apps/ita.py']);
+  assert.equal(git(wt, 'status', '--porcelain'), '');
+}));
+
+test('when the move cannot be made, a file that was only untracked is not left in the index', () => fixture(({ wt, head }) => {
+  // A nested repository with no commit makes `git add` of it die; an unmerged
+  // path makes `stash create` refuse. Either way the conductor must not leave
+  // its own staging behind for the next lap's commit to carry to the MR.
+  const before = untrackedFiles(wt);
+  writeFileSync(join(wt, 'apps', 'helper.py'), 'h = 1\n');
+  mkdirSync(join(wt, 'scaffold'), { recursive: true });
+  execFileSync('git', ['init', '-q', join(wt, 'scaffold')]);
+  const created = createdUntracked(before, untrackedFiles(wt));
+  assert.deepEqual(created, ['apps/helper.py'], 'the nested repository is not in the list at all');
+
+  // Force the failure after the add: an unmerged path, which `stash create` refuses.
+  writeFileSync(join(wt, 'apps', 'admin.py'), 'x = 2\n');
+  const blob = git(wt, 'rev-parse', 'HEAD:apps/models.py');
+  execFileSync('git', ['-C', wt, 'update-index', '--index-info'], {
+    input: `100644 ${blob} 1\tapps/conflict.py\n100644 ${blob} 2\tapps/conflict.py\n`, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  setAsideUncommitted(wt, 'r-1 review-fix lap 1', created);
+
+  assert.doesNotMatch(git(wt, 'status', '--porcelain'), /^A  apps\/helper\.py$/m, 'not staged by the conductor');
+  assert.match(git(wt, 'status', '--porcelain'), /^\?\? apps\/helper\.py$/m, 'still merely untracked');
+  assert.equal(git(wt, 'rev-parse', 'HEAD'), head);
+}));
+
+test('a tracked file replaced by a directory comes back as the file', () => fixture(({ wt }) => {
+  rmSync(join(wt, 'apps', 'admin.py'));
+  mkdirSync(join(wt, 'apps', 'admin.py'));
+  const before: string[] = [];
+  writeFileSync(join(wt, 'apps', 'admin.py', 'inner.py'), 'x = 3\n');
+
+  const moved = setAsideUncommitted(wt, 'r-1 review-fix lap 1', createdUntracked(before, untrackedFiles(wt)));
+
+  assert.ok(moved.includes('apps/admin.py'));
+  assert.equal(git(wt, 'status', '--porcelain'), '');
+  assert.equal(readFileSync(join(wt, 'apps', 'admin.py'), 'utf8'), 'x = 1\n');
+}));
+
+test('a file whose name looks like a pattern is moved as the file it is', () => fixture(({ wt }) => {
+  writeFileSync(join(wt, 'apps', 'a*.py'), 'star = 1\n');
+  git(wt, '--literal-pathspecs', 'add', 'apps/a*.py');
+  writeFileSync(join(wt, 'apps', 'admin.py'), 'x = 2\n');
+  git(wt, 'add', 'apps/admin.py');
+  git(wt, 'commit', '-qm', 'a file named like a glob, and admin at 2');
+  writeFileSync(join(wt, 'apps', 'a*.py'), 'star = 2\n');
+
+  assert.deepEqual(setAsideUncommitted(wt, 'r-1 review-fix lap 1'), ['apps/a*.py']);
+
+  assert.equal(readFileSync(join(wt, 'apps', 'a*.py'), 'utf8'), 'star = 1\n');
+  assert.equal(readFileSync(join(wt, 'apps', 'admin.py'), 'utf8'), 'x = 2\n', 'a file the pattern would also match is untouched');
 }));
 
 test('a directory that is not a git checkout is reported as nothing moved, not thrown', () => {

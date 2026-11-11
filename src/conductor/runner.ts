@@ -101,8 +101,8 @@ import { startRunApp } from '../lib/appserver.js';
 import { runPhase, type PhaseOutput } from './phase.js';
 import { schemaFor } from './schemas.js';
 import {
-  changedFilesBetween, mergePhase, mrOpenPhase, mrOpenSettled, pushRunBranch, revParse, setAsideUncommitted,
-  untrackedFiles,
+  changedFilesBetween, createdUntracked, mergePhase, mrOpenPhase, mrOpenSettled, pushRunBranch, revParse,
+  setAsideUncommitted, untrackedFiles,
 } from './codephases.js';
 import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
@@ -125,7 +125,7 @@ import {
   roundsUsed, startRound,
 } from '../mrfeedback/ledger.js';
 import type { MrFeedbackSignal } from '../mrfeedback/types.js';
-import { fixLapsUsed, reviewArtifact, reviewIsIncomplete, reviewSettled } from '../review/ledger.js';
+import { fixLapsUsed, notReviewed, reviewArtifact, reviewIsIncomplete, reviewSettled } from '../review/ledger.js';
 import { isBlocking } from '../review/markers.js';
 import { driveReview, type Session } from '../review/loop.js';
 import type { FixerOutput, ReviewerOutput } from '../review/types.js';
@@ -3047,7 +3047,9 @@ export async function runTicket(
       if (firstReview && r.out.ok && r.out.data !== null && reviewIsIncomplete(r.out.data as ReviewerOutput, {
         openBlocking: (extra.review?.threads ?? []).some((t) => !t.resolved && isBlocking(t.severity)),
       })) {
-        const said = String((r.out.data as ReviewerOutput).summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
+        // What it left out, in its own list when it gave one; else its summary.
+        const listed = notReviewed(r.out.data as ReviewerOutput).join('; ');
+        const said = (listed || String((r.out.data as ReviewerOutput).summary ?? '').replace(/\s+/g, ' ').trim()).slice(0, 600);
         partial = r.out.data as ReviewerOutput;
         r.out.ok = false;
         r.out.error = `${INCOMPLETE_REVIEW}${said ? `: ${said}` : ''}`;
@@ -3114,9 +3116,9 @@ export async function runTicket(
         return session<ReviewerOutput>(p, { review: notCovered ? { ...input, lastAttempt: notCovered } : input });
       },
       runFixer: async (input) => {
-        const before = new Set(untrackedFiles(wt));
+        const before = untrackedFiles(wt);
         const answered = await session<FixerOutput>(cfgFix, { reviewFix: input });
-        createdByFixer = untrackedFiles(wt).filter((f) => !before.has(f));
+        createdByFixer = createdUntracked(before, untrackedFiles(wt));
         return answered;
       },
       push: () => {

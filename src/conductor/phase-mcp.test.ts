@@ -76,7 +76,8 @@ test('no session can write a local file through the GitLab server, or open and r
   // merge request belong to the review loop and to people.
   for (const phase of ['review', 'review-fix', 'verify', 'mr']) {
     const denied = new Set(toolPolicy(phaseByName(phase)!).disallowedTools);
-    for (const tool of ['download_attachment', 'create_merge_request_thread', 'update_merge_request_note', 'publish_draft_note']) {
+    for (const tool of ['download_attachment', 'create_merge_request_thread', 'create_merge_request_note',
+      'update_merge_request_note', 'publish_draft_note']) {
       assert.ok(denied.has(`mcp__gitlab__${tool}`), `${phase} must not hold ${tool}`);
     }
   }
@@ -91,9 +92,9 @@ test('`mr` keeps the writes it is for, and only those', (t) => {
   // Spelled out on purpose: a server upgrade that adds a write tool fails here,
   // and someone decides whether `mr` should hold it before any session does.
   assert.deepEqual(open, [
-    'create_branch', 'create_issue', 'create_issue_note', 'create_merge_request', 'create_merge_request_note',
-    'create_note', 'create_or_update_file', 'push_files', 'update_issue', 'update_issue_note',
-    'update_merge_request', 'upload_markdown',
+    'create_branch', 'create_issue', 'create_issue_note', 'create_merge_request', 'create_note',
+    'create_or_update_file', 'push_files', 'update_issue', 'update_issue_note', 'update_merge_request',
+    'upload_markdown',
   ]);
   for (const never of ['delete_label', 'update_label', 'create_pipeline', 'delete_issue', 'merge_merge_request']) {
     assert.ok(denied.has(`mcp__gitlab__${never}`), `mr must not hold ${never}`);

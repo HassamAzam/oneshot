@@ -242,6 +242,14 @@ function rule(
     case 'open':
     case 'reopened':
     case 'disputed':
+      // A thread the fixer FIXED and flush then left open over a person's reply
+      // (src/review/post.ts) arrives here as 'open'. The reviewer is still asked
+      // to rule on that fix, and "it does not close this" must not fall through
+      // to nothing: the fixer's next lap needs the sentence as much as the reply.
+      if (t.status === 'open' && t.fixer?.action === 'fixed' && (ruling === 'reopen' || ruling === 'stands')) {
+        t.status = 'reopened'; t.reviewerNote = note;
+        return reply(l, t, 'reopened', note, o, 'none');
+      }
       // The fixer never answered (its session died), or a later commit closed it anyway.
       if (ruling === 'accepted') {
         t.status = 'accepted'; t.resolved = true;
@@ -254,8 +262,9 @@ function rule(
       return null;
     case 'accepted':
       // A later commit can break an earlier fix. A thread a person closed, or the
-      // reviewer itself withdrew, is not the reviewer's to open again.
-      if (ruling === 'reopen') {
+      // reviewer itself withdrew, is not the reviewer's to open again. `stands`
+      // here, as on a fixed thread, can only mean the finding stands again.
+      if (ruling === 'reopen' || ruling === 'stands') {
         t.status = 'reopened'; t.resolved = false; t.reviewerNote = note;
         return reply(l, t, 'reopened', note, o, 'unresolve');
       }
@@ -337,9 +346,32 @@ export function applyReview(
 
   const changed = o.changedFiles ? new Set(o.changedFiles.map((f) => repoPath(f, o.root))) : null;
   const taken = new Set(l.threads.map((t) => t.id));
+  /**
+   * What is already a thread, by where it is and by what it says. A first review
+   * run again on top of an earlier attempt's findings (a partial review, a
+   * re-run on the same merge request) is TOLD not to raise them again; this is
+   * what stops it when it does anyway, and a person reading the same finding on
+   * two threads.
+   */
+  const words = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  // Against what was open BEFORE this answer only: two findings of one review
+  // may well sit on the same line.
+  const openBefore = l.threads.filter((t) => !t.resolved);
+  const sameAsOpen = (f: Finding): ReviewThread | undefined => openBefore.find((t) => t.file === f.file
+    && (t.line === f.line || (words(t.what).length > 12 && words(t.what) === words(f.what))));
   let n = nextNumber(l);
   for (const f of findings) {
     if (wasRuling.has(f)) continue;
+    if (!o.recheck) {
+      const twin = sameAsOpen(f);
+      if (twin) {
+        dropped.push({
+          lap: o.lap, severity: f.severity, file: f.file, line: f.line, what: f.what,
+          reason: `already open on the merge request as ${twin.id}`,
+        });
+        continue;
+      }
+    }
     if (o.recheck && f.severity !== 'blocker' && !(changed && changed.has(f.file))) {
       dropped.push({
         lap: o.lap, severity: f.severity, file: f.file, line: f.line, what: f.what,
@@ -376,6 +408,13 @@ export function applyReview(
   return { ledger: l, raised, dropped };
 }
 
+/** The dimensions a first review says it neither landed nor covered (FINDINGS_SCHEMA, `notReviewed`). */
+export function notReviewed(out: ReviewerOutput): string[] {
+  return Array.isArray(out.notReviewed)
+    ? out.notReviewed.map((x) => String(x ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean)
+    : [];
+}
+
 /**
  * Whether a FIRST review says of itself that it did not cover the change.
  *
@@ -388,9 +427,10 @@ export function applyReview(
  * it is that case, and the caller re-attempts the review instead of accepting it.
  */
 export function reviewIsIncomplete(out: ReviewerOutput, o: { openBlocking?: boolean } = {}): boolean {
-  // The reviewer's own words for it (src/phases/prompts.ts tells it to write
-  // exactly this): said beside a blocker it is still half a review.
-  if (/\bNOT REVIEWED\b/.test(String(out.summary ?? ''))) return true;
+  // Said outright, in the field for it: beside a blocker it is still half a
+  // review. (A field, not the words "NOT REVIEWED" in the summary — a complete
+  // review may well say that nothing was left not reviewed.)
+  if (notReviewed(out).length) return true;
   if (String(out.verdict ?? '') !== 'changes-requested') return false;
   // Something blocking explains the verdict: a finding in this answer, or a
   // thread already open that the reviewer was told not to raise again.

@@ -526,6 +526,17 @@ export const FINDINGS_SCHEMA = phaseSchema({
       required: ['id', 'ruling', 'note'],
     },
   },
+  // Optional for the same reason `threads` is. It replaces reading the summary
+  // for the words "NOT REVIEWED": a complete review that merely mentions them
+  // ("nothing was left NOT REVIEWED") must not be taken for an incomplete one.
+  notReviewed: {
+    type: 'array',
+    description:
+      'FIRST REVIEW ONLY: one entry per review dimension that neither landed nor was covered by you, naming the '
+      + 'agent (e.g. "backend-reviewer-agent: did not land, not covered"). Omit it, or send [], when you '
+      + 'covered everything — a non-empty list means the review is run again.',
+    items: { type: 'string' },
+  },
 }, ['verdict', 'findings']);
 
 /**

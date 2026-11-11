@@ -143,6 +143,8 @@ export interface ReviewerOutput {
   findings?: unknown;
   /** Re-check laps only: one ruling per thread the reviewer was shown. */
   threads?: unknown;
+  /** First review only: the dimensions it neither landed nor covered. Non-empty means it is not the whole review. */
+  notReviewed?: unknown;
 }
 
 export interface FixerOutput {

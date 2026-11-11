@@ -369,6 +369,8 @@ export function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
     // the one tool here that resolves a thread, and a session holding it could
     // close a reviewer's finding the fixer never answered.
     'mcp__gitlab__create_merge_request_thread',
+    // …and this one REPLIES inside an existing thread (a top-level note is create_note).
+    'mcp__gitlab__create_merge_request_note',
     'mcp__gitlab__update_merge_request_note',
     'mcp__gitlab__create_draft_note',
     'mcp__gitlab__update_draft_note',
@@ -387,7 +389,6 @@ export function toolPolicy(cfg: PhaseConfig): { disallowedTools: string[] } {
       'mcp__gitlab__update_issue',
       'mcp__gitlab__create_issue',
       'mcp__gitlab__create_issue_note',
-      'mcp__gitlab__create_merge_request_note',
       'mcp__gitlab__create_merge_request_discussion_note',
       'mcp__gitlab__upload_markdown',
       'mcp__gitlab__push_files',

@@ -505,6 +505,32 @@ test('a comment written while the fixer FIXES the thread keeps it open until a l
   assert.deepEqual(w.mr.open(), []);
 });
 
+test('a comment during the fixer\'s lap does not cost the reviewer its say on the fix', async () => {
+  const w = world({
+    reviews: [
+      { findings: [F('F-01', 'major')] },
+      { findings: [], threads: [{ id: 'F-01', ruling: 'reopen', note: 'b2 deletes the assertion instead of fixing it.' }] },
+      { findings: [], threads: [{ id: 'F-01', ruling: 'accepted', note: '' }] },
+    ],
+    fixes: [
+      { commit: 'b2', threads: [{ id: 'F-01', action: 'fixed', reply: 'Removed the assertion.', commit: 'b2' }] },
+      { commit: 'c3', threads: [{ id: 'F-01', action: 'fixed', reply: 'Compares against the saved row now.', commit: 'c3' }] },
+    ],
+  });
+  const fixer = w.deps.runFixer;
+  let first = true;
+  w.deps.runFixer = async (input) => {
+    if (first) { first = false; w.mr.humanReply('d1', 'hassam.azam', 'Thanks - FYI TC-21 covers this too.'); }
+    return fixer(input);
+  };
+  assert.deepEqual(await driveReview(w.deps), { kind: 'done', raised: 1, open: 0 });
+  assert.deepEqual(w.mr.actions('d1'),
+    ['reviewer:raised', 'human:hassam.azam', 'fixer:fixed', 'reviewer:reopened', 'fixer:fixed']);
+  const second = w.fixerInputs[1]!.threads[0]!;
+  assert.match(second.reviewerNote ?? '', /deletes the assertion instead of fixing it/, 'the fixer is shown why it came back');
+  assert.match(second.human![0]!.body, /TC-21 covers this too/, 'and the person\'s reply');
+});
+
 test('a first review that did not finish has its findings posted, and is run again as a FIRST review', async () => {
   const w = world({
     reviews: [
@@ -520,6 +546,9 @@ test('a first review that did not finish has its findings posted, and is run aga
   assert.equal(died.kind, 'session-failed');
   assert.equal(w.ledger?.reviewedSha, null, 'the review is still owed');
   assert.equal(w.ledger?.threads.length, 1, 'but what it found is kept');
+  // Posted at once — if this had been the last attempt, the run stops here.
+  assert.deepEqual(w.mr.actions('d1'), ['reviewer:raised']);
+  assert.deepEqual(w.ledger?.pending, []);
   // The runner retries by entering the loop again.
   assert.deepEqual(await driveReview(w.deps), { kind: 'done', raised: 2, open: 0 });
   assert.equal(w.reviewerInputs[1]?.recheck, false, 'a whole review, not a re-check of the fixer\'s diff');

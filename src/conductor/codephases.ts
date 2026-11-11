@@ -1423,15 +1423,31 @@ export function porcelainPaths(z: string): string[] {
   return [...new Set(out)];
 }
 
-/** Files in a worktree that git neither tracks nor ignores, or [] when git cannot say. */
-export function untrackedFiles(worktree: string): string[] {
+/** Files in a worktree that git neither tracks nor ignores, or null when git cannot say. */
+export function untrackedFiles(worktree: string): string[] | null {
   try {
     return execFileSync('git', ['-C', worktree, 'ls-files', '--others', '--exclude-standard', '-z'], {
       encoding: 'utf8', stdio: 'pipe', timeout: 60_000,
     }).split('\0').filter(Boolean);
   } catch {
-    return [];
+    return null;
   }
+}
+
+/**
+ * The files a session created and left untracked: in `after`, not in `before`.
+ *
+ * Empty whenever the comparison cannot be trusted — a listing that failed, or a
+ * difference so large it can only be an ignore rule that changed under it —
+ * because the answer decides which files are moved out of the tree, and "every
+ * untracked file" is never the right one. A nested repository shows up as a
+ * directory entry (`vendor/lib/`); that is not a file to stage.
+ */
+export function createdUntracked(before: string[] | null, after: string[] | null, cap = 200): string[] {
+  if (!before || !after) return [];
+  const had = new Set(before);
+  const created = after.filter((f) => !had.has(f) && !f.endsWith('/'));
+  return created.length > cap ? [] : created;
 }
 
 /**
@@ -1446,39 +1462,60 @@ export function untrackedFiles(worktree: string): string[] {
  * would test it, and a staged deletion would ride the next lap's commit onto
  * the merge request.
  *
- * `alsoUntracked` are files the lap CREATED and never staged; the caller knows
- * them by comparing untrackedFiles() before and after the session. Everything
- * else untracked is left alone — the seeded links and a phase's scratch
- * directory are untracked on purpose — and so is a file marked skip-worktree,
- * which `git status` does not report.
+ * `alsoUntracked` are files the lap CREATED and never staged (createdUntracked).
+ * Everything else untracked is left alone — the seeded links and a phase's
+ * scratch directory are untracked on purpose — and so is a file marked
+ * skip-worktree, which `git status` does not report.
  *
  * Nothing is thrown away, and the stash stack is never touched: every worktree
  * of the repo shares it, so an entry there is one another session's
  * `git stash pop` could apply. `git stash create` builds the commit without
  * storing it; it is kept under refs/oneshot/aside/…, and
  * `git stash apply --index <ref>` brings it back.
+ *
+ * Whatever this function stages to build that commit it unstages again if it
+ * cannot finish: a file that was merely untracked must never be left in the
+ * index, where the next lap's plain `git commit` would carry it to the MR.
  */
 export function setAsideUncommitted(worktree: string, label: string, alsoUntracked: string[] = []): string[] {
-  const git = (args: string[]): string => execFileSync('git', ['-C', worktree, ...args], {
+  // --literal-pathspecs: every path here came from git's own NUL-separated
+  // output and is a name, never a pattern — a file called `a*.py` or `:x` is not.
+  const git = (args: string[]): string => execFileSync('git', ['-C', worktree, '--literal-pathspecs', ...args], {
     encoding: 'utf8', stdio: 'pipe', timeout: 60_000,
   });
+  const status = (): string => git(['status', '--porcelain', '-z', '--untracked-files=no']);
+  /** Paths this call put in the index itself, to take back if it gives up. */
+  const staged: string[] = [];
+  const unstage = (): void => {
+    if (!staged.length) return;
+    try { git(['reset', '-q', '--', ...staged]); } catch { /* best effort: the warning below says what is left */ }
+  };
   try {
-    const created = alsoUntracked.filter((f) => existsSync(join(worktree, f)));
-    if (created.length) git(['add', '--', ...created]);
-    const paths = porcelainPaths(git(['status', '--porcelain', '-z', '--untracked-files=no']));
-    if (!paths.length) return [];
+    // `git add -N` leaves an entry `stash create` refuses ("not uptodate"); a real add of it is the same file.
+    const intentToAdd = String(status()).split('\0').filter((e) => e.startsWith(' A ')).map((e) => e.slice(3));
+    const created = alsoUntracked.filter((f) => !f.endsWith('/') && existsSync(join(worktree, f)));
+    for (const f of [...new Set([...created, ...intentToAdd])]) {
+      git(['add', '--', f]);
+      staged.push(f);
+    }
+    const paths = porcelainPaths(status());
+    if (!paths.length) { unstage(); return []; }
     // An identity of its own: the commit needs one, and the service user's git
     // may have none configured (sessions get theirs from the environment).
     const sha = git(['-c', 'user.name=Oneshot', '-c', 'user.email=oneshot@localhost.invalid',
       'stash', 'create', `oneshot set aside: ${label}`]).trim();
-    if (!sha) return [];
+    if (!sha) { unstage(); return []; }
     const slug = label.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'edits';
     git(['update-ref', `refs/oneshot/aside/${slug}-${sha.slice(0, 8)}`, sha]);
     // Only once the commit is safely under a ref. Index and tree, for exactly
-    // the paths status named: a staged add leaves both, a deletion comes back.
-    git(['restore', '--source=HEAD', '--staged', '--worktree', '--', ...paths]);
+    // the paths status named — the OUTER one where one lies under another (a
+    // file replaced by a directory lists `a.txt` and `a.txt/inner.txt`, and
+    // git knows only the first as a path at HEAD).
+    const outer = paths.filter((p) => !paths.some((q) => q !== p && p.startsWith(`${q}/`)));
+    git(['restore', '--source=HEAD', '--staged', '--worktree', '--', ...outer]);
     return paths;
   } catch (err) {
+    unstage();
     log.warn('could not set aside uncommitted edits — the next session will read them as the code', {
       worktree, error: (err as Error).message.split('\n').slice(0, 3).join(' | ').slice(0, 300),
     });
