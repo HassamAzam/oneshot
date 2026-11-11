@@ -137,6 +137,24 @@ test('with ONESHOT_PICKUP_ANY_ASSIGNEE another conductor\'s claim keeps the tick
   }
 });
 
+test('ONESHOT_PICKUP_ONLY limits candidates to the listed tickets, and a typo narrows rather than opens', async () => {
+  process.env.ONESHOT_PICKUP_ANY_ASSIGNEE = '1';
+  const f = stubFetch((url) => (url.includes('/notes') ? [] : undefined));
+  const board = [990801, 990802, 990803].map((iid) => ({ ...issue(iid), assignees: [{ username: 'usman.nasir' }] }));
+  try {
+    process.env.ONESHOT_PICKUP_ONLY = '990801, 990803';
+    assert.deepEqual(iids((await triage(board)).candidates), [990801, 990803]);
+    process.env.ONESHOT_PICKUP_ONLY = 'abc';
+    assert.deepEqual(iids((await triage(board)).candidates), []);
+    process.env.ONESHOT_PICKUP_ONLY = '';
+    assert.deepEqual(iids((await triage(board)).candidates), [990801, 990802, 990803]);
+  } finally {
+    f.restore();
+    delete process.env.ONESHOT_PICKUP_ANY_ASSIGNEE;
+    delete process.env.ONESHOT_PICKUP_ONLY;
+  }
+});
+
 test('a Loop ticket assigned to someone else is never a candidate; an unassigned one is', async () => {
   // On 2026-11-10 a server holding a bot token briefly ran without this rule and
   // claimed three teammates' tickets out of 43 carrying Loop. The token's user

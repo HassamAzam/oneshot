@@ -13,7 +13,7 @@
  * run is skipped, and a ticket whose run died mid-phase is picked up from its
  * journal rather than restarted.
  */
-import { gitlabUsername, pickupAnyAssignee, projectConfig } from '../lib/config.js';
+import { gitlabUsername, pickupAnyAssignee, pickupOnly, projectConfig } from '../lib/config.js';
 import { foreignOwner } from '../lib/claims.js';
 import { isClaimed, latestRunStatus, logEvent, seeTicket } from '../lib/db.js';
 import { issuesWithEntryLabel, type Issue } from '../lib/gitlab.js';
@@ -67,11 +67,15 @@ export async function scan(): Promise<WatchResult> {
 export async function triage(issues: Issue[]): Promise<WatchResult> {
   const cfg = projectConfig();
   const anyAssignee = pickupAnyAssignee();
+  const only = pickupOnly();
   const candidates: Issue[] = [];
   const skipped: Array<{ iid: number; why: string }> = [];
 
   for (const issue of issues) {
     seeTicket(issue.iid, issue.title, issue.labels);
+    // Outside ONESHOT_PICKUP_ONLY, dropped silently like a teammate's ticket: one
+    // skip line per ticket on the board every tick would bury the listed ones.
+    if (only && !only.has(issue.iid)) continue;
 
     if (issue.labels.includes(cfg.labels.exit)) {
       skipped.push({ iid: issue.iid, why: `already ${cfg.labels.exit}` });

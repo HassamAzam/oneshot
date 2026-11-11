@@ -924,6 +924,18 @@ export function gitlabUsername(): string { return deskUsername(); }
 export function pickupAnyAssignee(): boolean { return envFlag('ONESHOT_PICKUP_ANY_ASSIGNEE'); }
 
 /**
+ * ONESHOT_PICKUP_ONLY=9174,9187: this conductor works only these tickets, on top
+ * of every other rule. Null when unset or empty, which means no limit. Entries that
+ * are not positive integers are ignored rather than read as "no limit", so a typo
+ * narrows the list instead of opening it.
+ */
+export function pickupOnly(): Set<number> | null {
+  const raw = envOr('ONESHOT_PICKUP_ONLY').trim();
+  if (!raw) return null;
+  return new Set(raw.split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0));
+}
+
+/**
  * The conductor's own tick cadence — how often `src/index.ts` scans for
  * claimable tickets. Exported so anything that needs to describe its own
  * cadence as "the same as the tick loop" (e.g. the review-gate park state in
