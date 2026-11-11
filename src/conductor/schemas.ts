@@ -176,6 +176,29 @@ export const RESEARCH_SCHEMA = phaseSchema({
     },
     required: ['reachable', 'route', 'entryPoint', 'gate', 'vocabulary'],
   },
+  uiSurfaces: {
+    type: 'array',
+    description:
+      'Every screen this ticket changes or adds, one entry per route. The design phase must draw ' +
+      'each one, and capture a `before` of each that exists today. Empty when uiPath.reachable is false.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        route: str('The URL path of the screen, e.g. /login or /project-logs/v2/person/:id.'),
+        exists: {
+          type: 'boolean',
+          description: 'True when the screen is in the app today; false for a screen this ticket adds.',
+        },
+        evidence: str(
+          'For an existing screen, the repo-relative file:line where its route is defined, e.g. ' +
+          'frontend/src/routes.js:42. Empty for a new screen.',
+        ),
+        change: str('What changes on this screen, in one line.'),
+      },
+      required: ['route', 'exists', 'evidence', 'change'],
+    },
+  },
   unknowns: strArr(
     'What you could NOT determine. State these rather than guessing. A noun you searched ' +
     'and did not find belongs here too: it stops the next phase repeating a search you ' +
@@ -232,7 +255,7 @@ export const RESEARCH_SCHEMA = phaseSchema({
     },
     required: ['kind', 'verdict', 'testedCommit', 'account', 'steps', 'expected', 'observed', 'evidence', 'reason', 'blocker'],
   },
-}, ['understanding', 'acceptanceCriteria', 'codePath', 'blastRadius', 'uiPath', 'unknowns', 'module', 'reproduction']);
+}, ['understanding', 'acceptanceCriteria', 'codePath', 'blastRadius', 'uiPath', 'uiSurfaces', 'unknowns', 'module', 'reproduction']);
 
 /**
  * What each `flow` node kind means. The kind is the one fact the planner
@@ -597,8 +620,12 @@ export const DESIGN_SCHEMA = phaseSchema({
           'it was not captured.',
         ),
         note: str('The one design decision on this screen worth the reviewer\'s attention'),
+        route: str(
+          'The research uiSurfaces route this screen draws, copied exactly, e.g. /login. ' +
+          'Every uiSurfaces route needs at least one screen.',
+        ),
       },
-      required: ['id', 'name', 'purpose', 'states', 'mockupHtml', 'screenshot', 'before', 'note'],
+      required: ['id', 'name', 'purpose', 'states', 'mockupHtml', 'screenshot', 'before', 'note', 'route'],
     },
   },
   prototype: {

@@ -135,6 +135,17 @@ export interface DesignScreen {
   before: string;
   /** The one design decision on this screen worth a reviewer's attention. */
   note: string;
+  /** The research `uiSurfaces` route this screen draws. Absent on designs made before it existed. */
+  route?: string;
+}
+
+/** One screen research says the ticket changes or adds. */
+export interface UiSurface {
+  route: string;
+  exists: boolean;
+  /** file:line of the route definition for an existing screen; empty for a new one. */
+  evidence: string;
+  change: string;
 }
 
 export interface DesignArtifact {

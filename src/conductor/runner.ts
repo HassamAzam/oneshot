@@ -47,11 +47,11 @@
  * continues from the phase remediation says to resume at.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
+  DRY_RUN, artifactDir, gitlabUsername, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -67,7 +67,7 @@ import {
 import {
   approvalCovers, archiveRun, artifactPath, ensureRunDirs, failedLapsOf, infraAttemptsOf, lapsOf,
   phaseSucceeded, phaseSettled, readArtifact,
-  readJournal, recordPhase, recordRemediation, reapScratch, updateJournal, writeArtifact,
+  readJournal, recordPhase, recordRemediation, reapScratch, requestCovers, updateJournal, writeArtifact,
   writeJournal,
   type PhaseRecord, type Remediation, type RunJournal,
 } from '../lib/artifacts.js';
@@ -94,6 +94,10 @@ import {
 import { log } from '../lib/log.js';
 import { accountActionReason } from '../lib/accountgate.js';
 import { exportRun } from '../lib/langfuse.js';
+import {
+  DESIGN_EVAL_RECORD, appendRound, checkBeforePosting, missingItems, nextRepair, repairDue,
+  roundPasses, routeEvidenceHolds, type DesignEvalRecord, type DesignEvalRound,
+} from '../lib/designeval.js';
 import { writeRunReport } from '../lib/report.js';
 import { publishPending } from '../lib/publish.js';
 import { startRunApp } from '../lib/appserver.js';
@@ -104,6 +108,7 @@ import {
   appendEdgeCases, checkApprovalGate, checkVerifyGate, declaredFiles, designApprovalRequestBody,
   MAX_CONFIRMATIONS, rearmGate,
   designApprovedRecordBody, designAttachments, designDeliverableRefusal, designGateApplies, gatesApply,
+  type GateAttachment,
   planApprovalRequestBody, planApprovedRecordBody, reviewAllRuns, reviewLabelPresent,
   testcasesApprovalRequestBody, testcasesApprovedRecordBody, triggerLine,
   gateAsked, type GateTrigger,
@@ -114,7 +119,8 @@ import {
 } from './zoneguard.js';
 import { isImplemented, promptFor, systemPromptFor, type PromptCtx } from '../phases/prompts.js';
 import {
-  countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type Ticket, type TestCase,
+  countsAsFailure, ticketScopeIds, type BaseCheck, type CaseResult, type DesignArtifact, type Ticket, type TestCase,
+  type UiSurface,
 } from '../phases/types.js';
 import {
   activeRound, addressedFeedbackOf, emptyLedger, normaliseItems, phasesOwedByRound, recordAddressed,
@@ -1597,15 +1603,37 @@ export async function runTicket(
         log.warn(`design.json changed since its approval on #${iid} — re-arming the design gate`);
         j = rearmGate(iid, 'design') ?? j;
       }
+      const designIdx = list.findIndex((p) => p.name === 'design');
+      const evalCtx: DesignEvalCtx = {
+        surfaces: researchSurfaces(prior.research ?? null),
+        repoDir: worktree ?? WORK_REPO,
+      };
+      const approval = j.designApproval;
+      // `asking` is "the gate is about to post a request comment": it has none
+      // standing, or the design has been rewritten under the one it has — which
+      // is the state a rejected-and-redrawn design arrives in, since feedback
+      // clears requestNoteId. Every one of those comments is graded first, and
+      // the attachment list graded here is the SAME array the gate uploads, so
+      // what was checked is what the reviewer gets.
+      const asking = approval?.requestNoteId == null || !requestCovers(approval, design);
+      const attachments = designAttachments(iid, design);
+      if (asking && designIdx !== -1 && validateDesignRequest(iid, j, design, evalCtx, attachments)) {
+        forced.add('design');
+        i = designIdx;
+        continue;
+      }
       const gate = await checkApprovalGate({
         iid,
         gate: 'design',
         requestBody: designApprovalRequestBody(iid, design),
         subject: design,
-        attachments: designAttachments(iid, design),
+        attachments,
         onApproved: async () => { await addIssueNote(iid, designApprovedRecordBody(design)); },
       });
       j = readJournal(iid) ?? j;
+      if (asking && j.designApproval?.requestNoteId != null && j.designHtmlRepair) {
+        j = updateJournal(iid, { designHtmlRepair: undefined }) ?? j;
+      }
       if (gate.verdict === 'unavailable') return finish(j, 'blocked', GATE_UNAVAILABLE);
       if (gate.verdict === 'pending') {
         return finish(j, 'parked',
@@ -1613,7 +1641,6 @@ export async function runTicket(
           + 'or comments there what to change to have the design redrawn');
       }
       if (gate.verdict === 'feedback') {
-        const designIdx = list.findIndex((p) => p.name === 'design');
         if (designIdx !== -1) {
           forced.add('design');
           i = designIdx;
@@ -3605,4 +3632,77 @@ function milestoneText(p: PhaseConfig, data: Record<string, unknown> | null, iid
       `${empty.length ? `\nempty passes: ${empty.join(', ')}` : ''}`;
   }
   return `*#${iid} ${p.name}* — ${data.summary ?? 'done'}`;
+}
+
+/** What the design eval reads besides the design: research's screen list and the repo its evidence cites. */
+interface DesignEvalCtx {
+  surfaces: UiSurface[];
+  repoDir: string;
+}
+
+function researchSurfaces(research: Record<string, unknown> | null): UiSurface[] {
+  const list = research?.uiSurfaces;
+  return Array.isArray(list) ? (list as UiSurface[]) : [];
+}
+
+/** A repo file's text, or null when it is missing or the path leaves the repo. */
+function readRepoFile(repoDir: string, rel: string): string | null {
+  const full = resolve(repoDir, rel);
+  if (!full.startsWith(resolve(repoDir) + sep)) return null;
+  try {
+    return readFileSync(full, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Grade the request comment the gate has PREPARED, before it is posted: every
+ * file the design names must be on disk and carried by that comment, and every
+ * research screen must be covered. The round is recorded whatever the verdict,
+ * so a request that went out short of a file says so on the ticket's own eval
+ * record.
+ *
+ * When something is missing and the cap allows, record a repair and return
+ * true so the caller re-runs `design` — nobody has been pinged yet, so nothing
+ * on the ticket changes under a reviewer. A dry run posts nothing, so it has no
+ * prepared comment to grade and is never sent back.
+ */
+function validateDesignRequest(
+  iid: number, j: RunJournal, design: Record<string, unknown> | null,
+  ctx: DesignEvalCtx, attachments: readonly GateAttachment[],
+): boolean {
+  if (DRY_RUN) return false;
+  const files = checkBeforePosting({
+    design: design as Partial<DesignArtifact> | null,
+    attached: attachments.map((a) => a.name),
+    onDisk: (f) => existsSync(join(artifactDir(iid), f)),
+    surfaces: ctx.surfaces,
+    evidenceHolds: (evidence, route) => routeEvidenceHolds(evidence, route, (rel) => readRepoFile(ctx.repoDir, rel)),
+  });
+  const round: DesignEvalRound = {
+    at: new Date().toISOString(),
+    attempt: j.designHtmlRepair?.attempts ?? 0,
+    files,
+    pass: roundPasses(files),
+  };
+  const record = readArtifact<DesignEvalRecord>(iid, DESIGN_EVAL_RECORD);
+  writeArtifact(iid, DESIGN_EVAL_RECORD, appendRound(record, iid, round));
+  const missing = missingItems(files);
+  if (round.pass) log.ok(`design-eval #${iid}: all ${files.length} checks passed on the prepared request`);
+  if (repairDue(j.designHtmlRepair, files)) {
+    const next = nextRepair(j.designHtmlRepair, files);
+    updateJournal(iid, { designHtmlRepair: next });
+    log.warn(`design-eval #${iid}: back to design before posting, ${missing.length} item(s) missing`, {
+      iid, attempt: next.attempts, missing,
+    });
+    return true;
+  }
+  if (missing.length) {
+    log.warn(`design-eval #${iid}: repair cap reached — posting the request without ${missing.length} item(s)`, {
+      iid, missing,
+    });
+  }
+  if (j.designHtmlRepair?.pending) updateJournal(iid, { designHtmlRepair: { ...j.designHtmlRepair, pending: false } });
+  return false;
 }
