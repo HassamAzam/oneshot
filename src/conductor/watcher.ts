@@ -14,7 +14,8 @@
  * journal rather than restarted.
  */
 import {
-  DRY_RUN, MERGE_POLL_MS, gitlabUsername, pickupAnyAssignee, pickupLabel, pickupOnly, pickupSince, projectConfig,
+  DRY_RUN, MERGE_POLL_MS, gitlabUsername, handoffAtMerge, pickupAnyAssignee, pickupLabel, pickupOnly, pickupSince,
+  projectConfig,
 } from '../lib/config.js';
 import { readJournal, type RunJournal } from '../lib/artifacts.js';
 import { foreignOwner } from '../lib/claims.js';
@@ -70,7 +71,7 @@ export async function scan(): Promise<WatchResult> {
  * plan had been approved never started.
  */
 export function mergeWaitRemaining(j: RunJournal | null, status: string | null, now: number): number | null {
-  if (!j || status !== 'parked' || !j.reviewMode || DRY_RUN) return null;
+  if (!j || status !== 'parked' || !j.reviewMode || DRY_RUN || handoffAtMerge()) return null;
   if (typeof j.humanMergeCheckAt !== 'number') return null;
   if (j.phases.some((p) => p.phase === 'merge' && p.status === 'ok')) return null;
   const left = j.humanMergeCheckAt + MERGE_POLL_MS - now;

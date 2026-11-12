@@ -117,7 +117,7 @@ test('with ONESHOT_PICKUP_ANY_ASSIGNEE a teammate\'s unclaimed ticket is a candi
   process.env.ONESHOT_PICKUP_ANY_ASSIGNEE = '1';
   const f = stubFetch((url) => (url.includes('/notes') ? [] : undefined));
   try {
-    const r = await triage([{ ...issue(990701), assignees: [{ username: 'usman.nasir' }] }]);
+    const r = await triage([{ ...issue(990701), assignees: [{ username: 'a.teammate' }] }]);
     assert.deepEqual(iids(r.candidates), [990701]);
   } finally {
     f.restore();
@@ -129,7 +129,7 @@ test('with ONESHOT_PICKUP_ANY_ASSIGNEE another conductor\'s claim keeps the tick
   process.env.ONESHOT_PICKUP_ANY_ASSIGNEE = '1';
   const f = stubFetch((url) => (url.includes('/notes') ? [claimNote(5, 'r-elsewhere-abc123', 3)] : undefined));
   try {
-    const r = await triage([{ ...issue(990702), assignees: [{ username: 'usman.nasir' }] }]);
+    const r = await triage([{ ...issue(990702), assignees: [{ username: 'a.teammate' }] }]);
     assert.deepEqual(iids(r.candidates), []);
     assert.match(r.skipped[0]!.why, /claimed by another conductor — run r-elsewhere-abc123/);
   } finally {
@@ -141,7 +141,7 @@ test('with ONESHOT_PICKUP_ANY_ASSIGNEE another conductor\'s claim keeps the tick
 test('ONESHOT_PICKUP_ONLY limits candidates to the listed tickets, and a typo narrows rather than opens', async () => {
   process.env.ONESHOT_PICKUP_ANY_ASSIGNEE = '1';
   const f = stubFetch((url) => (url.includes('/notes') ? [] : undefined));
-  const board = [990801, 990802, 990803].map((iid) => ({ ...issue(iid), assignees: [{ username: 'usman.nasir' }] }));
+  const board = [990801, 990802, 990803].map((iid) => ({ ...issue(iid), assignees: [{ username: 'a.teammate' }] }));
   try {
     process.env.ONESHOT_PICKUP_ONLY = '990801, 990803';
     assert.deepEqual(iids((await triage(board)).candidates), [990801, 990803]);
@@ -224,6 +224,12 @@ test('a run parked on a human merge holds no slot until its next check is due', 
   assert.equal(mergeWaitRemaining(j({ humanMergeCheckAt: undefined }), 'parked', now), null);
   assert.equal(mergeWaitRemaining(j({ phases: [{ phase: 'merge', status: 'ok' }] as RunJournal['phases'] }), 'parked', now), null);
   assert.equal(mergeWaitRemaining(null, 'parked', now), null);
+  process.env.ONESHOT_HANDOFF_AT_MERGE = '1';
+  try {
+    assert.equal(mergeWaitRemaining(j({}), 'parked', now), null, 'a hand-off conductor never waits on a merge');
+  } finally {
+    delete process.env.ONESHOT_HANDOFF_AT_MERGE;
+  }
 });
 
 test('a Loop ticket assigned to someone else is never a candidate; an unassigned one is', async () => {

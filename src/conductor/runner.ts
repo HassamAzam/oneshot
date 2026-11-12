@@ -51,7 +51,8 @@ import { existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  DRY_RUN, gitlabUsername, pickupAnyAssignee, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT, mergeTriggerLabel, modelFor,
+  DRY_RUN, gitlabUsername, handoffAtMerge, pickupAnyAssignee, pickupLabel, MERGE_POLL_MS, PAUSE, WORK_REPO, WT_ROOT,
+  mergeTriggerLabel, modelFor,
   mrFeedbackConfig,
   bugReproductionEnabled, phases, portPool, projectConfig,
   operatorName,
@@ -522,6 +523,29 @@ export function doneLabelSwap(
     remove: withInReview(cfg, [cfg.labels.entry, cfg.labels.blocked]),
     add: atMerge ? [cfg.labels.exit, atMerge] : [cfg.labels.exit],
   };
+}
+
+/**
+ * The label edit of a run handed off at merge (ONESHOT_HANDOFF_AT_MERGE). Off:
+ * the entry label and the pickup label, so no conductor — this one or a
+ * teammate's desk — takes the ticket up again, and the blocked label. On: the
+ * in-review marker, since the MR now waits on a person. Never the exit label or
+ * the automation trigger: whether it merged is the team's to mark on GitLab.
+ */
+export function handoffLabelSwap(
+  cfg: ReturnType<typeof projectConfig>, pickup: string | null = pickupLabel(),
+): { remove: string[]; add: string[] } {
+  return {
+    remove: [cfg.labels.entry, cfg.labels.blocked, ...(pickup ? [pickup] : [])].filter(Boolean),
+    add: cfg.labels.inReview ? [cfg.labels.inReview] : [],
+  };
+}
+
+/** The ticket note a handed-off run leaves, naming the MR it hands over. */
+export function handoffNote(runId: string, mrUrl: string | undefined): string {
+  return `Oneshot is done with this ticket: the merge request ${mrUrl ?? '(none recorded)'} is ready `
+    + 'for review. Merging it is the team\'s call on GitLab; Oneshot will not watch it, mark it '
+    + `merged or start the automation tests.\n\nRun \`${runId}\` — complete.`;
 }
 
 export function statusForFailure(p: PhaseConfig, infra = false): PhaseRecord['status'] {
@@ -1444,7 +1468,7 @@ export async function runTicket(
   // merge poll that has already served its purpose. Removing the Review
   // label still releases it immediately — `reviewMode` is re-derived above,
   // and this is skipped the moment it reads false.
-  {
+  if (!handoffAtMerge()) {
     const dueIn = mergePollWait({
       wasParked, reviewMode, dryRun: DRY_RUN, lastCheckAt: j.humanMergeCheckAt,
       mergeSucceeded: phaseSucceeded(iid, 'merge'), now: Date.now(),
@@ -1729,6 +1753,10 @@ export async function runTicket(
         greenZone = zone.green;
       }
     }
+
+    // Before the settled check: an MR somebody already merged is still the
+    // team's to mark, so a handed-off run labels it the same either way.
+    if (phase.name === 'merge' && handoffAtMerge()) return handOff();
 
     if (CODE_PHASES[phase.name]) {
       const settled = CODE_PHASE_SETTLED[phase.name];
@@ -4092,6 +4120,27 @@ export async function runTicket(
     };
   }
 
+  /**
+   * Finish a run at `merge` (ONESHOT_HANDOFF_AT_MERGE): the MR is open and the
+   * rest is the team's on GitLab. Recorded as done, so finish() drops the run
+   * database and worktree and frees the slot; `handedOff` makes its label edit
+   * take the entry and pickup labels off rather than mark the ticket merged.
+   */
+  async function handOff(): Promise<RunOutcome> {
+    const now = Date.now();
+    recordPhase(iid, {
+      phase: 'merge', lap: lapsOf(iid, 'merge'), status: 'skipped', startedAt: now, endedAt: now,
+      error: 'handed off: merging is the team\'s call on GitLab',
+    });
+    j = updateJournal(iid, { handedOff: true }) ?? j;
+    if (!DRY_RUN) {
+      const note = await addIssueNote(iid, handoffNote(runId, j.mrUrl));
+      if (!note.ok) log.warn(`#${iid} — could not post the hand-off note: ${note.error ?? note.kind}`);
+    }
+    log.ok(`#${iid} handed off at merge — ${j.mrUrl ?? 'no MR recorded'}`);
+    return finish(j, 'done', `handed off at merge — ${j.mrUrl ?? 'no MR recorded'}; merging is the team's call`);
+  }
+
   async function finish(
     journal: RunJournal, status: 'done' | 'blocked' | 'aborted' | 'parked', reason?: string,
   ): Promise<RunOutcome> {
@@ -4193,7 +4242,11 @@ export async function runTicket(
       // the ticket tells the board a person is wanted on work that is done.
       // The local automation tests' trigger goes on in the same edit
       // (doneLabelSwap): the merge is what they wait for.
-      if (!DRY_RUN) {
+      if (!DRY_RUN && journal.handedOff) {
+        const swap = handoffLabelSwap(cfg);
+        const res = await swapLabel(journal.iid, swap.remove, swap.add);
+        if (!res.ok) log.warn(`#${journal.iid} — could not take ${swap.remove.map((l) => `"${l}"`).join(', ')} off: ${res.error ?? res.kind}`);
+      } else if (!DRY_RUN) {
         const swap = doneLabelSwap(cfg);
         const res = await swapLabel(journal.iid, swap.remove, swap.add);
         if (!res.ok) log.warn(`#${journal.iid} — could not set ${swap.add.map((l) => `"${l}"`).join(' and ')}: ${res.error ?? res.kind}`);

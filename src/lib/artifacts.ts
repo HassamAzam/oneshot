@@ -326,6 +326,11 @@ export interface RunJournal {
    * touching the network.
    */
   humanMergeCheckAt?: number;
+  /**
+   * Finished at `merge` under ONESHOT_HANDOFF_AT_MERGE: the open MR went to the
+   * team, so finish() makes the hand-off label edit instead of the merged one.
+   */
+  handedOff?: boolean;
   branch?: string;
   /**
    * The immutable fork-point commit the run branched from (merge-base with the

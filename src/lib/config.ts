@@ -961,6 +961,14 @@ export function pickupLabel(): string | null {
 }
 
 /**
+ * ONESHOT_HANDOFF_AT_MERGE=1: a run that reaches `merge` is finished there. The
+ * open MR is the team's from then on — whether and when it merges is decided on
+ * GitLab — so the run neither waits for the merge nor starts anything that
+ * follows one, and its slot, database and worktree go to the next ticket.
+ */
+export function handoffAtMerge(): boolean { return envFlag('ONESHOT_HANDOFF_AT_MERGE'); }
+
+/**
  * The conductor's own tick cadence — how often `src/index.ts` scans for
  * claimable tickets. Exported so anything that needs to describe its own
  * cadence as "the same as the tick loop" (e.g. the review-gate park state in

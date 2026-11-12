@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyBaseCheck, applyStandingDecisions, baseCheckOutcome, codePhaseStatus, decideClaim, doneLabelSwap,
-  failedCases, failuresInARow, isRepark, phasesStaleSince,
+  failedCases, failuresInARow, handoffLabelSwap, handoffNote, isRepark, phasesStaleSince,
   mergePollWait, recordedVerifyVerdict,
   mergeScopedVerify, nextIndex, refusalIsFinal, remediationFreeze, salvagedReview,
   sharedDatabaseRefusal, statusForFailure, testcaseGateRoute, ticketComments, uiEvidenceRefusal,
@@ -409,6 +409,23 @@ test('a merged run swaps the entry label for the exit label AND the local-tests 
   assert.ok(swap.remove.includes(cfg.labels.blocked), 'a resumed block does not finish as Needs Human');
   if (cfg.labels.inReview) assert.ok(swap.remove.includes(cfg.labels.inReview));
   assert.ok(!swap.remove.includes('Ready for Automation Testing'));
+});
+
+test('a run handed off at merge takes Loop and the pickup label off, and never marks it merged', () => {
+  const cfg = projectConfig();
+  const swap = handoffLabelSwap(cfg, 'Loop Server');
+  assert.deepEqual(swap.remove, [cfg.labels.entry, cfg.labels.blocked, 'Loop Server']);
+  assert.deepEqual(swap.add, cfg.labels.inReview ? [cfg.labels.inReview] : []);
+  assert.ok(!swap.add.includes(cfg.labels.exit), 'merged is the team\'s to mark');
+  assert.ok(!swap.add.includes(cfg.labels.localTestsTrigger ?? ''), 'no automation tests start from a hand-off');
+  assert.deepEqual(handoffLabelSwap(cfg, null).remove, [cfg.labels.entry, cfg.labels.blocked]);
+});
+
+test('the hand-off note names the MR and reads as a stop note, so the run\'s claim ends', () => {
+  const note = handoffNote('r-abc123-def456', 'https://gitlab.example/arbisoft/erp/-/merge_requests/11307');
+  assert.match(note, /merge_requests\/11307/);
+  assert.match(note, /Oneshot stopped|— complete/);
+  assert.match(note, /r-abc123-def456/);
 });
 
 test('with the team\'s local tests off, a merged run adds the exit label alone', () => {
