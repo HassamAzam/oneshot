@@ -31,6 +31,9 @@ import {
   addIssueNote, addMergeRequestNote, mergeRequestUrl, projectUrl, uploadFile, type Upload,
 } from './gitlab.js';
 import { log } from './log.js';
+import { syncDrive } from './drivesync.js';
+import { renderResearchMd } from './drivepack.js';
+import { redact } from './report.js';
 import { codeSpan, mdText, tableCell } from './gitlabmd.js';
 import { fileChangesSection, renderFileChanges } from './planfiles.js';
 import { flowSection, renderFlowMermaid } from './planflow.js';
@@ -222,7 +225,7 @@ interface TestCase {
   blast: string;
 }
 
-function renderTestcasesCsv(cases: TestCase[]): string {
+export function renderTestcasesCsv(cases: TestCase[]): string {
   const head = ['ID', 'Test Scenario', 'Pre Condition', 'Steps', 'Expected Result', 'Passes', 'Blast']
     .map(csvCell).join(',');
   const rows = cases.map((c) => [
@@ -739,6 +742,11 @@ export function localTestsStartNote(s: LocalTestsStart): string {
     + '\n\n<!-- oneshot:local-tests-start -->';
 }
 
+/** The research note's body — exported for its test. */
+export function researchNote(iid: number, title: string, issueUrl: string, data: Record<string, unknown>): string {
+  return redact(renderResearchMd(iid, title, issueUrl, data, { text: mdText, cell: (v) => tableCell(v) || '—', fold: true }));
+}
+
 /**
  * What the flow and file-table renderers dropped or trimmed while drawing a
  * plan. `renderPlanMd` keeps only the markdown, so the warnings are gathered
@@ -749,6 +757,25 @@ export function planRenderWarnings(data: Record<string, unknown>): string[] {
 }
 
 const SPECS: Spec[] = [
+  {
+    /*
+     * The research write-up, before the plan, because it is what the plan is
+     * argued from: the traced code path, the blast radius, the unknowns the
+     * planner had to decide around. Until this it lived only in the run dir,
+     * so a reviewer reading "Open questions" on the plan could not see where
+     * they came from. Escaped through gitlabmd (a code path quoting
+     * `<title>` must not vanish into the sanitiser), redacted like the run
+     * report (research traces the app, and a trace may quote the test login),
+     * and the reference-only tables folded so the note reads at a glance.
+     */
+    key: 'research',
+    artifact: 'research.json',
+    target: 'ticket',
+    build: (data, ctx) => {
+      if (!String(data.summary ?? '').trim()) return null;
+      return { body: researchNote(ctx.iid, ctx.journal.title, ctx.journal.url, data), attachments: [] };
+    },
+  },
   {
     key: 'plan',
     artifact: 'plan.json',
@@ -1086,4 +1113,8 @@ export async function publishPending(ctx: PublishCtx): Promise<void> {
   } catch (err) {
     log.warn('publish pass failed', { error: (err as Error).message.slice(0, 160) });
   }
+  // The ticket's Drive folder rides the same passes: every point that can
+  // publish to GitLab is a point where an artifact may have landed or changed.
+  // A no-op unless ONESHOT_GDRIVE_* is configured, and it never throws.
+  await syncDrive(ctx.iid);
 }
