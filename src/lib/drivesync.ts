@@ -22,7 +22,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { DRY_RUN, PROJECT_TARGET, artifactDir, envOr, expandPath } from './config.js';
+import { DRY_RUN, PROJECT_TARGET, artifactDir, envOr, expandPath, handoffAtMerge } from './config.js';
 import { readArtifact, readJournal, updateJournal, type RunJournal } from './artifacts.js';
 import { Drive, DriveError } from './gdrive.js';
 import {
@@ -196,6 +196,16 @@ async function updateIndex(drive: Drive, root: string, j: RunJournal, ledger: Dr
 const GIVE_UP_AFTER = 3;
 
 /**
+ * Whether a pass may write the ticket's folder now. On a conductor that hands
+ * runs off at merge (ONESHOT_HANDOFF_AT_MERGE) the folder is filled once, from
+ * the finished run, when it is handed off — not built up phase by phase out of
+ * work a later lap may still replace.
+ */
+export function driveSyncDue(j: Pick<RunJournal, 'handedOff'>): boolean {
+  return !handoffAtMerge() || j.handedOff === true;
+}
+
+/**
  * Bring ticket `iid`'s Drive folder up to date with its run directory.
  * Never throws; returns the folder URL when it has one (for the CLI and logs).
  */
@@ -205,6 +215,7 @@ export async function syncDrive(iid: number): Promise<string | null> {
   if (DRY_RUN) return null;
   const j = readJournal(iid);
   if (!j) return null;
+  if (!driveSyncDue(j)) return null;
   const ledger: DriveLedger = { files: {}, ...(j.drive ?? {}) };
   const save = (): void => { updateJournal(iid, { drive: ledger }); };
   try {
